@@ -82,7 +82,16 @@ nonisolated final class SpectrogramProcessor: @unchecked Sendable {
     private let lock = NSLock()
     private var pending: [Column] = []
 
+    // Raw PCM ring buffer for the classifier (written on audio thread, read on main thread).
+    // 10 s @ 384 kHz = 3,840,000 samples ≈ 15 MB.
+    private let pcmCapacity = 3_840_000
+    private var pcmBuffer: [Float]
+    private var pcmHead = 0          // next write index
+    private var pcmFilled = false    // true once the buffer has wrapped at least once
+    private let pcmLock = NSLock()
+
     init(fftSize: Int = 1024, hopSize: Int = 512) {
+        pcmBuffer = [Float](repeating: 0, count: 3_840_000)
         self.fftSize = fftSize
         self.hopSize = hopSize
         self.log2n = vDSP_Length(log2(Float(fftSize)))
@@ -98,6 +107,35 @@ nonisolated final class SpectrogramProcessor: @unchecked Sendable {
         accumulator.reserveCapacity(fftSize * 4)
     }
 
+    // MARK: PCM snapshot (main thread)
+
+    /// Returns `count` samples ending `startSamplesBack` samples before the most recent.
+    /// `startSamplesBack = 0` returns the most recent `count` samples.
+    /// Returns an empty array if the requested window isn't in the ring buffer.
+    func pcmSnapshot(count: Int, startSamplesBack: Int = 0) -> [Float] {
+        pcmLock.lock()
+        let head   = pcmHead
+        let filled = pcmFilled
+        pcmLock.unlock()
+
+        let available = filled ? pcmCapacity : head
+        let totalBack = count + startSamplesBack
+        guard available >= totalBack else { return [] }
+
+        var out = [Float](repeating: 0, count: count)
+        // The window ends `startSamplesBack` before head.
+        let end   = (head - startSamplesBack + pcmCapacity) % pcmCapacity
+        let start = (end  - count             + pcmCapacity) % pcmCapacity
+        if start < end {
+            out.replaceSubrange(0..<count, with: pcmBuffer[start..<end])
+        } else {
+            let firstLen = pcmCapacity - start
+            out.replaceSubrange(0..<firstLen,  with: pcmBuffer[start...])
+            out.replaceSubrange(firstLen..<count, with: pcmBuffer[0..<end])
+        }
+        return out
+    }
+
     deinit { vDSP_destroy_fftsetup(fftSetup) }
 
     // MARK: Audio thread
@@ -106,6 +144,15 @@ nonisolated final class SpectrogramProcessor: @unchecked Sendable {
         guard let channel = buffer.floatChannelData?[0] else { return }
         let frames = Int(buffer.frameLength)
         guard frames > 0 else { return }
+
+        // Feed the PCM ring buffer for the classifier.
+        pcmLock.lock()
+        for i in 0..<frames {
+            pcmBuffer[pcmHead] = channel[i]
+            pcmHead += 1
+            if pcmHead == pcmCapacity { pcmHead = 0; pcmFilled = true }
+        }
+        pcmLock.unlock()
 
         accumulator.append(contentsOf: UnsafeBufferPointer(start: channel, count: frames))
 

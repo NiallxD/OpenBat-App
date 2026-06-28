@@ -148,10 +148,88 @@ final class PulseDetector {
     private(set) var capturedDurationMs: Double = 0
     private(set) var pulseCount: Int = 0              // total pulses detected this session
     private(set) var pulseRateHz: Double = 0          // recent calls per second
+    private(set) var lastClassification: ClassificationResult? = nil
+
+    /// The aggregated ID for the most recently completed pass (multi-pulse).
+    /// Updated when silence exceeds `passTimeoutSeconds` after the last detected pulse.
+    private(set) var lastPassResult: ClassificationResult? = nil
+    /// How many pulses contributed to `lastPassResult`.
+    private(set) var lastPassPulseCount: Int = 0
+
+    /// Silence gap (seconds) after the last pulse that closes a pass and fires the aggregated ID.
+    var passTimeoutSeconds: Double = 2.0
 
     /// Detection timestamps within the rate window, used to compute `pulseRateHz`.
     private var recentDetections: [Date] = []
     private let rateWindowSeconds: TimeInterval = 5
+
+    /// Supplier of raw PCM for the classifier. Wire to SpectrogramProcessor.pcmSnapshot.
+    /// Called on the main thread. Parameters: (sampleCount, startSamplesBack).
+    var pcmProvider: ((_ count: Int, _ startSamplesBack: Int) -> [Float])?
+
+    /// AutoID settings — when set, prior weights and pass thresholds come from here.
+    var autoIDSettings: AutoIDSettings?
+
+    /// Persistent history of completed passes (Sessions tab). Optional so the
+    /// detector still works without it.
+    var store: ClassificationStore?
+
+    // MARK: Pass accumulator (main thread)
+
+    private var passScores: [String: Float] = [:]   // running sum across pulses in current pass
+    private var passPulseCount: Int = 0
+    private var passPulses: [CapturedPulse] = []     // per-pulse detail for the history
+
+    /// Record one classified pulse into the running pass: accumulate its scores and
+    /// keep its detail (species, confidence, thumbnail) for the Sessions history.
+    private func accumulatePulse(_ captured: CapturedPulse, scores: [String: Float]) {
+        for (species, score) in scores {
+            passScores[species, default: 0] += score
+        }
+        passPulseCount += 1
+        passPulses.append(captured)
+    }
+
+    /// Close the current pass, if any (called on the silence timeout and on stop).
+    func finalizePass() {
+        defer {
+            passScores = [:]
+            passPulseCount = 0
+            passPulses = []
+        }
+        guard passPulseCount > 0 else { return }
+
+        // Pick winner from summed adjusted scores, excluding NOISE unless it's the only option.
+        let candidates = passScores.filter { $0.key != "NOISE" }
+        let pool = candidates.isEmpty ? passScores : candidates
+        guard let best = pool.max(by: { $0.value < $1.value }) else { return }
+
+        // Mean posterior across pulses. passScores are per-pulse renormalized posteriors
+        // (each pulse sums to 1), so dividing the running sum by the pulse count yields a
+        // proper mean posterior — and the full vector still sums to 1.
+        let n = Float(passPulseCount)
+        let meanConf = best.value / n
+
+        // Suppress very low-confidence results (noise floor bleed across pulses).
+        let minConf = autoIDSettings?.minPassConfidence ?? 0.05
+        guard passPulseCount >= (autoIDSettings?.minPassPulseCount ?? 1) else { return }
+        guard meanConf >= minConf else { return }
+
+        let meanScores = passScores.mapValues { $0 / n }
+        let passResult = ClassificationResult(
+            species: best.key,
+            confidence: meanConf,
+            allScores: meanScores
+        )
+        lastPassResult = passResult
+        lastPassPulseCount = passPulseCount
+        ClassificationLogger.shared.logPass(passResult, pulseCount: passPulseCount)
+
+        // Persist to the Sessions history with per-pulse detail.
+        store?.addPass(species: best.key,
+                       confidence: meanConf,
+                       pulses: passPulses)
+    }
 
     /// Clears the session counters (count, rate, last capture).
     func resetStats() {
@@ -160,6 +238,12 @@ final class PulseDetector {
         recentDetections.removeAll()
         lastPulseImage = nil
         lastDetectionDate = nil
+        lastClassification = nil
+        lastPassResult = nil
+        lastPassPulseCount = 0
+        passScores = [:]
+        passPulseCount = 0
+        passPulses = []
         capturedFreqMin = 0
         capturedFreqMax = 0
         capturedPeakFreq = 0
@@ -179,15 +263,23 @@ final class PulseDetector {
     private let captureQueue = DispatchQueue(label: "bat.PulseDetector.capture",
                                              qos: .userInitiated)
 
-    // Deferred capture: when a pulse ends we don't snapshot immediately, because
-    // the buffer doesn't yet hold the trailing columns needed to place the onset
-    // at exactly `onsetFraction`. We remember the onset's absolute column index and
-    // wait until enough columns have been recorded, THEN snapshot — so the onset
+    // Deferred capture: when a pulse ends we don't snapshot immediately, because the
+    // PCM ring doesn't yet hold the trailing audio needed to place the onset at exactly
+    // `onsetFraction`. We remember how many columns back the onset was *at arm time* and
+    // count feeds since, then snapshot once enough trailing context exists — so the onset
     // lands in the same spot every time instead of drifting with pulse length.
+    //
+    // Distance is tracked in FEEDS (one feed = one drained FFT column = `samplesPerCol`
+    // samples), NOT in `history.totalWritten`. feed() is called per column regardless of
+    // triggered-display mode, but the history stops growing during silence in that mode;
+    // the PCM ring (which the pulse image is rendered from) keeps advancing, so the
+    // feed counter is the unit that stays consistent with it.
     private var pendingCapture = false
-    private var pendingOnsetIndex = 0     // absolute index (totalWritten-based) of the onset column
+    private var pendingOnsetStepsBack = 0   // columns from newest back to the onset, at arm time
     private var pendingContentLength = 0
-    private var pendingWaitFeeds = 0      // safety: force capture if appends stall (triggered mode)
+    private var pendingWaitFeeds = 0        // feeds elapsed since arming
+
+    private let classifier = try? BatClassifier()
 
     // MARK: Feed (main thread — called once per drained FFT column)
 
@@ -201,6 +293,13 @@ final class PulseDetector {
         columnsSinceLastDetection += 1
         let holdOffColumns = max(1, Int(holdOffSeconds * columnsPerSecond))
         let gapColumns = max(1, Int(maxGapMs / 1000 * columnsPerSecond))
+
+        // Close the current pass once silence exceeds the timeout.
+        let effectiveTimeout = autoIDSettings?.passTimeoutSeconds ?? passTimeoutSeconds
+        let passTimeoutCols = Int(effectiveTimeout * columnsPerSecond)
+        if passPulseCount > 0 && columnsSinceLastDetection > passTimeoutCols {
+            finalizePass()
+        }
 
         let aboveThreshold: Bool
         switch triggerMode {
@@ -232,10 +331,9 @@ final class PulseDetector {
                    contentLen > 0,
                    !pendingCapture, !isCapturing {
                     // Arm a deferred capture. The onset sits `onsetStepsBack` columns
-                    // behind the newest; record its absolute index so we can snapshot
-                    // once enough trailing columns exist.
-                    let onsetStepsBack = belowRun + contentLen - 1   // == runColumns - 1
-                    pendingOnsetIndex = history.totalWritten - 1 - onsetStepsBack
+                    // behind the newest right now; we then count feeds until enough
+                    // trailing context exists to place it at `onsetFraction`.
+                    pendingOnsetStepsBack = belowRun + contentLen - 1   // == runColumns - 1
                     pendingContentLength = contentLen
                     pendingWaitFeeds = 0
                     pendingCapture = true
@@ -248,25 +346,29 @@ final class PulseDetector {
             }
         }
 
-        // Fire a deferred capture once the trailing context has accumulated (or the
-        // append stream stalls, e.g. in triggered display mode after the hold-off).
+        // Fire a deferred capture once the onset has scrolled far enough back that the
+        // window's trailing portion ((1 − onsetFraction) of it) is fully available.
         if pendingCapture {
-            pendingWaitFeeds += 1
+            // Feeds since the onset = its arm-time distance plus feeds waited. This
+            // advances every column even in triggered mode, staying in lockstep with
+            // the PCM ring the image is rendered from.
+            let feedsSinceOnset = pendingOnsetStepsBack + pendingWaitFeeds
             let totalCols = max(16, Int(displayWindowMs / 1000 * columnsPerSecond))
             let leadCols  = Int(onsetFraction * Double(totalCols))
-            let targetTrailing = max(0, totalCols - 1 - leadCols)
-            let onsetStepsBack = (history.totalWritten - 1) - pendingOnsetIndex
-            // Ready when the onset is far enough back, or as a safety net if appends
-            // have stalled (triggered mode) so we don't wait forever. The +8 margin
-            // keeps the normal path winning in continuous mode.
-            if onsetStepsBack >= targetTrailing || pendingWaitFeeds > targetTrailing + 8 {
+            // totalCols − leadCols (NOT −1): makes feedsSinceOnset*samplesPerCol reach
+            // exactly (1−onsetFraction)*windowSamples so the onset lands precisely at
+            // onsetFraction with no clamp drift.
+            let targetTrailing = max(0, totalCols - leadCols)
+            if feedsSinceOnset >= targetTrailing || pendingWaitFeeds > targetTrailing + 8 {
                 pendingCapture = false
                 scheduleCapture(history: history,
                                 columnsPerSecond: columnsPerSecond,
                                 sampleRate: sampleRate,
                                 dbRange: dbRange,
-                                onsetStepsBack: onsetStepsBack,
+                                onsetStepsBack: feedsSinceOnset,
                                 contentLength: pendingContentLength)
+            } else {
+                pendingWaitFeeds += 1
             }
         }
 
@@ -287,55 +389,87 @@ final class PulseDetector {
         guard !isCapturing else { return }
         isCapturing = true
 
-        let bins = history.binCount
-        guard bins > 0 else { isCapturing = false; return }
+        guard history.binCount > 0 else { isCapturing = false; return }
 
-        // Fixed-width window: every capture is the same number of columns, so the
-        // pulse always renders at the same scale and lands at the same place.
-        let totalCols = max(16, Int(displayWindowMs / 1000 * columnsPerSecond))
-        let leadCols  = Int(onsetFraction * Double(totalCols))   // target onset column
-
-        // `rowMajorSlice` counts `offset` columns back from the newest sample.
-        // The pulse onset sits `onsetStepsBack` columns back; choose `offset` so it
-        // falls at `leadCols` from the window's left edge. The deferred-capture logic
-        // waits until there's enough trailing context that `offset` resolves to ~0
-        // and the onset lands exactly at `leadCols`. Clamps only in the rare stall case.
-        let offset = max(0, onsetStepsBack + leadCols - (totalCols - 1))
-
-        // Read the ring on the main thread — produces a plain [Float] safe
-        // to hand to the background queue.
-        let floats = history.rowMajorSlice(offset: offset, count: totalCols)
-        guard floats.count == totalCols * bins else { isCapturing = false; return }
-
-        // Window-relative pulse extent (= leadCols..leadCols+contentLength when unclamped).
-        let pulseStart = max(0, (offset + totalCols - 1) - onsetStepsBack)
-        let pulseEnd   = min(totalCols, pulseStart + contentLength)
         let cps = columnsPerSecond
         let sr  = sampleRate
         let floor = pulseNoiseFloor
-        let range = dbRange
+        let minFreq = minFrequencyHz
+        let samplesPerCol = max(1, Int(sr / cps))
+        // Samples from the current write head back to the pulse onset.
+        let onsetBackSamples = onsetStepsBack * samplesPerCol
+
+        // pcmSnapshot(count, startBack) returns `count` samples ENDING `startBack`
+        // samples before the head. To place the onset at fraction `frac` from the
+        // window's left edge, the window must end `(1-frac)*count` samples after the
+        // onset, i.e. startBack = onsetBack - (1-frac)*count.  (The previous code
+        // omitted the `- count` term and captured the window *before* the call.)
+        func startBack(count: Int, onsetFrac: Double) -> Int {
+            max(0, onsetBackSamples - Int(Double(count) * (1 - onsetFrac)))
+        }
+
+        // Classification window: 50 ms NABat window with the onset ~30% in, so the
+        // call peak lands well within the model's expected 20–80% band.
+        let clsCount = max(19_200, Int(0.05 * sr))
+        let clsPCM   = pcmProvider?(clsCount, startBack(count: clsCount, onsetFrac: 0.30)) ?? []
+
+        // Display window: the full zoom span, onset locked at `onsetFraction`, rendered
+        // at high resolution from PCM (much sharper than the coarse display history).
+        let dispCount = max(PulseImageRenderer.fftSize + PulseImageRenderer.hop,
+                            Int(displayWindowMs / 1000 * sr))
+        let dispPCM   = pcmProvider?(dispCount, startBack(count: dispCount, onsetFrac: onsetFraction)) ?? []
+
+        // Snapshot prior weights + quality gate on the main thread so the background
+        // queue reads plain value types, not the @Observable settings object.
+        let priorSnapshot: [String: Float]
+        if let s = autoIDSettings {
+            priorSnapshot = BatClassifier.classNames.reduce(into: [:]) { d, code in
+                d[code] = s.effectivePrior(for: code)
+            }
+        } else {
+            priorSnapshot = BatClassifier.bcPrior
+        }
+        let gate = autoIDSettings?.qualityGate ?? QualityGate()
+
+        let cls = classifier
 
         captureQueue.async { [weak self] in
             guard let self else { return }
-            let result = Self.renderImage(floats: floats,
-                                         totalCols: totalCols,
-                                         bins: bins,
-                                         pulseColStart: pulseStart,
-                                         pulseColEnd: pulseEnd,
-                                         columnsPerSecond: cps,
-                                         sampleRate: sr,
-                                         noiseFloor: floor,
-                                         dbRange: range)
+            let result = PulseImageRenderer.render(pcm: dispPCM,
+                                                   sampleRate: sr,
+                                                   noiseFloor: floor,
+                                                   minFrequencyHz: minFreq)
+            // Classification runs in parallel with image rendering on the same queue.
+            let classification: ClassificationResult? = clsPCM.count >= clsCount
+                ? cls?.classify(pcm: clsPCM, gate: gate, prior: { priorSnapshot[$0] ?? 1.0 })
+                : nil
+
             DispatchQueue.main.async {
                 if let r = result {
                     let now = Date()
-                    self.lastPulseImage    = r.image
-                    self.lastDetectionDate = now
-                    self.capturedFreqMin   = r.freqMin
-                    self.capturedFreqMax   = r.freqMax
-                    self.capturedPeakFreq  = r.peakFreq
+                    self.lastPulseImage     = r.image
+                    self.lastDetectionDate  = now
+                    self.capturedFreqMin    = r.freqMin
+                    self.capturedFreqMax    = r.freqMax
+                    self.capturedPeakFreq   = r.peakFreq
                     self.capturedDurationMs = r.durationMs
                     self.pulseCount += 1
+
+                    if let c = classification {
+                        self.lastClassification = c
+                        let top = c.allScores.sorted { $0.value > $1.value }
+                            .prefix(6)
+                            .map { ScoreEntry(species: $0.key, score: $0.value) }
+                        let captured = CapturedPulse(date: now,
+                                                     species: c.species,
+                                                     confidence: c.confidence,
+                                                     peakFreqHz: r.peakFreq,
+                                                     durationMs: r.durationMs,
+                                                     topScores: top,
+                                                     image: r.image)
+                        self.accumulatePulse(captured, scores: c.allScores)
+                        ClassificationLogger.shared.logPulse(c)
+                    }
 
                     // Rate = detections per second over the trailing window.
                     self.recentDetections.append(now)
@@ -353,154 +487,4 @@ final class PulseDetector {
         }
     }
 
-    // MARK: Image rendering (background thread — no @Observable access)
-
-    private struct RenderResult {
-        let image: UIImage
-        let freqMin, freqMax, peakFreq, durationMs: Double
-    }
-
-    private static func renderImage(floats: [Float],
-                                    totalCols: Int,
-                                    bins: Int,
-                                    pulseColStart: Int,
-                                    pulseColEnd: Int,
-                                    columnsPerSecond: Double,
-                                    sampleRate: Double,
-                                    noiseFloor: Float,
-                                    dbRange: Double) -> RenderResult? {
-
-        // Values in `floats` are normalised in dB space over `dbRange` (maxDB−minDB),
-        // so a fixed dB-below-peak threshold is a *fractional* offset in [0,1] space.
-        // Using a ratio (×0.5) instead would correspond to ~half the dB range below
-        // peak (e.g. −35 dB) and would sweep in reverberation/echo tails.
-        let range = Float(max(dbRange, 1))
-        func normOffset(_ dbDown: Float) -> Float { dbDown / range }
-        let freqDbDown: Float = 15   // bandwidth crop extent below peak
-        let durDbDown:  Float = 12   // call-duration extent below peak
-
-        // Noise gate + contrast stretch: values below `noiseFloor` become 0; the
-        // [floor, 1] range is rescaled to [0, 1] so the pulse uses the full colormap.
-        let floor = min(max(noiseFloor, 0), 0.99)
-        let invSpan = 1 / max(0.01, 1 - floor)
-        func gate(_ t: Float) -> Float { max(0, (t - floor) * invSpan) }
-
-        // Find peak value (and its bin → dominant frequency) across pulse columns.
-        var peakValue: Float = 0
-        var peakBin = 0
-        for bin in 0..<bins {
-            for col in pulseColStart..<pulseColEnd {
-                let v = floats[bin * totalCols + col]
-                if v > peakValue { peakValue = v; peakBin = bin }
-            }
-        }
-        // Crop to bins within `freqDbDown` of the peak, never below the noise floor.
-        let freqThreshold = max(0.05, max(peakValue - normOffset(freqDbDown), floor))
-
-        // Find the frequency extent of the call.
-        var minBin = bins - 1
-        var maxBin = 0
-        for bin in 0..<bins {
-            for col in pulseColStart..<pulseColEnd {
-                if floats[bin * totalCols + col] >= freqThreshold {
-                    if bin < minBin { minBin = bin }
-                    if bin > maxBin { maxBin = bin }
-                }
-            }
-        }
-        if minBin > maxBin { minBin = 0; maxBin = bins - 1 }
-
-        // Measure call duration from the energy envelope, not the trigger count.
-        // Find the loudest column, then expand left/right while the column's peak
-        // stays within `durDbDown` of the call peak. dB-relative (not a ratio in the
-        // compressed 0–1 space) so a 10 ms pulse reads ~10 ms instead of sweeping in
-        // its reverb tail; independent of the amplitude trigger threshold.
-        func columnPeak(_ col: Int) -> Float {
-            var m: Float = 0
-            for bin in 0..<bins {
-                let v = floats[bin * totalCols + col]
-                if v > m { m = v }
-            }
-            return m
-        }
-        var peakCol = pulseColStart
-        var peakColVal: Float = 0
-        for col in pulseColStart..<pulseColEnd {
-            let m = columnPeak(col)
-            if m > peakColVal { peakColVal = m; peakCol = col }
-        }
-        let durThreshold = max(0.05, max(peakColVal - normOffset(durDbDown), floor))
-        var durStart = peakCol, durEnd = peakCol
-        while durStart - 1 >= 0, columnPeak(durStart - 1) >= durThreshold { durStart -= 1 }
-        while durEnd + 1 < totalCols, columnPeak(durEnd + 1) >= durThreshold { durEnd += 1 }
-        let durationCols = durEnd - durStart + 1
-
-        let binBuf  = max(8, (maxBin - minBin + 1) / 4)
-        let cropMin = max(0, minBin - binBuf)
-        let cropMax = min(bins - 1, maxBin + binBuf)
-        let cropBins = cropMax - cropMin + 1
-
-        var pixels = [UInt8](repeating: 255, count: totalCols * cropBins * 4)
-        for bin in cropMin...cropMax {
-            let yFlipped = cropMax - bin
-            for col in 0..<totalCols {
-                let t = gate(floats[bin * totalCols + col])
-                let (r, g, b) = colormap(t)
-                let idx = (yFlipped * totalCols + col) * 4
-                pixels[idx]     = r
-                pixels[idx + 1] = g
-                pixels[idx + 2] = b
-                pixels[idx + 3] = 255
-            }
-        }
-
-        guard
-            let provider = CGDataProvider(data: Data(pixels) as CFData),
-            let cgImage = CGImage(
-                width: totalCols, height: cropBins,
-                bitsPerComponent: 8, bitsPerPixel: 32,
-                bytesPerRow: totalCols * 4,
-                space: CGColorSpaceCreateDeviceRGB(),
-                bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
-                provider: provider, decode: nil,
-                shouldInterpolate: true,
-                intent: .defaultIntent)
-        else { return nil }
-
-        let hzPerBin = (sampleRate / 2) / Double(bins)
-        return RenderResult(
-            image: UIImage(cgImage: cgImage),
-            freqMin: Double(cropMin) * hzPerBin,
-            freqMax: Double(cropMax) * hzPerBin,
-            peakFreq: Double(peakBin) * hzPerBin,
-            // Call length from the energy envelope (−6 dB extent around the peak),
-            // not the trigger column count which jitters with the amplitude threshold.
-            durationMs: Double(durationCols) / columnsPerSecond * 1000
-        )
-    }
-
-    // MARK: Inferno colormap (mirrors Spectrogram.metal)
-
-    private static func colormap(_ t: Float) -> (UInt8, UInt8, UInt8) {
-        let t = min(max(t, 0), 1)
-        typealias RGB = (Float, Float, Float)
-        let stops: [(Float, RGB)] = [
-            (0.0, (0.001, 0.000, 0.014)),
-            (0.2, (0.215, 0.036, 0.405)),
-            (0.4, (0.575, 0.149, 0.404)),
-            (0.6, (0.868, 0.288, 0.245)),
-            (0.8, (0.988, 0.645, 0.040)),
-            (1.0, (0.988, 0.998, 0.645)),
-        ]
-        for i in 0..<stops.count - 1 {
-            let (t0, c0) = stops[i]
-            let (t1, c1) = stops[i + 1]
-            guard t <= t1 else { continue }
-            let f = (t - t0) / (t1 - t0)
-            return (UInt8((c0.0 * (1-f) + c1.0 * f) * 255),
-                    UInt8((c0.1 * (1-f) + c1.1 * f) * 255),
-                    UInt8((c0.2 * (1-f) + c1.2 * f) * 255))
-        }
-        return (252, 254, 164)
-    }
 }

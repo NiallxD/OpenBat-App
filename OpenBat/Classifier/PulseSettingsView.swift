@@ -92,8 +92,6 @@ struct PulseSettingsView: View {
                         .foregroundStyle(.secondary)
                 } header: {
                     Text("Noise rejection")
-                } footer: {
-                    Text("Display options (triggered view, pulse zoom & noise floor) are on the main screen — the toolbar toggle and the Pulse View / Spectrogram panel buttons.")
                 }
             }
             .navigationTitle("Pulse Detection")

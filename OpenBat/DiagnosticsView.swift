@@ -11,7 +11,9 @@ import SwiftUI
 
 struct DiagnosticsView: View {
     let audio: AudioEngineController
+    let recorder: AudioRecorder
     @Environment(\.dismiss) private var dismiss
+    @State private var logCleared = false
 
     var body: some View {
         NavigationStack {
@@ -20,6 +22,7 @@ struct DiagnosticsView: View {
                     statusLine
                     diagnosticsCard
                     levelMeter
+                    logSection
                 }
                 .padding()
             }
@@ -32,6 +35,46 @@ struct DiagnosticsView: View {
             }
         }
         .presentationDetents([.medium, .large])
+    }
+
+    private var logSection: some View {
+        VStack(spacing: 12) {
+            HStack {
+                Text("Classifier Log")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text(logFileSize())
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack(spacing: 12) {
+                ShareLink(item: ClassificationLogger.shared.fileURL) {
+                    Label("Share CSV", systemImage: "square.and.arrow.up")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+
+                Button(role: .destructive) {
+                    ClassificationLogger.shared.clearLog()
+                    logCleared = true
+                } label: {
+                    Label(logCleared ? "Cleared" : "Clear Log", systemImage: "trash")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+            }
+        }
+        .padding()
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    private func logFileSize() -> String {
+        let url = ClassificationLogger.shared.fileURL
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let size = attrs[.size] as? Int else { return "no log yet" }
+        return size < 1024 ? "\(size) B" : String(format: "%.1f KB", Double(size) / 1024)
     }
 
     private var statusLine: some View {
@@ -47,7 +90,13 @@ struct DiagnosticsView: View {
             row("Input", d.inputName, badge: d.isUSBInput ? "USB" : nil)
             Divider()
             row(
-                "Sample rate",
+                "Session rate",
+                d.sessionSampleRate > 0 ? "\(Int(d.sessionSampleRate)) Hz" : "—",
+                emphasis: d.sessionSampleRate >= 60_000 ? .green : (d.sessionSampleRate > 0 ? .orange : .secondary)
+            )
+            Divider()
+            row(
+                "Capture rate",
                 d.actualSampleRate > 0 ? "\(Int(d.actualSampleRate)) Hz" : "—",
                 emphasis: d.isNativeRate ? .green : (d.actualSampleRate > 0 ? .orange : .secondary)
             )
@@ -55,6 +104,14 @@ struct DiagnosticsView: View {
             row("Channels", d.channelCount > 0 ? "\(d.channelCount)" : "—")
             Divider()
             row("Buffers", "\(d.bufferCount)")
+            if recorder.lastWrittenSampleRate > 0 {
+                Divider()
+                row(
+                    "Written rate",
+                    "\(Int(recorder.lastWrittenSampleRate)) Hz",
+                    emphasis: recorder.lastWrittenSampleRate >= 192_000 ? .green : .orange
+                )
+            }
         }
         .padding()
         .background(.quaternary, in: RoundedRectangle(cornerRadius: 16))
@@ -96,3 +153,4 @@ struct DiagnosticsView: View {
         }
     }
 }
+

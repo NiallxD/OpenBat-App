@@ -15,9 +15,14 @@ import Accelerate
 /// that iOS hands us buffers at the device's native rate (target 384 kHz) rather
 /// than silently downsampling to the 48 kHz system-mixer rate.
 struct AudioDiagnostics: Equatable {
-    /// The sample rate iOS actually negotiated (read back from the session/format,
-    /// never the *preferred* value we requested). This is the pass/fail gate.
+    /// The sample rate of the buffers iOS actually *delivers* to the capture tap —
+    /// the true capture rate, read from each buffer's format (not the requested or
+    /// the node's advertised format, which can lie). This is the pass/fail gate.
     var actualSampleRate: Double = 0
+    /// The rate the AVAudioSession negotiated. If this is the native rate but
+    /// `actualSampleRate` is lower, the engine/tap is downsampling; if this is also
+    /// low, iOS never granted the native rate to the session.
+    var sessionSampleRate: Double = 0
     /// Human-readable name of the active input port (e.g. the Griff / a USB device).
     var inputName: String = "—"
     /// Whether the active input port reports as USB audio (vs. the built-in mic).

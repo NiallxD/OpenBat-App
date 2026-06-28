@@ -74,6 +74,10 @@ final class AudioEngineController {
     private let statsLock = NSLock()
     private nonisolated(unsafe) var pendingBufferCount = 0
     private nonisolated(unsafe) var latestLevelDB: Float = AudioLevel.minDB
+    /// The actual rate/channel count of delivered buffers, captured on the audio
+    /// thread and flushed to diagnostics — the only reliable source of the true rate.
+    private nonisolated(unsafe) var latestBufferSampleRate: Double = 0
+    private nonisolated(unsafe) var latestBufferChannels: Int = 0
     private var statsTimer: Timer?
     private let statsFlushRate = 15.0 // Hz
 
@@ -135,9 +139,15 @@ final class AudioEngineController {
         statsLock.lock()
         let count = pendingBufferCount
         let level = latestLevelDB
+        let rate = latestBufferSampleRate
+        let channels = latestBufferChannels
         statsLock.unlock()
         diagnostics.bufferCount = count
         diagnostics.currentLevelDB = level
+        // Correct the reported rate to what's actually being delivered (the node's
+        // advertised format set at startEngine can disagree with the real buffers).
+        if rate > 0 { diagnostics.actualSampleRate = rate }
+        if channels > 0 { diagnostics.channelCount = channels }
         updateAutoTune()
     }
 
@@ -188,7 +198,9 @@ final class AudioEngineController {
         let port = session.currentRoute.inputs.first
         diagnostics.inputName = port?.portName ?? "—"
         diagnostics.isUSBInput = port?.portType == .usbAudio
-        diagnostics.actualSampleRate = session.sampleRate
+        diagnostics.sessionSampleRate = session.sampleRate
+        // Provisional until the first real buffer arrives and flushStats corrects it.
+        if diagnostics.actualSampleRate == 0 { diagnostics.actualSampleRate = session.sampleRate }
     }
 
     // MARK: Engine
@@ -204,6 +216,9 @@ final class AudioEngineController {
         // for a tap that is not wired into the main mixer.
         let format = input.inputFormat(forBus: 0)
 
+        diagnostics.sessionSampleRate = AVAudioSession.sharedInstance().sampleRate
+        // Provisional from the node's advertised format; flushStats overwrites it with
+        // the real delivered-buffer rate (the gap between the two is the bug we surface).
         diagnostics.actualSampleRate = format.sampleRate
         diagnostics.channelCount = Int(format.channelCount)
 
@@ -232,6 +247,9 @@ final class AudioEngineController {
             self.statsLock.lock()
             self.pendingBufferCount += 1
             self.latestLevelDB = level
+            // The buffer's own format is the ground truth for the delivered rate.
+            self.latestBufferSampleRate = buffer.format.sampleRate
+            self.latestBufferChannels = Int(buffer.format.channelCount)
             self.statsLock.unlock()
         }
 
