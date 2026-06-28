@@ -1,0 +1,20 @@
+# Xcode / Swift
+## User-specific Xcode state
+*.xcuserstate
+xcuserdata/
+
+## Build products
+build/
+DerivedData/
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+## Swift Package Manager
+.build/
+.swiftpm/
+
+## macOS
+.DS_Store
