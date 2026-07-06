@@ -257,10 +257,11 @@ struct TourOverlay: View {
                 ? hole
                 : CGRect(x: geo.size.width / 2, y: geo.size.height / 2, width: 0, height: 0)
             ZStack {
-                // Dim everything except the spotlight.
+                // Dim everything except the spotlight. No .ignoresSafeArea() here:
+                // the host applies it to the whole overlay, so this view, the hole
+                // rects, the ring and the caption all share one coordinate space.
                 SpotlightShape(hole: shapeHole)
                     .fill(Color.black.opacity(0.82), style: FillStyle(eoFill: true))
-                    .ignoresSafeArea()
                     .contentShape(Rectangle())
                     .onTapGesture { advance() }
 

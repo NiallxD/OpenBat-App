@@ -124,9 +124,6 @@ struct ContentView: View {
         .overlayPreferenceValue(TourTargetKey.self) { anchors in
             GeometryReader { proxy in
                 if tourActive {
-                    // No .ignoresSafeArea() here — the resolved rects must stay in
-                    // this proxy's coordinate space, which is where the anchors were
-                    // captured. The dim shape inside bleeds full-screen on its own.
                     TourOverlay(targets: anchors.mapValues { proxy[$0] },
                                 index: $tourIndex,
                                 steps: TourScript.steps,
@@ -135,6 +132,13 @@ struct ContentView: View {
                                 })
                 }
             }
+            // Full-screen so the resolved anchor rects, the dim shape's cutout,
+            // and the highlight ring all share ONE coordinate space. Previously
+            // only the dim shape ignored the safe area, which shifted its local
+            // origin to the physical screen's top-left while the hole rects were
+            // resolved in the safe-area-inset space — the cutout drew a full
+            // status-bar-plus-nav-bar height above the ring.
+            .ignoresSafeArea()
         }
         .onAppear {
             audio.bufferSink = { [processor, recorder] buffer in
