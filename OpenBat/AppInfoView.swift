@@ -44,8 +44,16 @@ struct TourTargetKey: PreferenceKey {
 extension View {
     /// Tag a control so the guided tour can spotlight it. Cheap and inert when no
     /// tour is running (it only publishes a bounds anchor).
+    ///
+    /// Must be `transformAnchorPreference`, not `anchorPreference`: targets nest
+    /// (buttons tagged inside a pane that is itself tagged), and a plain
+    /// `anchorPreference` on the outer view REPLACES the dictionary its descendants
+    /// accumulated — the key's `reduce` only merges siblings, not parent/child —
+    /// silently dropping every button anchor inside a tagged pane.
     func tourTarget(_ id: TourID) -> some View {
-        anchorPreference(key: TourTargetKey.self, value: .bounds) { [id: $0] }
+        transformAnchorPreference(key: TourTargetKey.self, value: .bounds) { dict, anchor in
+            dict[id] = anchor
+        }
     }
 }
 
