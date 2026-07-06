@@ -23,12 +23,14 @@ import UIKit
 /// the portrait and landscape variant of its control (only one is ever in the
 /// view tree, so only one anchor is recorded).
 enum TourID: Hashable {
-    // Panes, each paired with the cluster of buttons that live inside it, plus the
-    // bottom call-to-action bar (start / record / listen).
-    case stats, statsButtons
-    case pulseView, pulseButtons
-    case spectrogram, spectrogramButtons
-    case controls
+    // The three panes, top to bottom.
+    case stats, pulseView, spectrogram
+    // Individual buttons. Tagged on the shared button properties, so the portrait
+    // and landscape placements both resolve to whichever one is in the tree.
+    case micStatus, resetStats                 // stats header (micStatus: portrait only)
+    case pulseSpeciesToggle, pulseSettings     // pulse-view header
+    case spectrogramSpeciesToggle, compressTimeline, batRange, palette, bandSettings
+    case start, record, listen                 // transport bar
 }
 
 struct TourTargetKey: PreferenceKey {
@@ -59,8 +61,8 @@ struct TourStep: Identifiable {
 }
 
 enum TourScript {
-    // Walks the screen top-to-bottom: each pane first, then the buttons inside it,
-    // then the bottom transport bar, then the menus.
+    // Walks the screen top-to-bottom: each pane first, then each button inside it
+    // individually, then the transport bar buttons, then the menus.
     static let steps: [TourStep] = [
         TourStep(target: nil, symbol: "hand.wave",
                  title: "Welcome to OpenBat",
@@ -69,27 +71,51 @@ enum TourScript {
         TourStep(target: .stats, symbol: "chart.bar",
                  title: "Live stats",
                  detail: "Peak frequency, bandwidth, duration, pulse rate and count for the most recent pulse, plus the current species ID and input level. They clear when activity goes stale."),
-        TourStep(target: .statsButtons, symbol: "cable.connector",
-                 title: "Stats controls",
-                 detail: "The circular arrow resets the pulse count, rate and peak-hold. In portrait, the connector icon beside it shows whether the ultrasonic mic is attached and its sample rate."),
+        TourStep(target: .micStatus, symbol: "cable.connector",
+                 title: "Mic status",
+                 detail: "Shows whether the ultrasonic mic is attached and the sample rate it's running at."),
+        TourStep(target: .resetStats, symbol: "arrow.counterclockwise",
+                 title: "Reset stats",
+                 detail: "Clears the pulse count, pulse rate and the level meter's peak-hold."),
 
         TourStep(target: .pulseView, symbol: "waveform.path.ecg",
                  title: "Pulse view & Species ID",
-                 detail: "A zoomed, onset-aligned render of the latest call. Pinch and drag to inspect it. It can also show the live Species ID feed instead — tap any ID there for the pulses and scores behind it."),
-        TourStep(target: .pulseButtons, symbol: "slider.horizontal.3",
-                 title: "Pulse view controls",
-                 detail: "The bat glyph swaps this pane between the pulse close-up and the Species ID feed. The sliders open display settings — zoom window span and noise floor."),
+                 detail: "A zoomed, onset-aligned render of the latest call. Pinch and drag to inspect it. It can also show the live Species ID feed instead."),
+        TourStep(target: .pulseSpeciesToggle, symbol: "sparkle.magnifyingglass",
+                 title: "Species ID feed",
+                 detail: "The bat glyph swaps this pane between the pulse close-up and the live Species ID feed. In the feed, tap any ID for the pulses and scores behind it."),
+        TourStep(target: .pulseSettings, symbol: "slider.horizontal.3",
+                 title: "Pulse view settings",
+                 detail: "Display settings for the pulse close-up — zoom window span and noise floor."),
 
         TourStep(target: .spectrogram, symbol: "waveform.badge.magnifyingglass",
                  title: "Spectrogram",
                  detail: "The scrolling frequency-vs-time view. Drag to scroll back through history."),
-        TourStep(target: .spectrogramButtons, symbol: "slider.horizontal.below.rectangle",
-                 title: "Spectrogram controls",
-                 detail: "Toggle the Species ID overlay, compress the timeline to back-to-back pulses, snap to the bat frequency band, or open the palette and frequency-range settings."),
+        TourStep(target: .spectrogramSpeciesToggle, symbol: "sparkle.magnifyingglass",
+                 title: "Species ID here too",
+                 detail: "Swaps this pane to the Species ID feed, same as in the pulse view — handy in landscape when the spectrogram is full screen."),
+        TourStep(target: .compressTimeline, symbol: "lines.measurement.horizontal.aligned.bottom",
+                 title: "Compress timeline",
+                 detail: "Drops the silent gaps so the display shows just the detected pulses, back-to-back."),
+        TourStep(target: .batRange, symbol: "minus.plus.lines.measurement.horizontal.aligned.bottom",
+                 title: "Bat frequency band",
+                 detail: "One-tap preset snapping the frequency axis to 15–90 kHz, where most bat calls live. Tap again to restore the full range."),
+        TourStep(target: .palette, symbol: "paintpalette",
+                 title: "Colour palette",
+                 detail: "Picks the colormap for the spectrogram and pulse view — Inferno, Viridis, Jet and friends."),
+        TourStep(target: .bandSettings, symbol: "slider.horizontal.3",
+                 title: "Display range",
+                 detail: "Fine control over the displayed frequency range, time window and noise floor."),
 
-        TourStep(target: .controls, symbol: "ear",
-                 title: "Start, record & listen",
-                 detail: "Left starts and stops detecting (Session with a GPS track, or just Listening). Middle arms WAV recording of each pass. Right cycles the listen mode — heterodyne or time-expansion — so you can hear the bats."),
+        TourStep(target: .start, symbol: "ear",
+                 title: "Start & stop",
+                 detail: "Starts and stops detecting. A Session logs IDs with a GPS track on a map; Just Listening logs to the Listening bucket."),
+        TourStep(target: .record, symbol: "record.circle",
+                 title: "Record",
+                 detail: "Arms WAV recording — each detected pass is saved as its own file, with the species ID in its metadata."),
+        TourStep(target: .listen, symbol: "headphones",
+                 title: "Listen",
+                 detail: "Cycles the listen mode — heterodyne or time-expansion — so you can hear the bats live. Tap again for off."),
 
         TourStep(target: nil, symbol: "line.3.horizontal.decrease.circle",
                  title: "Menus",

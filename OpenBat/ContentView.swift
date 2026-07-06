@@ -502,7 +502,6 @@ struct ContentView: View {
                 .padding(.horizontal, 12)
             }
             .clipShape(RoundedRectangle(cornerRadius: 10))
-            .tourTarget(.controls)
     }
 
     // MARK: Panels
@@ -532,7 +531,6 @@ struct ContentView: View {
                             micStatusPill
                             resetButton
                         }
-                        .tourTarget(.statsButtons)
                     }
                     statCellsRow
                     amplitudeMeter
@@ -563,7 +561,6 @@ struct ContentView: View {
                             .foregroundStyle(.secondary)
                         Spacer()
                         resetButton
-                            .tourTarget(.statsButtons)
                     }
                     .padding(.horizontal, 8)
                     .padding(.top, 6)
@@ -601,6 +598,7 @@ struct ContentView: View {
     /// rationale as the amplitude meters.
     private var micStatusPill: some View {
         MicStatusPill(audio: audio)
+            .tourTarget(.micStatus)
     }
 
     private var resetButton: some View {
@@ -616,6 +614,7 @@ struct ContentView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Reset stats")
+        .tourTarget(.resetStats)
     }
 
     /// Retro segmented level meter with a falling peak-hold dot, driven by the
@@ -934,7 +933,6 @@ struct ContentView: View {
             iconPill { pulseSpeciesIDButton }
             iconPill { pulseViewButton }
         }
-        .tourTarget(.pulseButtons)
     }
 
     /// Spectrogram header trailing content: toggles pill (species ID, compress
@@ -958,7 +956,6 @@ struct ContentView: View {
             }
             iconPill { paletteButton; bandButton }
         }
-        .tourTarget(.spectrogramButtons)
     }
 
     private var pulseViewButton: some View {
@@ -970,6 +967,7 @@ struct ContentView: View {
         .popover(isPresented: $showPulseView) {
             PulseViewControls(detector: pulseDetector)
         }
+        .tourTarget(.pulseSettings)
     }
 
     /// Species-ID view toggles, moved out of each panel's settings popover into
@@ -993,6 +991,7 @@ struct ContentView: View {
         }
         .tint(spectrogramShowsSpeciesID ? .toggleOn : .toggleOff)
         .accessibilityLabel("Species ID view")
+        .tourTarget(.spectrogramSpeciesToggle)
     }
 
     private var pulseSpeciesIDButton: some View {
@@ -1009,6 +1008,7 @@ struct ContentView: View {
         }
         .tint(pulseShowsSpeciesID ? .toggleOn : .toggleOff)
         .accessibilityLabel("Species ID view")
+        .tourTarget(.pulseSpeciesToggle)
     }
 
     /// Moved out of the hamburger menu into the spectrogram panel header, next to
@@ -1028,6 +1028,7 @@ struct ContentView: View {
         }
         .tint(pulseDetector.triggeredDisplayMode ? .toggleOn : .toggleOff)
         .accessibilityLabel("Compress timeline")
+        .tourTarget(.compressTimeline)
     }
 
     /// Most bat calls fall in this band — a one-tap preset instead of dragging the
@@ -1065,6 +1066,7 @@ struct ContentView: View {
         }
         .tint(isBatRange ? .toggleOn : .toggleOff)
         .accessibilityLabel("Bat range, 15 to 90 kilohertz")
+        .tourTarget(.batRange)
     }
 
     /// Colour palette picker, moved out of the frequency-range popover into its
@@ -1090,6 +1092,7 @@ struct ContentView: View {
         }
         .tint(.secondary)
         .accessibilityLabel("Colour palette")
+        .tourTarget(.palette)
     }
 
     private var paletteMenuLabel: some View {
@@ -1148,6 +1151,7 @@ struct ContentView: View {
                                  timeWindowSeconds: $timeWindowSeconds,
                                  noiseFloor: $pulseDetector.spectrogramNoiseFloor)
         }
+        .tourTarget(.bandSettings)
     }
 
     /// Heterodyne tuning pill, overlaid on the spectrogram only in that mode. A
@@ -1175,7 +1179,6 @@ struct ContentView: View {
         }
         .controlSize(.regular)
         .padding(.vertical, 6)
-        .tourTarget(.controls)
     }
 
     private var playStopButton: some View {
@@ -1189,6 +1192,7 @@ struct ContentView: View {
         .buttonStyle(.borderedProminent)
         .tint(audio.isRunning ? .red : .accentColor)
         .accessibilityLabel(audio.isRunning ? "Stop" : "Start")
+        .tourTarget(.start)
     }
 
     /// Same action, sized to match the other panel-header pill icons (plain
@@ -1203,6 +1207,7 @@ struct ContentView: View {
         }
         .tint(audio.isRunning ? .red : .accentColor)
         .accessibilityLabel(audio.isRunning ? "Stop" : "Start")
+        .tourTarget(.start)
     }
 
     /// Stop detection and tear down the active session. Called only on explicit user
@@ -1256,6 +1261,7 @@ struct ContentView: View {
         .buttonStyle(.bordered)
         .tint(recorder.isArmed ? .red : .secondary)
         .accessibilityLabel(recorder.isArmed ? "Stop recording" : "Record")
+        .tourTarget(.record)
     }
 
     /// Compact variant for the full-screen transport pill — see
@@ -1267,6 +1273,7 @@ struct ContentView: View {
         }
         .tint(recorder.isArmed ? .red : .secondary)
         .accessibilityLabel(recorder.isArmed ? "Stop recording" : "Record")
+        .tourTarget(.record)
     }
 
     /// Record button arms the triggered WAV recorder and starts/stops the
@@ -1306,6 +1313,7 @@ struct ContentView: View {
         // just inactive, same as the record button when not recording.
         .tint(audio.isListening ? .toggleOn : .toggleOff)
         .accessibilityLabel("Listening mode: \(listenModeName)")
+        .tourTarget(.listen)
     }
 
     /// Compact variant for the full-screen transport pill — see
@@ -1318,6 +1326,7 @@ struct ContentView: View {
         }
         .tint(audio.isListening ? .toggleOn : .toggleOff)
         .accessibilityLabel("Listening mode: \(listenModeName)")
+        .tourTarget(.listen)
     }
 
     private var nextListenMode: ListenMode {
