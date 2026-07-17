@@ -61,8 +61,10 @@ final class ClassificationLogger {
         }
     }
 
+    private static let iso8601 = ISO8601DateFormatter()
+
     private func makeRow(type: String, date: Date, result: ClassificationResult, pulseCount: Int) -> String {
-        let ts = ISO8601DateFormatter().string(from: date)
+        let ts = Self.iso8601.string(from: date)
         let conf = String(format: "%.1f", result.confidence * 100)
         let scores = classNames.map { name in
             String(format: "%.4f", result.allScores[name] ?? 0)
@@ -75,7 +77,7 @@ final class ClassificationLogger {
             guard let data = row.data(using: .utf8) else { return }
             if let handle = try? FileHandle(forWritingTo: fileURL) {
                 handle.seekToEndOfFile()
-                handle.write(data)
+                try? handle.write(contentsOf: data)
                 try? handle.close()
             } else {
                 try? data.write(to: fileURL)

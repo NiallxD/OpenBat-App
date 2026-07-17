@@ -71,6 +71,7 @@ struct ContentView: View {
     @Environment(\.verticalSizeClass) private var vSizeClass
     // When on, arming the recorder also starts ReplayKit screen capture.
     @AppStorage("recording.screenCaptureEnabled") private var screenCaptureEnabled = false
+    @AppStorage("recording.autoRecordOnSessionStart") private var autoRecordOnSessionStart = true
     // Toggled from each panel's own config popover (bandButton / pulseViewButton).
     @AppStorage("display.spectrogramShowsSpeciesID") private var spectrogramShowsSpeciesID = false
     @AppStorage("display.pulseShowsSpeciesID") private var pulseShowsSpeciesID = false
@@ -80,14 +81,22 @@ struct ContentView: View {
     private enum AppSection: String, CaseIterable {
         case detector  = "Detector"
         case sessions  = "Sessions"
+        case species   = "Species"
         var icon: String {
             switch self {
             case .detector:  "waveform"
             case .sessions:  "square.stack.3d.up"
+            case .species:   "book.closed"
             }
         }
     }
-    @State private var section: AppSection = .detector
+    // "-startSection Species" launch argument jumps straight to a section —
+    // lets automated runs exercise non-default sections without UI scripting.
+    @State private var section: AppSection =
+        UserDefaults.standard.string(forKey: "startSection").flatMap(AppSection.init) ?? .detector
+    /// Field-guide data (bundled → cached → GitHub). Created lazily so app
+    /// startup isn't gated on JSON decode; the remote check runs in .task below.
+    @State private var speciesGuide = SpeciesGuideStore()
 
     var body: some View {
         NavigationStack {
@@ -100,6 +109,24 @@ struct ContentView: View {
                         ToolbarItem(placement: .topBarTrailing) { optionsMenu }
                     }
                 }
+                // Hidden during the tour: the Liquid Glass toolbar buttons sit
+                // above the dim and keep re-adapting to the animated backdrop
+                // beneath them (random-looking pulsing). They're not usable
+                // mid-tour anyway; the bar returns when the tour ends.
+                //
+                // The reveal must NOT be animated: finish() flips tourActive
+                // inside a 0.25 s withAnimation so the dim overlay can fade out,
+                // and if the toolbar's .hidden→.visible rode along in that same
+                // transaction, the Liquid Glass buttons would fade back in while
+                // the busy dim backdrop was still animating underneath them —
+                // re-triggering the same adaptive-material pulsing, except this
+                // time it got stuck oscillating instead of settling. Snapping
+                // the toolbar in instantly (no shared animation with the dim
+                // fade) keeps the buttons still while any backdrop motion is
+                // happening, so Liquid Glass never has a moving backdrop to
+                // react to.
+                .toolbar(tourActive ? .hidden : .visible, for: .navigationBar)
+                .animation(nil, value: tourActive)
                 .sheet(isPresented: $showDiagnostics) {
                     DiagnosticsView(audio: audio, recorder: recorder)
                 }
@@ -107,7 +134,8 @@ struct ContentView: View {
                 // survive a swipe-down dismissal of the sheet too.
                 .sheet(isPresented: $showSettings, onDismiss: { autoIDSettings.save() }) {
                     SettingsView(settings: autoIDSettings, rteSettings: rteSettings,
-                                 pulseDetector: pulseDetector, recorder: recorder)
+                                 pulseDetector: pulseDetector, recorder: recorder,
+                                 location: location)
                 }
                 .sheet(isPresented: $showInfo, onDismiss: {
                     if tourPending {
@@ -130,6 +158,9 @@ struct ContentView: View {
                                 finish: {
                                     withAnimation(.easeInOut(duration: 0.25)) { tourActive = false }
                                 })
+                    // Skip re-diffing the overlay on the constant anchor-preference
+                    // churn from the live detector UI — see TourOverlay's ==.
+                    .equatable()
                 }
             }
             // Full-screen so the resolved anchor rects, the dim shape's cutout,
@@ -140,6 +171,9 @@ struct ContentView: View {
             // status-bar-plus-nav-bar height above the ring.
             .ignoresSafeArea()
         }
+        // Once per launch: see if the community species-guide JSON on GitHub
+        // has a newer dataVersion than what's bundled/cached. Offline → no-op.
+        .task { await speciesGuide.refreshFromRemote() }
         .onAppear {
             audio.bufferSink = { [processor, recorder] buffer in
                 processor.process(buffer)
@@ -276,6 +310,7 @@ struct ContentView: View {
         switch section {
         case .detector:  detectorLayout
         case .sessions:  SessionsView(store: classStore, settings: autoIDSettings)
+        case .species:   SpeciesExplorerView(store: speciesGuide)
         }
     }
 
@@ -1246,6 +1281,10 @@ struct ContentView: View {
             recorder.setActiveSession(id: id, label: label)
             screenRecorder.activeSessionID = id
             location.startTracking(geocodeSessionID: id)
+            if autoRecordOnSessionStart {
+                recorder.setArmed(true)
+                if screenCaptureEnabled { screenRecorder.start() }
+            }
         } else {
             recorder.setActiveSession(id: nil, label: "Listening only")
             screenRecorder.activeSessionID = nil

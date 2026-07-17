@@ -27,6 +27,9 @@ struct AudioDiagnostics: Equatable {
     var inputName: String = "—"
     /// Whether the active input port reports as USB audio (vs. the built-in mic).
     var isUSBInput: Bool = false
+    /// Whether any USB audio input (the Griff) is attached at all, active route or
+    /// not — drives the mic-connection pill even while capture is stopped.
+    var usbMicAvailable: Bool = false
     var channelCount: Int = 0
     /// Number of capture callbacks received since the engine started — should tick
     /// up steadily while running.

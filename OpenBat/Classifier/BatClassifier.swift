@@ -13,6 +13,11 @@ struct ClassificationResult {
     let species: String       // winning species code, e.g. "MYLU"
     let confidence: Float     // prior-adjusted, renormalized posterior of the winner (0–1)
     let allScores: [String: Float]  // prior-adjusted, renormalized posteriors for all 31 classes (sum to 1)
+    /// Raw (pre-prior) softmax output for all 31 classes — the model's unbiased read,
+    /// used by `PassAggregation` for the NoID/NOISE pass-level gate. Empty for
+    /// results that were never derived from a live classification (e.g. a pass-level
+    /// aggregate `ClassificationResult` built for display/logging only).
+    var rawScores: [String: Float] = [:]
 }
 
 /// Pulse quality gate, mirroring nabat-ml's `Spectrogram._process_window` defaults.
@@ -37,7 +42,7 @@ struct QualityGate {
     }
 }
 
-final class BatClassifier {
+final class BatClassifier: SpeciesClassifier {
 
     // Class order from training_history_m-1.p, must match CoreML output index order.
     static let classNames: [String] = [
@@ -112,10 +117,14 @@ final class BatClassifier {
         var allScores = [String: Float]()
         for i in 0..<n { allScores[Self.classNames[i]] = adjusted[i] }
 
+        var rawScores = [String: Float]()
+        for i in 0..<n { rawScores[Self.classNames[i]] = raw[i] }
+
         return ClassificationResult(
             species: Self.classNames[bestIdx],
             confidence: adjusted[bestIdx],   // renormalized posterior of the winner
-            allScores: allScores
+            allScores: allScores,
+            rawScores: rawScores
         )
     }
 }

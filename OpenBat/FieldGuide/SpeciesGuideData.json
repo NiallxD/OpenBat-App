@@ -1,0 +1,99 @@
+{
+  "schemaVersion": 1,
+  "dataVersion": 2,
+  "updatedAt": "2026-07-06T00:00:00Z",
+  "regions": [
+    {
+      "id": "uk-ireland",
+      "name": "UK & Ireland",
+      "latitude": 54.0,
+      "longitude": -4.0
+    },
+    {
+      "id": "continental-europe",
+      "name": "Continental Europe",
+      "latitude": 48.5,
+      "longitude": 10.0
+    },
+    {
+      "id": "north-america",
+      "name": "North America",
+      "latitude": 45.0,
+      "longitude": -95.0
+    },
+    {
+      "id": "australia-east",
+      "name": "Eastern Australia",
+      "latitude": -30.0,
+      "longitude": 150.0
+    }
+  ],
+  "species": [
+    {
+      "id": "pipistrellus-pipistrellus",
+      "commonName": "Common Pipistrelle",
+      "scientificName": "Pipistrellus pipistrellus",
+      "order": "Chiroptera",
+      "family": "Vespertilionidae",
+      "regions": ["uk-ireland", "continental-europe"],
+      "summary": "One of the smallest and most widespread European bats. Echolocates with FM sweeps ending around 45 kHz; a fast, erratic flier commonly seen at dusk around gardens, hedgerows and waterways.",
+      "measurements": {
+        "forearmMmRange": { "min": 27.0, "max": 32.0 },
+        "wingspanCmRange": { "min": 18.0, "max": 24.0 },
+        "weightGRange": { "min": 3.5, "max": 8.5 },
+        "color": "Dark brown fur above, paler brown-buff below; blackish face, ears and wing membranes."
+      },
+      "morphology": {
+        "earType": "Short, rounded, with a blunt tragus",
+        "tailType": "Tail fully enclosed within the tail membrane (uropatagium)",
+        "noseType": "Simple, no nose-leaf",
+        "otherFeatures": ["Keeled calcar", "Fast, jinking flight"]
+      },
+      "echolocation": {
+        "callType": "FM",
+        "peakFreqHzRange": { "min": 45000, "max": 47000 },
+        "characteristicFreqHzRange": { "min": 46000, "max": 46000 },
+        "freqHighHzRange": { "min": 60000, "max": 70000 },
+        "freqLowHzRange": { "min": 40000, "max": 45000 },
+        "durationMsRange": { "min": 4.0, "max": 8.0 },
+        "notes": "Steep FM sweep ending in a near-flat tail around 46 kHz; distinguishable from Soprano Pipistrelle by ~10 kHz lower Fc."
+      },
+      "conservation": {
+        "iucnStatus": "Least Concern",
+        "localStatus": "Protected in the UK & Ireland under the Wildlife and Countryside Act 1981"
+      },
+      "habits": {
+        "roosting": "Roosts in buildings — roof spaces, soffits, cavity walls — as well as tree holes; maternity colonies can number in the hundreds.",
+        "migration": "Largely sedentary; some short-distance seasonal movement between summer and winter roosts.",
+        "feeding": "Aerial hawking for small Diptera (midges, mosquitoes) along hedgerows, woodland edge and over water; a single bat can eat thousands of insects a night.",
+        "reproduction": "Mates in autumn with delayed fertilisation; females form maternity colonies in late spring, giving birth to a single pup in June/July.",
+        "other": "One of the first bats to emerge at dusk, often within 20 minutes of sunset."
+      },
+      "references": [
+        "Barlow, K.E. & Jones, G. (1997) Function of pipistrelle social calls: field data and a playback experiment. Animal Behaviour, 53(5), 991–999.",
+        "Davidson-Watts, I. & Jones, G. (2006) Differences in foraging behaviour between Pipistrellus pipistrellus and Pipistrellus pygmaeus. Journal of Zoology, 268(1), 55–62.",
+        "Bat Conservation Trust (2023) Common Pipistrelle. bats.org.uk/about-bats/bat-species-in-the-uk/common-pipistrelle"
+      ],
+      "contributors": [
+        { "name": "Niall Bell", "date": "2026-07-06T00:00:00Z", "note": "Created species profile" },
+        { "name": "Niall Bell", "date": "2026-07-06T00:00:00Z", "note": "Added echolocation and habits data" }
+      ]
+    },
+    {
+      "id": "myotis-lucifugus",
+      "commonName": "Little Brown Bat",
+      "scientificName": "Myotis lucifugus",
+      "family": "Vespertilionidae",
+      "regions": ["north-america"],
+      "summary": "Once among the most common bats in North America, now heavily impacted by white-nose syndrome. Calls sweep from about 80 kHz down to 40 kHz; forages over water and along forest edges."
+    },
+    {
+      "id": "pteropus-poliocephalus",
+      "commonName": "Grey-headed Flying-fox",
+      "scientificName": "Pteropus poliocephalus",
+      "family": "Pteropodidae",
+      "regions": ["australia-east"],
+      "summary": "A large fruit bat endemic to eastern Australia with a wingspan up to a metre. Does not echolocate — it navigates by sight and smell, and is a keystone pollinator and seed disperser."
+    }
+  ]
+}

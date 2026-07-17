@@ -26,6 +26,13 @@ OpenBat/
   Classifier/
     PulseDetector.swift           @Observable pulse trigger + background image renderer
     PulseSettingsView.swift       Settings sheet for trigger/display options
+  FieldGuide/
+    SpeciesGuide.swift             Codable schema — GuideSpecies + measurements/morphology/echolocation/conservation/habits
+    SpeciesGuideStore.swift        bundled → cached → GitHub raw-JSON resolution, dataVersion-gated
+    SpeciesExplorerView.swift      Search bar + globe explorer + region species list (grouped by family)
+    SpeciesDetailView.swift        Full species page — header/taxonomy breadcrumb, description, distribution, measurements, echolocation, conservation, habits
+    GBIFService.swift              Scientific-name → taxon-key resolution (cached) + tile-overlay factory
+    GBIFRangeMapView.swift          MKTileOverlay-backed interactive distribution map
   ContentView.swift               Main screen — GeometryReader proportional layout
   DiagnosticsView.swift           Debug sheet
 ```
@@ -56,7 +63,7 @@ When the user drags, `liveHistory.snapshot()` freezes a COW copy (O(1)). `upload
 2. Dispatches heavy computation (peak scan, pixel render, `CGImage` creation) to `captureQueue` (background)
 3. Posts results back on `DispatchQueue.main` to update `@Observable` properties
 
-Buffer geometry: `usePulseLen = min(consecutiveAbove, 100)`, `bufCol = max(4, usePulseLen / 3)`. This places the pulse onset at exactly **20% from the left** of the captured image: `bufCol / (2*bufCol + usePulseLen) = (P/3) / (5P/3) = 1/5 = 20%`.
+Capture geometry: captures are *deferred* — on the trailing edge the detector arms a pending capture and waits until enough trailing PCM exists, then renders a fixed `displayWindowMs` window from the raw PCM ring (`PulseImageRenderer`, fftSize 512 / hop 64) with the onset locked at `onsetFraction` = **25% from the left**. The classification window is cut separately per the model's `ModelInputSpec` (NABat: 50 ms, onset 30%).
 
 Frequency crop uses **relative threshold** (50% of peak value across pulse columns). Avoids the absolute-threshold failure where broadband noise floor fills all bins.
 
@@ -67,10 +74,11 @@ Defined identically in `Spectrogram.metal` (GPU) and `PulseDetector.colormap()` 
 
 | Symbol | Value | Notes |
 |--------|-------|-------|
-| `fftSize` | 1024 | Hann-windowed |
-| `hopSize` | 512 | 50% overlap |
-| `binCount` | 512 | `fftSize / 2` |
-| `columnsPerSecond` | 750 | at 384 kHz: `384000 / 512` |
+| `windowLen` | 1024 | Hann-windowed, raw samples per column |
+| `fftSize` | 2048 | zero-padded from `windowLen` — doubles bins, not hop |
+| `hopSize` | 512 | 50% overlap (of `windowLen`) |
+| `binCount` | 1024 | `fftSize / 2` |
+| `columnsPerSecond` | 750 | at 384 kHz: `384000 / 512` (unchanged — hop drives this, not fftSize) |
 | `maxVisibleColumns` | 2048 | seek texture width |
 | `ringTextureWidth` | 2560 | `maxVisibleColumns + 512 guard` |
 | `liveHistory capacity` | 90 000 | 120 s × 750 cols |
@@ -87,3 +95,4 @@ SourceKit frequently reports spurious errors like "Cannot find 'UIKit' in scope"
 - **Stats panel** (top 18% of screen): placeholder for species ID output.
 - **Pulse log**: store last N captures as a scrollable history in the pulse zoom panel.
 - **384 kHz capture verification**: confirm iOS hands the Griff mic's native rate and doesn't silently downsample. Check `diagnostics.isNativeRate` and `diagnostics.actualSampleRate`.
+- **Taxonomy browser**: an explorable full taxonomic tree (order → family → genus → species) for the field guide, replacing/complementing the region-grouped-by-family list in `RegionSpeciesView`.

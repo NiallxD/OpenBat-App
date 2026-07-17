@@ -65,6 +65,22 @@ struct PulseSettingsView: View {
                 }
 
                 Section {
+                    LabeledContent("Display refresh") {
+                        Text(detector.displayRefreshIntervalSeconds <= 0
+                             ? "Every pulse"
+                             : String(format: "%.1f s", detector.displayRefreshIntervalSeconds))
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                    }
+                    Slider(value: $detector.displayRefreshIntervalSeconds, in: 0...5, step: 0.5)
+                    Text("How often the pulse zoom image updates. 0 = every detected pulse. Set to 1–2 s to show one clean pulse per pass without flickering through noise hits.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } header: {
+                    Text("Display")
+                }
+
+                Section {
                     Stepper("Min duration: \(detector.minConsecutiveColumns) columns",
                             value: $detector.minConsecutiveColumns, in: 1...10)
                     Text("Above-threshold columns required in a pulse before it's accepted. Increase to reject single-column spikes.")
@@ -87,7 +103,7 @@ struct PulseSettingsView: View {
                             .foregroundStyle(.secondary)
                     }
                     Slider(value: $detector.holdOffSeconds, in: 0.02...1.0, step: 0.01)
-                    Text("Minimum gap between detections. Keep short (~50 ms) — gap-bridging already stops one call re-triggering, and a long hold-off caps the detected call rate (e.g. 300 ms limits you to ~3/sec).")
+                    Text("Minimum gap between detections. Default 150 ms blocks room echoes (which arrive within ~50–150 ms of the direct call) while allowing up to ~6 calls/sec. Raise further if echoes still re-trigger.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } header: {

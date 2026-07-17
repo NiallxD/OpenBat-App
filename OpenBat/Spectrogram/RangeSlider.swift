@@ -14,7 +14,7 @@ struct RangeSlider: View {
     @Binding var high: Double  // 0...1
     var minGap: Double = 0.02
 
-    private let thumbSize: CGFloat = 28
+    private let thumbSize: CGFloat = 20
     private let space = "rangeslider"
 
     var body: some View {

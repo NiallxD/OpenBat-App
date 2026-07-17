@@ -6,8 +6,9 @@
 //  armed audio recorder. Rather than ReplayKit's built-in writer (which uses a
 //  very high default bitrate → huge files), we take the raw frames from
 //  `startCapture` and re-encode with AVAssetWriter using HEVC at a capped bitrate,
-//  which shrinks the output dramatically. Saved next to the WAV passes in
-//  Documents/Recordings/<date>/screen-<time>.mp4 (video only — audio is the WAV).
+//  which shrinks the output dramatically. Saved next to the WAV passes (video only —
+//  audio is the WAV): Recordings/Sessions/<id>/ during a session, otherwise
+//  Recordings/Listening/<date>/. Mirrors AudioRecorder's folder layout.
 //
 //  NOT pulse-triggered: ReplayKit records continuously while armed.
 //
@@ -38,9 +39,13 @@ final class ScreenRecorder: @unchecked Sendable {
 
     var isAvailable: Bool { recorder.isAvailable }
 
+    /// Active session id (main thread), so recordings land in the same folder as
+    /// the session's WAV passes. nil = Listening bucket. Set from ContentView.
+    var activeSessionID: UUID?
+
     func start() {
         guard recorder.isAvailable, !recorder.isRecording else { return }
-        let url = Self.makeURL()
+        let url = makeURL()
         writeQueue.async { [weak self] in
             guard let self else { return }
             writer = try? AVAssetWriter(outputURL: url, fileType: .mp4)
@@ -144,11 +149,17 @@ final class ScreenRecorder: @unchecked Sendable {
 
     // MARK: - File location
 
-    private static func makeURL() -> URL {
+    private func makeURL() -> URL {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        let day = dayFormatter.string(from: Date())
-        let stamp = stampFormatter.string(from: Date())
-        let dir = docs.appendingPathComponent("Recordings/\(day)", isDirectory: true)
+        let stamp = Self.stampFormatter.string(from: Date())
+        // Same layout as AudioRecorder.makeURL(), so video sits beside the WAVs.
+        let dir: URL
+        if let sid = activeSessionID {
+            dir = docs.appendingPathComponent("Recordings/Sessions/\(sid.uuidString)", isDirectory: true)
+        } else {
+            let day = Self.dayFormatter.string(from: Date())
+            dir = docs.appendingPathComponent("Recordings/Listening/\(day)", isDirectory: true)
+        }
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir.appendingPathComponent("screen-\(stamp).mp4")
     }

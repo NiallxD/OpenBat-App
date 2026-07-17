@@ -14,42 +14,44 @@ struct PulseViewControls: View {
     @Bindable var detector: PulseDetector
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 10) {
             Text("Pulse view")
-                .font(.headline)
+                .font(.subheadline.weight(.semibold))
 
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 4) {
                 HStack {
-                    Text("Zoom window").font(.subheadline)
+                    Text("Zoom window").font(.caption)
                     Spacer()
                     Text(String(format: "%.0f ms", detector.displayWindowMs))
-                        .font(.callout.monospacedDigit())
+                        .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
-                Slider(value: $detector.displayWindowMs, in: 20...200, step: 10)
-                Text("Fixed time span of the captured pulse. The onset stays locked at 10% from the left, so every capture is at the same scale.")
-                    .font(.caption)
+                Slider(value: $detector.displayWindowMs, in: 6...40, step: 2)
+                    .controlSize(.small)
+                Text("Time span per capture; onset locked at 25% from the left.")
+                    .font(.caption2)
                     .foregroundStyle(.secondary)
             }
 
             Divider()
 
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 4) {
                 HStack {
-                    Text("Noise floor").font(.subheadline)
+                    Text("Noise floor").font(.caption)
                     Spacer()
                     Text(String(format: "%.2f", detector.pulseNoiseFloor))
-                        .font(.callout.monospacedDigit())
+                        .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
                 Slider(value: $detector.pulseNoiseFloor, in: 0...0.9, step: 0.05)
-                Text("Hides energy below this brightness and stretches the rest to full contrast. Applies to both the pulse view and the live spectrogram.")
-                    .font(.caption)
+                    .controlSize(.small)
+                Text("Hides energy below this brightness.")
+                    .font(.caption2)
                     .foregroundStyle(.secondary)
             }
         }
-        .padding()
-        .frame(width: 300)
+        .padding(12)
+        .frame(width: 270)
         .presentationCompactAdaptation(.popover)
     }
 }

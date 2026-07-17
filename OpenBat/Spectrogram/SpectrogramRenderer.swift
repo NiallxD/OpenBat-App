@@ -27,8 +27,9 @@ final class SpectrogramRenderer: NSObject, MTKViewDelegate {
 
     let device: MTLDevice
 
-    /// Expected new columns per second (sampleRate / hopSize).
-    var columnsPerSecond: Double = 750
+    /// Expected new columns per second (sampleRate / hopSize). Placeholder until
+    /// SpectrogramView's updateUIView sets the real value from processor.hopSize.
+    var columnsPerSecond: Double = 1500
 
     /// Width of the x-axis time window shown on screen, in seconds.
     var timeWindowSeconds: Double = 0.5
@@ -71,9 +72,23 @@ final class SpectrogramRenderer: NSObject, MTKViewDelegate {
     // Ring texture: live path, incremental uploads only.
     private let ringTexture: MTLTexture
     private let ringTextureWidth: Int
+    // Pre-allocated staging buffer for batched ring uploads; grown as needed.
+    private var uploadScratch: [Float] = []
 
     // Seek texture: scroll path, reloaded from snapshot when position changes.
-    private let seekTexture: MTLTexture
+    // Double-buffered: `.replace()` on a `.shared`-storage texture is a synchronous
+    // CPU memcpy with no implicit fence against an outstanding GPU read of the SAME
+    // texture object. The live ring path gets away with unbuffered writes because
+    // each frame only overwrites a small forward region the GPU isn't currently
+    // sampling; the seek path re-uploads the ENTIRE visible window on every scrub
+    // step, right before that same texture is sampled in the same draw — a real
+    // write/read race that showed up as torn "stripy noise" while scrubbing.
+    // Alternating between two textures means a fresh CPU write never lands on the
+    // texture the GPU may still be reading from the previous frame.
+    private let seekTextures: [MTLTexture]
+    private var seekWriteIndex = 0
+    private var seekReadIndex = 0
+    private var currentSeekTexture: MTLTexture { seekTextures[seekReadIndex] }
     private let maxVisibleColumns: Int
     private let height: Int
 
@@ -88,6 +103,7 @@ final class SpectrogramRenderer: NSObject, MTKViewDelegate {
     private var snapshotHistory: HistoryBuffer?
     private var lastSeekOffset: Int = -1
     private var lastSeekVisibleColumns: Int = 0
+    private var previousTriggeredMode: Bool = false
 
     // MARK: Live display head
 
@@ -127,11 +143,14 @@ final class SpectrogramRenderer: NSObject, MTKViewDelegate {
         guard let ringTexture = device.makeTexture(descriptor: ringDesc) else { return nil }
 
         // Seek texture: linear layout (no ring wrapping) for snapshot display.
+        // Two, for double-buffering — see the `seekTextures` doc comment.
         let seekDesc = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .r32Float, width: maxVisibleColumns, height: processor.binCount, mipmapped: false)
         seekDesc.usage = [.shaderRead]
         seekDesc.storageMode = .shared
-        guard let seekTexture = device.makeTexture(descriptor: seekDesc) else { return nil }
+        guard let seekTextureA = device.makeTexture(descriptor: seekDesc),
+              let seekTextureB = device.makeTexture(descriptor: seekDesc)
+        else { return nil }
 
         self.device = device
         self.processor = processor
@@ -139,16 +158,16 @@ final class SpectrogramRenderer: NSObject, MTKViewDelegate {
         self.pipeline = pipeline
         self.ringTexture = ringTexture
         self.ringTextureWidth = ringWidth
-        self.seekTexture = seekTexture
+        self.seekTextures = [seekTextureA, seekTextureB]
         self.maxVisibleColumns = maxVisibleColumns
         self.height = processor.binCount
-        // 750 cols/s = 384 kHz sample rate / 512 hop (the Griff mic's known rate).
-        self.liveHistory = HistoryBuffer(capacity: Int(historySeconds * 750), binCount: processor.binCount)
+        // 1500 cols/s = 384 kHz sample rate / 256 hop (the Griff mic's known rate).
+        self.liveHistory = HistoryBuffer(capacity: Int(historySeconds * 1500), binCount: processor.binCount)
 
         super.init()
 
         clearTexture(ringTexture, width: ringWidth)
-        clearTexture(seekTexture, width: maxVisibleColumns)
+        for tex in seekTextures { clearTexture(tex, width: maxVisibleColumns) }
     }
 
     // MARK: MTKViewDelegate
@@ -156,17 +175,33 @@ final class SpectrogramRenderer: NSObject, MTKViewDelegate {
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
 
     func draw(in view: MTKView) {
+        // When triggered display mode is first turned on, wipe liveHistory so that
+        // scroll-back doesn't surface pre-trigger background noise. The seek texture
+        // will be rebuilt from the fresh history on the next scroll session.
+        let triggered = pulseDetector?.triggeredDisplayMode ?? false
+        if triggered && !previousTriggeredMode {
+            liveHistory.clear()
+            snapshotHistory = nil
+            lastSeekOffset = -1
+        }
+        previousTriggeredMode = triggered
+
         // Drain new FFT columns → ring texture (live path) + liveHistory (both paths).
-        // In triggered display mode, only columns where a pulse is active (or within
-        // the hold-off window) are uploaded to the ring — silent gaps are skipped so
-        // the scrolling spectrogram shows back-to-back pulses, Wildlife Acoustics style.
-        // isInPulse reflects the PREVIOUS column's state (updated at the end of feed())
-        // so checking it before feed() gives a 1-column (~1 ms) lag — negligible.
+        // In triggered display mode, only columns where a pulse is active are uploaded
+        // to the ring — silent gaps are skipped so the spectrogram shows back-to-back
+        // pulses, Wildlife Acoustics style. isInPulse reflects the PREVIOUS column's
+        // state (updated at the end of feed()) so checking it here gives a 1-column
+        // (~1 ms) lag — negligible.
+        //
+        // Columns are collected into a batch so the ring texture is updated in 1–2
+        // MTLTexture.replace() calls instead of one per column, reducing Metal API
+        // overhead from ~12–25 calls per frame to at most 2.
+
+        var batchMagnitudes: [[Float]] = []
         for column in processor.drain() {
-            let triggered = pulseDetector?.triggeredDisplayMode ?? false
             let inPulse   = pulseDetector?.isInPulse ?? true
             if !triggered || inPulse {
-                uploadToRing(column.magnitudes)
+                batchMagnitudes.append(column.magnitudes)
                 liveHistory.append(column.magnitudes)
             }
             // Per-column peak — NOT processor.peakLevel, which only holds the last
@@ -174,12 +209,12 @@ final class SpectrogramRenderer: NSObject, MTKViewDelegate {
             pulseDetector?.feed(
                 peakLevel: column.peakLevel,
                 peakFrequency: processor.frequency(forBin: column.peakBin, level: column.peakLevel),
-                history: liveHistory,
+                columnEndSample: column.endSample,
                 columnsPerSecond: columnsPerSecond,
-                sampleRate: processor.sampleRate,
-                dbRange: Double(processor.maxDB - processor.minDB)
+                sampleRate: processor.sampleRate
             )
         }
+        batchUploadToRing(batchMagnitudes)
 
         // Refresh the seek texture when scroll position or window size changes.
         if isScrolling {
@@ -204,14 +239,16 @@ final class SpectrogramRenderer: NSObject, MTKViewDelegate {
         let vc = visibleColumns
         let renderTexture: MTLTexture
         var rightEdge, windowLen, texWidth: Float
+        var isRing: Float
 
         if isScrolling {
             // Seek texture is linear: tell the shader rightEdge = vc so it
             // samples [0, vc/maxVisibleColumns] of UV — exactly what we uploaded.
-            renderTexture = seekTexture
+            renderTexture = currentSeekTexture
             rightEdge = Float(vc)
             windowLen  = Float(vc)
             texWidth   = Float(maxVisibleColumns)
+            isRing = 0
         } else {
             // Ring texture: fractional display head drives smooth scrolling.
             renderTexture = ringTexture
@@ -219,12 +256,14 @@ final class SpectrogramRenderer: NSObject, MTKViewDelegate {
             if rightEdge < 0 { rightEdge += Float(ringTextureWidth) }
             windowLen = Float(vc)
             texWidth  = Float(ringTextureWidth)
+            isRing = 1
         }
 
         var low  = bandLow
         var high = bandHigh
-        // Same noise-floor setting as the captured pulse view, applied live in the shader.
-        var floor = pulseDetector?.pulseNoiseFloor ?? 0
+        // Independent noise-floor setting from the pulse view's, applied live in the shader.
+        var floor = pulseDetector?.spectrogramNoiseFloor ?? 0
+        var paletteIndex = Float((pulseDetector?.displayPalette ?? .inferno).rawValue)
 
         encoder.setRenderPipelineState(pipeline)
         encoder.setFragmentTexture(renderTexture, index: 0)
@@ -234,6 +273,8 @@ final class SpectrogramRenderer: NSObject, MTKViewDelegate {
         encoder.setFragmentBytes(&low,        length: MemoryLayout<Float>.size, index: 3)
         encoder.setFragmentBytes(&high,       length: MemoryLayout<Float>.size, index: 4)
         encoder.setFragmentBytes(&floor,      length: MemoryLayout<Float>.size, index: 5)
+        encoder.setFragmentBytes(&isRing,     length: MemoryLayout<Float>.size, index: 6)
+        encoder.setFragmentBytes(&paletteIndex, length: MemoryLayout<Float>.size, index: 7)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         encoder.endEncoding()
 
@@ -255,33 +296,73 @@ final class SpectrogramRenderer: NSObject, MTKViewDelegate {
         }
     }
 
-    private func uploadToRing(_ column: [Float]) {
-        guard column.count == height else { return }
-        column.withUnsafeBytes { raw in
-            ringTexture.replace(
-                region: MTLRegionMake2D(Int(writeIndex), 0, 1, height),
-                mipmapLevel: 0,
-                withBytes: raw.baseAddress!,
-                bytesPerRow: MemoryLayout<Float>.stride
-            )
+    /// Upload multiple columns to the ring texture in at most two replace() calls
+    /// (one before the ring wrap, one after), instead of one call per column.
+    /// Staging is transposed so the GPU sees row-major layout (bin × column).
+    private func batchUploadToRing(_ columns: [[Float]]) {
+        guard !columns.isEmpty else { return }
+        let count = columns.count
+        var remaining = columns[...]
+        var xStart = Int(writeIndex)
+
+        while !remaining.isEmpty {
+            let batchCount = min(remaining.count, ringTextureWidth - xStart)
+            let batch = remaining.prefix(batchCount)
+
+            // Grow scratch to hold this batch (bin-major: staging[bin * batchCount + col]).
+            let needed = batchCount * height
+            if uploadScratch.count < needed {
+                uploadScratch = [Float](repeating: 0, count: needed)
+            }
+
+            // Transpose: col[bin] → staging[bin * batchCount + col] (stride-batchCount write).
+            uploadScratch.withUnsafeMutableBufferPointer { staging in
+                for (c, col) in batch.enumerated() {
+                    col.withUnsafeBufferPointer { src in
+                        var dst = staging.baseAddress! + c
+                        for b in 0..<height {
+                            dst.pointee = src[b]
+                            dst += batchCount
+                        }
+                    }
+                }
+            }
+
+            uploadScratch.withUnsafeBytes { raw in
+                ringTexture.replace(
+                    region: MTLRegionMake2D(xStart, 0, batchCount, height),
+                    mipmapLevel: 0,
+                    withBytes: raw.baseAddress!,
+                    bytesPerRow: batchCount * MemoryLayout<Float>.stride
+                )
+            }
+
+            xStart = (xStart + batchCount) % ringTextureWidth
+            remaining = remaining.dropFirst(batchCount)
         }
-        writeIndex = (writeIndex + 1) % UInt32(ringTextureWidth)
-        totalColumns += 1
+
+        writeIndex = UInt32((Int(writeIndex) + count) % ringTextureWidth)
+        totalColumns += Double(count)
     }
 
-    /// Reads a slice from the snapshot and uploads it to the seek texture in a
-    /// single replace() call (row-major layout: result[bin * count + col]).
+    /// Reads a slice from the snapshot and uploads it to the write-side seek
+    /// texture in a single replace() call (row-major layout:
+    /// result[bin * count + col]), then flips the read/write buffers so `draw(in:)`
+    /// renders from the texture just written while the NEXT upload targets the
+    /// other one — never the one still possibly in-flight on the GPU.
     private func uploadSeekSlice(offset: Int, count: Int) {
         guard let snap = snapshotHistory, count > 0 else { return }
         let floats = snap.rowMajorSlice(offset: offset, count: count)
         floats.withUnsafeBytes { raw in
-            seekTexture.replace(
+            seekTextures[seekWriteIndex].replace(
                 region: MTLRegionMake2D(0, 0, count, height),
                 mipmapLevel: 0,
                 withBytes: raw.baseAddress!,
                 bytesPerRow: count * MemoryLayout<Float>.stride
             )
         }
+        seekReadIndex = seekWriteIndex
+        seekWriteIndex = 1 - seekWriteIndex
     }
 
     // MARK: Display head (live path only)

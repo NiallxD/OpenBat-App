@@ -64,6 +64,9 @@ struct TourStep: Identifiable {
     /// The control to spotlight, or nil for a centred, no-cutout card.
     let target: TourID?
     let symbol: String
+    /// Rotation applied to the card's symbol, matching icons the UI itself renders
+    /// rotated (the bat-range button draws its bracket at -90°).
+    var symbolRotation: Angle = .zero
     let title: String
     let detail: String
 }
@@ -106,6 +109,7 @@ enum TourScript {
                  title: "Compress timeline",
                  detail: "Drops the silent gaps so the display shows just the detected pulses, back-to-back."),
         TourStep(target: .batRange, symbol: "minus.plus.lines.measurement.horizontal.aligned.bottom",
+                 symbolRotation: .degrees(-90),
                  title: "Bat frequency band",
                  detail: "One-tap preset snapping the frequency axis to 15–90 kHz, where most bat calls live. Tap again to restore the full range."),
         TourStep(target: .palette, symbol: "paintpalette",
@@ -267,12 +271,22 @@ struct AppInfoView: View {
 /// control and a caption card. Presented via `.overlayPreferenceValue` so it can
 /// resolve the tagged controls' bounds. Binding-driven so ContentView owns the
 /// step index and dismissal.
-struct TourOverlay: View {
+struct TourOverlay: View, Equatable {
     let targets: [TourID: CGRect]
     @Binding var index: Int
     let steps: [TourStep]
     /// Ends the tour (Skip / Done / finishing the last step).
     let finish: () -> Void
+
+    /// The detector UI relayouts many times a second while running (stats text,
+    /// meters, button tints), and every pass republishes the anchor preferences,
+    /// re-invoking the host's overlayPreferenceValue closure. Comparing the
+    /// resolved rects + step index lets SwiftUI skip re-diffing this whole
+    /// overlay (dim shape, material card, shadow) when nothing visible changed —
+    /// paired with .equatable() at the call site.
+    static func == (lhs: TourOverlay, rhs: TourOverlay) -> Bool {
+        lhs.targets == rhs.targets && lhs.index == rhs.index
+    }
 
     private var step: TourStep { steps[min(index, steps.count - 1)] }
     private var hole: CGRect {
@@ -341,6 +355,7 @@ struct TourOverlay: View {
             HStack(spacing: 10) {
                 Image(systemName: step.symbol)
                     .font(.title2)
+                    .rotationEffect(step.symbolRotation)
                     .foregroundStyle(.tint)
                 Text(step.title).font(.headline)
                 Spacer()
@@ -353,21 +368,39 @@ struct TourOverlay: View {
                 .foregroundStyle(.primary.opacity(0.9))
                 .fixedSize(horizontal: false, vertical: true)
 
-            HStack {
+            HStack(spacing: 12) {
                 Button("End tour") { finish() }
                     .foregroundStyle(.secondary)
                 Spacer()
                 if index > 0 {
-                    Button("Back") { withAnimation { index -= 1 } }
+                    Button { withAnimation { index -= 1 } } label: {
+                        Image(systemName: "chevron.left")
+                            .fontWeight(.semibold)
+                            .frame(width: 36, height: 36)
+                            .background(.white.opacity(0.12), in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Back")
                 }
-                Button(index == steps.count - 1 ? "Done" : "Next") { advance() }
-                    .fontWeight(.semibold)
+                Button { advance() } label: {
+                    // Checkmark on the last step (the old "Done").
+                    Image(systemName: index == steps.count - 1 ? "checkmark" : "chevron.right")
+                        .fontWeight(.semibold)
+                        .foregroundStyle(.white)
+                        .frame(width: 36, height: 36)
+                        .background(.tint, in: Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(index == steps.count - 1 ? "Done" : "Next")
             }
             .font(.callout)
         }
         .padding(16)
         .frame(maxWidth: 360)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+        // Opaque fill, not a material: a material backdrop-blurs the live
+        // spectrogram beneath it every frame, a per-frame GPU cost for the whole
+        // tour. Over the 82% black dim an opaque dark grey looks the same.
+        .background(Color(.systemGray6), in: RoundedRectangle(cornerRadius: 16))
         .overlay(RoundedRectangle(cornerRadius: 16).stroke(.white.opacity(0.12)))
         .shadow(radius: 20, y: 8)
         .padding(.horizontal, 16)

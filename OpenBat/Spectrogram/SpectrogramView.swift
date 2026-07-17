@@ -83,6 +83,8 @@ struct SpectrogramView: View {
                                      pulseDetector: pulseDetector)
                     .clipShape(RoundedRectangle(cornerRadius: 12))
 
+                gridOverlay
+
                 frequencyAxis
                     .padding(6)
 
@@ -135,6 +137,25 @@ struct SpectrogramView: View {
                 Spacer()
             }
         }
+    }
+
+    // MARK: Grid
+
+    /// Faint analysis grid, same style as the pulse view's (`ContentView.pulseGrid`):
+    /// vertical quarter lines mark time, horizontal ones frequency, with the middle
+    /// line aligned to the mid axis label.
+    private var gridOverlay: some View {
+        GeometryReader { geo in
+            let w = geo.size.width, h = geo.size.height
+            Path { p in
+                for f in [0.25, 0.5, 0.75] as [CGFloat] {
+                    p.move(to: CGPoint(x: w * f, y: 0)); p.addLine(to: CGPoint(x: w * f, y: h))
+                    p.move(to: CGPoint(x: 0, y: h * f)); p.addLine(to: CGPoint(x: w, y: h * f))
+                }
+            }
+            .stroke(Color.white.opacity(0.12), lineWidth: 0.5)
+        }
+        .allowsHitTesting(false)
     }
 
     // MARK: Frequency axis

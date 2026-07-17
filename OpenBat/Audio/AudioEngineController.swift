@@ -49,6 +49,11 @@ final class AudioEngineController {
     /// Whether the LO is following the detected call (true) or held where the user
     /// set it (false).
     private(set) var isAutoTune = true
+    /// Squelch hold: keeps the gate open for this many auto-tune ticks (~67 ms
+    /// each) after the last confident detection, so brief silent gaps between
+    /// pulses don't chop the audio.
+    private var gateHoldTicks = 0
+    private let gateHoldDuration = 8  // ≈ 530 ms at 15 Hz timer
     /// Supplies the current dominant frequency (Hz) for auto-tune, or 0 if none.
     /// Wired to the spectrogram processor's peak detector.
     var autoTunePeakProvider: (() -> Double)?
@@ -61,6 +66,12 @@ final class AudioEngineController {
     /// Guards against overlapping engine restarts (e.g. a route change firing
     /// while a heterodyne toggle is already reconfiguring).
     private var isReconfiguring = false
+    /// `stop()`'s session deactivation, tracked so a following `configureSession()`
+    /// (e.g. `setListenMode`'s stop-then-restart) can wait for it to actually finish
+    /// instead of racing a `setActive(true)` against an in-flight `setActive(false)`
+    /// on the session — that race was making mode switches unpredictably slow/stuck
+    /// even after moving both calls off the main actor.
+    private var pendingDeactivation: Task<Void, Never>?
 
     /// Optional sink for raw capture buffers, so later phases (FFT/spectrogram,
     /// recording) can subscribe without touching capture code. Called on a
@@ -80,9 +91,38 @@ final class AudioEngineController {
     private nonisolated(unsafe) var latestBufferChannels: Int = 0
     private var statsTimer: Timer?
     private let statsFlushRate = 15.0 // Hz
+    /// Idle-time poll for mic plug/unplug — see `prepareInputMonitoring()`.
+    private var inputPollTimer: Timer?
 
     init() {
         registerForNotifications()
+        Task { await prepareInputMonitoring() }
+    }
+
+    /// Makes the mic-connection pill work before the first start(). The session's
+    /// default category is playback-only, under which `availableInputs` hides input
+    /// devices entirely — the Griff would be invisible (and route-change
+    /// notifications for it unreliable) until capture first configured the session.
+    /// Setting a record-capable category up front fixes that; the session is NOT
+    /// activated here, so this doesn't touch other apps' audio or prompt for
+    /// permission.
+    private func prepareInputMonitoring() async {
+        await Task.detached {
+            try? AVAudioSession.sharedInstance().setCategory(.record, mode: .measurement, options: [])
+        }.value
+        updateInputDiagnostics()
+
+        // Route-change notifications are only delivered while the session is
+        // active, i.e. while capturing. To catch the Griff being plugged in or
+        // pulled while idle — without activating the session (permission prompt,
+        // interrupts other apps' audio) — poll the available inputs on a slow
+        // timer. The running engine's route-change handler covers the active case.
+        inputPollTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, !self.isRunning else { return }
+                self.updateInputDiagnostics()
+            }
+        }
     }
 
     // MARK: Lifecycle
@@ -96,7 +136,7 @@ final class AudioEngineController {
         }
 
         do {
-            try configureSession()
+            try await configureSession()
             try startEngine()
             startStatsTimer()
             isRunning = true
@@ -115,7 +155,15 @@ final class AudioEngineController {
         engine.inputNode.removeTap(onBus: 0)
         if engine.isRunning { engine.stop() }
         sourceNode = nil
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        // Deactivation is a courtesy to other apps and doesn't need to block the
+        // caller — off the main actor, same rationale as configureSession()'s
+        // activation call (setActive can block for a while). Tracked in
+        // `pendingDeactivation` so a following configureSession() (stop-then-
+        // restart, e.g. setListenMode) waits for it instead of racing.
+        pendingDeactivation?.cancel()
+        pendingDeactivation = Task.detached(priority: .utility) {
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        }
         isRunning = false
         // Drop the meter to silence — otherwise it freezes at the last live value.
         statsLock.lock(); latestLevelDB = AudioLevel.minDB; statsLock.unlock()
@@ -166,29 +214,44 @@ final class AudioEngineController {
 
     // MARK: Session
 
-    private func configureSession() throws {
-        let session = AVAudioSession.sharedInstance()
+    /// `AVAudioSession.setCategory`/`setActive` are synchronous system calls that
+    /// can block the calling thread for hundreds of milliseconds while iOS
+    /// renegotiates routing — worse under `.playAndRecord` with Bluetooth options,
+    /// which is exactly the category a listen-mode switch engages. Running that on
+    /// the main actor (this class's default isolation) froze the whole UI for the
+    /// duration, which is why switching listen mode mid-session felt unresponsive.
+    /// The actual session calls are pushed onto a detached task; only the quick
+    /// `@Observable` diagnostics update happens back on the main actor.
+    private func configureSession() async throws {
+        // Let a just-fired stop() finish deactivating before we reactivate —
+        // otherwise setActive(true) here can race setActive(false) still in
+        // flight from stop(), which made the session get stuck renegotiating.
+        await pendingDeactivation?.value
+        let listening = isListening
+        try await Task.detached(priority: .userInitiated) {
+            let session = AVAudioSession.sharedInstance()
 
-        // `.record` keeps us off the output mixer path and is the proven 384 kHz
-        // path; `.measurement` disables automatic gain control so ultrasonic
-        // levels aren't reshaped. Listening needs simultaneous output, so it
-        // upgrades to `.playAndRecord` (verify the rate stays native on device).
-        if isListening {
-            try session.setCategory(.playAndRecord, mode: .measurement, options: [.defaultToSpeaker, .allowBluetoothA2DP])
-        } else {
-            try session.setCategory(.record, mode: .measurement, options: [])
-        }
-        try session.setPreferredSampleRate(Self.preferredSampleRate)
-        // Modest IO buffer: low latency without starving the output (5 ms was tight
-        // enough to risk playback underruns).
-        try session.setPreferredIOBufferDuration(0.008)
+            // `.record` keeps us off the output mixer path and is the proven 384 kHz
+            // path; `.measurement` disables automatic gain control so ultrasonic
+            // levels aren't reshaped. Listening needs simultaneous output, so it
+            // upgrades to `.playAndRecord` (verify the rate stays native on device).
+            if listening {
+                try session.setCategory(.playAndRecord, mode: .measurement, options: [.defaultToSpeaker, .allowBluetoothA2DP])
+            } else {
+                try session.setCategory(.record, mode: .measurement, options: [])
+            }
+            try session.setPreferredSampleRate(Self.preferredSampleRate)
+            // Modest IO buffer: low latency without starving the output (5 ms was tight
+            // enough to risk playback underruns).
+            try session.setPreferredIOBufferDuration(0.008)
 
-        // Prefer the USB input (the Griff) over the built-in mic, if present.
-        if let usbInput = session.availableInputs?.first(where: { $0.portType == .usbAudio }) {
-            try session.setPreferredInput(usbInput)
-        }
+            // Prefer the USB input (the Griff) over the built-in mic, if present.
+            if let usbInput = session.availableInputs?.first(where: { $0.portType == .usbAudio }) {
+                try session.setPreferredInput(usbInput)
+            }
 
-        try session.setActive(true)
+            try session.setActive(true)
+        }.value
         isConfigured = true
         updateInputDiagnostics()
     }
@@ -198,6 +261,8 @@ final class AudioEngineController {
         let port = session.currentRoute.inputs.first
         diagnostics.inputName = port?.portName ?? "—"
         diagnostics.isUSBInput = port?.portType == .usbAudio
+        diagnostics.usbMicAvailable = diagnostics.isUSBInput
+            || session.availableInputs?.contains { $0.portType == .usbAudio } ?? false
         diagnostics.sessionSampleRate = session.sampleRate
         // Provisional until the first real buffer arrives and flushStats corrects it.
         if diagnostics.actualSampleRate == 0 { diagnostics.actualSampleRate = session.sampleRate }
@@ -290,20 +355,40 @@ final class AudioEngineController {
         listenMode = mode
         tunedFrequency = 0
         isAutoTune = true
+        gateHoldTicks = 0
         if isRunning {
             stop()
             Task { await start() }
         }
     }
 
+    /// Called by the pulse detector at the rising edge of each detected pulse.
+    /// Opens the heterodyne gate immediately (without waiting for the 67 ms stats
+    /// timer) and snaps the LO to the pulse frequency when the species shifts by
+    /// more than 8 kHz — fixes silent Noctule calls when the LO is locked onto
+    /// a Pipistrelle, and fixes isolated short calls that end before the timer fires.
+    func notifyPulseDetected(frequency: Double) {
+        guard listenMode == .heterodyne, isAutoTune, frequency > 0 else { return }
+        if tunedFrequency <= 0 || abs(frequency - tunedFrequency) > 8_000 {
+            tunedFrequency = frequency          // snap for large species shifts
+        } else {
+            tunedFrequency += (frequency - tunedFrequency) * 0.3   // slew within species
+        }
+        heterodyne.loFrequency = max(tunedFrequency - audibleOffsetHz, 100)
+        gateHoldTicks = gateHoldDuration
+        heterodyne.setGate(true)
+    }
+
     /// Switch to manual tuning and park the LO at `frequency` (clamped to the
-    /// usable ultrasonic range).
+    /// usable ultrasonic range). The squelch gate is held open in manual mode —
+    /// the user has explicitly chosen a frequency to monitor.
     func setManualTune(frequency: Double) {
         isAutoTune = false
         let nyquist = diagnostics.actualSampleRate > 0 ? diagnostics.actualSampleRate / 2 : 192_000
         let clamped = min(max(frequency, 1_000), nyquist)
         tunedFrequency = clamped // the frequency we're listening at
         heterodyne.loFrequency = max(clamped - audibleOffsetHz, 100)
+        heterodyne.setGate(true)
     }
 
     /// Hand control back to the auto-tuner.
@@ -312,18 +397,32 @@ final class AudioEngineController {
     }
 
     /// Auto-tune: park the LO just below the detected call frequency and slew
-    /// toward it. Called from the stats timer (~15 Hz). Holds the last value when
-    /// there's no confident detection.
+    /// toward it. Called from the stats timer (~15 Hz). Also drives the squelch
+    /// gate: opens on detection, holds for ~530 ms after the last pulse, then
+    /// closes so background noise is silenced between calls.
     private func updateAutoTune() {
-        guard listenMode == .heterodyne, isAutoTune, let peak = autoTunePeakProvider?(), peak > 0 else { return }
-        // `tunedFrequency` is the frequency we're listening at (the detected call);
-        // the LO sits `audibleOffsetHz` below it so the call becomes audible.
-        if tunedFrequency <= 0 {
-            tunedFrequency = peak
+        guard listenMode == .heterodyne, isAutoTune else { return }
+        let peak = autoTunePeakProvider?() ?? 0
+
+        if peak > 0 {
+            // `tunedFrequency` is the frequency we're listening at (the detected call);
+            // the LO sits `audibleOffsetHz` below it so the call becomes audible.
+            if tunedFrequency <= 0 {
+                tunedFrequency = peak
+            } else {
+                tunedFrequency += (peak - tunedFrequency) * 0.3 // slew for stability
+            }
+            heterodyne.loFrequency = max(tunedFrequency - audibleOffsetHz, 100)
+            gateHoldTicks = gateHoldDuration
+            heterodyne.setGate(true)
         } else {
-            tunedFrequency += (peak - tunedFrequency) * 0.3 // slew for stability
+            // No detection — count down the hold; close the gate only after it expires.
+            if gateHoldTicks > 0 {
+                gateHoldTicks -= 1
+            } else {
+                heterodyne.setGate(false)
+            }
         }
-        heterodyne.loFrequency = max(tunedFrequency - audibleOffsetHz, 100)
     }
 
     // MARK: Notifications
@@ -335,7 +434,7 @@ final class AudioEngineController {
             forName: AVAudioSession.routeChangeNotification,
             object: nil, queue: .main
         ) { [weak self] note in
-            Task { @MainActor in self?.handleRouteChange(note) }
+            Task { @MainActor in await self?.handleRouteChange(note) }
         }
 
         center.addObserver(
@@ -353,7 +452,7 @@ final class AudioEngineController {
     /// (category change, override, configuration change) caused a restart storm
     /// once heterodyne enabled the speaker output — the change itself triggered
     /// another change, hanging the app.
-    private func handleRouteChange(_ note: Notification) {
+    private func handleRouteChange(_ note: Notification) async {
         updateInputDiagnostics()
 
         guard
@@ -375,12 +474,12 @@ final class AudioEngineController {
         engine.inputNode.removeTap(onBus: 0)
         if engine.isRunning { engine.stop() }
         do {
-            try configureSession()
+            try await configureSession()
             try startEngine()
             status = "Re-bound input: \(diagnostics.inputName)"
         } catch {
             status = "Route change error: \(error.localizedDescription)"
-            isRunning = false
+            stop()   // engine is in an unknown state — full stop, session preserved
         }
     }
 
@@ -393,10 +492,20 @@ final class AudioEngineController {
 
         switch type {
         case .began:
+            statsTimer?.invalidate()
+            statsTimer = nil
             isRunning = false
             status = "Interrupted"
         case .ended:
-            Task { await start() }
+            // Only auto-restart when iOS says the session may resume (e.g. after a
+            // phone call). Restarting against the system's advice can fail or fight
+            // another app for the session.
+            let optRaw = info[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
+            if AVAudioSession.InterruptionOptions(rawValue: optRaw).contains(.shouldResume) {
+                Task { await start() }
+            } else {
+                status = "Interrupted — tap Start to resume"
+            }
         @unknown default:
             break
         }

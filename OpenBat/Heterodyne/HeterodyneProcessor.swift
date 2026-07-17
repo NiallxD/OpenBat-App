@@ -68,6 +68,23 @@ nonisolated final class HeterodyneProcessor: @unchecked Sendable {
     /// Reused output scratch so `process` doesn't allocate on the realtime thread.
     private var scratch = [Float]()
 
+    // MARK: Squelch gate (shared, atomic)
+
+    // The gate opens when a confirmed ultrasonic detection arrives (set from the
+    // main thread via `setGate`); the render thread reads it and ramps the output
+    // envelope smoothly to avoid clicks. Using an Atomic avoids any lock on the
+    // realtime output thread.
+    private let gateOpenA = Atomic<Bool>(false)
+
+    /// Open (true) or close (false) the squelch gate. Called from the main thread
+    /// by the auto-tuner. Manual-tune mode always holds the gate open.
+    func setGate(_ open: Bool) {
+        gateOpenA.store(open, ordering: .releasing)
+    }
+
+    // Render-thread-only envelope state — no synchronisation needed.
+    private var gateLevel: Float = 0   // 0 = fully muted, 1 = fully open
+
     // Input band-limit (4th-order high-pass + low-pass), applied before mixing so
     // only in-band ultrasound is heterodyned. Recomputed when the band changes.
     private var bandHPa = Biquad(), bandHPb = Biquad()
@@ -81,8 +98,18 @@ nonisolated final class HeterodyneProcessor: @unchecked Sendable {
 
     // Lock-free SPSC ring: the producer only advances `writeIndexA`, the consumer
     // only advances `readIndexA`. No lock → the two realtime threads never block
-    // each other.
-    private var ring = [Float](repeating: 0, count: 24_000) // ~0.5 s at 48 kHz
+    // each other. Manually managed memory (not a Swift Array): both realtime
+    // threads touch elements concurrently, which Array's exclusivity/CoW rules
+    // don't permit.
+    private let ring: UnsafeMutableBufferPointer<Float>  // ~0.5 s at 48 kHz
+
+    init() {
+        ring = .allocate(capacity: 24_000)
+        ring.initialize(repeating: 0)
+    }
+
+    deinit { ring.deallocate() }
+
     private let writeIndexA = Atomic<Int>(0)
     private let readIndexA = Atomic<Int>(0)
     private var readFrac = 0.0 // fractional read position (consumer only)
@@ -98,8 +125,9 @@ nonisolated final class HeterodyneProcessor: @unchecked Sendable {
     func reset(inputSampleRate fs: Double) {
         inputSampleRate = fs
         decimation = max(1, Int((fs / outputSampleRate).rounded()))
-        // Cutoff below the decimation Nyquist (24 kHz) — also the heterodyne LPF.
-        let cutoff = min(9_000, outputSampleRate * 0.45)
+        // LPF cutoff: bat calls shifted down by audibleOffsetHz land at ≤3 kHz,
+        // so 4 kHz keeps all relevant content while cutting broadband impact noise.
+        let cutoff = min(4_000.0, outputSampleRate * 0.35)
         lp1 = .lowpass(cutoff: cutoff, sampleRate: fs)
         lp2 = .lowpass(cutoff: cutoff, sampleRate: fs)
         phase = 0
@@ -111,6 +139,8 @@ nonisolated final class HeterodyneProcessor: @unchecked Sendable {
         writeIndexA.store(0, ordering: .relaxed)
         readIndexA.store(0, ordering: .relaxed)
         readFrac = 0
+        gateOpenA.store(false, ordering: .relaxed)
+        gateLevel = 0
         softTarget = Int(outputSampleRate * 0.06)
         hardMax = Int(outputSampleRate * 0.25)
     }
@@ -219,12 +249,23 @@ nonisolated final class HeterodyneProcessor: @unchecked Sendable {
         let error = Double(available) - Double(softTarget)
         let rate = 1.0 + min(max(error / Double(softTarget) * 0.1, -0.03), 0.03)
 
+        // Squelch gate: ramp the envelope toward 0 or 1 at different speeds so
+        // the gate opens quickly (10 ms — bat calls can be as short as 5 ms) and
+        // fades out gently (50 ms) to avoid audible clicks when it closes.
+        let gateTarget: Float = gateOpenA.load(ordering: .acquiring) ? 1.0 : 0.0
+        let openSlew:  Float = 1.0 / (Float(outputSampleRate) * 0.010)  // 10 ms
+        let closeSlew: Float = 1.0 / (Float(outputSampleRate) * 0.050)  // 50 ms
+
         var produced = 0
         while produced < frames, available >= 2 {
             let next = (r + 1) % cap
             let s0 = ring[r]
             let s1 = ring[next]
-            out[produced] = s0 + Float(readFrac) * (s1 - s0)
+            let sample = s0 + Float(readFrac) * (s1 - s0)
+
+            if gateLevel < gateTarget { gateLevel = min(gateLevel + openSlew,  gateTarget) }
+            else                      { gateLevel = max(gateLevel - closeSlew, gateTarget) }
+            out[produced] = sample * gateLevel
             produced += 1
 
             readFrac += rate
@@ -238,7 +279,13 @@ nonisolated final class HeterodyneProcessor: @unchecked Sendable {
         readIndexA.store(r, ordering: .releasing)
 
         if produced < frames {
-            for i in produced..<frames { out[i] = 0 } // underrun → silence
+            // Keep ramping the gate envelope during underrun silence so the fade
+            // remains smooth when audio resumes.
+            for i in produced..<frames {
+                if gateLevel < gateTarget { gateLevel = min(gateLevel + openSlew,  gateTarget) }
+                else                      { gateLevel = max(gateLevel - closeSlew, gateTarget) }
+                out[i] = 0
+            }
         }
     }
 }

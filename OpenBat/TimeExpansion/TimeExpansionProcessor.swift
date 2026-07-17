@@ -27,8 +27,14 @@ nonisolated final class TimeExpansionProcessor: @unchecked Sendable {
     private var _gain: Float = 4
     private var _bandLowFraction: Double = 0
     private var _bandHighFraction: Double = 1
-    /// Detection threshold in dBFS (band-limited RMS). Louder ⇒ call.
-    private var _thresholdDB: Float = -50
+    /// Detection threshold in dBFS (band-limited RMS). Louder ⇒ call. Default kept
+    /// in sync with RTESettings.defaultThresholdDB (RTESettings.apply overwrites it
+    /// on launch anyway; this is the fallback before settings are applied).
+    private var _thresholdDB: Float = -38
+    /// How long to keep the gate open after the signal drops below threshold (ms).
+    private var _holdMs: Float = 15.0
+    /// RMS window size for the sub-buffer gate (ms). Smaller = more responsive; larger = smoother.
+    private var _gateBlockMs: Float = 1.5
 
     var gain: Float {
         get { ctrlLock.lock(); defer { ctrlLock.unlock() }; return _gain }
@@ -38,6 +44,16 @@ nonisolated final class TimeExpansionProcessor: @unchecked Sendable {
     var thresholdDB: Float {
         get { ctrlLock.lock(); defer { ctrlLock.unlock() }; return _thresholdDB }
         set { ctrlLock.lock(); _thresholdDB = newValue; ctrlLock.unlock() }
+    }
+
+    var holdMs: Float {
+        get { ctrlLock.lock(); defer { ctrlLock.unlock() }; return _holdMs }
+        set { ctrlLock.lock(); _holdMs = newValue; ctrlLock.unlock() }
+    }
+
+    var gateBlockMs: Float {
+        get { ctrlLock.lock(); defer { ctrlLock.unlock() }; return _gateBlockMs }
+        set { ctrlLock.lock(); _gateBlockMs = newValue; ctrlLock.unlock() }
     }
 
     func setBand(low: Double, high: Double) {
@@ -59,19 +75,39 @@ nonisolated final class TimeExpansionProcessor: @unchecked Sendable {
     private var appliedLowFraction = -1.0
     private var appliedHighFraction = -1.0
     /// Samples still pushed after the level drops, to catch call tails / bridge dips.
-    /// Sample-based (not buffer-based) so the queued audio tracks the actual call
-    /// extent rather than whole 8 ms IO buffers — critical for keeping up at 8×.
+    /// Sample-based so the gate tracks the real call extent rather than whole IO buffers.
     private var holdSamplesRemaining = 0
-    private let holdSamples = 1536          // ~4 ms at 384 kHz
-    private let gateBlock = 256             // RMS window for sub-buffer gating (~0.7 ms)
     private var scratch = [Float]()
 
     // MARK: Lock-free SPSC ring (push expanded call samples; silence between calls)
 
-    private var ring = [Float](repeating: 0, count: 96_000) // ~2 s at 48 kHz
+    // Manually managed memory (not a Swift Array): the producer and consumer
+    // realtime threads touch elements concurrently, which Array's exclusivity/CoW
+    // rules don't permit. Mirrors HeterodyneProcessor.
+    private let ring: UnsafeMutableBufferPointer<Float>  // ~2 s at 48 kHz
+
+    init() {
+        ring = .allocate(capacity: 96_000)
+        ring.initialize(repeating: 0)
+    }
+
+    deinit { ring.deallocate() }
+
     private let writeIndexA = Atomic<Int>(0)
     private let readIndexA = Atomic<Int>(0)
     private var hardMax = 24_000 // ~0.5 s of queued expansion before we skip ahead
+
+    // MARK: Output soft-gate envelope (output thread only)
+
+    // Ramps 0→1 when ring has data, 1→0 when ring is empty. Eliminates gate-open /
+    // gate-close clicks by replacing instantaneous amplitude steps with a short linear
+    // ramp. lastSample is held during the fade-out so the signal decays to zero rather
+    // than cutting to it — important when the instantaneous sample value is non-zero.
+    private var outputEnvelope: Float = 0
+    private var lastSample: Float = 0
+    // 4 ms at 48 kHz = 192 samples → rate = 1/192 per sample. Gentler than the old
+    // 2 ms ramp so gate open/close transitions don't click on short calls.
+    private let envelopeRate: Float = 1.0 / 192.0
 
     func reset(inputSampleRate fs: Double) {
         inputSampleRate = fs
@@ -81,6 +117,8 @@ nonisolated final class TimeExpansionProcessor: @unchecked Sendable {
         writeIndexA.store(0, ordering: .relaxed)
         readIndexA.store(0, ordering: .relaxed)
         hardMax = Int(outputSampleRate * 0.5)
+        outputEnvelope = 0
+        lastSample = 0
     }
 
     private func reconfigureBand(low: Double, high: Double) {
@@ -114,6 +152,10 @@ nonisolated final class TimeExpansionProcessor: @unchecked Sendable {
         }
         let g = gain
         let threshold = thresholdDB
+        // Compute sample counts from the ms settings each buffer — cheap and avoids
+        // a separate "applied" tracking for these two values.
+        let holdSamples = max(1, Int(Double(holdMs) / 1000.0 * inputSampleRate))
+        let gateBlock   = max(1, Int(Double(gateBlockMs) / 1000.0 * inputSampleRate))
 
         scratch.removeAll(keepingCapacity: true)
         if scratch.capacity < n { scratch.reserveCapacity(n) }
@@ -168,23 +210,32 @@ nonisolated final class TimeExpansionProcessor: @unchecked Sendable {
         var available = (w - r + cap) % cap
 
         // If expansion has fallen too far behind real time (a sustained buzz),
-        // skip ahead so we don't drift seconds late.
+        // skip ahead so we don't drift seconds late. We deliberately DON'T reset the
+        // envelope here: the ring still has data, so the output should keep flowing.
+        // Zeroing the envelope forced a full fade-out/fade-in at every skip, and under
+        // a saturated ring (dense activity) skips fire constantly — that repeated
+        // re-ramp WAS the popping. Jumping the read cursor alone leaves a single-sample
+        // discontinuity, far less audible than a 4 ms gate cycle.
         if available > hardMax {
             r = (r + (available - hardMax)) % cap
             available = hardMax
         }
 
-        var produced = 0
-        while produced < frames, available > 0 {
-            out[produced] = ring[r]
-            r = (r + 1) % cap
-            available -= 1
-            produced += 1
+        // Per-sample soft gate: envelope ramps to 1 while ring has data, ramps to 0
+        // when silent. lastSample is held during the ramp-down so we decay from the
+        // real signal rather than cutting to 0 from a non-zero instantaneous value.
+        for i in 0..<frames {
+            if available > 0 {
+                lastSample = ring[r]
+                r = (r + 1) % cap
+                available -= 1
+                outputEnvelope = min(1, outputEnvelope + envelopeRate)
+            } else {
+                outputEnvelope = max(0, outputEnvelope - envelopeRate)
+            }
+            out[i] = lastSample * outputEnvelope
         }
-        readIndexA.store(r, ordering: .releasing)
 
-        if produced < frames {
-            for i in produced..<frames { out[i] = 0 } // silence between calls
-        }
+        readIndexA.store(r, ordering: .releasing)
     }
 }
