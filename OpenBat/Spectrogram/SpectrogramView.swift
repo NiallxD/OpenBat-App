@@ -19,6 +19,7 @@ private struct MetalSpectrogramView: UIViewRepresentable {
     let isScrolling: Bool
     let scrollColumnOffset: Double
     let pulseDetector: PulseDetector?
+    let isPaused: Bool
 
     func makeCoordinator() -> SpectrogramRenderer? {
         SpectrogramRenderer(processor: processor)
@@ -32,7 +33,7 @@ private struct MetalSpectrogramView: UIViewRepresentable {
         view.preferredFramesPerSecond = 60
         view.framebufferOnly = true
         view.enableSetNeedsDisplay = false
-        view.isPaused = false
+        view.isPaused = isPaused
         return view
     }
 
@@ -47,6 +48,11 @@ private struct MetalSpectrogramView: UIViewRepresentable {
         coordinator.isScrolling = isScrolling
         coordinator.scrollColumnOffset = scrollColumnOffset
         coordinator.pulseDetector = pulseDetector
+        // Stopping the 60 Hz Metal render loop (which drains FFT columns and
+        // feeds the pulse detector inline, all on the main thread) is what
+        // frees the main run loop up for gesture recognition while a sheet/
+        // popover is on screen — see SpectrogramView.isPaused.
+        if uiView.isPaused != isPaused { uiView.isPaused = isPaused }
     }
 }
 
@@ -60,6 +66,10 @@ struct SpectrogramView: View {
     /// Width of the x-axis time window, in seconds (e.g. 0.5 = 500 ms).
     var timeWindowSeconds: Double = 0.5
     var pulseDetector: PulseDetector? = nil
+    /// When true, stops the Metal render loop (and with it, FFT-column
+    /// draining and pulse-detector feeding) entirely — for use while a sheet
+    /// or popover is covering the spectrogram and doesn't need it live.
+    var isPaused: Bool = false
 
     @State private var isScrolling = false
     @State private var scrollColumnOffset: Double = 0
@@ -80,7 +90,8 @@ struct SpectrogramView: View {
                                      timeWindowSeconds: timeWindowSeconds,
                                      isScrolling: isScrolling,
                                      scrollColumnOffset: scrollColumnOffset,
-                                     pulseDetector: pulseDetector)
+                                     pulseDetector: pulseDetector,
+                                     isPaused: isPaused)
                     .clipShape(RoundedRectangle(cornerRadius: 12))
 
                 gridOverlay

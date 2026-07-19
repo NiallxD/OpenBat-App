@@ -42,16 +42,32 @@ final class LocationProvider: NSObject, CLLocationManagerDelegate {
     /// your area") — deliberately lighter weight than `startTracking`: only requests
     /// when-in-use authorization (never escalates to Always) and asks for a single fix
     /// rather than continuous updates. Safe to call repeatedly; a no-op once denied.
+    /// No-ops while `tracking`, since continuous updates are already feeding
+    /// `currentCoordinate` at that point.
     func requestRegionFix() {
+        guard !tracking else { return }
         switch manager.authorizationStatus {
         case .notDetermined:
             pendingRegionFix = true
             manager.requestWhenInUseAuthorization()   // fix follows once granted (delegate below)
         case .authorizedWhenInUse, .authorizedAlways:
-            manager.requestLocation()
+            requestCoarseLocation()
         default:
             break                                      // denied/restricted — no fix
         }
+    }
+
+    /// `desiredAccuracy` governs what CoreLocation itself waits to converge on before
+    /// calling the delegate back at all — independent of the accuracy floor
+    /// `didUpdateLocations` then accepts. Left at `kCLLocationAccuracyBest` (the
+    /// default set for tracking), `requestLocation()` can sit for tens of seconds
+    /// waiting for a GPS-grade fix even though a region-fix decision only needs
+    /// ~100 km precision. Dropping it to kilometre-scale here lets CoreLocation
+    /// return its first cheap cell/wifi estimate immediately; `beginUpdates()` puts
+    /// it back to `.best` before a tracked session's continuous updates begin.
+    private func requestCoarseLocation() {
+        manager.desiredAccuracy = kCLLocationAccuracyThreeKilometers
+        manager.requestLocation()
     }
 
     /// Begin recording a course for the active session. Escalates to Always so the
@@ -84,6 +100,9 @@ final class LocationProvider: NSObject, CLLocationManagerDelegate {
     }
 
     private func beginUpdates() {
+        // Undo requestCoarseLocation()'s kilometre-scale relaxation — a tracked
+        // session's breadcrumbs need the strict accuracy floor in didUpdateLocations.
+        manager.desiredAccuracy = kCLLocationAccuracyBest
         // `allowsBackgroundLocationUpdates = true` THROWS unless UIBackgroundModes contains
         // "location"; only enable background updates when that mode is actually declared, so
         // a misconfigured build degrades to foreground tracking instead of crashing.
@@ -106,7 +125,7 @@ final class LocationProvider: NSObject, CLLocationManagerDelegate {
         if pendingRegionFix {
             pendingRegionFix = false
             switch manager.authorizationStatus {
-            case .authorizedWhenInUse, .authorizedAlways: manager.requestLocation()
+            case .authorizedWhenInUse, .authorizedAlways: requestCoarseLocation()
             default: break
             }
         }
@@ -130,9 +149,18 @@ final class LocationProvider: NSObject, CLLocationManagerDelegate {
     /// inaccurate right at the start of a session.
     private let maxAcceptableAccuracyMeters: Double = 50
 
+    /// Looser bar used only when not `tracking` — i.e. a one-shot `requestRegionFix()`
+    /// for model/prior suggestions, which only ever need country/region-scale (~100 km)
+    /// precision. Requiring the strict 50 m bar here made `currentCoordinate` sit nil
+    /// for ~30 s after granting permission, waiting for GPS to lock past the first
+    /// coarse cell/wifi fix, even though that first fix was already far more precise
+    /// than a 100 km-radius decision needs.
+    private let maxAcceptableRegionAccuracyMeters: Double = 5000
+
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
         guard let loc = locations.last else { return }
-        guard loc.horizontalAccuracy > 0, loc.horizontalAccuracy <= maxAcceptableAccuracyMeters else { return }
+        let threshold = tracking ? maxAcceptableAccuracyMeters : maxAcceptableRegionAccuracyMeters
+        guard loc.horizontalAccuracy > 0, loc.horizontalAccuracy <= threshold else { return }
         currentCoordinate = loc.coordinate
         guard tracking else { return }
 

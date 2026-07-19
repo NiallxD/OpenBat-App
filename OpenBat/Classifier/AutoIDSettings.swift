@@ -8,6 +8,7 @@
 //  classifies (nil = AutoID off). Lives as @State in ContentView, injected where needed.
 //
 
+import CoreLocation
 import Foundation
 
 @Observable
@@ -58,6 +59,143 @@ final class AutoIDSettings {
             && pass.pulseCount >= mapPinMinPulseCount
     }
 
+    // MARK: Location-based priors
+
+    /// What changed the last time a location move triggered a refresh — surfaced once
+    /// so the app can tell the user "we updated X for your new location" instead of
+    /// silently rewriting priors underneath them. `recommendedModel` is set only when
+    /// it differs from the model that was active at refresh time (never re-suggests
+    /// the model already in use). Species lists are codes for the *active* model only
+    /// — a refresh touches every model's priors, but only the active one affects what
+    /// the user sees classified right now. Cleared via `acknowledgeChangeSummary()`.
+    private(set) var pendingChangeSummary: PriorRefreshSummary?
+
+    struct PriorRefreshSummary {
+        var recommendedModel: ModelDescriptor?
+        var newlyEnabledSpecies: [String]
+        var newlyDisabledSpecies: [String]
+
+        var isEmpty: Bool {
+            recommendedModel == nil && newlyEnabledSpecies.isEmpty && newlyDisabledSpecies.isEmpty
+        }
+    }
+
+    func acknowledgeChangeSummary() {
+        pendingChangeSummary = nil
+    }
+
+    /// True while a GBIF prior refresh is in flight — surfaced so a settings
+    /// screen can show a spinner instead of looking like nothing happened.
+    private(set) var isRefreshingPriors = false
+    private let priorRefreshLock = NSLock()
+
+    /// How far (km) the user needs to have moved since the last refresh before
+    /// another one runs. Small enough to catch a real move to a different
+    /// bioregion (e.g. Squamish → California), large enough that everyday
+    /// movement around one town doesn't re-query GBIF on every launch.
+    private static let priorRefreshDistanceKm: Double = 100
+
+    private static let keyLastPriorCoordinate = "AutoIDSettings_lastPriorCoordinate"
+
+    private var lastPriorCheckCoordinate: CLLocationCoordinate2D? {
+        get {
+            guard let stored = UserDefaults.standard.string(forKey: Self.keyLastPriorCoordinate) else { return nil }
+            let parts = stored.split(separator: ",")
+            guard parts.count == 2, let lat = Double(parts[0]), let lon = Double(parts[1]) else { return nil }
+            return CLLocationCoordinate2D(latitude: lat, longitude: lon)
+        }
+        set {
+            let d = UserDefaults.standard
+            if let newValue {
+                d.set("\(newValue.latitude),\(newValue.longitude)", forKey: Self.keyLastPriorCoordinate)
+            } else {
+                d.removeObject(forKey: Self.keyLastPriorCoordinate)
+            }
+        }
+    }
+
+    /// Refreshes every registered model's species priors from GBIF occurrence
+    /// data near `coordinate` — but only if this is the first fix ever, or the
+    /// user has moved at least `priorRefreshDistanceKm` since the last refresh.
+    /// Call this whenever a fresh location fix comes in (see
+    /// `LocationProvider.requestRegionFix`); it no-ops harmlessly otherwise, so
+    /// it's safe to call on every fix rather than needing its own trigger logic
+    /// at each call site.
+    ///
+    /// Refreshes ALL models, not just the active one, so switching models later
+    /// already has location-appropriate priors instead of the neutral default.
+    /// Runs one model after another (not concurrently) — each one is already
+    /// internally parallel (see GBIFService.suggestPriors), and the total
+    /// species count across both bundled models today is small enough that
+    /// serial-by-model isn't meaningfully slower, while keeping memory/network
+    /// pressure lower than firing every model's every species query at once.
+    ///
+    /// `AutoIDSettings` isn't actor-isolated (PulseDetector's capture queue reads
+    /// its properties synchronously off the main thread — see CLAUDE.md), so this
+    /// method's own re-entrancy check needs its own lock rather than relying on
+    /// isolation: repeated GPS fixes in quick succession (e.g. right after
+    /// `LocationProvider.requestRegionFix()`, before a fix stabilizes) can each spawn
+    /// a `Task` calling this concurrently, and a plain check-then-set on
+    /// `isRefreshingPriors` is a real TOCTOU race between them. `perModel`/
+    /// `lastPriorCheckCoordinate` drive SwiftUI, so the actual write-back is hopped
+    /// onto the main actor regardless of which thread the awaits above resume on.
+    func refreshPriorsFromGBIFIfNeeded(coordinate: CLLocationCoordinate2D) async {
+        priorRefreshLock.lock()
+        guard !isRefreshingPriors else { priorRefreshLock.unlock(); return }
+        if let last = lastPriorCheckCoordinate {
+            let moved = CLLocation(latitude: last.latitude, longitude: last.longitude)
+                .distance(from: CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude))
+            guard moved / 1000 >= Self.priorRefreshDistanceKm else { priorRefreshLock.unlock(); return }
+        }
+        isRefreshingPriors = true
+        priorRefreshLock.unlock()
+        defer { isRefreshingPriors = false }
+
+        // Snapshot before overwriting, so the active model's changes can be reported
+        // to the user afterwards — this is the only model whose priors affect what's
+        // classified right now, so it's the only one worth diffing.
+        let activeIDAtStart = activeModelID
+        let previousActiveSpecies = activeIDAtStart.flatMap { perModel[$0]?.species } ?? [:]
+
+        var updated = perModel
+        for descriptor in ModelRegistry.all {
+            guard !descriptor.scientificNames.isEmpty else { continue }
+            let suggestions = await GBIFService.suggestPriors(scientificNames: descriptor.scientificNames,
+                                                               near: coordinate)
+            guard var settings = updated[descriptor.id] else { continue }
+            for (code, suggestion) in suggestions {
+                settings.species[code] = SpeciesState(enabled: suggestion.enabled, prior: suggestion.prior)
+            }
+            updated[descriptor.id] = settings
+        }
+        let suggestedModel = ModelRegistry.suggestedModel(for: coordinate)
+
+        await MainActor.run {
+            perModel = updated
+            lastPriorCheckCoordinate = coordinate
+            save()
+
+            var newlyEnabled: [String] = []
+            var newlyDisabled: [String] = []
+            if let activeID = activeIDAtStart, let newSpecies = updated[activeID]?.species {
+                for (code, newState) in newSpecies {
+                    let wasEnabled = previousActiveSpecies[code]?.enabled ?? true
+                    if newState.enabled && !wasEnabled { newlyEnabled.append(code) }
+                    if !newState.enabled && wasEnabled { newlyDisabled.append(code) }
+                }
+            }
+            // Never re-recommend the model already in use.
+            let recommended = suggestedModel.flatMap { $0.id == activeIDAtStart ? nil : $0 }
+
+            let summary = PriorRefreshSummary(recommendedModel: recommended,
+                                              newlyEnabledSpecies: newlyEnabled.sorted(),
+                                              newlyDisabledSpecies: newlyDisabled.sorted())
+            if !summary.isEmpty {
+                pendingChangeSummary = summary
+            }
+        }
+    }
+
     // MARK: Init
 
     init() {
@@ -105,17 +243,18 @@ final class AutoIDSettings {
 
     // MARK: Defaults
 
-    /// Default settings for a model, derived from its descriptor: enabled when the
-    /// default prior ≥ 0.75, prior stored either way, and the descriptor's gate.
-    /// `minPassConfidence`/`minPassPulseCount` default to a real bar rather than
-    /// "almost anything wins" — the old 0.05/1 defaults meant nearly every pulse
-    /// produced *a* winning species regardless of how weak the margin over the
-    /// runner-up actually was.
+    /// Default settings for a model, derived from its descriptor: every species
+    /// starts enabled with a neutral prior (no location-based bias yet — see
+    /// `refreshPriorsFromGBIFIfNeeded`, which overwrites these from GBIF
+    /// occurrence data as soon as a location fix is available). The descriptor's
+    /// gate is used as-is. `minPassConfidence`/`minPassPulseCount` default to a
+    /// real bar rather than "almost anything wins" — the old 0.05/1 defaults
+    /// meant nearly every pulse produced *a* winning species regardless of how
+    /// weak the margin over the runner-up actually was.
     static func defaultSettings(for d: ModelDescriptor) -> ModelSettings {
         var species: [String: SpeciesState] = [:]
         for code in d.classNames {
-            let p = d.defaultPrior[code] ?? 1.0
-            species[code] = SpeciesState(enabled: p >= 0.75, prior: max(0.01, p))
+            species[code] = SpeciesState(enabled: true, prior: 1.0)
         }
         return ModelSettings(species: species,
                              passTimeoutSeconds: 2.0,

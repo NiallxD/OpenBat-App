@@ -43,7 +43,11 @@ enum ClassifierSpectrogramEngine {
         var w = [Float](repeating: 0, count: count)
         switch fn {
         case .hamming: vDSP_hamm_window(&w, vDSP_Length(count), 0)
-        case .hann:    vDSP_hann_window(&w, vDSP_Length(count), Int32(vDSP_HANN_NORM))
+        // vDSP_HANN_DENORM (peak 1.0) matches torch.hann_window's convention exactly —
+        // vDSP_HANN_NORM instead produces an energy-normalized window (peak ≈1.633,
+        // i.e. sqrt(8/3)), which would silently rescale PCEN's input (see below).
+        // Only used by .hann (BatDetect2 today); NABat uses .hamming and is unaffected.
+        case .hann:    vDSP_hann_window(&w, vDSP_Length(count), Int32(vDSP_HANN_DENORM))
         }
         return w
     }
@@ -59,8 +63,27 @@ enum ClassifierSpectrogramEngine {
         let padded = [Float](repeating: 0, count: pad) + pcm + [Float](repeating: 0, count: pad)
         let nFrames = 1 + (padded.count - nFFT) / hop
 
-        // ── 1. STFT → power → dB ─────────────────────────────────────────
+        // ── 1. STFT → power → dB, plus a parallel linear-magnitude copy for PCEN ──
+        // PCEN (see applyPCEN) needs the raw linear magnitude, matching
+        // torchaudio.transforms.Spectrogram(power=1) exactly — it must NOT run on the
+        // dB values. Kept as a second array (rather than deriving dB from magnitude
+        // later) so NABat's already-verified dB path is untouched bit-for-bit: `stft`
+        // below keeps vDSP's raw (uncorrected) packed-real-FFT scale exactly as before
+        // (NABat's QualityGate compares `amplitude` against an ABSOLUTE dB threshold,
+        // and its SNR ratio is not invariant under a constant dB shift, so this scale
+        // must not change). `linearMag` gets an extra ×0.5, confirmed empirically
+        // against torchaudio's rfft convention (see batdetect2_conversion.md) —
+        // vDSP's zrop packed-real FFT returns magnitudes exactly 2× a standard
+        // single-sided rfft, which PCEN's fixed absolute constants (eps, bias) are
+        // NOT invariant to the way minMax-normalized dB values are.
+        // Only PCEN (BatDetect2) reads `linearMag` (see applyPCEN below) — NABat's
+        // `.db` scaling never touches it, so skip the extra nBins*nFrames buffer and
+        // per-sample sqrtf for that path.
+        var needsLinearMag = false
+        if case .pcen = spec.scaling { needsLinearMag = true }
+
         var stft = [Float](repeating: 0, count: nBins * nFrames)
+        var linearMag = needsLinearMag ? [Float](repeating: 0, count: nBins * nFrames) : []
 
         let setup = dftSetup(nFFT: nFFT)
         let window = windowTable(spec.window, count: nFFT)
@@ -82,7 +105,9 @@ enum ClassifierSpectrogramEngine {
                 vDSP_DFT_Execute(setup, realIn, imagIn, &realOut, &imagOut)
                 for bin in 0..<nBins {
                     let r = realOut[bin], i = imagOut[bin]
-                    stft[bin * nFrames + frame] = 10.0 * log10f(max(r * r + i * i, 1e-10))
+                    let powerVal = r * r + i * i
+                    stft[bin * nFrames + frame] = 10.0 * log10f(max(powerVal, 1e-10))
+                    if needsLinearMag { linearMag[bin * nFrames + frame] = 0.5 * sqrtf(powerVal) }
                 }
             }
         }
@@ -97,13 +122,19 @@ enum ClassifierSpectrogramEngine {
         if loBin > 0 {
             for bin in 0..<loBin {
                 let base = bin * nFrames
-                for f in 0..<nFrames { stft[base + f] = sentinelDB }
+                for f in 0..<nFrames {
+                    stft[base + f] = sentinelDB
+                    if needsLinearMag { linearMag[base + f] = 0 }
+                }
             }
         }
         if hiBin < nBins - 1 {
             for bin in (hiBin + 1)..<nBins {
                 let base = bin * nFrames
-                for f in 0..<nFrames { stft[base + f] = sentinelDB }
+                for f in 0..<nFrames {
+                    stft[base + f] = sentinelDB
+                    if needsLinearMag { linearMag[base + f] = 0 }
+                }
             }
         }
 
@@ -119,7 +150,21 @@ enum ClassifierSpectrogramEngine {
         }
         let peakTimeFraction = nFrames > 1 ? Float(peakFrame) / Float(nFrames - 1) : 0.5
 
-        // ── 3. Denoise ────────────────────────────────────────────────────
+        // ── 3. Scale (must run BEFORE denoise for BatDetect2: its real pipeline is
+        // PCEN → spectral-mean-subtraction, in that order. For NABat (.db) this switch
+        // is a no-op — dB was already computed in step 1 — so moving it here doesn't
+        // change NABat's output at all.
+        switch spec.scaling {
+        case .db:
+            break // already in dB from step 1
+
+        case .pcen(let timeConstant, let gain, let bias, let power):
+            applyPCEN(&stft, linearMag: linearMag, nBins: nBins, nFrames: nFrames,
+                     sampleRate: spec.sampleRate,
+                     timeConstant: timeConstant, gain: gain, bias: bias, power: power)
+        }
+
+        // ── 4. Denoise ────────────────────────────────────────────────────
         switch spec.denoise {
         case .none:
             break
@@ -160,7 +205,7 @@ enum ClassifierSpectrogramEngine {
             vDSP_vthres(stft, 1, &zero, &stft, 1, vDSP_Length(stft.count))
         }
 
-        // ── 3b. Quality metrics on the denoised spec (pre-normalize) ─────
+        // ── 4b. Quality metrics on the denoised spec (pre-normalize) ─────
         let peakRowBase = peakBin * nFrames
         let amplitude = stft[peakRowBase + peakFrame]
         var wholeMean: Float = 0
@@ -172,20 +217,6 @@ enum ClassifierSpectrogramEngine {
         for f in lo..<hi { rsig += stft[peakRowBase + f] }
         rsig /= 10
         let snr = wholeMean > 0 ? rsig / wholeMean : 0
-
-        // ── 4. Scale (PCEN happens on the raw power domain — applied here as an
-        // alternative to the dB conversion in step 1 would require restructuring;
-        // since dB is already computed above, PCEN mode instead runs a per-row AGC
-        // directly on the dB-domain values, which is what step 5's normalize expects.)
-        switch spec.scaling {
-        case .db:
-            break // already in dB from step 1
-
-        case .pcen(let timeConstant, let gain, let bias, let power):
-            applyPCEN(&stft, nBins: nBins, nFrames: nFrames,
-                     hop: hop, sampleRate: spec.sampleRate,
-                     timeConstant: timeConstant, gain: gain, bias: bias, power: power)
-        }
 
         // ── 5. Normalize ──────────────────────────────────────────────────
         switch spec.normalize {
@@ -204,6 +235,9 @@ enum ClassifierSpectrogramEngine {
             let inv = peakAbs > 0 ? 1 / peakAbs : 1
             var invVar = inv
             vDSP_vsmul(stft, 1, &invVar, &stft, 1, vDSP_Length(stft.count))
+
+        case .none:
+            break
         }
 
         // ── 6. Crop to [minFreqHz, maxFreqHz] and resize to output dims ──
@@ -215,35 +249,66 @@ enum ClassifierSpectrogramEngine {
 
         var result = [Float](repeating: 0, count: outH * outW * channels)
 
-        // Frequency (row) axis: `round` to nearest bin centre. Time (col) axis: `floor`
-        // to the containing frame. These conventions are asymmetric on purpose — they
-        // match the reference implementation's pcolormesh mapping exactly (round for
-        // bin, floor for frame) and must stay that way for NABat parity.
-        func binFrac(forRow row: Int) -> Float {
+        // `.nearest` (NABat): frequency (row) axis rounds to nearest bin centre, time
+        // (col) axis floors to the containing frame, and row 0 = TOP of the image =
+        // highest frequency. These conventions are asymmetric on purpose — they match
+        // the reference implementation's pcolormesh mapping exactly and must stay that
+        // way for NABat parity.
+        func binFracNearest(forRow row: Int) -> Float {
             let freq = topHz - (Float(row) + 0.5) / Float(outH) * spanHz
             return freq / hzPerBin
         }
-        func frameFrac(forCol col: Int) -> Float {
+        func frameFracNearest(forCol col: Int) -> Float {
             (Float(col) + 0.5) / Float(outW) * Float(nFrames)
         }
 
-        func sampleValue(binF: Float, frameF: Float) -> Float {
+        // `.bilinear` (BatDetect2): the real pipeline physically crops the STFT to
+        // [lowIndex, highIndex) bins BEFORE resizing that fixed-size tensor with
+        // `torch.nn.functional.interpolate(..., align_corners=False)` — a genuinely
+        // different algorithm from `.nearest`'s frequency-continuous sampling over the
+        // full bin range, not just a different interpolation kernel. Two fidelity
+        // points verified against the real pipeline (see batdetect2_conversion.md —
+        // this fixed a correlation regression from ~0.99 pre-resize to ~0.71 when this
+        // block still reused `.nearest`'s conventions):
+        //  1. Row 0 = LOWEST frequency in the cropped band (the raw STFT/tensor's
+        //     natural bin order, top-to-bottom in frequency — NOT flipped like
+        //     `.nearest`, since nothing in the real pipeline flips the frequency axis).
+        //  2. Both axes use torch's align_corners=False source-coordinate formula,
+        //     `src = (dst + 0.5) * (srcSize / dstSize) - 0.5`, not the naive
+        //     `(dst + 0.5) / dstSize * srcSize` `.nearest` uses.
+        // bin = freq * nFFT / sampleRate = freq / (sampleRate/2) * nBins — the mapping
+        // that actually matches `stft`'s layout (nBins = nFFT/2 entries, 0..<nBins).
+        let lowIndex = Int((botHz * 2 / Float(spec.sampleRate) * Float(nBins)).rounded(.down))
+        let highIndex = Int((topHz * 2 / Float(spec.sampleRate) * Float(nBins)).rounded(.down))
+        let croppedBinCount = max(1, highIndex - lowIndex)
+
+        func torchAlignCornersFalseSrc(dst: Int, dstSize: Int, srcSize: Int) -> Float {
+            (Float(dst) + 0.5) * (Float(srcSize) / Float(dstSize)) - 0.5
+        }
+
+        func sampleValue(row: Int, col: Int) -> Float {
             switch spec.resize {
             case .nearest:
+                let binF = binFracNearest(forRow: row)
+                let frameF = frameFracNearest(forCol: col)
                 let bin = max(0, min(nBins - 1, Int(binF.rounded())))
                 let frame = max(0, min(nFrames - 1, Int(frameF.rounded(.down))))
                 return stft[bin * nFrames + frame]
+
             case .bilinear:
-                // Continuous pixel-centre convention for interpolation (no parity
-                // constraint here — bilinear is new, used only by non-NABat models).
-                let binC = binF - 0.5, frameC = frameF - 0.5
-                let b0 = max(0, min(nBins - 1, Int(binC.rounded(.down))))
-                let b1 = max(0, min(nBins - 1, b0 + 1))
+                let binC = torchAlignCornersFalseSrc(dst: row, dstSize: outH, srcSize: croppedBinCount)
+                let frameC = torchAlignCornersFalseSrc(dst: col, dstSize: outW, srcSize: nFrames)
+                let b0 = max(0, min(croppedBinCount - 1, Int(binC.rounded(.down))))
+                let b1 = max(0, min(croppedBinCount - 1, b0 + 1))
                 let f0 = max(0, min(nFrames - 1, Int(frameC.rounded(.down))))
                 let f1 = max(0, min(nFrames - 1, f0 + 1))
-                let tb = binC - Float(b0), tf = frameC - Float(f0)
-                let v00 = stft[b0 * nFrames + f0], v01 = stft[b0 * nFrames + f1]
-                let v10 = stft[b1 * nFrames + f0], v11 = stft[b1 * nFrames + f1]
+                let tb = max(0, min(1, binC - Float(b0))), tf = max(0, min(1, frameC - Float(f0)))
+                // b0/b1 index into the CROPPED range — offset by lowIndex to reach the
+                // true (uncropped) bin in `stft`, whose natural order is unflipped.
+                let bin0 = max(0, min(nBins - 1, lowIndex + b0))
+                let bin1 = max(0, min(nBins - 1, lowIndex + b1))
+                let v00 = stft[bin0 * nFrames + f0], v01 = stft[bin0 * nFrames + f1]
+                let v10 = stft[bin1 * nFrames + f0], v11 = stft[bin1 * nFrames + f1]
                 let top = v00 + (v01 - v00) * tf
                 let bot = v10 + (v11 - v10) * tf
                 return top + (bot - top) * tb
@@ -251,10 +316,8 @@ enum ClassifierSpectrogramEngine {
         }
 
         for row in 0..<outH {
-            let binF = binFrac(forRow: row)
             for col in 0..<outW {
-                let frameF = frameFrac(forCol: col)
-                let value = sampleValue(binF: binF, frameF: frameF)
+                let value = sampleValue(row: row, col: col)
                 let idx = (row * outW + col) * channels
                 switch spec.color {
                 case .colormap(let map):
@@ -280,28 +343,48 @@ enum ClassifierSpectrogramEngine {
         return count % 2 == 1 ? tmp[count / 2] : (tmp[count / 2 - 1] + tmp[count / 2]) * 0.5
     }
 
-    /// Standard PCEN (Wang et al. / librosa): per frequency bin, smooth the (already
-    /// dB-converted — see call site note) energy with a one-pole IIR filter, then apply
-    /// the gain/bias/power AGC curve. `timeConstant` sets the smoothing coefficient the
-    /// same way librosa derives it from `time_constant` and the frame hop.
-    private static func applyPCEN(_ stft: inout [Float], nBins: Int, nFrames: Int,
-                                   hop: Int, sampleRate: Double,
+    /// PCEN exactly matching `batdetect2.preprocess.audio.PCEN` — runs on the LINEAR
+    /// magnitude STFT (`linearMag`), writing its result into `stft` (replacing whatever
+    /// was there, e.g. dB values from step 1) for the denoise/normalize/resize steps
+    /// that follow. Two intentional fidelity points, both load-bearing:
+    ///
+    /// 1. The smoothing constant is derived from a FIXED hop of 512 samples and
+    ///    `sampleRate / 10`, regardless of the STFT's actual `hop` — a legacy
+    ///    compatibility quirk in the reference implementation (it originally used
+    ///    `librosa.pcen(sr=samplerate/10, hop_length=512)`), not a mistake to "fix".
+    /// 2. The AGC/compression formula has no final `- bias**power` term — the
+    ///    reference implementation omits it (unlike some textbook PCEN formulations).
+    private static func applyPCEN(_ stft: inout [Float], linearMag: [Float],
+                                   nBins: Int, nFrames: Int, sampleRate: Double,
                                    timeConstant: Float, gain: Float, bias: Float, power: Float) {
-        let framesPerSecond = Float(sampleRate) / Float(hop)
-        let t = timeConstant * framesPerSecond
+        let referenceHop: Float = 512
+        let referenceRate = Float(sampleRate) / 10
+        let t = timeConstant * referenceRate / referenceHop
         let s = t > 0 ? (sqrtf(1 + 4 * t * t) - 1) / (2 * t * t) : 1
-        var smoothed = [Float](repeating: 0, count: nFrames)
+        let eps: Float = 1e-6
+        let scale: Float = Float(1 << 31)
+        let biasPow = powf(bias, power)
+
+        var m = [Float](repeating: 0, count: nFrames)
         for bin in 0..<nBins {
             let base = bin * nFrames
-            var m = stft[base]
-            smoothed[0] = m
+            // Zero-history initial condition, matching torchaudio.functional.lfilter's
+            // default (x[-1] = y[-1] = 0): m[0] = s·S[0] + (1-s)·0, NOT S[0] directly.
+            // With s this small (~0.05 at BatDetect2's defaults), a wrong initial value
+            // decays as (1-s)^n and corrupts ~100+ frames — verified against the real
+            // pipeline's PCEN output (see batdetect2_conversion.md): this one-line fix
+            // took bin-for-bin correlation from ~0.001 to ~0.99.
+            var acc: Float = max(0, s * linearMag[base] * scale)
+            m[0] = acc
             for f in 1..<nFrames {
-                m = (1 - s) * m + s * stft[base + f]
-                smoothed[f] = m
+                let S = linearMag[base + f] * scale
+                acc = max(0, (1 - s) * acc + s * S)
+                m[f] = acc
             }
             for f in 0..<nFrames {
-                let denom = powf(bias + smoothed[f], gain)
-                stft[base + f] = powf(stft[base + f] / denom + bias, power) - powf(bias, power)
+                let S = linearMag[base + f] * scale
+                let smooth = expf(-gain * (logf(eps) + log1pf(m[f] / eps)))
+                stft[base + f] = biasPow * expm1f(power * log1pf(S * smooth / bias))
             }
         }
     }

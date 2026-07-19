@@ -11,38 +11,133 @@
 //
 
 import SwiftUI
+import UIKit
 
 struct SpeciesDetailView: View {
     let species: GuideSpecies
     let store: SpeciesGuideStore
+    let rangeStore: SpeciesRangeStore
 
     @State private var showContributors = false
+    @State private var photoURL: URL?
+    /// .compact vertical size class == iPhone landscape; on iPad, size class
+    /// alone doesn't reliably reflect rotation, so landscape there is instead
+    /// detected via GeometryReader (see ContentView's identical pattern).
+    @Environment(\.verticalSizeClass) private var vSizeClass
 
     var body: some View {
-        List {
-            headerSection
-            if let summary = species.summary {
-                Section("Overview") { Text(summary) }
-            }
-            Section("Distribution") {
-                GBIFDistributionCard(species: species)
-                    .listRowInsets(EdgeInsets())
-            }
-            measurementsSection
-            echolocationSection
-            conservationSection
-            habitsSection
-            Section("Regions") {
-                ForEach(store.guide.regions.filter { species.regions.contains($0.id) }) { region in
-                    Label(region.name, systemImage: "globe.europe.africa")
+        GeometryReader { geo in
+            let isIPadLandscape = vSizeClass != .compact
+                && UIDevice.current.userInterfaceIdiom == .pad
+                && geo.size.width > geo.size.height
+            List {
+                if let photoURL {
+                    photoSection(url: photoURL)
                 }
+                headerSection
+                if isIPadLandscape {
+                    overviewAndDistributionSection(availableWidth: geo.size.width)
+                } else {
+                    if let summary = species.summary {
+                        Section("Overview") { Text(summary) }
+                    }
+                    Section("Distribution") {
+                        GBIFDistributionCard(species: species, rangeStore: rangeStore)
+                            .listRowInsets(EdgeInsets())
+                    }
+                }
+                measurementsSection
+                echolocationSection
+                conservationSection
+                habitsSection
+                Section("Regions") {
+                    ForEach(store.guide.regions.filter { species.regions.contains($0.id) }) { region in
+                        Label(region.name, systemImage: "globe.europe.africa")
+                    }
+                }
+                referencesSection
             }
-            referencesSection
+            // `.insetGrouped` (the default for a List with Sections) draws each
+            // Section as a rounded card with its own fixed margin from the screen
+            // edges — `.listRowInsets(EdgeInsets())` alone only zeroes the row's
+            // OWN padding inside that card, it can't remove the card's outer
+            // margin, so the photo (and the GBIF map, which has the same
+            // .listRowInsets trick) never actually reached the edges. `.plain`
+            // has no card background at all, so a zero-inset row genuinely spans
+            // full width — and matches the list style already used elsewhere in
+            // the field guide (SpeciesExplorerView's search results/region list).
+            .listStyle(.plain)
+            .navigationTitle(species.commonName)
+            .navigationBarTitleDisplayMode(.inline)
+            .sheet(isPresented: $showContributors) {
+                ContributorsSheet(species: species)
+            }
+            .task(id: species.scientificName) {
+                photoURL = await WikipediaSpeciesImageService.fetchImageURL(for: species.scientificName)
+            }
         }
-        .navigationTitle(species.commonName)
-        .navigationBarTitleDisplayMode(.inline)
-        .sheet(isPresented: $showContributors) {
-            ContributorsSheet(species: species)
+    }
+
+    // MARK: iPad landscape — overview + square distribution map
+
+    /// Overview text (left two-thirds) and a squared-off distribution map
+    /// (right third), side by side — iPad landscape only. `availableWidth` is
+    /// the GeometryReader's measured width, since a List row can't measure
+    /// its own available width the way the view above it can.
+    private func overviewAndDistributionSection(availableWidth: CGFloat) -> some View {
+        // Rough allowance for the List's own leading/trailing margins so the
+        // computed thirds don't run flush against the screen edges.
+        let contentWidth = availableWidth - 32
+        let spacing: CGFloat = 16
+        let mapWidth = (contentWidth - spacing) / 3
+        let textWidth = contentWidth - spacing - mapWidth
+
+        return Section("Overview") {
+            HStack(alignment: .top, spacing: spacing) {
+                if let summary = species.summary {
+                    Text(summary)
+                        .frame(width: textWidth, alignment: .leading)
+                } else {
+                    Spacer().frame(width: textWidth)
+                }
+                GBIFDistributionCard(species: species, rangeStore: rangeStore, mapHeight: mapWidth)
+                    .frame(width: mapWidth)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+            }
+            .listRowInsets(EdgeInsets())
+            .padding(16)
+        }
+    }
+
+    // MARK: Photo
+
+    /// Hero photo from Wikipedia's open media — see WikipediaSpeciesImageService.
+    /// Edge-to-edge, matching the companion birding app's species profile
+    /// (full-bleed, no card/rounded corners — that app's version sits at the
+    /// top of a plain ScrollView; `.listRowInsets(EdgeInsets())` gets the same
+    /// full-width effect inside this page's List). Per-image author/license
+    /// isn't tracked, so a blanket attribution caption is shown underneath.
+    private func photoSection(url: URL) -> some View {
+        Section {
+            VStack(alignment: .trailing, spacing: 2) {
+                AsyncImage(url: url) { phase in
+                    if case .success(let image) = phase {
+                        image.resizable().scaledToFill()
+                    } else {
+                        Color(.systemGray5)
+                    }
+                }
+                .frame(height: 260)
+                .frame(maxWidth: .infinity)
+                .clipped()
+
+                Text("Photo: Wikipedia (CC BY-SA 4.0)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .padding(.trailing, 12)
+                    .padding(.top, 2)
+            }
+            .listRowInsets(EdgeInsets())
         }
     }
 

@@ -84,6 +84,23 @@ enum PulseImageRenderer {
         return w
     }()
 
+    // ── Scratch buffers reused across captures ───────────────────────────────
+    //  `render` is only ever invoked from PulseDetector's serial captureQueue
+    //  (gated by isCapturing), so one set of buffers can be recycled instead of
+    //  reallocating ~4 MB per pulse. Each call STEALS the arrays (leaving the
+    //  statics empty) so the working copies stay uniquely referenced — Swift COW
+    //  then mutates them in place — and hands them back before returning. The
+    //  variable-size ones (dB, pixels) grow to the largest capture seen and are
+    //  never shrunk; every used element is overwritten each call, so no zeroing
+    //  is needed on reuse (windowed's zero-pad tail past windowLen is written
+    //  once at allocation and never touched again).
+    private static var dbScratch: [Float] = []
+    private static var windowedScratch: [Float] = []
+    private static var realpScratch: [Float] = []
+    private static var imagpScratch: [Float] = []
+    private static var magsScratch: [Float] = []
+    private static var pixelScratch: [UInt8] = []
+
     /// Render `pcm` (raw samples at `sampleRate`) into a sharp pulse spectrogram.
     ///
     /// The captured buffer is deliberately WIDER than the displayed span: this
@@ -115,11 +132,17 @@ enum PulseImageRenderer {
         // ── 1. STFT → magnitude → dB, row-major [bin * nFrames + frame] ──────
         //  A `windowLen` Hann window is copied into a zero-padded `fftLen` buffer,
         //  so the FFT interpolates to `bins` frequency points at full time res.
-        var dB = [Float](repeating: 0, count: bins * nFrames)
-        var windowed = [Float](repeating: 0, count: fftLen)   // tail stays zero (pad)
-        var realp = [Float](repeating: 0, count: bins)
-        var imagp = [Float](repeating: 0, count: bins)
-        var mags  = [Float](repeating: 0, count: bins)
+        let dbCount = bins * nFrames
+        var dB = Self.dbScratch; Self.dbScratch = []
+        if dB.count < dbCount { dB = [Float](repeating: 0, count: dbCount) }
+        var windowed = Self.windowedScratch; Self.windowedScratch = []
+        if windowed.count != fftLen { windowed = [Float](repeating: 0, count: fftLen) } // tail stays zero (pad)
+        var realp = Self.realpScratch; Self.realpScratch = []
+        var imagp = Self.imagpScratch; Self.imagpScratch = []
+        var mags  = Self.magsScratch;  Self.magsScratch  = []
+        if realp.count != bins { realp = [Float](repeating: 0, count: bins) }
+        if imagp.count != bins { imagp = [Float](repeating: 0, count: bins) }
+        if mags.count  != bins { mags  = [Float](repeating: 0, count: bins) }
         let scale: Float = 1.0 / Float(fftLen)
 
         pcm.withUnsafeBufferPointer { pBuf in
@@ -144,15 +167,18 @@ enum PulseImageRenderer {
         }
 
         // ── 2. Normalize to [0,1] over [peakDB − dynamicRange, peakDB] ───────
+        //  Lengths are `dbCount`, not `dB.count`: the reused scratch may be larger
+        //  than this capture's used region, and stale tail values must not feed
+        //  the max or get rescaled.
         var maxDB: Float = -.greatestFiniteMagnitude
-        vDSP_maxv(dB, 1, &maxDB, vDSP_Length(dB.count))
+        vDSP_maxv(dB, 1, &maxDB, vDSP_Length(dbCount))
         let minDB = maxDB - dynamicRangeDB
         var negMin = -minDB
         var inv = 1.0 / dynamicRangeDB
-        vDSP_vsadd(dB, 1, &negMin, &dB, 1, vDSP_Length(dB.count))
-        vDSP_vsmul(dB, 1, &inv,    &dB, 1, vDSP_Length(dB.count))
+        vDSP_vsadd(dB, 1, &negMin, &dB, 1, vDSP_Length(dbCount))
+        vDSP_vsmul(dB, 1, &inv,    &dB, 1, vDSP_Length(dbCount))
         var lo: Float = 0, hi: Float = 1
-        vDSP_vclip(dB, 1, &lo, &hi, &dB, 1, vDSP_Length(dB.count))   // → norm in [0,1]
+        vDSP_vclip(dB, 1, &lo, &hi, &dB, 1, vDSP_Length(dbCount))   // → norm in [0,1]
         let norm = dB
 
         let hzPerBin = (sampleRate / 2) / Double(bins)
@@ -264,7 +290,9 @@ enum PulseImageRenderer {
         let wideOutFrames = padLeft + outFrames + padRight
         let wideSrcStart = srcStart - padLeft
 
-        var pixels = [UInt8](repeating: 255, count: wideOutFrames * renderBins * 4)
+        let pixelCount = wideOutFrames * renderBins * 4
+        var pixels = Self.pixelScratch; Self.pixelScratch = []
+        if pixels.count < pixelCount { pixels = [UInt8](repeating: 255, count: pixelCount) }
         for bin in renderMin...renderMax {
             let yFlipped = renderMax - bin     // row 0 = top = high freq
             let base = bin * nFrames
@@ -280,8 +308,20 @@ enum PulseImageRenderer {
             }
         }
 
+        // Copy only the used prefix into the provider (the reused scratch may be
+        // larger), then hand every scratch buffer back before either exit below.
+        let providerData = pixels.withUnsafeBufferPointer {
+            Data(bytes: $0.baseAddress!, count: pixelCount)
+        }
+        Self.dbScratch = dB
+        Self.windowedScratch = windowed
+        Self.realpScratch = realp
+        Self.imagpScratch = imagp
+        Self.magsScratch = mags
+        Self.pixelScratch = pixels
+
         guard
-            let provider = CGDataProvider(data: Data(pixels) as CFData),
+            let provider = CGDataProvider(data: providerData as CFData),
             let cgImage = CGImage(
                 width: wideOutFrames, height: renderBins,
                 bitsPerComponent: 8, bitsPerPixel: 32,

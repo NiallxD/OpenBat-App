@@ -24,6 +24,17 @@ final class AudioEngineController {
     // MARK: Published state
 
     private(set) var diagnostics = AudioDiagnostics()
+    /// Slow-changing mirrors of `diagnostics` fields, published as their own
+    /// observable properties so views that only need these (ContentView.body's
+    /// nyquist / onChange reads) aren't invalidated by the 15 Hz stats flush —
+    /// `flushStats()` mutates the `diagnostics` struct every tick (bufferCount /
+    /// currentLevelDB), and @Observable tracks at whole-property granularity, so
+    /// any body reading `diagnostics.<anything>` re-renders 15×/s while capturing.
+    /// That churn was rebuilding the toolbar Menus mid-tap and dropping their
+    /// actions. Only ever set via `syncSlowDiagnostics()` (equality-guarded,
+    /// since @Observable notifies on every set, changed or not).
+    private(set) var activeSampleRate: Double = 0
+    private(set) var activeInputName = "—"
     private(set) var isRunning = false
     /// User-facing status / error line.
     private(set) var status = "Idle"
@@ -196,7 +207,20 @@ final class AudioEngineController {
         // advertised format set at startEngine can disagree with the real buffers).
         if rate > 0 { diagnostics.actualSampleRate = rate }
         if channels > 0 { diagnostics.channelCount = channels }
+        syncSlowDiagnostics()
         updateAutoTune()
+    }
+
+    /// Re-publish the slow-changing diagnostics fields to their standalone
+    /// mirrors. Equality-guarded so the 15 Hz flush doesn't notify observers
+    /// of `activeSampleRate`/`activeInputName` when nothing actually changed.
+    private func syncSlowDiagnostics() {
+        if activeSampleRate != diagnostics.actualSampleRate {
+            activeSampleRate = diagnostics.actualSampleRate
+        }
+        if activeInputName != diagnostics.inputName {
+            activeInputName = diagnostics.inputName
+        }
     }
 
     // MARK: Permission
@@ -266,6 +290,7 @@ final class AudioEngineController {
         diagnostics.sessionSampleRate = session.sampleRate
         // Provisional until the first real buffer arrives and flushStats corrects it.
         if diagnostics.actualSampleRate == 0 { diagnostics.actualSampleRate = session.sampleRate }
+        syncSlowDiagnostics()
     }
 
     // MARK: Engine
@@ -286,6 +311,7 @@ final class AudioEngineController {
         // the real delivered-buffer rate (the gap between the two is the bug we surface).
         diagnostics.actualSampleRate = format.sampleRate
         diagnostics.channelCount = Int(format.channelCount)
+        syncSlowDiagnostics()
 
         // Feed the active listening processor from the tap, and attach its output.
         let hetero: HeterodyneProcessor? = (listenMode == .heterodyne) ? heterodyne : nil

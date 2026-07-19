@@ -16,6 +16,7 @@ struct AutoIDSettingsView: View {
 
     var body: some View {
         Form {
+            locationUnavailableSection
             locationSuggestionSection
 
             Section {
@@ -31,6 +32,29 @@ struct AutoIDSettingsView: View {
             }
         }
         .onAppear { location.requestRegionFix() }
+    }
+
+    /// Warns that AutoID species priors are neutral (every species enabled, equal
+    /// weight — see `AutoIDSettings.defaultSettings`) until a location fix lets GBIF
+    /// refine them. Shown for both "denied/restricted" (permanent until the user
+    /// changes it in Settings) and "not yet determined/no fix yet" (transient), since
+    /// either way the user is currently getting unfiltered results.
+    @ViewBuilder
+    private var locationUnavailableSection: some View {
+        if location.currentCoordinate == nil {
+            Section {
+                Label {
+                    Text("Location isn't available, so species priors haven't been "
+                       + "narrowed to your area — AutoID may be less accurate than "
+                       + "with location enabled.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } icon: {
+                    Image(systemName: "location.slash")
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
     }
 
     /// Suggests activating a model that covers the user's current location, or notes
@@ -87,7 +111,10 @@ struct AutoIDSettingsView: View {
                 ModelDetailView(settings: settings, model: model)
             } label: {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(model.displayName).font(.headline)
+                    HStack(spacing: 6) {
+                        Text(model.displayName).font(.headline)
+                        if model.isBeta { BetaBadge() }
+                    }
                     Text("\(model.region) · \(model.classNames.count) classes · v\(model.version)")
                         .font(.caption)
                         .foregroundStyle(.secondary)

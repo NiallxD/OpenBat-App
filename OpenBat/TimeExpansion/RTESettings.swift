@@ -13,11 +13,19 @@ final class RTESettings {
 
     // MARK: Settings
 
-    /// Gate threshold in dBFS. Blocks whose band-limited RMS exceeds this value
-    /// are treated as a bat call and pushed into the expansion ring.
-    /// Lower = more sensitive (picks up quiet calls, also more noise).
-    var thresholdDB: Float {
-        didSet { UserDefaults.standard.set(thresholdDB, forKey: Self.keyThreshold) }
+    /// Minimum frequency (kHz) that can trigger expansion. Only energy above this
+    /// drives the gate, so low-frequency handling noise (footsteps, clothing, wind)
+    /// is ignored. Raise it if non-bat sounds are triggering RTE; lower it to catch
+    /// lower-frequency bats. This is the primary user-facing "noise rejection" knob.
+    var minFrequencyKHz: Float {
+        didSet { UserDefaults.standard.set(minFrequencyKHz, forKey: Self.keyMinFreqKHz) }
+    }
+
+    /// How far (dB) a block must rise above the rolling noise floor to count as a
+    /// call. The gate is relative, not absolute, so quiet calls still trigger while
+    /// the floor auto-tracks conditions. Lower = more sensitive (also more noise).
+    var marginDB: Float {
+        didSet { UserDefaults.standard.set(marginDB, forKey: Self.keyMarginDB) }
     }
 
     /// How long after the signal drops below threshold to keep the gate open (ms).
@@ -39,27 +47,32 @@ final class RTESettings {
 
     // MARK: Defaults
 
-    // Tuned against the Bat_Walk_27_06_2026 field corpus. RTE is only sustainable
-    // when (gate duty × 8× expansion) stays under 100%; the old −50 dB threshold
-    // passed ~25% of the audio → 200% playback → the ring saturated and the
-    // skip-ahead thrashed continuously (the popping). −38 dB keeps duty near ~35%,
-    // and the longer hold keeps each call coherent instead of fragmenting.
-    static let defaultThresholdDB: Float  = -38.0
+    // Tuned against the Bat_Walk_27_06_2026 field corpus. The gate is now relative
+    // (block RMS vs a rolling noise floor) rather than a fixed −38 dBFS threshold, so
+    // quiet high-frequency species trigger without the absolute gate missing them. A
+    // 12 dB margin sits comfortably below the ~18–25 dB call-to-floor spread of even
+    // the quietest Myotis while rejecting the floor. A 15 kHz detection high-pass
+    // keeps footsteps / clothing / wind (all sub-bat-band) from ever triggering.
+    static let defaultMinFreqKHz: Float   = 15.0
+    static let defaultMarginDB: Float     = 12.0
     static let defaultHoldMs: Float       = 15.0
     static let defaultGain: Float         = 4.0
     static let defaultGateBlockMs: Float  = 1.5
 
     // MARK: Persistence keys
 
-    private static let keyThreshold   = "RTE.thresholdDB"
+    private static let keyMinFreqKHz  = "RTE.minFreqKHz"
+    private static let keyMarginDB    = "RTE.marginDB"
     private static let keyHoldMs      = "RTE.holdMs"
     private static let keyGain        = "RTE.gain"
     private static let keyGateBlockMs = "RTE.gateBlockMs"
 
     init() {
         let d = UserDefaults.standard
-        thresholdDB = d.object(forKey: Self.keyThreshold)   != nil
-            ? d.float(forKey: Self.keyThreshold)   : Self.defaultThresholdDB
+        minFrequencyKHz = d.object(forKey: Self.keyMinFreqKHz) != nil
+            ? d.float(forKey: Self.keyMinFreqKHz)  : Self.defaultMinFreqKHz
+        marginDB    = d.object(forKey: Self.keyMarginDB)    != nil
+            ? d.float(forKey: Self.keyMarginDB)    : Self.defaultMarginDB
         holdMs      = d.object(forKey: Self.keyHoldMs)      != nil
             ? d.float(forKey: Self.keyHoldMs)      : Self.defaultHoldMs
         gain        = d.object(forKey: Self.keyGain)        != nil
@@ -71,16 +84,18 @@ final class RTESettings {
     // MARK: Apply
 
     func apply(to processor: TimeExpansionProcessor) {
-        processor.thresholdDB = thresholdDB
-        processor.holdMs      = holdMs
-        processor.gain        = gain
-        processor.gateBlockMs = gateBlockMs
+        processor.minFrequencyHz = minFrequencyKHz * 1000
+        processor.marginDB       = marginDB
+        processor.holdMs         = holdMs
+        processor.gain           = gain
+        processor.gateBlockMs    = gateBlockMs
     }
 
     func reset() {
-        thresholdDB = Self.defaultThresholdDB
-        holdMs      = Self.defaultHoldMs
-        gain        = Self.defaultGain
-        gateBlockMs = Self.defaultGateBlockMs
+        minFrequencyKHz = Self.defaultMinFreqKHz
+        marginDB        = Self.defaultMarginDB
+        holdMs          = Self.defaultHoldMs
+        gain            = Self.defaultGain
+        gateBlockMs     = Self.defaultGateBlockMs
     }
 }

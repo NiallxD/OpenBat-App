@@ -173,7 +173,10 @@ struct AppInfoView: View {
                             .padding(.vertical, 6)
                     }
                     .buttonStyle(.borderedProminent)
+                    .tint(.batAccent)
                     .padding(.top, 4)
+
+                    attributionSection
                 }
                 .padding(20)
             }
@@ -263,6 +266,57 @@ struct AppInfoView: View {
             Text(body).font(.subheadline).foregroundStyle(.secondary)
         }
     }
+
+    // MARK: Attribution
+
+    private var attributionSection: some View {
+        DataModelSourcesView()
+    }
+}
+
+/// One entry per data source OpenBat actually depends on. Classifier models are
+/// pulled straight from `ModelRegistry.all` (its `citation`/`sourceURL` are also
+/// shown in the model detail screen) so a newly registered model is attributed
+/// automatically — no separate list to keep in sync. BatDetect2's CC BY-NC
+/// non-commercial licence surfaces here through that same `citation`. GBIF
+/// (distribution maps) and Wikipedia (species photos/summaries) are fixed
+/// entries since they're general data sources, not classifiers.
+///
+/// Shared (not private to AppInfoView) so the field guide credits the same
+/// sources from its own sheet — see `SpeciesExplorerView`.
+struct DataModelSourcesView: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Data & Model Sources").font(.headline)
+
+            ForEach(ModelRegistry.all) { model in
+                attributionRow(name: model.displayName, detail: model.citation, url: model.sourceURL)
+            }
+            attributionRow(name: "GBIF",
+                           detail: "Species distribution maps use occurrence data from the Global Biodiversity Information Facility (GBIF), licensed CC BY 4.0.",
+                           url: URL(string: "https://www.gbif.org"))
+            attributionRow(name: "Wikipedia",
+                           detail: "Species photos and summary text in the field guide come from Wikipedia, licensed CC BY-SA 4.0. Individual photo authorship isn't tracked per-image.",
+                           url: URL(string: "https://www.wikipedia.org"))
+        }
+    }
+
+    private func attributionRow(name: String, detail: String, url: URL?) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            if let url {
+                Link(destination: url) {
+                    HStack(spacing: 4) {
+                        Text(name).font(.subheadline.weight(.semibold))
+                        Image(systemName: "arrow.up.right.square")
+                            .font(.caption2)
+                    }
+                }
+            } else {
+                Text(name).font(.subheadline.weight(.semibold))
+            }
+            Text(detail).font(.caption).foregroundStyle(.secondary)
+        }
+    }
 }
 
 // MARK: - Guided tour overlay
@@ -334,15 +388,18 @@ struct TourOverlay: View, Equatable {
     @ViewBuilder private func captionLayer(in size: CGSize, hasHole: Bool) -> some View {
         if hasHole {
             let below = hole.midY < size.height / 2
+            // Clamp the spacer at 0: on a short landscape height (size.height < 200) the
+            // `size.height - 200` cap goes negative, which snapped the card to the top/
+            // bottom edge. max(0, …) keeps it a valid spacer height.
             VStack(spacing: 0) {
                 if below {
-                    Color.clear.frame(height: min(hole.maxY + 16, size.height - 200))
+                    Color.clear.frame(height: max(0, min(hole.maxY + 16, size.height - 200)))
                     card
                     Spacer(minLength: 0)
                 } else {
                     Spacer(minLength: 0)
                     card
-                    Color.clear.frame(height: min(size.height - hole.minY + 16, size.height - 200))
+                    Color.clear.frame(height: max(0, min(size.height - hole.minY + 16, size.height - 200)))
                 }
             }
         } else {
@@ -356,7 +413,7 @@ struct TourOverlay: View, Equatable {
                 Image(systemName: step.symbol)
                     .font(.title2)
                     .rotationEffect(step.symbolRotation)
-                    .foregroundStyle(.tint)
+                    .foregroundStyle(Color.batAccent)
                 Text(step.title).font(.headline)
                 Spacer()
                 Text("\(index + 1)/\(steps.count)")
@@ -388,7 +445,7 @@ struct TourOverlay: View, Equatable {
                         .fontWeight(.semibold)
                         .foregroundStyle(.white)
                         .frame(width: 36, height: 36)
-                        .background(.tint, in: Circle())
+                        .background(Color.batAccent, in: Circle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(index == steps.count - 1 ? "Done" : "Next")

@@ -19,8 +19,13 @@ import UIKit
 /// open something rather than being a state get plain white, matching the
 /// leading/trailing nav-bar menus — they're not a toggle, so they don't get the
 /// grey/orange treatment.
-private extension Color {
-    static let toggleOn = Color(red: 0.914, green: 0.514, blue: 0.114) // #E9831D
+extension Color {
+    /// The app's signature orange — the bat-glyph / logo colour. The single source
+    /// of truth for it, reused for the "on" toggle tint here and the guided-tour
+    /// accents in AppInfoView (the AccentColor asset is intentionally empty, so a
+    /// bare `.tint` falls back to system blue — hence naming the colour explicitly).
+    static let batAccent = Color(red: 0.914, green: 0.514, blue: 0.114) // #E9831D
+    static let toggleOn = batAccent
     static let toggleOff = Color.secondary
 }
 
@@ -34,6 +39,7 @@ struct ContentView: View {
     @State private var rteSettings = RTESettings()
     @State private var classStore = ClassificationStore()
     @State private var location = LocationProvider()
+    @Environment(\.scenePhase) private var scenePhase
     @State private var showStartPrompt = false
     @State private var showDiagnostics = false
     @State private var showSettings = false
@@ -53,12 +59,6 @@ struct ContentView: View {
     @AppStorage("display.bandHigh") private var bandHigh = 1.0
     /// Pulse-view pinch-to-zoom + pan (both axes), reset on each new capture —
     /// see the "Pulse zoom/pan" section further down for the geometry.
-    @State private var pulseZoomScale: CGFloat = 1
-    @State private var pulseZoomBaseScale: CGFloat = 1
-    @State private var pulsePanX: CGFloat = 0
-    @State private var pulsePanY: CGFloat = 0
-    @State private var pulsePanBaseX: CGFloat = 0
-    @State private var pulsePanBaseY: CGFloat = 0
     /// Peak-hold state for the amplitude meters. Owned by a separate @Observable object
     /// (rather than plain @State read in ContentView.body) so the 15 Hz level updates that
     /// drive it are scoped to the leaf meter views — reading it here would invalidate the
@@ -97,6 +97,7 @@ struct ContentView: View {
     /// Field-guide data (bundled → cached → GitHub). Created lazily so app
     /// startup isn't gated on JSON decode; the remote check runs in .task below.
     @State private var speciesGuide = SpeciesGuideStore()
+    @State private var speciesRange = SpeciesRangeStore()
 
     var body: some View {
         NavigationStack {
@@ -137,11 +138,27 @@ struct ContentView: View {
                                  pulseDetector: pulseDetector, recorder: recorder,
                                  location: location)
                 }
-                .sheet(isPresented: $showInfo, onDismiss: {
+                .sheet(isPresented: Binding(
+            get: { autoIDSettings.pendingChangeSummary != nil },
+            set: { if !$0 { autoIDSettings.acknowledgeChangeSummary() } }
+        )) {
+            if let summary = autoIDSettings.pendingChangeSummary {
+                LocationChangeSummaryView(settings: autoIDSettings, summary: summary)
+            }
+        }
+        .sheet(isPresented: $showInfo, onDismiss: {
                     if tourPending {
                         tourPending = false
                         tourIndex = 0
-                        withAnimation(.easeInOut(duration: 0.3)) { tourActive = true }
+                        // The tour's spotlight targets (`.tourTarget`) only exist inside
+                        // `detectorLayout` — starting the tour from another section (e.g.
+                        // Species) left it running with no real anchors to point at. Jump
+                        // back to Detector first and let that frame land before revealing
+                        // the overlay, so the targets are mounted by the time it reads them.
+                        section = .detector
+                        DispatchQueue.main.async {
+                            withAnimation(.easeInOut(duration: 0.3)) { tourActive = true }
+                        }
                     }
                 }) {
                     AppInfoView(startTour: { tourPending = true })
@@ -174,6 +191,11 @@ struct ContentView: View {
         // Once per launch: see if the community species-guide JSON on GitHub
         // has a newer dataVersion than what's bundled/cached. Offline → no-op.
         .task { await speciesGuide.refreshFromRemote() }
+        // Same once-per-launch check for the committed GBIF range snapshot —
+        // no bundled fallback here, so offline-with-no-cache just leaves
+        // `speciesRange.ranges` empty and GBIFDistributionCard falls back to
+        // its live per-species GBIF fetch.
+        .task { await speciesRange.refreshFromRemote() }
         .onAppear {
             audio.bufferSink = { [processor, recorder] buffer in
                 processor.process(buffer)
@@ -195,10 +217,16 @@ struct ContentView: View {
             }
             pulseDetector.autoIDSettings = autoIDSettings
             pulseDetector.store = classStore
+            recorder.setActiveModel(id: autoIDSettings.activeModelID)
             pulseDetector.coordinateProvider = { [location] in location.currentCoordinate }
             location.store = classStore
             applyBand()
             rteSettings.apply(to: audio.timeExpansion)
+            // Region fix so species priors can be suggested from GBIF occurrence
+            // data near the user (see the onChange below) — same lightweight,
+            // one-shot fix AutoIDSettingsView already uses, just requested
+            // proactively on launch instead of only when that screen is opened.
+            location.requestRegionFix()
         }
         .confirmationDialog("Start detecting", isPresented: $showStartPrompt, titleVisibility: .visible) {
             Button("New Session") { startDetecting(newSession: true) }
@@ -207,13 +235,26 @@ struct ContentView: View {
         } message: {
             Text("A session logs IDs and a GPS track on a map. Listening just records to the Listening log.")
         }
-        .onChange(of: audio.diagnostics.actualSampleRate) { _, rate in
+        // audio.activeSampleRate / activeInputName (not diagnostics.*) in the
+        // onChange reads below and in `nyquist`: the diagnostics struct churns at
+        // the 15 Hz stats flush, and reading ANY of its fields here invalidates
+        // the whole body — which rebuilds the toolbar Menus mid-tap and drops
+        // their button actions (same failure the meters/stat cells were scoped
+        // out of body for). The mirrors only notify on actual change.
+        .onChange(of: audio.activeSampleRate) { _, rate in
             processor.sampleRate = rate
+        }
+        .onChange(of: menuIsOpen) { _, open in
+            processor.suspended = open
         }
         .onChange(of: bandLow)  { _, _ in applyBand() }
         .onChange(of: bandHigh) { _, _ in applyBand() }
-        .onChange(of: autoIDSettings.activeModelID) { _, _ in pulseDetector.refreshModel() }
-        .onChange(of: rteSettings.thresholdDB) { _, _ in rteSettings.apply(to: audio.timeExpansion) }
+        .onChange(of: autoIDSettings.activeModelID) { _, id in
+            pulseDetector.refreshModel()
+            recorder.setActiveModel(id: id)
+        }
+        .onChange(of: rteSettings.minFrequencyKHz) { _, _ in rteSettings.apply(to: audio.timeExpansion) }
+        .onChange(of: rteSettings.marginDB)    { _, _ in rteSettings.apply(to: audio.timeExpansion) }
         .onChange(of: rteSettings.holdMs)      { _, _ in rteSettings.apply(to: audio.timeExpansion) }
         .onChange(of: rteSettings.gain)        { _, _ in rteSettings.apply(to: audio.timeExpansion) }
         .onChange(of: rteSettings.gateBlockMs) { _, _ in rteSettings.apply(to: audio.timeExpansion) }
@@ -235,9 +276,24 @@ struct ContentView: View {
         // CLLocationCoordinate2D isn't Equatable; key onChange off a derived string.
         .onChange(of: location.currentCoordinate.map { "\($0.latitude),\($0.longitude)" }) { _, _ in
             recorder.setCoordinate(location.currentCoordinate.map { ($0.latitude, $0.longitude) })
+            // No-ops unless this is the first fix ever or the user has moved far
+            // enough since the last one — see refreshPriorsFromGBIFIfNeeded's doc
+            // comment. Safe to call on every fix rather than gating the call site.
+            if let coordinate = location.currentCoordinate {
+                Task { await autoIDSettings.refreshPriorsFromGBIFIfNeeded(coordinate: coordinate) }
+            }
         }
-        .onChange(of: audio.diagnostics.inputName) { _, name in
+        .onChange(of: audio.activeInputName) { _, name in
             recorder.setInputName(name)
+        }
+        // ContentView.onAppear only fires once per process lifetime (SwiftUI doesn't
+        // recreate the WindowGroup's root view on background→foreground), so without
+        // this the model/prior location check would only ever re-run if the user
+        // happened to open AutoID settings (whose own onAppear re-requests a fix).
+        // Re-requesting on every return to foreground makes "on app open" actually
+        // mean "every time the app opens", not just the very first cold launch.
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { location.requestRegionFix() }
         }
         .onDisappear {
             UIApplication.shared.isIdleTimerDisabled = false
@@ -299,7 +355,7 @@ struct ContentView: View {
                 .padding(.horizontal, 8)
                 .padding(.top, 8)
                 .padding(.bottom, 4)
-            SpeciesFeedView(store: classStore, activeSessionID: classStore.activeSessionID, sessionStart: feedSessionStart)
+            SpeciesFeedView(store: classStore, activeSessionID: classStore.activeSessionID, sessionStart: feedSessionStart, autoIDActive: autoIDSettings.activeModelID != nil)
         }
         .panelCard()
     }
@@ -310,7 +366,7 @@ struct ContentView: View {
         switch section {
         case .detector:  detectorLayout
         case .sessions:  SessionsView(store: classStore, settings: autoIDSettings)
-        case .species:   SpeciesExplorerView(store: speciesGuide)
+        case .species:   SpeciesExplorerView(store: speciesGuide, rangeStore: speciesRange, userCoordinate: location.currentCoordinate)
         }
     }
 
@@ -415,64 +471,59 @@ struct ContentView: View {
             .tourTarget(.stats)
     }
 
-    private var pulseBlock: some View {
+    /// Shared card scaffold for the pulse/spectrogram panel blocks: header row
+    /// inside the card, then the panel body, wrapped in the hairline `panelCard`
+    /// and tagged for the tour — the four blocks below only differ in title,
+    /// trailing header buttons, body, and tour stop.
+    private func panel(_ title: String,
+                       tour: TourID,
+                       @ViewBuilder trailing: () -> some View,
+                       @ViewBuilder content: () -> some View) -> some View {
         VStack(spacing: 0) {
-            panelHeader(pulseShowsSpeciesID ? "Species ID" : "Pulse View") {
-                pulseHeaderTrailing
-            }
+            panelHeader(title, trailing: trailing)
                 .padding(.horizontal, 8)
                 .padding(.top, 8)
                 .padding(.bottom, 4)
-            pulsePanelContent
+            content()
         }
         .panelCard()
-        .tourTarget(.pulseView)
+        .tourTarget(tour)
+    }
+
+    private var pulseBlock: some View {
+        panel(pulseShowsSpeciesID ? "Species ID" : "Pulse View", tour: .pulseView) {
+            pulseHeaderTrailing
+        } content: {
+            pulsePanelContent
+        }
     }
 
     private var spectrogramBlock: some View {
-        VStack(spacing: 0) {
-            panelHeader(spectrogramShowsSpeciesID ? "Species ID" : "Spectrogram") {
-                spectrogramHeaderTrailing(showFullScreen: false)
-            }
-                .padding(.horizontal, 8)
-                .padding(.top, 8)
-                .padding(.bottom, 4)
+        panel(spectrogramShowsSpeciesID ? "Species ID" : "Spectrogram", tour: .spectrogram) {
+            spectrogramHeaderTrailing(showFullScreen: false)
+        } content: {
             spectrogramPanelContent
         }
-        .panelCard()
-        .tourTarget(.spectrogram)
     }
 
     /// Landscape spectrogram panel with its header inside the card. Gets the extra
     /// full-screen button the portrait header doesn't need (portrait has no
     /// sidebar-hiding concept — the panels are already stacked full-width).
     private var landscapeSpectrogramBlock: some View {
-        VStack(spacing: 0) {
-            panelHeader(spectrogramShowsSpeciesID ? "Species ID" : "Spectrogram") {
-                spectrogramHeaderTrailing(showFullScreen: true)
-            }
-                .padding(.horizontal, 8)
-                .padding(.top, 8)
-                .padding(.bottom, 4)
+        panel(spectrogramShowsSpeciesID ? "Species ID" : "Spectrogram", tour: .spectrogram) {
+            spectrogramHeaderTrailing(showFullScreen: true)
+        } content: {
             spectrogramPanelContent
         }
-        .panelCard()
-        .tourTarget(.spectrogram)
     }
 
     /// Landscape pulse panel with its header inside the card.
     private var landscapePulseBlock: some View {
-        VStack(spacing: 0) {
-            panelHeader(pulseShowsSpeciesID ? "Species ID" : "Pulse View") {
-                pulseHeaderTrailing
-            }
-                .padding(.horizontal, 8)
-                .padding(.top, 8)
-                .padding(.bottom, 4)
+        panel(pulseShowsSpeciesID ? "Species ID" : "Pulse View", tour: .pulseView) {
+            pulseHeaderTrailing
+        } content: {
             pulsePanelContent
         }
-        .panelCard()
-        .tourTarget(.pulseView)
     }
 
     /// Spectrogram panel body — the live Metal view, with the species feed overlaid
@@ -489,13 +540,14 @@ struct ContentView: View {
                             bandLow: bandLow,
                             bandHigh: bandHigh,
                             timeWindowSeconds: timeWindowSeconds,
-                            pulseDetector: pulseDetector)
+                            pulseDetector: pulseDetector,
+                            isPaused: menuIsOpen)
                 .overlay(alignment: .topTrailing) { tunedPillOverlay }
                 .opacity(spectrogramShowsSpeciesID ? 0 : 1)
                 .allowsHitTesting(!spectrogramShowsSpeciesID)
 
             if spectrogramShowsSpeciesID {
-                SpeciesFeedView(store: classStore, activeSessionID: classStore.activeSessionID, sessionStart: feedSessionStart)
+                SpeciesFeedView(store: classStore, activeSessionID: classStore.activeSessionID, sessionStart: feedSessionStart, autoIDActive: autoIDSettings.activeModelID != nil)
             }
         }
     }
@@ -504,14 +556,14 @@ struct ContentView: View {
     /// `spectrogramPanelContent`, for the pulse-view popover (pulseViewButton).
     private var pulsePanelContent: some View {
         ZStack {
-            pulseZoomPanel
+            PulseZoomView(pulseDetector: pulseDetector)
                 .opacity(pulseShowsSpeciesID ? 0 : 1)
                 .allowsHitTesting(!pulseShowsSpeciesID)
 
             if pulseShowsSpeciesID {
                 // No pulse thumbnail here — this panel's landscape column is too
                 // narrow, and the live pulse view already shows the same image.
-                SpeciesFeedView(store: classStore, activeSessionID: classStore.activeSessionID, sessionStart: feedSessionStart, showsThumbnail: false)
+                SpeciesFeedView(store: classStore, activeSessionID: classStore.activeSessionID, sessionStart: feedSessionStart, showsThumbnail: false, autoIDActive: autoIDSettings.activeModelID != nil)
             }
         }
     }
@@ -659,274 +711,25 @@ struct ContentView: View {
         AmplitudeMeterView(audio: audio, peakHold: peakHold, detector: pulseDetector)
     }
 
-    // MARK: Pulse zoom/pan
-    //
-    // Photos-app-style pinch-to-zoom + drag-to-pan over PulseImageRenderer's wide
-    // render (full spectrum vertically, tight-window-plus-margin horizontally —
-    // see PulseImageRenderer.swift and PulseDetector's captured*Wide*/*TimeTight*
-    // properties). Both axes use the same `.scaleEffect(anchor: .center)` +
-    // `.offset()` composition:
-    //
-    //   screen(v) = 0.5 + (v − 0.5)·s + offset      (v, screen ∈ [0,1], top/left = 0)
-    //
-    // `axisZoomGeometry` picks the (defaultScale, offset) pair that makes the tight
-    // default window exactly fill the frame at rest; `pulsePanX`/`pulsePanY` START
-    // at that value and are the SINGLE source of truth for the current offset from
-    // then on (pinch only ever changes scale; drag only ever changes pan) — no
-    // separate "baked default" + "user delta" to keep in sync, which is what
-    // caused the earlier Y-only zoom bug (see git history). `clampOffsetFrac`
-    // bounds pan so the visible window can never pan past the rendered content's
-    // own edges ("hit walls").
-
-    private var pulseZoomPanel: some View {
-        GeometryReader { geo in
-            pulseZoomContent(geo: geo)
-        }
-    }
-
-    private func pulseZoomContent(geo: GeometryProxy) -> some View {
-        // Each axis floors at scale 1 (its full rendered content) independently —
-        // the shared pinch multiplier can drive one axis's raw product below 1
-        // (e.g. an axis with a smaller "exact fit" scale) without that axis
-        // rendering smaller than its own content, which wouldn't mean anything.
-        let scaleX = max(1, timeZoomGeometry.defaultScale * pulseZoomScale)
-        let scaleY = max(1, freqZoomGeometry.defaultScale * pulseZoomScale)
-
-        return ZStack(alignment: .topLeading) {
-            if let img = pulseDetector.lastPulseImage {
-                // .high interpolation looks crisp instead of a blurry upscale.
-                Image(uiImage: img)
-                    .resizable()
-                    .interpolation(.high)
-                    .frame(width: geo.size.width, height: geo.size.height)
-                    .scaleEffect(x: scaleX, y: scaleY, anchor: .center)
-                    .offset(x: pulsePanX * geo.size.width, y: pulsePanY * geo.size.height)
-                    .clipped()
-            } else {
-                Text("No pulse detected")
-                    .font(.caption2)
-                    .foregroundStyle(.white.opacity(0.35))
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-
-            pulseGrid
-
-            if pulseDetector.capturedFreqMax > 0 {
-                pulseFrequencyAxis.padding(6)
-            }
-
-            VStack {
-                Spacer()
-                HStack {
-                    Spacer()
-                    Text(pulseDetector.capturedDurationMs > 0
-                         ? String(format: "%.0f ms", pulseDetector.capturedDurationMs)
-                         : "–")
-                        .font(.caption2.monospacedDigit())
-                        .foregroundStyle(.white.opacity(0.6))
-                        .padding(6)
-                }
-            }
-        }
-        .frame(width: geo.size.width, height: geo.size.height)
-        .contentShape(Rectangle())
-        .gesture(pulseZoomPanGesture(geoSize: geo.size, scaleX: scaleX, scaleY: scaleY))
-        // A new capture resets to the default (reduced-zoom, centred) view —
-        // otherwise a leftover zoom/pan from the previous pulse would crop into an
-        // unrelated new one.
-        .onChange(of: pulseDetector.lastDetectionDate) { _, _ in
-            pulseZoomScale = pulseZoomDefaultMultiplier
-            pulseZoomBaseScale = pulseZoomDefaultMultiplier
-            let sx = max(1, timeZoomGeometry.defaultScale * pulseZoomDefaultMultiplier)
-            let sy = max(1, freqZoomGeometry.defaultScale * pulseZoomDefaultMultiplier)
-            pulsePanBaseX = centeringOffset(midFrac: timeTightMidFrac, scale: sx)
-            pulsePanBaseY = centeringOffset(midFrac: freqTightMidFrac, scale: sy)
-            pulsePanX = pulsePanBaseX
-            pulsePanY = pulsePanBaseY
-        }
-    }
-
-    /// Multiplier applied to each axis's "exact fit" scale (see `axisZoomGeometry`)
-    /// for the DEFAULT view — under 1 shows some context around the tight call
-    /// crop instead of filling the frame with just the crop, which read as too
-    /// tightly zoomed in by default.
-    private let pulseZoomDefaultMultiplier: CGFloat = 0.6
-
-    /// Given where the default (tight) window sits within the wider rendered
-    /// content — as a [leftFrac, rightFrac] pair, 0…1, matching the content's own
-    /// top→bottom or left→right order — returns the scale that exactly fills the
-    /// frame with just that window (used as the reference "1×" for pinch, and
-    /// scaled down by `pulseZoomDefaultMultiplier` for the actual default view).
-    private func axisZoomGeometry(leftFrac: Double, rightFrac: Double) -> (defaultScale: CGFloat, midFrac: Double) {
-        let span = max(0.02, rightFrac - leftFrac)
-        return (CGFloat(1 / span), (leftFrac + rightFrac) / 2)
-    }
-
-    /// The `.offset()` fraction that centres wide-image point `midFrac` on screen
-    /// at the given scale: solving `screen(midFrac) = 0.5 + (midFrac-0.5)·scale +
-    /// offset = 0.5` for offset. Re-derived at whatever the CURRENT scale is
-    /// (rather than only at the "exact fit" scale) so it stays centred as pinch
-    /// zooms in/out, and so the reduced-zoom default (`pulseZoomDefaultMultiplier`
-    /// ≠ 1) is centred too.
-    private func centeringOffset(midFrac: Double, scale: CGFloat) -> CGFloat {
-        CGFloat(-(midFrac - 0.5)) * scale
-    }
-
-    /// Bounds a total offset fraction (centring + user pan) so the visible window
-    /// never pans past the edge of the rendered content, at the given effective
-    /// scale. At scale 1 the window already fills the content exactly, so the
-    /// bound is 0 (no pan room); it grows as you zoom in.
-    private func clampOffsetFrac(_ offset: CGFloat, scale: CGFloat) -> CGFloat {
-        let bound = max(0, 0.5 * (scale - 1))
-        return min(max(offset, -bound), bound)
-    }
-
-    private var freqZoomGeometry: (defaultScale: CGFloat, midFrac: Double) {
-        let wideLo = pulseDetector.capturedWideFreqMin
-        let wideHi = pulseDetector.capturedWideFreqMax
-        let tightLo = pulseDetector.capturedFreqMin
-        let tightHi = pulseDetector.capturedFreqMax
-        let span = wideHi - wideLo
-        guard span > 0, tightHi > tightLo else { return (1, 0.5) }
-        let leftFrac = (wideHi - tightHi) / span     // tight band's top edge, high freq = top = 0
-        let rightFrac = (wideHi - tightLo) / span    // tight band's bottom edge
-        return axisZoomGeometry(leftFrac: leftFrac, rightFrac: rightFrac)
-    }
-
-    private var timeZoomGeometry: (defaultScale: CGFloat, midFrac: Double) {
-        axisZoomGeometry(leftFrac: pulseDetector.capturedTimeTightLeftFrac,
-                         rightFrac: pulseDetector.capturedTimeTightRightFrac)
-    }
-
-    private var freqTightMidFrac: Double { freqZoomGeometry.midFrac }
-    private var timeTightMidFrac: Double { timeZoomGeometry.midFrac }
-
-    /// Effective visible frequency range for the current zoom/pan — used by
-    /// `pulseFrequencyAxis` so the labels track what's on screen, not just the
-    /// default view. Inverts the same screen(v) relationship the render uses.
-    private var visiblePulseFreqRange: (lo: Double, hi: Double) {
-        let wideLo = pulseDetector.capturedWideFreqMin
-        let wideHi = pulseDetector.capturedWideFreqMax
-        let span = wideHi - wideLo
-        let s = Double(max(1, freqZoomGeometry.defaultScale * pulseZoomScale))
-        guard span > 0, s > 0 else {
-            return (pulseDetector.capturedFreqMin, pulseDetector.capturedFreqMax)
-        }
-        let offset = Double(pulsePanY)
-        // screen(v) = 0.5 + (v-0.5)*s + offset; solving for v at screen = 0 / 1.
-        let vTop = 0.5 - (0.5 + offset) / s
-        let vBottom = 0.5 + (0.5 - offset) / s
-        return (lo: wideHi - vBottom * span, hi: wideHi - vTop * span)
-    }
-
-    /// Pinch range: down to whichever axis's full-wide-content multiplier is
-    /// smaller (so pinching out far enough always reaches "show everything" on at
-    /// least one axis — the other, if its own default scale is smaller, will hit
-    /// its own scale-1 floor first; see the `max(1, ...)` clamps on scaleX/scaleY),
-    /// up to generous zoom-in headroom above the exact-fit scale.
-    private var pulseZoomLowerBound: CGFloat {
-        1 / max(timeZoomGeometry.defaultScale, freqZoomGeometry.defaultScale)
-    }
-    private var pulseZoomUpperBound: CGFloat {
-        max(timeZoomGeometry.defaultScale, freqZoomGeometry.defaultScale) * 5
-    }
-
-    private func pulseZoomPanGesture(geoSize: CGSize, scaleX: CGFloat, scaleY: CGFloat) -> some Gesture {
-        let magnification = MagnificationGesture()
-            .onChanged { value in
-                // Preserve the CURRENT on-screen centre point as scale changes —
-                // without this, changing scale while the `.offset()` pan stays
-                // fixed drifts the view back toward the wide image's own centre
-                // (screen = 0.5 + (v-0.5)·s + offset ⇒ the visible centre
-                // v = 0.5 − offset/s moves whenever s changes unless offset is
-                // re-derived for the new s at the same v).
-                let oldScaleX = max(1, timeZoomGeometry.defaultScale * pulseZoomScale)
-                let oldScaleY = max(1, freqZoomGeometry.defaultScale * pulseZoomScale)
-                let vCenterX = 0.5 - Double(pulsePanX) / Double(oldScaleX)
-                let vCenterY = 0.5 - Double(pulsePanY) / Double(oldScaleY)
-
-                pulseZoomScale = min(max(pulseZoomBaseScale * value, pulseZoomLowerBound), pulseZoomUpperBound)
-
-                let newScaleX = max(1, timeZoomGeometry.defaultScale * pulseZoomScale)
-                let newScaleY = max(1, freqZoomGeometry.defaultScale * pulseZoomScale)
-                pulsePanX = clampOffsetFrac(CGFloat((0.5 - vCenterX) * Double(newScaleX)), scale: newScaleX)
-                pulsePanY = clampOffsetFrac(CGFloat((0.5 - vCenterY) * Double(newScaleY)), scale: newScaleY)
-            }
-            .onEnded { _ in
-                pulseZoomBaseScale = pulseZoomScale
-                pulsePanBaseX = pulsePanX
-                pulsePanBaseY = pulsePanY
-            }
-        // Pan reads scaleX/scaleY fresh from the closure each call (captured by
-        // reference via `self`), so it stays correctly bounded even while a
-        // simultaneous pinch is changing the scale mid-drag.
-        let pan = DragGesture(minimumDistance: 2)
-            .onChanged { value in
-                guard geoSize.width > 0, geoSize.height > 0 else { return }
-                let dxFrac = value.translation.width / geoSize.width
-                let dyFrac = value.translation.height / geoSize.height
-                pulsePanX = clampOffsetFrac(pulsePanBaseX + dxFrac, scale: scaleX)
-                pulsePanY = clampOffsetFrac(pulsePanBaseY + dyFrac, scale: scaleY)
-            }
-            .onEnded { _ in
-                pulsePanBaseX = pulsePanX
-                pulsePanBaseY = pulsePanY
-            }
-        return SimultaneousGesture(magnification, pan)
-    }
-
-    /// Faint analysis grid over the pulse capture. Vertical lines mark time
-    /// (the brighter dashed one is the locked pulse onset, at the detector's
-    /// onsetFraction); horizontal lines mark frequency, aligned with the
-    /// hi / mid / lo axis labels.
-    private var pulseGrid: some View {
-        GeometryReader { geo in
-            let w = geo.size.width, h = geo.size.height
-            let onsetX = w * CGFloat(pulseDetector.onsetFraction)
-            ZStack {
-                Path { p in
-                    for f in [0.25, 0.5, 0.75] as [CGFloat] {   // time divisions
-                        p.move(to: CGPoint(x: w * f, y: 0)); p.addLine(to: CGPoint(x: w * f, y: h))
-                    }
-                    for f in [0.25, 0.5, 0.75] as [CGFloat] {   // frequency divisions
-                        p.move(to: CGPoint(x: 0, y: h * f)); p.addLine(to: CGPoint(x: w, y: h * f))
-                    }
-                }
-                .stroke(Color.white.opacity(0.12), lineWidth: 0.5)
-
-                Path { p in                                      // onset marker
-                    p.move(to: CGPoint(x: onsetX, y: 0)); p.addLine(to: CGPoint(x: onsetX, y: h))
-                }
-                .stroke(Color.white.opacity(0.30), style: StrokeStyle(lineWidth: 0.5, dash: [3, 3]))
-            }
-        }
-        .allowsHitTesting(false)
-    }
-
-    private var pulseFrequencyAxis: some View {
-        let (lo, hi) = visiblePulseFreqRange
-        return VStack {
-            axisLabel(hi)
-            Spacer()
-            axisLabel((lo + hi) / 2)
-            Spacer()
-            axisLabel(lo)
-        }
-    }
-
-    private func axisLabel(_ hz: Double) -> some View {
-        Text(hz >= 1000 ? String(format: "%.0f kHz", hz / 1000)
-                        : String(format: "%.0f Hz", hz))
-            .font(.caption2.monospacedDigit())
-            .foregroundStyle(.white.opacity(0.7))
-            .shadow(radius: 1)
-    }
-
     // MARK: Helpers
 
     private var nyquist: Double {
-        let rate = audio.diagnostics.actualSampleRate
+        // activeSampleRate, not diagnostics.actualSampleRate — see the comment
+        // on the onChange block in body.
+        let rate = audio.activeSampleRate
         return audio.isRunning && rate > 0 ? rate / 2 : 192_000
+    }
+
+    /// True while a full-screen sheet covers the live view — none of them need
+    /// the spectrogram's 60 Hz Metal render loop (which drains FFT columns and
+    /// feeds the pulse detector inline on the main thread), and stopping it
+    /// frees the main thread up for the sheet's own gesture handling instead of
+    /// competing with it. Audio capture/recording itself is untouched — only
+    /// live display + pulse detection pause. Deliberately excludes the pulse
+    /// zoom (showPulseView) and frequency-band (showBand) popovers: those are
+    /// meant to be used while watching the live feed.
+    private var menuIsOpen: Bool {
+        showDiagnostics || showSettings || showInfo || autoIDSettings.pendingChangeSummary != nil
     }
 
     private func applyBand() {
@@ -1327,15 +1130,6 @@ struct ContentView: View {
         }
     }
 
-    private var triggeredDisplayButton: some View {
-        Button { pulseDetector.triggeredDisplayMode.toggle() } label: {
-            Image(systemName: "rectangle.compress.vertical").controlIcon()
-        }
-        .buttonStyle(.bordered)
-        .tint(pulseDetector.triggeredDisplayMode ? .green : .secondary)
-        .accessibilityLabel("Triggered display")
-    }
-
     /// Cycles off → heterodyne → RTE → off on tap, icon changing with it — replaces
     /// the old Menu-based picker, which buried listen mode two taps deep and read
     /// as unresponsive (open menu, then tap an item) even once the underlying
@@ -1376,11 +1170,14 @@ struct ContentView: View {
         }
     }
 
+    // Spelled out (not "RTE") because this string is the VoiceOver label on the
+    // listen-mode button, whose only visible cue is an icon — "Time expansion" reads
+    // clearly where the acronym doesn't.
     private var listenModeName: String {
         switch audio.listenMode {
         case .off:           "Off"
         case .heterodyne:    "Heterodyne"
-        case .timeExpansion: "RTE"
+        case .timeExpansion: "Time expansion"
         }
     }
 
@@ -1392,415 +1189,6 @@ struct ContentView: View {
         }
     }
 
-}
-
-// MARK: - Pulse stat cells
-
-/// One labelled stat readout (title, big value, small unit) — a leaf View so it
-/// carries no dependencies of its own; used by `PulseStatsRow`/`PulseStatsColumn`.
-private struct StatCell: View {
-    let title: String
-    let value: String
-    let unit: String
-
-    var body: some View {
-        VStack(spacing: 2) {
-            Text(title.uppercased())
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(.secondary)
-            HStack(alignment: .firstTextBaseline, spacing: 2) {
-                Text(value)
-                    .font(.title3.monospacedDigit().weight(.semibold))
-                if !unit.isEmpty {
-                    Text(unit)
-                        .font(.system(size: 9))
-                        .foregroundStyle(.secondary)
-                }
-            }
-        }
-        .frame(maxWidth: .infinity)
-        .minimumScaleFactor(0.6)
-        .lineLimit(1)
-    }
-}
-
-/// Last-ID readout with a stale-after-30s red tint. `TimelineView` re-evaluates
-/// once a second so the ID turns red as it ages without needing a pulse (or any
-/// other state change) to trigger a redraw — already self-contained (the
-/// `pulseDetector.lastPassResult`/`lastPassDate` reads happen inside the
-/// `TimelineView` content closure, not synchronously during the parent's body).
-private struct SpeciesStatCell: View {
-    let pulseDetector: PulseDetector
-
-    var body: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { context in
-            let isStale = pulseDetector.lastPassDate
-                .map { context.date.timeIntervalSince($0) > staleIDSeconds } ?? false
-            VStack(spacing: 2) {
-                Text("SPECIES")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                if let pass = pulseDetector.lastPassResult {
-                    HStack(alignment: .center, spacing: 4) {
-                        Text(pass.species)
-                            .font(.system(size: 15, weight: .semibold))
-                            .foregroundStyle(isStale ? .red : .primary)
-                        VStack(alignment: .leading, spacing: 0) {
-                            Text("\(pulseDetector.lastPassPulseCount)p")
-                            Text(String(format: "%.0f%%", pass.confidence * 100))
-                        }
-                        .font(.system(size: 8))
-                        .foregroundStyle(.secondary)
-                    }
-                } else {
-                    Text("–")
-                        .font(.title3.weight(.semibold))
-                }
-            }
-            .frame(maxWidth: .infinity)
-            .minimumScaleFactor(0.6)
-            .lineLimit(1)
-        }
-    }
-}
-
-/// Horizontal stat row for portrait. A standalone View struct: `pulseDetector`'s
-/// `pulseCount`/`pulseRateHz`/`capturedPeakFreq`/`capturedDurationMs`/
-/// `capturedFreqMin`/`capturedFreqMax` update on essentially every detected pulse
-/// (sometimes many times a second during an active pass) — reading them inline in
-/// ContentView.body invalidated (and froze the hit-testing of) the whole screen,
-/// the same failure mode the amplitude meter had before it was scoped down.
-private struct PulseStatsRow: View {
-    let pulseDetector: PulseDetector
-
-    var body: some View {
-        // 1 Hz TimelineView so the last-pulse stats age out on their own —
-        // without it they'd freeze at their final values until the next pulse.
-        TimelineView(.periodic(from: .now, by: 1)) { context in
-            let values = PulseStatValues(pulseDetector, now: context.date)
-            HStack(spacing: 0) {
-                StatCell(title: "Fpeak", value: values.fpeak, unit: "kHz")
-                statDivider
-                StatCell(title: "Bndwth", value: values.bandwidth, unit: "kHz")
-                statDivider
-                StatCell(title: "Dur", value: values.duration, unit: "ms")
-                statDivider
-                StatCell(title: "Rate", value: values.rate, unit: "/s")
-                statDivider
-                StatCell(title: "Pulses", value: "\(pulseDetector.pulseCount)", unit: "")
-                statDivider
-                SpeciesStatCell(pulseDetector: pulseDetector)
-            }
-        }
-    }
-
-    private var statDivider: some View {
-        Divider().frame(height: 28)
-    }
-}
-
-/// Vertical stat column for the landscape sidebar. Same scoping rationale as
-/// `PulseStatsRow`.
-private struct PulseStatsColumn: View {
-    let pulseDetector: PulseDetector
-
-    var body: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { context in
-            let values = PulseStatValues(pulseDetector, now: context.date)
-            VStack(spacing: 0) {
-                StatCell(title: "Fpeak", value: values.fpeak, unit: "kHz").frame(maxHeight: .infinity)
-                Divider()
-                StatCell(title: "Bndwth", value: values.bandwidth, unit: "kHz").frame(maxHeight: .infinity)
-                Divider()
-                StatCell(title: "Dur", value: values.duration, unit: "ms").frame(maxHeight: .infinity)
-                Divider()
-                StatCell(title: "Rate", value: values.rate, unit: "/s").frame(maxHeight: .infinity)
-                Divider()
-                StatCell(title: "Pulses", value: "\(pulseDetector.pulseCount)", unit: "").frame(maxHeight: .infinity)
-                Divider()
-                SpeciesStatCell(pulseDetector: pulseDetector).frame(maxHeight: .infinity)
-            }
-        }
-    }
-}
-
-/// Display strings for the last-pulse stat cells (Fpeak/Bndwth/Dur/Rate),
-/// shared by the portrait row and landscape column. All four describe the most
-/// recent pulse (or, for Rate, the window around it), so once nothing has been
-/// captured for `staleIDSeconds` — the same threshold that turns the species ID
-/// red — they revert to "–" instead of freezing at values from a long-gone pass.
-/// The Pulses counter is cumulative and deliberately exempt.
-private struct PulseStatValues {
-    let fpeak: String
-    let bandwidth: String
-    let duration: String
-    let rate: String
-
-    init(_ d: PulseDetector, now: Date) {
-        let stale = d.lastDetectionDate
-            .map { now.timeIntervalSince($0) > staleIDSeconds } ?? true
-        fpeak = !stale && d.capturedPeakFreq > 0
-            ? String(format: "%.0f", d.capturedPeakFreq / 1000) : "–"
-        let bw = d.capturedFreqMax - d.capturedFreqMin
-        bandwidth = !stale && bw > 0 ? String(format: "%.0f", bw / 1000) : "–"
-        duration = !stale && d.capturedDurationMs > 0
-            ? String(format: "%.0f", d.capturedDurationMs) : "–"
-        rate = !stale && d.pulseRateHz > 0
-            ? String(format: "%.1f", d.pulseRateHz) : "–"
-    }
-}
-
-/// An ID/capture older than this is stale: the species cell turns red and the
-/// last-pulse stat cells clear — it's from a previous pass, not whatever is
-/// flying now.
-private let staleIDSeconds: TimeInterval = 30
-
-// MARK: - Heterodyne tuning pill
-
-/// Draggable pill showing the heterodyne LO frequency. A standalone View struct:
-/// `audio.tunedFrequency`/`isAutoTune` update at 15 Hz (the same stats timer that
-/// drives the amplitude meter) while heterodyne listening is active, so this keeps
-/// that churn from invalidating all of ContentView.body. Owns its own drag-gesture
-/// state instead of borrowing @State from the parent.
-private struct TunedPillView: View {
-    let audio: AudioEngineController
-    let nyquist: Double
-
-    @State private var dragBaseFrequency: Double?
-    @State private var dragBaseHeight: CGFloat = 0
-
-    var body: some View {
-        HStack(spacing: 5) {
-            Image(systemName: audio.isAutoTune ? "a.circle.fill" : "hand.draw.fill")
-                .font(.system(size: 11))
-            Text(audio.tunedFrequency > 0
-                 ? String(format: "%.1f kHz", audio.tunedFrequency / 1000)
-                 : "tuning…")
-                .font(.caption.monospacedDigit())
-        }
-        .foregroundStyle(audio.isAutoTune ? .green : .orange)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(.ultraThinMaterial, in: Capsule())
-        .gesture(tuneGesture)
-    }
-
-    private var tuneGesture: some Gesture {
-        DragGesture(minimumDistance: 0)
-            .onChanged { value in
-                let dy = value.translation.height
-                if dragBaseFrequency == nil {
-                    guard abs(dy) > 6 else { return }
-                    dragBaseFrequency = audio.tunedFrequency > 0 ? audio.tunedFrequency : nyquist * 0.25
-                    dragBaseHeight = dy
-                }
-                guard let base = dragBaseFrequency else { return }
-                let hzPerPoint = max(nyquist / 500, 50)
-                audio.setManualTune(frequency: base - Double(dy - dragBaseHeight) * hzPerPoint)
-            }
-            .onEnded { _ in
-                if dragBaseFrequency == nil { audio.enableAutoTune() }
-                dragBaseFrequency = nil
-            }
-    }
-}
-
-// MARK: - Mic status pill
-
-/// External-mic connection indicator: a green connector icon that slowly pulses
-/// while a USB mic (the Griff) is attached, or a red slashed connector when only
-/// the built-in mic is available. While capturing, also shows the delivered feed
-/// rate in kHz, flashing red if iOS hands us less than the required 384 kHz.
-private struct MicStatusPill: View {
-    let audio: AudioEngineController
-    @State private var slowPulse = false   // ~1.4 s breathe for the connected icon
-    @State private var fastFlash = false   // ~0.4 s blink for a clamped feed rate
-
-    private static let requiredRate: Double = 384_000
-
-    var body: some View {
-        let d = audio.diagnostics
-        let connected = d.usbMicAvailable
-        let rateKnown = audio.isRunning && d.actualSampleRate > 0
-        let rateBad = rateKnown && d.actualSampleRate < Self.requiredRate
-        HStack(spacing: 4) {
-            Image(systemName: connected ? "cable.connector" : "cable.connector.slash")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(connected ? Color.green : .red)
-                .opacity(connected && slowPulse ? 0.35 : 1)
-            if rateKnown {
-                Text("\(Int((d.actualSampleRate / 1000).rounded())) kHz")
-                    .font(.system(size: 9, weight: .semibold).monospacedDigit())
-                    .foregroundStyle(rateBad ? Color.red : .secondary)
-                    .opacity(rateBad && fastFlash ? 0.25 : 1)
-            }
-        }
-        .padding(.horizontal, 7)
-        .padding(.vertical, 4)
-        .background(.ultraThinMaterial, in: Capsule())
-        .onAppear {
-            withAnimation(.easeInOut(duration: 1.4).repeatForever(autoreverses: true)) { slowPulse = true }
-            withAnimation(.easeInOut(duration: 0.4).repeatForever(autoreverses: true)) { fastFlash = true }
-        }
-        .accessibilityLabel(connected ? "External microphone connected" : "No external microphone")
-    }
-}
-
-// MARK: - Amplitude meter
-
-/// Shared math for the amplitude meters. Free functions rather than ContentView
-/// methods so the standalone meter View structs below can use them too.
-private enum MeterMath {
-    /// Meter floor in dBFS. Higher than the −80 capture floor because the ambient
-    /// noise floor sits near −60, so the useful swing is −60…0.
-    static let floorDB: Double = -60
-
-    /// Maps a dBFS value to 0…1 over the meter's [floorDB, 0] range.
-    static func normalized(_ db: Double) -> Double {
-        min(max((db - floorDB) / (0 - floorDB), 0), 1)
-    }
-
-    /// Samples the user-selected display palette so the meter matches the
-    /// spectrogram. Skewed toward the bright end (t = 0.35…1) because most
-    /// palettes start near-black, which would make the low segments invisible.
-    static func color(_ frac: Double, palette: Palette) -> Color {
-        let f = min(max(frac, 0), 1)
-        let (r, g, b) = DisplayColormap.rgb(Float(0.35 + 0.65 * f), palette: palette)
-        return Color(red: Double(r) / 255, green: Double(g) / 255, blue: Double(b) / 255)
-    }
-}
-
-/// Owns the peak-hold position for the amplitude meters. Held as `@State` in
-/// ContentView but only ever read/written from inside the meter leaf views below,
-/// so its 15 Hz updates never invalidate ContentView.body.
-@Observable
-final class PeakHoldTracker {
-    private(set) var peakHold: Double = 0    // 0–1 peak-hold position for the VU meter
-    private var peakHoldAt: Date = .distantPast
-
-    func update(db: Double) {
-        let n = MeterMath.normalized(db)
-        if n >= peakHold {
-            peakHold = n                       // jump up to a new peak and hold
-            peakHoldAt = Date()
-        } else if Date().timeIntervalSince(peakHoldAt) > 0.8 {
-            peakHold = max(n, peakHold - 0.02) // then fall back gradually (~0.3/s at 15 Hz)
-        }
-    }
-
-    func reset() { peakHold = 0 }
-}
-
-/// Retro segmented level meter with a falling peak-hold dot, driven by the input
-/// RMS level. Segments sample the selected display palette. A standalone
-/// View (not a ContentView computed property) so reading `currentLevelDB` at
-/// 15 Hz only invalidates this small view, not the whole screen.
-private struct AmplitudeMeterView: View {
-    let audio: AudioEngineController
-    let peakHold: PeakHoldTracker
-    let detector: PulseDetector
-
-    var body: some View {
-        let palette = detector.displayPalette
-        let level = MeterMath.normalized(Double(audio.diagnostics.currentLevelDB))
-        let segments = 40
-        VStack(alignment: .leading, spacing: 3) {
-            HStack {
-                Text("AMPLITUDE")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Text(String(format: "%.0f dBFS", audio.diagnostics.currentLevelDB))
-                    .font(.system(size: 9).monospacedDigit())
-                    .foregroundStyle(.secondary)
-            }
-
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    HStack(spacing: 2) {
-                        ForEach(0..<segments, id: \.self) { i in
-                            let frac = Double(i) / Double(segments - 1)
-                            let lit = frac <= level
-                            RoundedRectangle(cornerRadius: 1.5)
-                                .fill(MeterMath.color(frac, palette: palette).opacity(lit ? 1 : 0.12))
-                        }
-                    }
-                    if peakHold.peakHold > 0 {
-                        Circle()
-                            .fill(MeterMath.color(peakHold.peakHold, palette: palette))
-                            .frame(width: 7, height: 7)
-                            .shadow(color: MeterMath.color(peakHold.peakHold, palette: palette).opacity(0.8), radius: 2)
-                            .position(x: max(3, min(geo.size.width - 3, geo.size.width * peakHold.peakHold)),
-                                      y: geo.size.height / 2)
-                    }
-                }
-            }
-            .frame(height: 13)
-
-            HStack {
-                meterScaleLabel("-60")
-                Spacer()
-                meterScaleLabel("-30")
-                Spacer()
-                meterScaleLabel("0 dB")
-            }
-        }
-        .onChange(of: audio.diagnostics.currentLevelDB) { _, db in
-            peakHold.update(db: Double(db))
-        }
-    }
-
-    private func meterScaleLabel(_ s: String) -> some View {
-        Text(s)
-            .font(.system(size: 8).monospacedDigit())
-            .foregroundStyle(.secondary)
-    }
-}
-
-/// Vertical amplitude meter for the landscape sidebar. Same scoping rationale as
-/// `AmplitudeMeterView`.
-private struct VerticalAmplitudeMeterView: View {
-    let audio: AudioEngineController
-    let peakHold: PeakHoldTracker
-    let detector: PulseDetector
-
-    var body: some View {
-        let palette = detector.displayPalette
-        let level = MeterMath.normalized(Double(audio.diagnostics.currentLevelDB))
-        let segments = 20
-        VStack(spacing: 2) {
-            Text(String(format: "%.0f", audio.diagnostics.currentLevelDB))
-                .font(.system(size: 6).monospacedDigit())
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.7)
-            GeometryReader { geo in
-                ZStack {
-                    VStack(spacing: 1) {
-                        ForEach((0..<segments).reversed(), id: \.self) { i in
-                            let frac = Double(i) / Double(segments - 1)
-                            RoundedRectangle(cornerRadius: 1.5)
-                                .fill(MeterMath.color(frac, palette: palette).opacity(frac <= level ? 1 : 0.12))
-                        }
-                    }
-                    if peakHold.peakHold > 0 {
-                        Circle()
-                            .fill(MeterMath.color(peakHold.peakHold, palette: palette))
-                            .frame(width: 6, height: 6)
-                            .shadow(color: MeterMath.color(peakHold.peakHold, palette: palette).opacity(0.8), radius: 2)
-                            .position(x: geo.size.width / 2,
-                                      y: geo.size.height * (1.0 - CGFloat(peakHold.peakHold)))
-                    }
-                }
-            }
-            Text("dB")
-                .font(.system(size: 6))
-                .foregroundStyle(.secondary)
-        }
-        .onChange(of: audio.diagnostics.currentLevelDB) { _, db in
-            peakHold.update(db: Double(db))
-        }
-    }
 }
 
 private extension View {

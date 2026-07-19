@@ -51,17 +51,47 @@ final class BatClassifier: SpeciesClassifier {
         "MYSO","MYTH","MYVE","MYVO","MYYU","NOISE","NYHU","NYMA","PAHE","PESU","TABR"
     ]
 
-    // Prior weights for coastal SW BC (from notebook Step 5).
-    static let bcPrior: [String: Float] = [
-        "MYLU": 1.00, "MYYU": 1.00, "MYCA": 1.00, "MYEV": 1.00,
-        "MYVO": 1.00, "MYTH": 1.00, "EPFU": 1.00, "LACI": 1.00,
-        "LANO": 1.00, "COTO": 1.00,
-        "EUMA": 0.75, "ANPA": 0.75, "PAHE": 0.75,
-        "LABO": 0.01, "MYCI": 0.01, "LABL": 0.01, "MYSE": 0.01,
-        "PESU": 0.01, "MYAU": 0.01, "LAIN": 0.01, "LASE": 0.01,
-        "TABR": 0.01, "EUPE": 0.01, "MYGR": 0.01, "MYLE": 0.01,
-        "MYSO": 0.01, "MYVE": 0.01, "NYHU": 0.01, "NYMA": 0.01,
-        "IDPH": 0.01, "NOISE": 1.00,
+    /// Code → scientific name, from NABat's official species-code reference table
+    /// (nabatmonitoring.org/species-codes, "NABat_Species_Codes (updated 10-8-24).xlsx" —
+    /// fetched and cross-checked directly, not guessed: a wrong mapping here would
+    /// silently query GBIF for the wrong species when suggesting location-based
+    /// priors, the same class of bug the project has hit before with model class
+    /// orders). "LABL" (Lasiurus blossevillii) isn't in that current sheet — it's
+    /// been superseded there, but is independently confirmed as the NABat ML
+    /// classifier's own code for the western red bat. "NOISE" has no scientific
+    /// name and is deliberately absent — it's not a real taxon, so GBIF-based prior
+    /// suggestion (see GBIFService.suggestPriors) never touches its species state.
+    static let scientificNames: [String: String] = [
+        "ANPA": "Antrozous pallidus",
+        "COTO": "Corynorhinus townsendii",
+        "EPFU": "Eptesicus fuscus",
+        "EUMA": "Euderma maculatum",
+        "EUPE": "Eumops perotis",
+        "IDPH": "Idionycteris phyllotis",
+        "LABL": "Lasiurus blossevillii",
+        "LABO": "Lasiurus borealis",
+        "LACI": "Lasiurus cinereus",
+        "LAIN": "Lasiurus intermedius",
+        "LANO": "Lasionycteris noctivagans",
+        "LASE": "Lasiurus seminolus",
+        "MYAU": "Myotis austroriparius",
+        "MYCA": "Myotis californicus",
+        "MYCI": "Myotis ciliolabrum",
+        "MYEV": "Myotis evotis",
+        "MYGR": "Myotis grisescens",
+        "MYLE": "Myotis leibii",
+        "MYLU": "Myotis lucifugus",
+        "MYSE": "Myotis septentrionalis",
+        "MYSO": "Myotis sodalis",
+        "MYTH": "Myotis thysanodes",
+        "MYVE": "Myotis velifer",
+        "MYVO": "Myotis volans",
+        "MYYU": "Myotis yumanensis",
+        "NYHU": "Nycticeius humeralis",
+        "NYMA": "Nyctinomops macrotis",
+        "PAHE": "Parastrellus hesperus",
+        "PESU": "Perimyotis subflavus",
+        "TABR": "Tadarida brasiliensis",
     ]
 
     private let model: NABatML
@@ -73,11 +103,13 @@ final class BatClassifier: SpeciesClassifier {
     }
 
     /// Render `pcm` (raw 384 kHz samples) as a NABat spectrogram and run inference.
-    /// `prior` maps a species code to its weight (0.01–1.0); defaults to the built-in BC prior.
+    /// `prior` maps a species code to its weight (0.01–1.0); defaults to neutral
+    /// (no bias) — real priors come from AutoIDSettings, populated from GBIF
+    /// occurrence data near the user's location (see GBIFService.suggestPriors).
     /// Safe to call on any background queue; returns nil if the PCM is too short or the model fails.
     func classify(pcm: [Float],
                   gate: QualityGate = QualityGate(),
-                  prior: (String) -> Float = { BatClassifier.bcPrior[$0] ?? 1.0 }) -> ClassificationResult? {
+                  prior: (String) -> Float = { _ in 1.0 }) -> ClassificationResult? {
         guard let rendered = NaBatSpectrogramRenderer.render(pcm: pcm) else { return nil }
         // Reject low-quality / edge-clipped pulses before running the model.
         guard gate.passes(rendered) else { return nil }

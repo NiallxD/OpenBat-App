@@ -76,7 +76,7 @@ final class SpeciesGuideStore {
             request.cachePolicy = .reloadIgnoringLocalCacheData
             request.timeoutInterval = 15
             let (data, response) = try await URLSession.shared.data(for: request)
-            guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
                 throw URLError(.badServerResponse)
             }
             let remote = try JSONDecoder().decode(SpeciesGuide.self, from: data)
@@ -85,7 +85,7 @@ final class SpeciesGuideStore {
                 lastRefreshError = "Guide update needs a newer app version."
                 return
             }
-            guard remote.dataVersion > guide.dataVersion else { return } // already current
+            guard remote.dataVersion > guide.dataVersion else { return }
             try data.write(to: Self.cacheURL, options: .atomic)
             guide = remote
             source = .cached

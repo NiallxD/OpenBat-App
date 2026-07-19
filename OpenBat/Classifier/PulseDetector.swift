@@ -294,10 +294,13 @@ final class PulseDetector {
         }
         guard passPulseCount > 0 else { return }
 
+        let descriptor = activeClassifier()?.descriptor
         guard let outcome = PassAggregation.aggregate(
             passAggPulses,
             minAdjustedConfidence: autoIDSettings?.minPassConfidence ?? 0.05,
-            minPulseCount: autoIDSettings?.minPassPulseCount ?? 1
+            minPulseCount: autoIDSettings?.minPassPulseCount ?? 1,
+            rawConfidenceThreshold: descriptor?.noidRawConfidenceThreshold ?? PassAggregation.noidRawConfidenceThreshold,
+            noiseClassName: descriptor?.noiseClassName
         ) else { return }   // NoID
 
         let passResult = ClassificationResult(
@@ -308,7 +311,8 @@ final class PulseDetector {
         lastPassResult = passResult
         lastPassPulseCount = passPulseCount
         lastPassDate = Date()
-        ClassificationLogger.shared.logPass(passResult, pulseCount: passPulseCount)
+        ClassificationLogger.shared.logPass(passResult, pulseCount: passPulseCount,
+                                            modelID: autoIDSettings?.activeModelID)
 
         // Second-place species by mean posterior — surfaced as a runner-up suggestion
         // in the species feed. Not meaningful for a NOISE outcome (its meanScores are
@@ -393,9 +397,18 @@ final class PulseDetector {
     private var pendingArmAbs = 0       // onset arm time, to bound how long we wait
 
     /// Trailing audio (seconds) held past the onset before a capture fires. Must cover
-    /// the largest classification window (NABat: 50 ms @ 30 % onset → 35 ms trailing)
-    /// as well as the display window, so neither is truncated. ~5 ms slack on top.
-    private let deferTrailSeconds = 0.06
+    /// every registered model's classification window (the trailing fraction after
+    /// onset, `windowSeconds * (1 - onsetFraction)`) as well as the display window, so
+    /// none of them are truncated — computed as a max over `ModelRegistry.all` (NABat:
+    /// 50 ms @ 30% onset → 35 ms trailing; BatDetect2: 256 ms @ 30% onset → 179.2 ms
+    /// trailing) rather than hardcoded, so adding a model with a longer window doesn't
+    /// silently truncate its captures. ~5 ms slack on top.
+    private var deferTrailSeconds: Double {
+        let maxTrailing = ModelRegistry.all
+            .map { $0.input.windowSeconds * (1 - $0.input.onsetFraction) }
+            .max() ?? 0.055
+        return maxTrailing + 0.005
+    }
 
     // Active classifier, lazily built from the active model descriptor and cached
     // until the active model id changes.
@@ -534,7 +547,15 @@ final class PulseDetector {
         let now = Date()
         pulseCount += 1
         recentDetections.append(now)
-        recentDetections.removeAll { now.timeIntervalSince($0) > rateWindowSeconds }
+        // Dates are appended in order, so expired entries are always a prefix —
+        // scan only up to the first still-valid one instead of the full-array
+        // predicate pass removeAll(where:) makes on every detection.
+        let cutoff = now.addingTimeInterval(-rateWindowSeconds)
+        let firstValid = recentDetections.firstIndex { $0 >= cutoff }
+            ?? recentDetections.endIndex
+        if firstValid > recentDetections.startIndex {
+            recentDetections.removeFirst(firstValid)
+        }
         if let first = recentDetections.first, recentDetections.count > 1 {
             let span = now.timeIntervalSince(first)
             pulseRateHz = span > 0 ? Double(recentDetections.count - 1) / span : 0
@@ -591,7 +612,10 @@ final class PulseDetector {
                 d[code] = s.effectivePrior(for: code)
             }
         } else {
-            priorSnapshot = active?.descriptor.defaultPrior ?? [:]
+            // No AutoIDSettings attached (shouldn't happen outside tests/previews) —
+            // no static default prior exists anymore, so this just falls through to
+            // `{ priorSnapshot[$0] ?? 1.0 }`'s neutral fallback below.
+            priorSnapshot = [:]
         }
         let gate = autoIDSettings?.qualityGate ?? .disabled
 
@@ -676,7 +700,8 @@ final class PulseDetector {
                                              imageSpanMs: result?.cleanSpanMs)
                 self.accumulatePulse(captured, raw: classification.rawScores, adjusted: classification.allScores)
                 self.onPulseClassified?(classification, captured.date)
-                ClassificationLogger.shared.logPulse(classification)
+                ClassificationLogger.shared.logPulse(classification,
+                                                     modelID: self.autoIDSettings?.activeModelID)
             }
         }
     }

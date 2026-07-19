@@ -15,9 +15,11 @@
 //               head back to the live edge.
 //
 //  GPU memory:  ring texture + seek texture ≈ 9 MB total.
-//  CPU memory:  liveHistory ≈ 44 MB (120 s at UInt8); snapshotHistory another
-//               ≈ 44 MB while held (COW, materialises on first post-snapshot
-//               append to the live buffer).
+//  CPU memory:  liveHistory ≈ 92 MB (60 s × 1500 cols/s × 1024 bins at UInt8);
+//               snapshotHistory another ≈ 92 MB while held (COW, materialises on the
+//               first post-snapshot append to the live buffer). History was 120 s
+//               (≈ 184 MB resident, ≈ 368 MB peak while scrolling) — halved to 60 s to
+//               cut the jetsam risk on base-model devices running CoreML alongside it.
 //
 
 import MetalKit
@@ -118,7 +120,7 @@ final class SpectrogramRenderer: NSObject, MTKViewDelegate {
 
     init?(processor: SpectrogramProcessor,
           maxVisibleColumns: Int = 2048,
-          historySeconds: Double = 120,
+          historySeconds: Double = 60,
           guardColumns: Int = 512) {
         guard
             let device = MTLCreateSystemDefaultDevice(),
@@ -389,6 +391,10 @@ final class SpectrogramRenderer: NSObject, MTKViewDelegate {
         displayHead += (target - displayHead) * 0.05
 
         displayHead = min(displayHead, totalColumns)
-        displayHead = max(displayHead, totalColumns - Double(ringTextureWidth - visibleColumns))
+        // Floor at 0: before `ringTextureWidth` columns have been written the
+        // (totalColumns − guard) lower bound is negative, which let displayHead settle
+        // at a negative value during the first ~1.7 s. Clamping to 0 keeps it pinned to
+        // real, written columns from the first frame.
+        displayHead = max(displayHead, max(0, totalColumns - Double(ringTextureWidth - visibleColumns)))
     }
 }

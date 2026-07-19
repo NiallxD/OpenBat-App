@@ -27,10 +27,18 @@ nonisolated final class TimeExpansionProcessor: @unchecked Sendable {
     private var _gain: Float = 4
     private var _bandLowFraction: Double = 0
     private var _bandHighFraction: Double = 1
-    /// Detection threshold in dBFS (band-limited RMS). Louder ⇒ call. Default kept
-    /// in sync with RTESettings.defaultThresholdDB (RTESettings.apply overwrites it
-    /// on launch anyway; this is the fallback before settings are applied).
-    private var _thresholdDB: Float = -38
+    /// How far (dB) a gate block's detection-band RMS must sit ABOVE the rolling
+    /// noise floor to count as a call. Relative rather than absolute (the old fixed
+    /// −38 dBFS) so quiet high-frequency species (e.g. California Myotis, which sit
+    /// ~18–25 dB over the floor but only −32…−39 dBFS absolute) still open the gate,
+    /// while the floor auto-tracks conditions to keep duty bounded. Default kept in
+    /// sync with RTESettings.defaultMarginDB (apply() overwrites it on launch).
+    private var _marginDB: Float = 12
+    /// Detection high-pass cutoff (Hz). Only energy above this drives the gate, so
+    /// low-frequency handling noise (footsteps, clothing, wind — all well below the
+    /// bat band) can't trigger expansion. The enqueued (listened) audio is unchanged;
+    /// this filter feeds the gate DECISION only. Matches PulseDetector.minFrequencyHz.
+    private var _minFrequencyHz: Float = 15_000
     /// How long to keep the gate open after the signal drops below threshold (ms).
     private var _holdMs: Float = 15.0
     /// RMS window size for the sub-buffer gate (ms). Smaller = more responsive; larger = smoother.
@@ -41,9 +49,14 @@ nonisolated final class TimeExpansionProcessor: @unchecked Sendable {
         set { ctrlLock.lock(); _gain = newValue; ctrlLock.unlock() }
     }
 
-    var thresholdDB: Float {
-        get { ctrlLock.lock(); defer { ctrlLock.unlock() }; return _thresholdDB }
-        set { ctrlLock.lock(); _thresholdDB = newValue; ctrlLock.unlock() }
+    var marginDB: Float {
+        get { ctrlLock.lock(); defer { ctrlLock.unlock() }; return _marginDB }
+        set { ctrlLock.lock(); _marginDB = newValue; ctrlLock.unlock() }
+    }
+
+    var minFrequencyHz: Float {
+        get { ctrlLock.lock(); defer { ctrlLock.unlock() }; return _minFrequencyHz }
+        set { ctrlLock.lock(); _minFrequencyHz = newValue; ctrlLock.unlock() }
     }
 
     var holdMs: Float {
@@ -74,10 +87,22 @@ nonisolated final class TimeExpansionProcessor: @unchecked Sendable {
     private var applyLP = false
     private var appliedLowFraction = -1.0
     private var appliedHighFraction = -1.0
+    /// Detection high-pass (4th-order = two cascaded biquads) at `minFrequencyHz`.
+    /// Runs continuously (like the band filters) so its state stays stable; the
+    /// filtered signal is used only to measure per-block RMS for the gate decision.
+    private var detHPa = Biquad(), detHPb = Biquad()
+    private var appliedMinFreq = -1.0
+    /// Rolling estimate of the detection-band noise floor (dB). Tracks down fast to
+    /// the quiet background and rises slowly, so a short call doesn't inflate it but
+    /// a sustained loud section gradually does (bounding gate duty). The gate opens
+    /// when a block sits `marginDB` above this.
+    private var noiseFloorDB: Float = -60
     /// Samples still pushed after the level drops, to catch call tails / bridge dips.
     /// Sample-based so the gate tracks the real call extent rather than whole IO buffers.
     private var holdSamplesRemaining = 0
     private var scratch = [Float]()
+    /// Parallel to `scratch`: the detection-high-passed signal, used for gate RMS only.
+    private var detScratch = [Float]()
 
     // MARK: Lock-free SPSC ring (push expanded call samples; silence between calls)
 
@@ -113,6 +138,8 @@ nonisolated final class TimeExpansionProcessor: @unchecked Sendable {
         inputSampleRate = fs
         let (low, high) = bandFractions()
         reconfigureBand(low: low, high: high)
+        reconfigureDetection(minFreq: Double(minFrequencyHz))
+        noiseFloorDB = -60
         holdSamplesRemaining = 0
         writeIndexA.store(0, ordering: .relaxed)
         readIndexA.store(0, ordering: .relaxed)
@@ -139,6 +166,20 @@ nonisolated final class TimeExpansionProcessor: @unchecked Sendable {
         appliedHighFraction = high
     }
 
+    /// (Re)build the detection high-pass at `minFreq`. Two cascaded biquads give a
+    /// 4th-order roll-off (~24 dB/oct), so content an octave or more below the cutoff
+    /// — footsteps, clothing, wind — is knocked well under the floor before the gate
+    /// measures it. A cutoff at/below 100 Hz disables it (pass everything).
+    private func reconfigureDetection(minFreq: Double) {
+        let nyquist = inputSampleRate / 2
+        let cutoff = max(0, min(minFreq, nyquist * 0.98))
+        if cutoff > 100 {
+            detHPa = .highpass(cutoff: cutoff, sampleRate: inputSampleRate)
+            detHPb = .highpass(cutoff: cutoff, sampleRate: inputSampleRate)
+        }
+        appliedMinFreq = minFreq
+    }
+
     // MARK: Producer (capture thread)
 
     func process(_ buffer: AVAudioPCMBuffer) {
@@ -150,36 +191,55 @@ nonisolated final class TimeExpansionProcessor: @unchecked Sendable {
         if lowF != appliedLowFraction || highF != appliedHighFraction {
             reconfigureBand(low: lowF, high: highF)
         }
+        let minFreq = Double(minFrequencyHz)
+        if minFreq != appliedMinFreq { reconfigureDetection(minFreq: minFreq) }
+        let applyDetHP = appliedMinFreq > 100
         let g = gain
-        let threshold = thresholdDB
+        let margin = marginDB
         // Compute sample counts from the ms settings each buffer — cheap and avoids
         // a separate "applied" tracking for these two values.
         let holdSamples = max(1, Int(Double(holdMs) / 1000.0 * inputSampleRate))
         let gateBlock   = max(1, Int(Double(gateBlockMs) / 1000.0 * inputSampleRate))
 
         scratch.removeAll(keepingCapacity: true)
+        detScratch.removeAll(keepingCapacity: true)
         if scratch.capacity < n { scratch.reserveCapacity(n) }
+        if detScratch.capacity < n { detScratch.reserveCapacity(n) }
 
-        // Band-limit the whole buffer (filters must run continuously for stability).
+        // Band-limit the whole buffer for LISTENING (filters must run continuously for
+        // stability), and separately high-pass it for the gate DECISION. Both filter
+        // chains run every sample so their state stays valid across buffers.
         for i in 0..<n {
             var x = channel[i]
             if applyHP { x = bandHPb.process(bandHPa.process(x)) }
             if applyLP { x = bandLPb.process(bandLPa.process(x)) }
             scratch.append(x)
+            let d = applyDetHP ? detHPb.process(detHPa.process(channel[i])) : channel[i]
+            detScratch.append(d)
         }
 
-        // Sub-buffer gate: scan short blocks and only queue those at/after a call,
-        // with a sample-based hold. This keeps the queued audio close to the real
-        // call extent, so 8× expansion doesn't fall behind on whole 8 ms buffers.
+        // Sub-buffer gate: scan short blocks, measure the detection-band RMS, and open
+        // only when it rises `margin` dB above the rolling noise floor. Relative gating
+        // catches quiet calls that a fixed threshold misses; the high-passed detection
+        // signal keeps low-frequency handling noise from ever reaching the decision.
+        // A sample-based hold keeps the queued audio close to the real call extent, so
+        // 8× expansion doesn't fall behind on whole IO buffers.
         var i = 0
         while i < n {
             let end = min(i + gateBlock, n)
             let len = end - i
             var ss: Float = 0
-            for j in i..<end { ss += scratch[j] * scratch[j] }
+            for j in i..<end { ss += detScratch[j] * detScratch[j] }
             let rms = sqrt(ss / Float(len))
             let db = rms > 0 ? 20 * log10(rms) : -120
-            if db >= threshold { holdSamplesRemaining = holdSamples }
+
+            // Track the floor: fall fast toward a quieter block, rise slowly toward a
+            // louder one. A brief call barely nudges it; sustained loudness lifts it,
+            // which raises the effective threshold and bounds duty on dense passes.
+            let alpha: Float = db < noiseFloorDB ? 0.2 : 0.002
+            noiseFloorDB += alpha * (db - noiseFloorDB)
+
+            if db >= noiseFloorDB + margin { holdSamplesRemaining = holdSamples }
             if holdSamplesRemaining > 0 {
                 enqueue(scratch, range: i..<end, gain: g)
                 holdSamplesRemaining = max(0, holdSamplesRemaining - len)

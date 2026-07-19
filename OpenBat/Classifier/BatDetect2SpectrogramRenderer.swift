@@ -5,12 +5,11 @@
 //  Spectrogram config for BatDetect2 (macaodha/batdetect2, CC BY-NC 4.0 — the
 //  MIT-adjacent base model, NOT the batdetect2-acoupi GPL3 wrapper).
 //
-//  Params below are transcribed from the published v2.0.0b2 preprocessing config
-//  (bat_detect2/preprocess/{audio,spectrogram,config}.py, model.yaml) — they are
-//  NOT YET VERIFIED against a converted checkpoint's actual expected input, since no
-//  BatDetect2 weights have been converted to CoreML yet. Treat every value here as a
-//  starting point to confirm once real weights + a reference spectrogram are in hand
-//  (same process NaBatSpectrogramRenderer went through — see its magma/viridis note).
+//  Params below are confirmed against the actual v2.0.0b2 checkpoint
+//  (batdetect2_uk_same.ckpt's stored hyper_parameters['preprocess'], read directly
+//  from the Lightning checkpoint — not guessed from docs). See
+//  batdetect2_conversion.md for how these were extracted and verified end-to-end
+//  (Python `BatDetect2API` on a real UK example WAV vs. this Swift path).
 //
 //  Unlike NABat (a 100×100 fixed classifier over a single pre-cut pulse), BatDetect2
 //  is a fully-convolutional detector: it expects a longer spectrogram chunk and
@@ -24,19 +23,19 @@ import Foundation
 
 enum BatDetect2SpectrogramRenderer {
 
-    // 256 kHz target, 2 ms window, 75% overlap — matches the published config.
-    // PCM handed in must already be at this rate (resample upstream if the model's
-    // ModelInputSpec window is cut from 384 kHz audio; see BatDetect2Classifier).
+    // 256 kHz target, 2 ms window, 75% overlap — confirmed against the checkpoint's
+    // stored preprocess config. PCM handed in must already be at this rate (resample
+    // upstream from 384 kHz; see BatDetect2Classifier).
     static let targetSampleRate = 256_000.0
     static let nFFT = 512                          // 0.002 s * 256 kHz
     static let hop  = 128                          // 25% of nFFT (75% overlap)
 
-    // TODO: confirm exact output width against the converted checkpoint. Height
-    // (128) and the resize_factor (0.5) come straight from model.yaml; width depends
-    // on how many frames the model's input chunk produces at hop=128 samples, then
-    // halved by resize_factor — placeholder until verified.
+    // Height (128) is fixed regardless of clip length (ResizeConfig.height in the
+    // checkpoint's preprocess config). Width scales with input duration — confirmed
+    // 256 samples-wide for a 256 ms window (matches ModelInputSpec.batdetect2's
+    // windowSeconds, chosen to equal the model's own training clip length).
     static let outH = 128
-    static let outW = 128
+    static let outW = 256
 
     static let spec = SpectrogramRenderSpec(
         sampleRate: targetSampleRate,
@@ -45,10 +44,15 @@ enum BatDetect2SpectrogramRenderer {
         window: .hann,
         minFreqHz: 10_000,
         maxFreqHz: 120_000,
-        // PCEN constants from model.yaml's spectrogram_transforms entry — unverified.
-        scaling: .pcen(timeConstant: 0.1, gain: 0.98, bias: 2, power: 0.5),
+        // PCEN constants read directly from the checkpoint's stored preprocess
+        // config: gain/bias/power match the published defaults, but time_constant is
+        // 0.4, NOT the 0.1 originally guessed here.
+        scaling: .pcen(timeConstant: 0.4, gain: 0.98, bias: 2, power: 0.5),
         denoise: .spectralMeanSubtraction,
-        normalize: .peak,
+        // The real pipeline's spectrogram_transforms list is exactly
+        // [PcenConfig(), SpectralMeanSubtractionConfig()] — no normalize step at all.
+        // `.peak` (originally guessed here) does not exist in the reference pipeline.
+        normalize: .none,
         resize: .bilinear,
         color: .grayscale,
         outputWidth: outW,

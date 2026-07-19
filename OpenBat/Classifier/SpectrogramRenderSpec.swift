@@ -26,9 +26,11 @@ enum SpectrogramScaling {
     /// 10 * log10(power), matching librosa/matplotlib dB spectrograms (NABat).
     case db
     /// Per-Channel Energy Normalization (Lostanlen et al.), as used by BatDetect2's
-    /// preprocessing. `timeConstant` in seconds; `gain`/`bias`/`power` per the standard
-    /// PCEN formula. NOT YET VERIFIED against a converted BatDetect2 checkpoint — the
-    /// exact smoothing/gain constants must be confirmed once real weights are in hand.
+    /// preprocessing. Runs on the LINEAR magnitude STFT (not dB) — matches
+    /// `batdetect2.preprocess.audio.PCEN` exactly, including its legacy-compatibility
+    /// quirk of computing the smoothing constant from a fixed hop of 512 samples and
+    /// `sampleRate/10`, regardless of the STFT's actual hop size. `timeConstant` in
+    /// seconds; `gain`/`bias`/`power` per that same formula.
     case pcen(timeConstant: Float, gain: Float, bias: Float, power: Float)
 }
 
@@ -44,8 +46,11 @@ enum SpectrogramDenoise {
 enum SpectrogramNormalize {
     /// Per-spectrogram min/max to [0,1] (mirrors matplotlib's auto-norm; NABat).
     case minMax
-    /// Per-spectrogram peak-normalize so max |value| = 1 (BatDetect2).
+    /// Per-spectrogram peak-normalize so max |value| = 1.
     case peak
+    /// No normalization step — BatDetect2's real preprocessing config has none; its
+    /// PCEN + spectral-mean-subtraction stages already bound the output range.
+    case none
 }
 
 enum SpectrogramResize {

@@ -43,8 +43,10 @@ enum PassAggregation {
     }
 
     /// Mean per-pulse raw confidence below this is NoID — the reference pipeline's
-    /// fixed threshold, applied to each pulse's own top raw score (not adjusted by
-    /// species priors), not a user-tunable setting.
+    /// fixed threshold for NABat, applied to each pulse's own top raw score (not
+    /// adjusted by species priors), not a user-tunable setting. Kept as the default so
+    /// existing call sites that don't pass `rawConfidenceThreshold` explicitly keep
+    /// NABat's exact, already-verified behavior.
     static let noidRawConfidenceThreshold: Float = 0.57
 
     /// Returns `nil` for NoID — not enough raw-confidence evidence to call anything,
@@ -52,9 +54,25 @@ enum PassAggregation {
     /// `Outcome(species: "NOISE", ...)` when the raw evidence's top class is noise, or
     /// the winning species among `minAdjustedConfidence`/`minPulseCount`-gated,
     /// prior-adjusted posteriors otherwise.
+    ///
+    /// - Parameters:
+    ///   - rawConfidenceThreshold: model-specific NoID cutoff. Defaults to NABat's
+    ///     verified 0.57. BatDetect2's classifier head is a per-pixel softmax with very
+    ///     different dynamics (see `BatDetect2Classifier` — often far more sharply
+    ///     peaked than NABat's), so its threshold below (0.4, in `ModelDescriptor`) is
+    ///     a documented starting point, NOT independently verified against a labelled
+    ///     noise/no-call dataset the way NABat's 0.57 was. Revisit once field data is
+    ///     available.
+    ///   - noiseClassName: the class name that means "not a bat call", if the model has
+    ///     one. NABat's reference pipeline has an explicit "NOISE" class; BatDetect2 has
+    ///     none — its background/"not bat" probability is summed away into
+    ///     `detection_probs` before OpenBat ever sees per-class scores (see
+    ///     `BatDetect2Classifier`), so passing `nil` here is correct, not a gap.
     static func aggregate(_ pulses: [Pulse],
                           minAdjustedConfidence: Float,
-                          minPulseCount: Int) -> Outcome? {
+                          minPulseCount: Int,
+                          rawConfidenceThreshold: Float = noidRawConfidenceThreshold,
+                          noiseClassName: String? = "NOISE") -> Outcome? {
         guard !pulses.isEmpty else { return nil }
         let n = Float(pulses.count)
 
@@ -62,15 +80,15 @@ enum PassAggregation {
         // whatever it predicted, unbiased by priors) — independent of which class
         // actually wins below.
         let meanRawConfidence = pulses.reduce(Float(0)) { $0 + ($1.rawScores.values.max() ?? 0) } / n
-        guard meanRawConfidence >= noidRawConfidenceThreshold else { return nil }   // NoID
+        guard meanRawConfidence >= rawConfidenceThreshold else { return nil }   // NoID
 
         // Winning class by raw evidence, aggregated across the pass's pulses.
         var rawSum: [String: Float] = [:]
         for p in pulses { for (k, v) in p.rawScores { rawSum[k, default: 0] += v } }
         guard let rawBest = rawSum.max(by: { $0.value < $1.value }) else { return nil }
 
-        if rawBest.key == "NOISE" {
-            return Outcome(species: "NOISE",
+        if let noiseClassName, rawBest.key == noiseClassName {
+            return Outcome(species: noiseClassName,
                            confidence: rawBest.value / n,
                            meanScores: rawSum.mapValues { $0 / n })
         }
@@ -80,7 +98,7 @@ enum PassAggregation {
         // species-filtering/confidence-tuning behaviour.
         var adjSum: [String: Float] = [:]
         for p in pulses { for (k, v) in p.adjustedScores { adjSum[k, default: 0] += v } }
-        let candidates = adjSum.filter { $0.key != "NOISE" }
+        let candidates = adjSum.filter { $0.key != noiseClassName }
         let pool = candidates.isEmpty ? adjSum : candidates
         guard let best = pool.max(by: { $0.value < $1.value }) else { return nil }
 

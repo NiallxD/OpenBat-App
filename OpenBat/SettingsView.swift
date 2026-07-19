@@ -144,17 +144,17 @@ struct SettingsView: View {
     private var rteTab: some View {
         Form {
             Section {
-                LabeledContent("Threshold") {
-                    Text(String(format: "%.0f dBFS", rteSettings.thresholdDB))
+                LabeledContent("Minimum frequency") {
+                    Text(String(format: "%.0f kHz", rteSettings.minFrequencyKHz))
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                 }
-                Slider(value: $rteSettings.thresholdDB, in: -80 ... -20, step: 1)
-                Text("Band-limited RMS must exceed this level for a block to be treated as a bat call. Because playback is 8× slower than real time, the gate must stay mostly closed — around −38 dB keeps only the calls. Lowering it far (e.g. −50) makes expansion fall permanently behind and pop; raise it if handling noise triggers expansion.")
+                Slider(value: $rteSettings.minFrequencyKHz, in: 5 ... 60, step: 1)
+                Text("Only sounds above this frequency can trigger expansion. If too many non-bat sounds (footsteps, keys, wind) are triggering RTE, move this up a bit; move it down to catch lower-frequency bats.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } header: {
-                Text("Gate")
+                Text("Noise rejection")
             }
 
             Section {
@@ -186,6 +186,16 @@ struct SettingsView: View {
             }
 
             Section {
+                LabeledContent("Sensitivity") {
+                    Text(String(format: "%.0f dB", rteSettings.marginDB))
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                }
+                Slider(value: $rteSettings.marginDB, in: 4 ... 24, step: 1)
+                Text("How far a sound must rise above the background noise floor to trigger. Lower catches fainter calls but lets in more noise; higher only takes the loudest. The gate is relative, so this adapts to conditions automatically.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
                 LabeledContent("Gate window") {
                     Text(String(format: "%.2f ms", rteSettings.gateBlockMs))
                         .monospacedDigit()

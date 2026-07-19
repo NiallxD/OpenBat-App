@@ -19,7 +19,7 @@ OpenBat/
     SpectrogramProcessor.swift    Audio-thread FFT → normalised 0–1 columns via vDSP
     SpectrogramRenderer.swift     MTKViewDelegate — ring texture + seek texture + HistoryBuffer
     SpectrogramView.swift         SwiftUI wrapper with drag-to-scroll gesture
-    HistoryBuffer.swift           UInt8 ring buffer, 120 s @ ~44 MB; COW snapshot in O(1)
+    HistoryBuffer.swift           UInt8 ring buffer, 60 s @ ~90 MB; COW snapshot in O(1)
     FrequencyBandControl.swift    Popover: frequency range + time-window sliders
     RangeSlider.swift             Custom dual-thumb slider
     Spectrogram.metal             Full-screen pass, inferno colormap, ring-buffer UV math
@@ -34,6 +34,9 @@ OpenBat/
     GBIFService.swift              Scientific-name → taxon-key resolution (cached) + tile-overlay factory
     GBIFRangeMapView.swift          MKTileOverlay-backed interactive distribution map
   ContentView.swift               Main screen — GeometryReader proportional layout
+  PulseZoomView.swift             Pinch-zoom + pan leaf view over the captured pulse render
+  PulseStatsViews.swift           Stat row/column leaf views + shared staleIDSeconds
+  LiveStatusViews.swift           Tuning pill, mic-status pill, amplitude meters
   DiagnosticsView.swift           Debug sheet
 ```
 
@@ -74,14 +77,14 @@ Defined identically in `Spectrogram.metal` (GPU) and `PulseDetector.colormap()` 
 
 | Symbol | Value | Notes |
 |--------|-------|-------|
-| `windowLen` | 1024 | Hann-windowed, raw samples per column |
-| `fftSize` | 2048 | zero-padded from `windowLen` — doubles bins, not hop |
-| `hopSize` | 512 | 50% overlap (of `windowLen`) |
+| `windowLen` | 512 | Hann-windowed, raw samples per column |
+| `fftSize` | 2048 | zero-padded from `windowLen` — drives bin count, not hop |
+| `hopSize` | 256 | 50% overlap (of `windowLen`) |
 | `binCount` | 1024 | `fftSize / 2` |
-| `columnsPerSecond` | 750 | at 384 kHz: `384000 / 512` (unchanged — hop drives this, not fftSize) |
+| `columnsPerSecond` | 1500 | at 384 kHz: `384000 / 256` (hop drives this, not fftSize) |
 | `maxVisibleColumns` | 2048 | seek texture width |
 | `ringTextureWidth` | 2560 | `maxVisibleColumns + 512 guard` |
-| `liveHistory capacity` | 90 000 | 120 s × 750 cols |
+| `liveHistory capacity` | 90 000 | 60 s × 1500 cols (`historySeconds` default in `SpectrogramRenderer`) |
 | `minDB / maxDB` | −90 / −20 dB | display dynamic range |
 | Metal max texture dim | 16 384 | limits single-texture history |
 

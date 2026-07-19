@@ -23,6 +23,10 @@ struct SpeciesFeedView: View {
     /// The pulse-view column in iPhone landscape is too narrow for the pulse
     /// thumbnail + text + badge to share a row — that placement passes false.
     var showsThumbnail: Bool = true
+    /// False when no AutoID model is active (`AutoIDSettings.activeModelID == nil`) —
+    /// the feed can never populate in that state, so the empty view explains how to
+    /// turn a classifier on instead of implying the app is just waiting for a bat.
+    var autoIDActive: Bool = true
 
     private var entries: [PassRecord] {
         store.speciesFeed(sessionID: activeSessionID, since: sessionStart)
@@ -48,18 +52,33 @@ struct SpeciesFeedView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private var emptyState: some View {
-        VStack(spacing: 4) {
-            Image("batIcon")
-                .resizable()
-                .scaledToFit()
-                .frame(width: 28, height: 28)
-                .foregroundStyle(.secondary)
-            Text(sessionStart == nil ? "Start detecting to see species here" : "No species detected yet")
+    @ViewBuilder private var emptyState: some View {
+        VStack(spacing: 6) {
+            if autoIDActive {
+                Image("batIcon")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 28, height: 28)
+                    .foregroundStyle(.secondary)
+            } else {
+                Image(systemName: "sparkle.magnifyingglass")
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+            }
+            Text(emptyMessage)
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
         }
+        .padding(.horizontal, 12)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var emptyMessage: String {
+        if !autoIDActive {
+            return "No AutoID model is active. Turn one on in Settings ▸ AutoID to identify species."
+        }
+        return sessionStart == nil ? "Start detecting to see species here" : "No species detected yet"
     }
 }
 
@@ -76,6 +95,10 @@ private struct SpeciesFeedRow: View {
         // Re-evaluates every second so "3s ago" keeps counting up without needing a
         // new detection to trigger a redraw.
         TimelineView(.periodic(from: .now, by: 1)) { context in
+            // Ages out on the same `staleIDSeconds` clock that reds the species
+            // stat cell — a dimmed row reads as "heard earlier", matching the
+            // stat panel instead of implying the bat is still overhead.
+            let isStale = context.date.timeIntervalSince(pass.date) > staleIDSeconds
             // The runner-up/noise lines sit below the main row at full width —
             // sharing the middle column with the name scrunches everything when
             // this feed is in a narrow panel (e.g. the pulse-view column in
@@ -91,6 +114,8 @@ private struct SpeciesFeedRow: View {
                 }
                 secondaryLines
             }
+            .opacity(isStale ? 0.5 : 1)
+            .animation(.easeInOut(duration: 0.6), value: isStale)
         }
         .padding(8)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))

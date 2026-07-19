@@ -12,12 +12,10 @@
 //  detection in that window scored highest — discarding BatDetect2's bounding-box
 //  localization, keeping only its classification.
 //
-//  NOT YET FUNCTIONAL: no converted CoreML weights are bundled. `init()` loads
-//  "BatDetect2" by name via the generic MLModel API (not an Xcode-generated wrapper
-//  class) specifically so this file compiles today and only needs the .mlpackage
-//  dropped into the project + `classNames`/`outputKeys` confirmed once a conversion
-//  exists — no other code changes. See BatDetect2SpectrogramRenderer for the
-//  (unverified) preprocessing config this depends on.
+//  `init()` loads "BatDetect2" by name via the generic MLModel API (not an
+//  Xcode-generated wrapper class) so this file didn't need to change once the
+//  .mlpackage was dropped into the project. See BatDetect2SpectrogramRenderer for
+//  the (checkpoint-verified) preprocessing config this depends on.
 //
 
 import CoreML
@@ -26,11 +24,43 @@ import Foundation
 
 final class BatDetect2Classifier: SpeciesClassifier {
 
-    // TODO: replace with the real class order from the converted model's label file.
-    // Per the published UK pretrained model: 17 UK species + a generic "Bat" (uncertain
-    // ID) class + a background/"Not bat" class. Do NOT ship this guessed list — it must
-    // come from the checkpoint being converted.
-    static let classNames: [String] = []
+    // The real 17-class order, read directly from batdetect2_uk_same.ckpt's stored
+    // hyper_parameters['class_names'] — NOT the paper's prose description. There is
+    // no extra "generic Bat" or "background/NotBat" class in this list: the model's
+    // ClassifierHead has num_classes+1 output channels (the +1 is a background logit
+    // used only inside the softmax, then discarded — see ModelOutput.detection_probs,
+    // which is derived by SUMMING these 17 class probabilities, not from a separate
+    // detection head). Codes are BatDetect2's own 6-letter species abbreviations
+    // (not NABat 4-letter codes), uppercased for consistency with the rest of the app.
+    static let classNames: [String] = [
+        "MYOMYS", "MYOALC", "CNESER", "PIPNAT", "BARBAR", "MYONAT", "MYODAU",
+        "MYOBRA", "PIPPIP", "MYOBEC", "PIPPYG", "RHIHIP", "NYCLEI", "RHIFER",
+        "PLEAUR", "NYCNOC", "PLEAUS",
+    ]
+
+    /// Code → scientific name, read directly from the checkpoint's own stored
+    /// `targets_config.classification_targets` (each entry's `dwc:scientificName`
+    /// tag) during conversion — see batdetect2_conversion.md. Used to suggest
+    /// location-based priors from GBIF occurrence data (GBIFService.suggestPriors).
+    static let scientificNames: [String: String] = [
+        "MYOMYS": "Myotis mystacinus",
+        "MYOALC": "Myotis alcathoe",
+        "CNESER": "Cnephaeus serotinus",
+        "PIPNAT": "Pipistrellus nathusii",
+        "BARBAR": "Barbastella barbastellus",
+        "MYONAT": "Myotis nattereri",
+        "MYODAU": "Myotis daubentonii",
+        "MYOBRA": "Myotis brandtii",
+        "PIPPIP": "Pipistrellus pipistrellus",
+        "MYOBEC": "Myotis bechsteinii",
+        "PIPPYG": "Pipistrellus pygmaeus",
+        "RHIHIP": "Rhinolophus hipposideros",
+        "NYCLEI": "Nyctalus leisleri",
+        "RHIFER": "Rhinolophus ferrumequinum",
+        "PLEAUR": "Plecotus auritus",
+        "NYCNOC": "Nyctalus noctula",
+        "PLEAUS": "Plecotus austriacus",
+    ]
 
     // Output feature names BatDetect2's forward pass exposes; confirm against the
     // actual CoreML conversion's output names (coremltools may rename them).
@@ -52,13 +82,14 @@ final class BatDetect2Classifier: SpeciesClassifier {
     }
 
     /// `pcm` is the raw pulse window at the app's native rate (384 kHz); resampled here
-    /// to BatDetect2's expected 256 kHz before rendering. `gate` is unused — BatDetect2
-    /// has no equivalent of NABat's quality-gate metrics defined yet (denoise: .none
-    /// equivalent quality path), so every window is classified.
+    /// to BatDetect2's expected 256 kHz before rendering, matching the reference
+    /// pipeline's `scipy.signal.resample_poly` (see PolyphaseResampler) rather than a
+    /// naive linear interpolation, which would alias badly this close to Nyquist.
+    /// `gate` is unused — BatDetect2 has no equivalent of NABat's quality-gate metrics
+    /// defined yet (denoise: .none equivalent quality path), so every window is
+    /// classified.
     func classify(pcm: [Float], gate: QualityGate, prior: (String) -> Float) -> ClassificationResult? {
-        guard !Self.classNames.isEmpty else { return nil }  // scaffold: no real labels yet
-
-        let resampled = Self.resample(pcm, from: 384_000, to: BatDetect2SpectrogramRenderer.targetSampleRate)
+        let resampled = PolyphaseResampler.resample(pcm, from: 384_000, to: BatDetect2SpectrogramRenderer.targetSampleRate)
         guard let rendered = BatDetect2SpectrogramRenderer.render(pcm: resampled) else { return nil }
 
         let outH = BatDetect2SpectrogramRenderer.outH
@@ -81,6 +112,11 @@ final class BatDetect2Classifier: SpeciesClassifier {
         // found, discarding its bbox/size regression entirely.
         let n = Self.classNames.count
         let hw = outH * outW
+        // Guards the assumption that the model's output spatial resolution equals the
+        // input tensor's (128x256) — true for BatDetect2's UNet-style architecture, but
+        // not verified by the type system, so a converter/shape change fails safely
+        // here instead of indexing out of bounds below.
+        guard detectionProbs.count == hw, classProbs.count == n * hw else { return nil }
         var bestCell = 0
         var bestDetProb = -Float.greatestFiniteMagnitude
         for i in 0..<hw {
@@ -112,23 +148,5 @@ final class BatDetect2Classifier: SpeciesClassifier {
                                     confidence: adjusted[bestIdx],
                                     allScores: allScores,
                                     rawScores: rawScores)
-    }
-
-    /// Linear-interpolation resample. Adequate as a placeholder — a real deployment
-    /// should confirm whether BatDetect2's training data anti-aliased the downsample
-    /// (384 kHz → 256 kHz is a 2:3 ratio) before relying on this for accuracy.
-    private static func resample(_ pcm: [Float], from srcRate: Double, to dstRate: Double) -> [Float] {
-        guard srcRate != dstRate, !pcm.isEmpty else { return pcm }
-        let ratio = srcRate / dstRate
-        let outCount = max(1, Int(Double(pcm.count) / ratio))
-        var out = [Float](repeating: 0, count: outCount)
-        for i in 0..<outCount {
-            let srcPos = Double(i) * ratio
-            let i0 = min(pcm.count - 1, Int(srcPos))
-            let i1 = min(pcm.count - 1, i0 + 1)
-            let frac = Float(srcPos - Double(i0))
-            out[i] = pcm[i0] + (pcm[i1] - pcm[i0]) * frac
-        }
-        return out
     }
 }

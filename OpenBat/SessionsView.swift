@@ -381,6 +381,11 @@ struct PassDetailView: View {
                     }
                 }
                 .padding(.vertical, 4)
+            } footer: {
+                // Plain-language caveat: the % is a posterior renormalized over the
+                // species enabled in AutoID settings, not an absolute certainty —
+                // without this, "85%" over-promises whenever species are disabled.
+                Text("Confidence is how the classifier splits its belief between the species enabled in AutoID settings — not an absolute certainty. Disabling species hands their share to the rest, so the number can read high even for an unclear call.")
             }
 
             if pass.complex != nil {

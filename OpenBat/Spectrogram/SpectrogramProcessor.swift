@@ -89,6 +89,15 @@ nonisolated final class SpectrogramProcessor: @unchecked Sendable {
     /// Sample rate of the captured stream, needed to convert bins → Hz. Set from
     /// the audio path once the rate is known.
     var sampleRate: Double = 0
+    /// Set (from the main thread) while a sheet covers the live spectrogram and
+    /// its Metal render loop is paused (see `SpectrogramView.isPaused`). Skips
+    /// FFT column generation entirely — a plain Bool read/write is fine here:
+    /// it only ever gates a coarse "do the analysis or don't" branch, so a
+    /// stale read for one buffer either way is harmless. Without this, `process`
+    /// kept generating columns nobody was draining, both wasting audio-thread
+    /// CPU and building a backlog that made the display "catch up" in a rapid
+    /// fast-forward once the render loop resumed.
+    nonisolated(unsafe) var suspended = false
     /// Normalised (0…1) magnitude required before a peak counts as a detection.
     var peakThreshold: Float = 0.5
     /// Restrict the peak search to this fraction-of-Nyquist band (matches the
@@ -164,16 +173,36 @@ nonisolated final class SpectrogramProcessor: @unchecked Sendable {
     /// `startSamplesBack = 0` returns the most recent `count` samples.
     /// Returns an empty array if the requested window isn't in the ring buffer.
     func pcmSnapshot(count: Int, startSamplesBack: Int = 0) -> [Float] {
-        // Copy under the lock: the audio thread mutates pcmBuffer through an
-        // unsafe pointer, so reading it unlocked is a race (and a Swift-exclusivity
-        // violation). The windows we snapshot are small (≤ ~120 KB), so the copy
-        // costs microseconds — cheap enough to hold the lock for.
         pcmLock.lock()
         defer { pcmLock.unlock() }
+        return pcmSnapshotLocked(count: count, startSamplesBack: startSamplesBack)
+    }
 
+    /// Returns `count` samples ending at absolute stream index `endAbsolute`
+    /// (exclusive) — i.e. samples `[endAbsolute - count, endAbsolute)`. Anchoring by
+    /// absolute index (stamped on each `Column.endSample`) keeps the captured pulse
+    /// window fixed regardless of drain timing. Empty if the range has scrolled out
+    /// of the ring or lies in the future.
+    func pcmSnapshot(count: Int, endingAtAbsolute endAbsolute: Int) -> [Float] {
+        // ONE lock across the whole mapping: reading `pcmTotalWritten`, releasing, then
+        // re-locking to read `pcmHead` let the audio thread advance both between the two
+        // reads, so `startSamplesBack` (from the old total) no longer lined up with the
+        // now-newer head — shifting the "absolute-anchored" window by up to one IO
+        // buffer. Computing startBack and copying under a single held lock keeps the
+        // window pinned to the exact absolute range requested.
+        pcmLock.lock()
+        defer { pcmLock.unlock() }
+        guard endAbsolute <= pcmTotalWritten else { return [] }
+        return pcmSnapshotLocked(count: count, startSamplesBack: pcmTotalWritten - endAbsolute)
+    }
+
+    /// Core ring copy — caller must already hold `pcmLock`. The audio thread mutates
+    /// `pcmBuffer` through an unsafe pointer, so reading it (and `pcmHead`) must happen
+    /// under the lock. The windows are small (≤ ~120 KB), so the copy costs microseconds.
+    private func pcmSnapshotLocked(count: Int, startSamplesBack: Int) -> [Float] {
         let available = pcmFilled ? pcmCapacity : pcmHead
         let totalBack = count + startSamplesBack
-        guard available >= totalBack else { return [] }
+        guard startSamplesBack >= 0, available >= totalBack else { return [] }
 
         var out = [Float](repeating: 0, count: count)
         // The window ends `startSamplesBack` before head.
@@ -187,20 +216,6 @@ nonisolated final class SpectrogramProcessor: @unchecked Sendable {
             out.replaceSubrange(firstLen..<count, with: pcmBuffer[0..<end])
         }
         return out
-    }
-
-    /// Returns `count` samples ending at absolute stream index `endAbsolute`
-    /// (exclusive) — i.e. samples `[endAbsolute - count, endAbsolute)`. Anchoring by
-    /// absolute index (stamped on each `Column.endSample`) keeps the captured pulse
-    /// window fixed regardless of drain timing. Empty if the range has scrolled out
-    /// of the ring or lies in the future.
-    func pcmSnapshot(count: Int, endingAtAbsolute endAbsolute: Int) -> [Float] {
-        pcmLock.lock()
-        let total = pcmTotalWritten
-        pcmLock.unlock()
-        guard endAbsolute <= total else { return [] }
-        let startBack = total - endAbsolute
-        return pcmSnapshot(count: count, startSamplesBack: startBack)
     }
 
     deinit { vDSP_destroy_fftsetup(fftSetup) }
@@ -231,6 +246,19 @@ nonisolated final class SpectrogramProcessor: @unchecked Sendable {
         pcmLock.unlock()
 
         accumulator.append(contentsOf: UnsafeBufferPointer(start: channel, count: frames))
+
+        guard !suspended else {
+            // No display/pulse-detector is draining columns right now — skip the
+            // FFT work and just keep the accumulator from growing unbounded,
+            // preserving the trailing overlap so resuming picks up cleanly.
+            let keep = windowLen - 1
+            if accumulator.count > keep {
+                let drop = accumulator.count - keep
+                accumulator.removeFirst(drop)
+                accumAbsStart += drop
+            }
+            return
+        }
 
         var columns: [Column] = []
         var offset = 0

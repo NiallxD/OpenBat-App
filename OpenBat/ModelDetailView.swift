@@ -12,6 +12,19 @@
 
 import SwiftUI
 
+/// Small "BETA" pill shown next to a model's name wherever it's listed
+/// (`AutoIDSettingsView`'s model row, this screen's title).
+struct BetaBadge: View {
+    var body: some View {
+        Text("BETA")
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(.orange)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Color.orange.opacity(0.15), in: Capsule())
+    }
+}
+
 struct ModelDetailView: View {
     @Bindable var settings: AutoIDSettings
     let model: ModelDescriptor
@@ -27,6 +40,16 @@ struct ModelDetailView: View {
         }
         .navigationTitle(model.displayName)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            if model.isBeta {
+                ToolbarItem(placement: .principal) {
+                    VStack(spacing: 2) {
+                        Text(model.displayName).font(.headline)
+                        BetaBadge()
+                    }
+                }
+            }
+        }
     }
 
     // MARK: Metadata
@@ -154,7 +177,9 @@ struct ModelDetailView: View {
                 withAnimation { settings.resetModel(model.id) }
             }
         } footer: {
-            Text("Restores this model's species, priors, and thresholds to its built-in defaults.")
+            Text("Restores this model's species, priors, and thresholds to a neutral baseline "
+               + "(every species enabled, no location bias). Priors re-suggest automatically "
+               + "from nearby GBIF occurrence data the next time your location updates.")
         }
     }
 

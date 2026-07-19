@@ -7,7 +7,7 @@
 //  the inferno colormap — at 4× the memory efficiency of Float32.
 //
 //  At 1500 cols/sec (384 kHz / hop 256) and 1024 bins:
-//    120 s → 180 000 cols × 1024 bins ≈ 176 MB per buffer
+//    60 s → 90 000 cols × 1024 bins ≈ 92 MB per buffer
 //
 //  Snapshot semantics: snapshot() is O(1) thanks to Swift Array copy-on-write.
 //  The physical ~44 MB copy materialises only when the original buffer first

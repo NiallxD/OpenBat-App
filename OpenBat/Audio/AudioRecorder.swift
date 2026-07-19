@@ -47,6 +47,11 @@ final class AudioRecorder: @unchecked Sendable {
     private var sessionLabelQ = "Listening only"
     private var inputNameQ = "—"
     private var lastCoordinateQ: (lat: Double, lon: Double)?
+    // Which model was active when pulses were classified — set from the main thread
+    // via `setActiveModel(id:)` whenever AutoIDSettings.activeModelID changes, so
+    // `speciesAutoID`'s NoID/NOISE gate can use the SAME model's calibration
+    // PulseDetector itself uses, instead of always assuming NABat.
+    private var activeModelIDQ: String?
     // Classified pulses land here (from PulseDetector.onPulseClassified) tagged with
     // their capture date, carrying both raw and prior-adjusted scores so
     // `speciesAutoID` can run the same `PassAggregation` rule PulseDetector uses for
@@ -112,6 +117,14 @@ final class AudioRecorder: @unchecked Sendable {
             let cutoff = Date().addingTimeInterval(-(maxSegmentSeconds + 5))
             recentClassificationsQ.removeAll { $0.date < cutoff }
         }
+    }
+
+    /// Tell the recorder which model is currently active, so `speciesAutoID` gates a
+    /// WAV's GUANO species tag with that model's own NoID threshold/noise-class name
+    /// rather than always assuming NABat. Call once at startup and again whenever
+    /// `AutoIDSettings.activeModelID` changes (see ContentView).
+    func setActiveModel(id: String?) {
+        queue.async { [weak self] in self?.activeModelIDQ = id }
     }
 
     func setArmed(_ on: Bool) {
@@ -273,20 +286,31 @@ final class AudioRecorder: @unchecked Sendable {
     /// Winning species (GUANO/Wildlife-Acoustics-style code, "NOISE", or "No ID")
     /// across the pulses classified during this segment's time span, plus its mean
     /// confidence and contributing pulse count. Uses the same `PassAggregation` rule
-    /// as `PulseDetector.finalizePass` (mean per-pulse raw confidence below 0.57 →
-    /// "No ID"; NOISE allowed to win on raw evidence) so a WAV's GUANO tag can't
-    /// disagree with what the app itself would report — scoped to just this file's
-    /// pulses rather than the whole multi-segment pass. The extra
-    /// `minPassConfidence`/`minPassPulseCount` strictness PulseDetector applies on
-    /// top (AutoIDSettings, user-tunable) isn't applied here — this is only the
-    /// reference pipeline's own NoID/NOISE gate, since AudioRecorder doesn't have
-    /// access to the active model's settings.
+    /// as `PulseDetector.finalizePass`, gated with whichever model's
+    /// `noidRawConfidenceThreshold`/`noiseClassName` was active when these pulses were
+    /// classified (see `setActiveModel(id:)`) — so a WAV's GUANO species tag can't
+    /// disagree with what the app itself would report for that model. Falls back to
+    /// NABat's calibration if no model is set (matches the prior, model-blind
+    /// behavior). The extra `minPassConfidence`/`minPassPulseCount` strictness
+    /// PulseDetector applies on top (AutoIDSettings, user-tunable) isn't applied here
+    /// either — this is only the reference pipeline's own NoID/NOISE gate.
     private func speciesAutoID(segmentStart: Date) -> (species: String, confidence: Float?, pulseCount: Int) {
         let inSegment = recentClassificationsQ.filter { $0.date >= segmentStart }
         guard !inSegment.isEmpty else { return ("No ID", nil, 0) }
 
+        let descriptor = ModelRegistry.descriptor(id: activeModelIDQ)
         let pulses = inSegment.map { PassAggregation.Pulse(rawScores: $0.raw, adjustedScores: $0.adjusted) }
-        guard let outcome = PassAggregation.aggregate(pulses, minAdjustedConfidence: 0, minPulseCount: 1) else {
+        guard let outcome = PassAggregation.aggregate(
+            pulses,
+            minAdjustedConfidence: 0,
+            minPulseCount: 1,
+            rawConfidenceThreshold: descriptor?.noidRawConfidenceThreshold ?? PassAggregation.noidRawConfidenceThreshold,
+            // NOT `descriptor?.noiseClassName ?? "NOISE"` — that would silently
+            // overwrite BatDetect2's deliberate `nil` (no noise class) with "NOISE".
+            // `.map` preserves the distinction between "no descriptor found" (fall
+            // back to "NOISE") and "descriptor found, and it has no noise class".
+            noiseClassName: descriptor.map { $0.noiseClassName } ?? "NOISE"
+        ) else {
             return ("No ID", nil, 0)
         }
         return (outcome.species, outcome.confidence, inSegment.count)
