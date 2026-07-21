@@ -47,10 +47,28 @@ final class SpeciesGuideStore {
     }()
 
     init() {
-        let bundled = Self.loadBundled()
-        let cached = Self.decode(from: Self.cacheURL)
-        // Prefer whichever copy is newer; ties go to the cache (identical data).
-        if let cached, cached.dataVersion >= (bundled?.dataVersion ?? 0) {
+        let bundledData = Self.bundledData()
+        let bundled = bundledData.flatMap(Self.decode(data:))
+        let cachedData = try? Data(contentsOf: Self.cacheURL)
+        let cached = cachedData.flatMap(Self.decode(data:))
+
+        if let cached, let bundled, cached.dataVersion == bundled.dataVersion {
+            // Equal declared version — normally means "identical data", but a
+            // bundled-JSON edit that forgot to bump dataVersion would tie here too
+            // and then silently keep shadowing the new bundled content forever
+            // (this exact bug happened once: boundary polygons were added to the
+            // bundle without a version bump, and a stale same-version cache
+            // shadowed them). A raw byte comparison catches that: only trust the
+            // cache if it's actually byte-identical to what's bundled now.
+            if cachedData == bundledData {
+                guide = cached
+                source = .cached
+            } else {
+                guide = bundled
+                source = .bundled
+                try? FileManager.default.removeItem(at: Self.cacheURL)
+            }
+        } else if let cached, cached.dataVersion > (bundled?.dataVersion ?? 0) {
             guide = cached
             source = .cached
         } else if let bundled {
@@ -96,18 +114,17 @@ final class SpeciesGuideStore {
 
     // MARK: Decoding helpers
 
-    private static func loadBundled() -> SpeciesGuide? {
+    private static func bundledData() -> Data? {
         guard let url = Bundle.main.url(forResource: "SpeciesGuideData",
                                         withExtension: "json") else {
             assertionFailure("SpeciesGuideData.json missing from bundle")
             return nil
         }
-        return decode(from: url)
+        return try? Data(contentsOf: url)
     }
 
-    private static func decode(from url: URL) -> SpeciesGuide? {
-        guard let data = try? Data(contentsOf: url),
-              let guide = try? JSONDecoder().decode(SpeciesGuide.self, from: data),
+    private static func decode(data: Data) -> SpeciesGuide? {
+        guard let guide = try? JSONDecoder().decode(SpeciesGuide.self, from: data),
               guide.schemaVersion <= SpeciesGuide.supportedSchemaVersion else { return nil }
         return guide
     }
