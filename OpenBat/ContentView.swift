@@ -378,6 +378,7 @@ struct ContentView: View {
                 }
             }
             controlBar
+            appFooter
         }
         .padding(.horizontal)
         .padding(.top, 6)
@@ -409,7 +410,28 @@ struct ContentView: View {
     }
 
     /// Leading-toolbar switcher between Detector and Sessions (replaces the bottom tabs).
+    ///
+    /// Same iOS 26 FixedMenu workaround as `optionsMenu`/`paletteButton`: without the
+    /// `GlassEffectContainer` + `.glassEffect(.identity)` wrapping, Liquid Glass hides
+    /// this Menu's label for the whole time it's open and then visibly fades/pulses it
+    /// back in seconds after dismissal.
     private var sectionMenu: some View {
+        Group {
+            if #available(iOS 26.0, *) {
+                GlassEffectContainer {
+                    sectionMenuContent {
+                        Image(systemName: section.icon).glassEffect(.identity)
+                    }
+                    .clipped()
+                }
+            } else {
+                sectionMenuContent { Image(systemName: section.icon) }
+            }
+        }
+        .accessibilityLabel("Switch view")
+    }
+
+    private func sectionMenuContent(@ViewBuilder label: () -> some View) -> some View {
         Menu {
             Picker("View", selection: $section) {
                 ForEach(AppSection.allCases, id: \.self) { s in
@@ -421,14 +443,34 @@ struct ContentView: View {
                 Label("Info & Tour", systemImage: "info.circle")
             }
         } label: {
-            Image(systemName: section.icon)
+            label()
         }
-        .accessibilityLabel("Switch view")
     }
 
     /// Settings / diagnostics menu — shown in the nav-bar trailing slot on the
     /// Detector section.
+    ///
+    /// Same iOS 26 FixedMenu workaround as `paletteButton`: without the
+    /// `GlassEffectContainer` + `.glassEffect(.identity)` wrapping, Liquid
+    /// Glass hides this Menu's label for the whole time it's open and then
+    /// visibly fades/pulses it back in seconds after dismissal.
     private var optionsMenu: some View {
+        Group {
+            if #available(iOS 26.0, *) {
+                GlassEffectContainer {
+                    optionsMenuContent {
+                        Image(systemName: "ellipsis.circle").glassEffect(.identity)
+                    }
+                    .clipped()
+                }
+            } else {
+                optionsMenuContent { Image(systemName: "ellipsis.circle") }
+            }
+        }
+        .accessibilityLabel("Menu")
+    }
+
+    private func optionsMenuContent(@ViewBuilder label: () -> some View) -> some View {
         Menu {
             Button { showSettings = true } label: {
                 Label("Settings", systemImage: "gearshape")
@@ -438,9 +480,8 @@ struct ContentView: View {
                 Label("Diagnostics", systemImage: "gauge.medium")
             }
         } label: {
-            Image(systemName: "ellipsis.circle")
+            label()
         }
-        .accessibilityLabel("Menu")
     }
 
     /// Portrait: stacked panels with a fixed stats slot and the control bar below.
@@ -457,6 +498,7 @@ struct ContentView: View {
                 }
             }
             controlBar
+            appFooter
         }
         .padding(.horizontal)
         .padding(.top, 6)
@@ -1079,6 +1121,19 @@ struct ContentView: View {
         .padding(.vertical, 6)
     }
 
+    /// Credit + version/build line under the control bar. Version/build come straight
+    /// from the app's Info.plist (CFBundleShortVersionString / CFBundleVersion), which
+    /// Xcode stamps from the target's Marketing Version / Current Project Version at
+    /// build time — no manual syncing needed.
+    private var appFooter: some View {
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—"
+        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "—"
+        return Text("Created by Niall Bell · v\(version) (\(build))")
+            .font(.caption2)
+            .foregroundStyle(.tertiary)
+            .padding(.bottom, 4)
+    }
+
     private var playStopButton: some View {
         Button {
             if audio.isRunning { stopDetecting() }
@@ -1157,26 +1212,13 @@ struct ContentView: View {
     }
 
     private var recordButton: some View {
-        Button { toggleRecording() } label: {
-            Image(systemName: recorder.isWriting ? "record.circle.fill" : "record.circle")
-                .controlIcon()
-        }
-        .buttonStyle(.bordered)
-        .tint(recorder.isArmed ? .red : .secondary)
-        .accessibilityLabel(recorder.isArmed ? "Stop recording" : "Record")
-        .tourTarget(.record)
+        RecordButton(recorder: recorder, action: toggleRecording)
     }
 
     /// Compact variant for the full-screen transport pill — see
     /// `playStopButtonCompact`.
     private var recordButtonCompact: some View {
-        Button { toggleRecording() } label: {
-            Image(systemName: recorder.isWriting ? "record.circle.fill" : "record.circle")
-                .font(.callout)
-        }
-        .tint(recorder.isArmed ? .red : .secondary)
-        .accessibilityLabel(recorder.isArmed ? "Stop recording" : "Record")
-        .tourTarget(.record)
+        RecordButtonCompact(recorder: recorder, action: toggleRecording)
     }
 
     /// Record button arms the triggered WAV recorder and starts/stops the
@@ -1250,6 +1292,44 @@ struct ContentView: View {
         }
     }
 
+}
+
+/// The main record toggle: arms/disarms the triggered WAV recorder. A standalone
+/// `View` struct, not a computed property on `ContentView` — see CLAUDE.md's
+/// `@Observable` churn note. `recorder.isWriting` flips on every WAV pass open/close
+/// during active detection; reading it directly in a `ContentView.body` computed
+/// property invalidated the whole screen at that rate, dropping taps on the transport
+/// buttons and both toolbar menus mid-tap.
+struct RecordButton: View {
+    let recorder: AudioRecorder
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: recorder.isWriting ? "record.circle.fill" : "record.circle")
+                .controlIcon()
+        }
+        .buttonStyle(.bordered)
+        .tint(recorder.isArmed ? .red : .secondary)
+        .accessibilityLabel(recorder.isArmed ? "Stop recording" : "Record")
+        .tourTarget(.record)
+    }
+}
+
+/// Compact variant for the full-screen transport pill — see `RecordButton`.
+struct RecordButtonCompact: View {
+    let recorder: AudioRecorder
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: recorder.isWriting ? "record.circle.fill" : "record.circle")
+                .font(.callout)
+        }
+        .tint(recorder.isArmed ? .red : .secondary)
+        .accessibilityLabel(recorder.isArmed ? "Stop recording" : "Record")
+        .tourTarget(.record)
+    }
 }
 
 private extension View {

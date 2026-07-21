@@ -139,7 +139,10 @@ struct ModelDescriptor: Identifiable {
     }
 }
 
-enum ModelRegistry {
+/// `nonisolated`: same reasoning as `Biquad`/`AudioLevel` — a static registry with no
+/// mutable state and no isolation annotation, looked up from `AudioRecorder`'s
+/// background queue and `PulseDetector`'s capture pipeline as well as the main actor.
+nonisolated enum ModelRegistry {
 
     /// Stable id for the bundled NABat model — referenced by the v1→v2 settings migration.
     static let nabatID = "nabat-ml-v1"

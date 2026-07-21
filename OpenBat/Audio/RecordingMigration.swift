@@ -34,20 +34,12 @@ enum RecordingMigration {
     static func run(store: ClassificationStore) async -> Result {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let root = docs.appendingPathComponent("Recordings", isDirectory: true)
-        guard let enumerator = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)
-        else { return Result() }
-
         let known = Set(store.recordings.map { $0.relativeWavPath })
         // Snapshot on the main actor — Parsed work below runs off it, so it can't
         // read `store` live; a session's start/end can't change mid-scan anyway.
         let sessions = store.sessions
 
-        var wavURLs: [URL] = []
-        for case let url as URL in enumerator where url.pathExtension.lowercased() == "wav" {
-            let relativePath = String(url.path.dropFirst(docs.path.count + 1))
-            guard !known.contains(relativePath) else { continue }
-            wavURLs.append(url)
-        }
+        let wavURLs = collectWavURLs(root: root, docsPath: docs.path, known: known)
 
         var result = Result()
         for url in wavURLs {
@@ -91,12 +83,39 @@ enum RecordingMigration {
         case rejectedNoise
     }
 
+    /// `FileManager.DirectoryEnumerator`'s iteration is `noasync` — Foundation
+    /// disallows calling it lexically inside an `async` function body, even though
+    /// the actual blocking is identical either way. Pulled into its own plain
+    /// (non-async) `nonisolated` function so `run(store:)`'s `async` body never calls
+    /// it directly.
+    private nonisolated static func collectWavURLs(root: URL, docsPath: String, known: Set<String>) -> [URL] {
+        guard let enumerator = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)
+        else { return [] }
+        var wavURLs: [URL] = []
+        for case let url as URL in enumerator where url.pathExtension.lowercased() == "wav" {
+            let relativePath = String(url.path.dropFirst(docsPath.count + 1))
+            guard !known.contains(relativePath) else { continue }
+            wavURLs.append(url)
+        }
+        return wavURLs
+    }
+
     private nonisolated static func parseAndRender(url: URL, docsPath: String, sessions: [RecordingSession]) -> ParseOutcome {
         let relativePath = String(url.path.dropFirst(docsPath.count + 1))
         // No GUANO chunk at all (a corrupt file, or one from before GUANO existed) —
         // nothing reliable to import; skip rather than guess.
         guard let fields = GuanoMetadata.read(from: url) else { return .noMetadata }
 
+        // A fresh formatter per call, not a shared static — `ISO8601DateFormatter`
+        // isn't Sendable/thread-safe for concurrent use (a real Swift 6 mode error, not
+        // just a strictness warning), and `parseAndRender` runs off the main actor via
+        // `Task.detached`. Construction is cheap and this only runs once per orphaned
+        // WAV during a manual, one-time migration — no need to share the instance.
+        let isoFormatter: ISO8601DateFormatter = {
+            let f = ISO8601DateFormatter()
+            f.formatOptions = [.withInternetDateTime]
+            return f
+        }()
         let date = fields["Timestamp"].flatMap { isoFormatter.date(from: $0) }
             ?? (try? url.resourceValues(forKeys: [.creationDateKey]))?.creationDate
             ?? Date()
@@ -148,10 +167,4 @@ enum RecordingMigration {
         guard parts.count == 2 else { return nil }
         return CLLocationCoordinate2D(latitude: parts[0], longitude: parts[1])
     }
-
-    private nonisolated static let isoFormatter: ISO8601DateFormatter = {
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime]
-        return f
-    }()
 }

@@ -26,7 +26,10 @@
 
 import Foundation
 
-enum PassAggregation {
+/// `nonisolated`: same reasoning as `Biquad`/`AudioLevel` — stateless gating math with
+/// no isolation annotation, called from both `PulseDetector.finalizePass` (main actor)
+/// and `AudioRecorder.speciesAutoID` (now `nonisolated`, its own background queue).
+nonisolated enum PassAggregation {
 
     /// One pulse's contribution to a pass: raw (pre-prior) softmax scores from the
     /// model, and prior-adjusted, renormalized posteriors (`BatClassifier.classify`'s

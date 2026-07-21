@@ -51,7 +51,10 @@ final class AudioEngineController {
 
     /// The rate we *ask* iOS for. The Griff samples at 384 kHz; iOS may or may not
     /// honour it (the central risk this milestone validates).
-    static let preferredSampleRate: Double = 384_000
+    /// `nonisolated`: an immutable Sendable constant read from `configureSession`'s
+    /// detached (non-main-actor) task — without this it inherits this class's
+    /// `@MainActor` isolation by the project's default and can't be read from there.
+    nonisolated static let preferredSampleRate: Double = 384_000
 
     // MARK: Listening (heterodyne / time expansion)
 
@@ -104,6 +107,12 @@ final class AudioEngineController {
     // UI on every callback (~90/s) floods the main thread and starves the
     // spectrogram's render loop, so we throttle to `statsFlushRate`.
     private let statsLock = NSLock()
+    // The compiler suggests plain `nonisolated` over `nonisolated(unsafe)` here, but
+    // that's wrong once `@Observable`'s macro expansion is in the picture: it turns
+    // these into tracked accessors that plain `nonisolated` can't attach to ("cannot
+    // be applied to mutable stored properties"). `(unsafe)` is the one that actually
+    // works with the macro — `statsLock` is what makes concurrent access from the
+    // audio thread + `flushStats()` safe, same as before.
     private nonisolated(unsafe) var pendingBufferCount = 0
     private nonisolated(unsafe) var latestLevelDB: Float = AudioLevel.minDB
     /// The actual rate/channel count of delivered buffers, captured on the audio
@@ -139,7 +148,11 @@ final class AudioEngineController {
         // interrupts other apps' audio) — poll the available inputs on a slow
         // timer. The running engine's route-change handler covers the active case.
         inputPollTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in
+            // `[weak self]` on the Task itself, not just the outer Timer closure —
+            // implicitly closing over the outer closure's captured `self` from inside
+            // the Task reads as referencing a `var` across a concurrency boundary
+            // (a real Swift 6 error), even though it's just a weak class reference.
+            Task { @MainActor [weak self] in
                 guard let self, !self.isRunning else { return }
                 self.updateInputDiagnostics()
             }
@@ -468,18 +481,34 @@ final class AudioEngineController {
     private func registerForNotifications() {
         let center = NotificationCenter.default
 
+        // Both handlers below take Sendable enum/primitive values, not the
+        // `Notification` itself — `Notification` isn't Sendable, and capturing it
+        // into the `Task` closure (which crosses into `@MainActor` from this
+        // `@Sendable` NotificationCenter callback) is a real Swift 6 concurrency
+        // error, not just a strictness warning. Extracting the needed values here,
+        // before the `Task` is created, keeps everything crossing the boundary
+        // Sendable.
         center.addObserver(
             forName: AVAudioSession.routeChangeNotification,
             object: nil, queue: .main
         ) { [weak self] note in
-            Task { @MainActor in await self?.handleRouteChange(note) }
+            guard
+                let raw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
+                let reason = AVAudioSession.RouteChangeReason(rawValue: raw)
+            else { return }
+            Task { @MainActor in await self?.handleRouteChange(reason) }
         }
 
         center.addObserver(
             forName: AVAudioSession.interruptionNotification,
             object: nil, queue: .main
         ) { [weak self] note in
-            Task { @MainActor in self?.handleInterruption(note) }
+            guard
+                let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+                let type = AVAudioSession.InterruptionType(rawValue: raw)
+            else { return }
+            let optionsRaw = note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
+            Task { @MainActor [weak self] in self?.handleInterruption(type, optionsRaw: optionsRaw) }
         }
     }
 
@@ -490,13 +519,8 @@ final class AudioEngineController {
     /// (category change, override, configuration change) caused a restart storm
     /// once heterodyne enabled the speaker output — the change itself triggered
     /// another change, hanging the app.
-    private func handleRouteChange(_ note: Notification) async {
+    private func handleRouteChange(_ reason: AVAudioSession.RouteChangeReason) async {
         updateInputDiagnostics()
-
-        guard
-            let raw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
-            let reason = AVAudioSession.RouteChangeReason(rawValue: raw)
-        else { return }
 
         switch reason {
         case .newDeviceAvailable, .oldDeviceUnavailable:
@@ -521,13 +545,7 @@ final class AudioEngineController {
         }
     }
 
-    private func handleInterruption(_ note: Notification) {
-        guard
-            let info = note.userInfo,
-            let raw = info[AVAudioSessionInterruptionTypeKey] as? UInt,
-            let type = AVAudioSession.InterruptionType(rawValue: raw)
-        else { return }
-
+    private func handleInterruption(_ type: AVAudioSession.InterruptionType, optionsRaw: UInt) {
         switch type {
         case .began:
             statsTimer?.invalidate()
@@ -538,8 +556,7 @@ final class AudioEngineController {
             // Only auto-restart when iOS says the session may resume (e.g. after a
             // phone call). Restarting against the system's advice can fail or fight
             // another app for the session.
-            let optRaw = info[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
-            if AVAudioSession.InterruptionOptions(rawValue: optRaw).contains(.shouldResume) {
+            if AVAudioSession.InterruptionOptions(rawValue: optionsRaw).contains(.shouldResume) {
                 Task { await start() }
             } else {
                 status = "Interrupted — tap Start to resume"

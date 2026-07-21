@@ -17,7 +17,11 @@ import AVFoundation
 import Accelerate
 import UIKit
 
-enum RecordingSpectrogramRenderer {
+/// `nonisolated`: same reasoning as `Biquad`/`AudioLevel`/`GuanoMetadata` — this was
+/// always documented ("safe to call off the main thread... the caller decides where
+/// to run it") but had no explicit isolation annotation, so it inherited this
+/// project's `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` default anyway.
+nonisolated enum RecordingSpectrogramRenderer {
 
     /// Renders a full spectrogram overview of `wavURL`, downsampled on the time axis
     /// to at most `maxWidth` columns via max-pooling (preserves a brief loud call

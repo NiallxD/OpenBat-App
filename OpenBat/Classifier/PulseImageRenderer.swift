@@ -152,10 +152,19 @@ enum PulseImageRenderer {
                           &windowed, 1, vDSP_Length(windowLen))
                 windowed.withUnsafeBufferPointer { wBuf in
                     wBuf.baseAddress!.withMemoryRebound(to: DSPComplex.self, capacity: bins) { cplx in
-                        var split = DSPSplitComplex(realp: &realp, imagp: &imagp)
-                        vDSP_ctoz(cplx, 2, &split, 1, vDSP_Length(bins))
-                        vDSP_fft_zrip(fftSetup, &split, 1, log2n, FFTDirection(FFT_FORWARD))
-                        vDSP_zvabs(&split, 1, &mags, 1, vDSP_Length(bins))
+                        // realp/imagp pointers must stay valid across all three vDSP calls, not
+                        // just DSPSplitComplex's own init — nest under withUnsafeMutableBufferPointer
+                        // (matching SpectrogramProcessor.makeColumn's equivalent FFT) rather than
+                        // taking `&realp`/`&imagp` directly, which only guarantees the pointer for
+                        // the init call itself and could dangle for the reads/writes after it.
+                        realp.withUnsafeMutableBufferPointer { rp in
+                            imagp.withUnsafeMutableBufferPointer { ip in
+                                var split = DSPSplitComplex(realp: rp.baseAddress!, imagp: ip.baseAddress!)
+                                vDSP_ctoz(cplx, 2, &split, 1, vDSP_Length(bins))
+                                vDSP_fft_zrip(fftSetup, &split, 1, log2n, FFTDirection(FFT_FORWARD))
+                                vDSP_zvabs(&split, 1, &mags, 1, vDSP_Length(bins))
+                            }
+                        }
                     }
                 }
                 var s = scale

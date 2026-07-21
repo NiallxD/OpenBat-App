@@ -582,6 +582,17 @@ final class PulseDetector {
         guard !isCapturing else { return }
         isCapturing = true
 
+        // This pulse's own wall-clock capture time — NOT `lastDetectionDate`, which is
+        // a display-only property gated by quality/refresh-window logic (see below) and
+        // can go several pulses stale during a burst. `onPulseClassified` hands this date
+        // to `AudioRecorder.addClassifiedPulse`, which attributes pulses to a WAV segment
+        // by `date >= segmentStart` — a stale date silently excludes real classified
+        // pulses from that segment's aggregate, reporting NOID/0 pulses even though
+        // PulseDetector's own pass (unaffected, since it doesn't filter by date) shows a
+        // confident species. Captured once here so every consumer of this pulse's result
+        // agrees on when it actually happened.
+        let captureDate = Date()
+
         let sr  = sampleRate
         let floor = pulseNoiseFloor
         let minFreq = minFrequencyHz
@@ -696,7 +707,7 @@ final class PulseDetector {
                 let top = classification.allScores.sorted { $0.value > $1.value }
                     .prefix(6)
                     .map { ScoreEntry(species: $0.key, score: $0.value) }
-                let captured = CapturedPulse(date: self.lastDetectionDate ?? Date(),
+                let captured = CapturedPulse(date: captureDate,
                                              species: classification.species,
                                              confidence: classification.confidence,
                                              peakFreqHz: result?.peakFreq ?? 0,

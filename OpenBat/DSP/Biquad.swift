@@ -8,7 +8,14 @@
 
 import Foundation
 
-struct Biquad {
+/// Explicitly `nonisolated`: the project sets `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`,
+/// so without this annotation `Biquad`'s init/static factories/`process` would inherit
+/// `@MainActor` — but this type is constructed and driven entirely from the `nonisolated`
+/// real-time audio thread (HeterodyneProcessor, TimeExpansionProcessor). Every call from
+/// there would be a synchronous nonisolated→main-actor hop, bridged by an implicit
+/// `unsafeForcedSync` (the runtime warning this fixes) — pure DSP math with no shared
+/// state has no business being actor-isolated at all.
+nonisolated struct Biquad {
     var b0: Float = 1, b1: Float = 0, b2: Float = 0, a1: Float = 0, a2: Float = 0
     var z1: Float = 0, z2: Float = 0
 

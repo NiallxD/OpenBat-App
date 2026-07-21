@@ -37,20 +37,32 @@ struct SpeciesExplorerView: View {
     /// the whole planet as a spinnable globe — just pre-panned toward the user
     /// rather than a fixed point, so the globe opens already facing home.
     @State private var camera: MapCameraPosition
-    /// Guards the one-time pin-layout nudge in `globe`'s `.onAppear` — without
+    /// Guards the one-time opening pan/fade in `globe`'s `.onAppear` — without
     /// this it re-fires every time the globe reappears (e.g. popping back
-    /// from a region/species page), snapping the camera back to
-    /// `userCoordinate` instead of staying wherever the user last panned it to.
+    /// from a region/species page), snapping the camera back to Null Island
+    /// instead of staying wherever the user last panned it to.
     @State private var hasNudgedCameraOnce = false
+    /// Globe starts invisible and fades in once imagery has had a moment to
+    /// load, instead of popping in already fully opaque.
+    @State private var globeOpacity: Double = 0
 
     private static let fallbackCenter = CLLocationCoordinate2D(latitude: 30, longitude: -10)
+    /// Opening camera position — Null Island (0, 0), out in the Atlantic —
+    /// the globe swoops from here to `userCoordinate` on first appearance.
+    private static let openingCenter = CLLocationCoordinate2D(latitude: 0, longitude: 0)
+    /// Total wall-clock time for the opening swoop. Previously requested via
+    /// `withAnimation(duration: 4.0)`, which MapKit silently shortened to
+    /// ~1.5s in practice — this is the real, honored duration for the
+    /// hand-stepped animation in `animateSwoop`.
+    private static let swoopDuration = 6.0
+    private static let swoopStepInterval = 1.0 / 60.0
 
     init(store: SpeciesGuideStore, rangeStore: SpeciesRangeStore, userCoordinate: CLLocationCoordinate2D? = nil) {
         self.store = store
         self.rangeStore = rangeStore
         self.userCoordinate = userCoordinate
         _camera = State(initialValue: .camera(
-            MapCamera(centerCoordinate: userCoordinate ?? Self.fallbackCenter, distance: 40_000_000)
+            MapCamera(centerCoordinate: Self.openingCenter, distance: 60_000_000)
         ))
     }
 
@@ -135,35 +147,96 @@ struct SpeciesExplorerView: View {
 
     // MARK: Globe
 
+    /// Stable per-region tint, cycled by index rather than hashed from `id` so
+    /// colors stay visually distinct between neighbors regardless of slug text.
+    private static let regionPalette: [Color] = [.orange, .teal, .purple, .mint, .pink, .indigo, .yellow, .cyan]
+
+    private func regionColor(_ region: GuideRegion) -> Color {
+        let index = store.guide.regions.firstIndex(of: region) ?? 0
+        return Self.regionPalette[index % Self.regionPalette.count]
+    }
+
     private var globe: some View {
         Map(position: $camera) {
             ForEach(store.guide.regions) { region in
-                Annotation(region.name, coordinate: region.coordinate) {
-                    NavigationLink(value: SpeciesGuideDestination.region(region)) {
-                        RegionPin(count: store.guide.species(in: region).count)
+                if region.polygons.isEmpty {
+                    // No boundary data yet for this region — fall back to a pin.
+                    Annotation(region.name, coordinate: region.coordinate) {
+                        NavigationLink(value: SpeciesGuideDestination.region(region)) {
+                            RegionPin(count: store.guide.species(in: region).count)
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
+                } else {
+                    ForEach(Array(region.polygons.enumerated()), id: \.offset) { _, ring in
+                        MapPolygon(coordinates: ring)
+                            .foregroundStyle(regionColor(region).opacity(0.45))
+                            .stroke(regionColor(region), lineWidth: 2)
+                    }
+                    Annotation(region.name, coordinate: region.coordinate) {
+                        NavigationLink(value: SpeciesGuideDestination.region(region)) {
+                            RegionLabel(name: region.name, color: regionColor(region),
+                                        count: store.guide.species(in: region).count)
+                        }
+                        .buttonStyle(.plain)
+                    }
                 }
             }
         }
         .mapStyle(.imagery(elevation: .realistic))
         .overlay(alignment: .bottom) { globeFooter }
         .ignoresSafeArea(edges: .bottom)
+        .opacity(globeOpacity)
         .onAppear {
             guard !hasNudgedCameraOnce else { return }
             hasNudgedCameraOnce = true
+            withAnimation(.easeIn(duration: 0.5)) { globeOpacity = 1 }
             // MapKit's realistic-elevation globe doesn't lay out `Annotation`
             // pins on first render — they stay invisible until the camera
-            // moves at least once. A negligible programmatic nudge right
-            // after appearing forces that first layout pass so pins show up
-            // without the user needing to pan the globe themselves. Guarded to
-            // fire only once (not on every return from a pushed region/species
-            // page) so the camera otherwise just keeps whatever position the
-            // user last panned/tapped it to.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                camera = .camera(MapCamera(centerCoordinate: userCoordinate ?? Self.fallbackCenter,
-                                            distance: 39_999_999))
+            // moves at least once. The opening swoop (Null Island → the
+            // user's location) doubles as that first layout-triggering move,
+            // so pins show up without the user needing to pan themselves.
+            // Guarded to fire only once (not on every return from a pushed
+            // region/species page) so the camera otherwise just keeps
+            // whatever position the user last panned/tapped it to.
+            //
+            // Driven by hand rather than a single `withAnimation(duration:)`
+            // around one big camera jump — SwiftUI's `Map` doesn't reliably
+            // honor a requested duration for large `MapCamera` position
+            // changes; it substitutes MapKit's own short internal camera
+            // transition instead, so a "4 second" swoop actually completed
+            // in ~1.5s. Stepping the camera through many small, close-spaced
+            // updates forces MapKit to animate each hop at its own (short)
+            // pace back-to-back, which reads as one smooth, slow pan overall.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                animateSwoop(to: userCoordinate ?? Self.fallbackCenter)
             }
+        }
+    }
+
+    /// Steps `camera` from its current position to `destination` over
+    /// `Self.swoopDuration`, in small increments so MapKit's per-update
+    /// internal animation can't shortcut the overall pace (see `.onAppear`
+    /// above).
+    private func animateSwoop(to destination: CLLocationCoordinate2D) {
+        let steps = Int(Self.swoopDuration / Self.swoopStepInterval)
+        let startCenter = Self.openingCenter
+        let startDistance = 60_000_000.0
+        let endDistance = 40_000_000.0
+        var step = 0
+        Timer.scheduledTimer(withTimeInterval: Self.swoopStepInterval, repeats: true) { timer in
+            step += 1
+            let t = min(Double(step) / Double(steps), 1.0)
+            // easeInOut
+            let eased = t < 0.5 ? 2 * t * t : 1 - pow(-2 * t + 2, 2) / 2
+            let lat = startCenter.latitude + (destination.latitude - startCenter.latitude) * eased
+            let lon = startCenter.longitude + (destination.longitude - startCenter.longitude) * eased
+            let distance = startDistance + (endDistance - startDistance) * eased
+            Task { @MainActor in
+                camera = .camera(MapCamera(centerCoordinate: .init(latitude: lat, longitude: lon),
+                                            distance: distance))
+            }
+            if t >= 1.0 { timer.invalidate() }
         }
     }
 
@@ -245,6 +318,31 @@ private struct RegionPin: View {
                     .offset(x: 6, y: -6)
             }
         }
+    }
+}
+
+/// Centroid label used on regions drawn as a colored boundary outline (see
+/// `SpeciesExplorerView.globe`) — a compact name chip instead of `RegionPin`'s
+/// bat-icon pin, since the colored shape already marks the region.
+private struct RegionLabel: View {
+    let name: String
+    let color: Color
+    let count: Int
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Text(name)
+                .font(.caption.bold())
+            Text("\(count)")
+                .font(.caption2.bold())
+                .padding(3)
+                .background(.white.opacity(0.3), in: Circle())
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(color.gradient, in: Capsule())
+        .shadow(radius: 2)
     }
 }
 

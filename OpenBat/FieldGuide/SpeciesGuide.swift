@@ -47,16 +47,37 @@ struct SpeciesGuide: Codable {
     }
 }
 
-/// A geographic region pin on the explorer globe. `latitude`/`longitude` place
-/// the pin; species reference regions by `id`.
+/// A geographic region on the explorer globe. `latitude`/`longitude` place the
+/// label/fallback pin; species reference regions by `id`.
+///
+/// `boundary`, when present, draws the region as a filled/stroked outline
+/// instead of a pin — a GeoJSON-style MultiPolygon: an array of polygons
+/// (for regions split across landmasses, e.g. islands), each polygon an
+/// array of `[longitude, latitude]` pairs for its exterior ring (GeoJSON's
+/// coordinate order — no interior-ring/hole support, which coarse regional
+/// outlines don't need). Regions without a `boundary` fall back to the pin
+/// so the guide JSON can be migrated one region at a time.
 struct GuideRegion: Codable, Identifiable, Hashable {
-    var id: String            // stable slug, e.g. "uk-ireland"
-    var name: String          // display name, e.g. "UK & Ireland"
+    var id: String             // stable slug, e.g. "uk-ireland"
+    var name: String           // display name, e.g. "UK & Ireland"
     var latitude: Double
     var longitude: Double
+    var boundary: [[[Double]]]?
 
     var coordinate: CLLocationCoordinate2D {
         .init(latitude: latitude, longitude: longitude)
+    }
+
+    /// `boundary` decoded into map-ready coordinate rings; empty if absent
+    /// or malformed (rings need at least 3 points).
+    var polygons: [[CLLocationCoordinate2D]] {
+        guard let boundary else { return [] }
+        return boundary
+            .map { ring in ring.compactMap { pair -> CLLocationCoordinate2D? in
+                guard pair.count == 2 else { return nil }
+                return CLLocationCoordinate2D(latitude: pair[1], longitude: pair[0])
+            } }
+            .filter { $0.count >= 3 }
     }
 }
 

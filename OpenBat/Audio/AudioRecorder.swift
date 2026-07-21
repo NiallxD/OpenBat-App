@@ -37,8 +37,16 @@ struct RecordingReport {
     let spectrogramImage: UIImage?
 }
 
+/// `nonisolated`, matching `HeterodyneProcessor`/`TimeExpansionProcessor`'s pattern —
+/// this project's `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` would otherwise make
+/// `AudioRecorder` implicitly `@MainActor`, but `append(_:)` is called directly from
+/// the real-time audio-tap closure (see `ContentView`'s `bufferSink`), and all of the
+/// class's actual work already runs on its own serial `queue`. `@Observable`-tracked
+/// properties are still safe to read from SwiftUI: every mutation of one is already
+/// manually hopped onto `DispatchQueue.main.async` (see `setArmed`, `closeSegment`,
+/// etc.) rather than relying on actor isolation for that.
 @Observable
-final class AudioRecorder: @unchecked Sendable {
+nonisolated final class AudioRecorder: @unchecked Sendable {
 
     // MARK: UI state (main thread)
 

@@ -14,7 +14,12 @@
 
 import Foundation
 
-enum GuanoMetadata {
+/// `nonisolated`: same reasoning as `Biquad`/`AudioLevel` — a stateless enum with no
+/// isolation annotation inherits this project's `SWIFT_DEFAULT_ACTOR_ISOLATION =
+/// MainActor` default, but this is called from `AudioRecorder`'s background queue
+/// (`makeGuanoChunk`) and `RecordingMigration`'s detached background tasks
+/// (`parseAndRender`) — plain data transformation with no reason to be actor-isolated.
+nonisolated enum GuanoMetadata {
 
     /// One metadata line. `tightColon` writes `Key:Value` with no space after the colon —
     /// used for `Loc Position`, where a leading space before the latitude makes some apps

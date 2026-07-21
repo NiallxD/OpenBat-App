@@ -22,7 +22,9 @@ import CoreML
 import Accelerate
 import Foundation
 
-final class BatDetect2Classifier: SpeciesClassifier {
+/// `nonisolated`: same reasoning as `BatClassifier` — `model` is `let`, set once in
+/// `init`, and Core ML's `MLModel.prediction` is documented safe to call concurrently.
+nonisolated final class BatDetect2Classifier: SpeciesClassifier {
 
     // The real 17-class order, read directly from batdetect2_uk_same.ckpt's stored
     // hyper_parameters['class_names'] — NOT the paper's prose description. There is

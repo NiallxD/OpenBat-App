@@ -21,8 +21,6 @@ struct PlaybackListView: View {
     @Bindable var store: ClassificationStore
     let rteSettings: RTESettings
 
-    @State private var isImporting = false
-    @State private var importSummary: RecordingMigration.Result?
     /// Shared with SessionsView/RecordingDetailView via the same UserDefaults key.
     @AppStorage("display.showNoID") private var showNoID = false
 
@@ -88,36 +86,6 @@ struct PlaybackListView: View {
                 }
                 .toggleStyle(.button)
                 .accessibilityLabel(showNoID ? "Hide unclassified recordings" : "Show unclassified recordings")
-            }
-            ToolbarItem(placement: .topBarTrailing) {
-                if isImporting {
-                    ProgressView()
-                } else {
-                    Button {
-                        Task {
-                            isImporting = true
-                            importSummary = await RecordingMigration.run(store: store)
-                            isImporting = false
-                        }
-                    } label: {
-                        Image(systemName: "square.and.arrow.down")
-                    }
-                    .accessibilityLabel("Import existing recordings")
-                }
-            }
-        }
-        .alert("Import complete", isPresented: Binding(
-            get: { importSummary != nil },
-            set: { if !$0 { importSummary = nil } }
-        )) {
-            Button("OK") { importSummary = nil }
-        } message: {
-            if let s = importSummary {
-                Text(s.imported > 0
-                     ? "Imported \(s.imported) recording\(s.imported == 1 ? "" : "s")."
-                       + (s.skippedNoMetadata > 0 ? " Skipped \(s.skippedNoMetadata) file\(s.skippedNoMetadata == 1 ? "" : "s") with no readable metadata." : "")
-                       + (s.skippedNoise > 0 ? " Left \(s.skippedNoise) noise file\(s.skippedNoise == 1 ? "" : "s") on disk, unimported." : "")
-                     : "No new recordings found — everything on disk is already imported.")
             }
         }
     }
@@ -232,7 +200,37 @@ private struct PlaybackControlsView: View {
         .accessibilityLabel("Listen mode: \(listenModeName)")
     }
 
+    /// Same iOS 26 FixedMenu workaround as the live Detector screen's palette
+    /// Menu (ContentView.paletteButton): without the `GlassEffectContainer` +
+    /// `.glassEffect(.identity)` wrapping, Liquid Glass hides this Menu's
+    /// label the whole time it's open and then visibly fades/pulses it back
+    /// in seconds after dismissal.
     private var paletteButton: some View {
+        Group {
+            if #available(iOS 26.0, *) {
+                GlassEffectContainer {
+                    paletteMenuContent {
+                        paletteMenuLabel.glassEffect(.identity)
+                    }
+                    .clipped()
+                }
+            } else {
+                paletteMenuContent { paletteMenuLabel }
+            }
+        }
+        .foregroundStyle(.secondary)
+        .accessibilityLabel("Colour palette")
+    }
+
+    private var paletteMenuLabel: some View {
+        VStack(spacing: 4) {
+            Image(systemName: "paintpalette").font(.title2)
+            Text("Palette").font(.caption2)
+        }
+        .frame(width: 64)
+    }
+
+    private func paletteMenuContent(@ViewBuilder label: () -> some View) -> some View {
         Menu {
             Picker("Palette", selection: $palette) {
                 ForEach(Palette.allCases) { p in
@@ -240,14 +238,8 @@ private struct PlaybackControlsView: View {
                 }
             }
         } label: {
-            VStack(spacing: 4) {
-                Image(systemName: "paintpalette").font(.title2)
-                Text("Palette").font(.caption2)
-            }
-            .frame(width: 64)
+            label()
         }
-        .foregroundStyle(.secondary)
-        .accessibilityLabel("Colour palette")
     }
 
     private var nextListenMode: ListenMode {

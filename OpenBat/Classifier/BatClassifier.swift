@@ -42,7 +42,12 @@ struct QualityGate {
     }
 }
 
-final class BatClassifier: SpeciesClassifier {
+/// `nonisolated`: this file's own header already documents the contract — "Call
+/// classify(pcm:) on any background queue" — but had no isolation annotation, so it
+/// inherited `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` anyway. Safe: `model` is
+/// `let`, set once in `init`, and Core ML's `MLModel.prediction` is documented safe
+/// to call concurrently.
+nonisolated final class BatClassifier: SpeciesClassifier {
 
     // Class order from training_history_m-1.p, must match CoreML output index order.
     static let classNames: [String] = [

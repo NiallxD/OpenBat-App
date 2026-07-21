@@ -40,7 +40,10 @@ enum Palette: Int, CaseIterable, Identifiable {
 
 /// CPU-side colormap sampling, used by `PulseImageRenderer` for the pulse-view
 /// image and Sessions thumbnails. Mirrors the GPU stop tables in Spectrogram.metal.
-enum DisplayColormap {
+/// `nonisolated`: same reasoning as `Biquad`/`AudioLevel`/`GuanoMetadata` — pure
+/// math with no isolation annotation, called from `PulseImageRenderer`'s capture
+/// pipeline and `RecordingSpectrogramRenderer`'s off-main render path.
+nonisolated enum DisplayColormap {
     private typealias RGB = (Float, Float, Float)
     private typealias Stop = (Float, RGB)
 

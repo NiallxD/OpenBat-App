@@ -41,7 +41,12 @@ struct AudioDiagnostics: Equatable {
     var isNativeRate: Bool { actualSampleRate > 60_000 }
 }
 
-enum AudioLevel {
+/// `nonisolated`: same reasoning as `Biquad` — the project's
+/// `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` would otherwise make this
+/// stateless enum implicitly `@MainActor`, but `rmsDB(of:)` is called from
+/// `AudioEngineController`'s real-time audio-tap closure (`installTap`), which
+/// is `nonisolated` by design.
+nonisolated enum AudioLevel {
     /// Floor for the dBFS meter so silence maps to a finite value.
     static let minDB: Float = -80
 

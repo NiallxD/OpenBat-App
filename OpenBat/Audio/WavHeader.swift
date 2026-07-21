@@ -10,7 +10,11 @@
 
 import Foundation
 
-enum WavHeader {
+/// `nonisolated`: same reasoning as `Biquad`/`AudioLevel`/`GuanoMetadata` — stateless
+/// file parsing called from `AudioRecorder`'s background queue and
+/// `RecordingSpectrogramRenderer`'s off-main render path, but had no explicit
+/// isolation annotation, so it inherited `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`.
+nonisolated enum WavHeader {
     static func read(url: URL) -> (sampleRate: UInt32, dataBytes: UInt32)? {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? handle.close() }
