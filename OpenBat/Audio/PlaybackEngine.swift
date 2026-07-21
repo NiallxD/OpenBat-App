@@ -288,7 +288,11 @@ final class PlaybackEngine {
     func togglePlaying() { isPlaying ? pause() : play() }
 
     func play() {
-        guard let url = loadedURL, !isPlaying, currentTimeSeconds < durationSeconds else { return }
+        guard let url = loadedURL, !isPlaying else { return }
+        // Playback finished (currentTimeSeconds sits at durationSeconds via
+        // onFinished) — treat play() as "play again" rather than a silent no-op
+        // that leaves the button looking unresponsive once a file has ended.
+        if currentTimeSeconds >= durationSeconds { currentTimeSeconds = 0 }
         isPlaying = true
         driver.startEngineIfNeeded()
         heterodyne.setGate(listenMode == .heterodyne)

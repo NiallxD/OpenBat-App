@@ -54,6 +54,13 @@ enum GBIFService {
     }()
 
     private static let cacheDefaultsKey = "gbif.taxonKeyCache"
+    /// Guards `taxonKeyCache`'s read-modify-write in `fetchTaxonKey` — several
+    /// species cards can resolve concurrently (each a separate SwiftUI `.task`),
+    /// and an unguarded read-then-write there is a lost-update race: two
+    /// concurrent resolutions both read the same base dict, and whichever writes
+    /// back second silently drops the other's newly-resolved key (self-healing
+    /// on the next lookup, but still a needless re-fetch).
+    private static let taxonKeyCacheLock = NSLock()
 
     private static var taxonKeyCache: [String: Int] {
         get {
@@ -81,9 +88,11 @@ enum GBIFService {
             let (data, _) = try await session.data(from: url)
             let match = try JSONDecoder().decode(MatchResponse.self, from: data)
             guard match.matchType != "NONE", let key = match.usageKey else { return nil }
+            taxonKeyCacheLock.lock()
             var cache = taxonKeyCache
             cache[scientificName] = key
             taxonKeyCache = cache
+            taxonKeyCacheLock.unlock()
             return key
         } catch {
             return nil
