@@ -424,14 +424,23 @@ final class ClassificationStore {
         persistRecordings()
     }
 
+    /// Wipes both passes AND recordings (WAVs included) — nothing calls this
+    /// today, but it previously only cleared `passes` while still wiping the
+    /// shared `imagesDir` out from under `recordings`' own thumbnails, orphaning
+    /// them (broken thumbnail, WAV and JSON entry left behind). Mirrors
+    /// `clearListening()`'s "recordings own their WAVs" scoping instead.
     func clearAll() {
         passes.removeAll()
+        recordings.removeAll()
         imageCache.removeAllObjects()
         io.async { [weak self] in
             guard let self else { return }
             try? FileManager.default.removeItem(at: self.imagesDir)
             try? FileManager.default.createDirectory(at: self.imagesDir, withIntermediateDirectories: true)
             try? FileManager.default.removeItem(at: self.jsonURL)
+            try? FileManager.default.removeItem(at: self.recordingsURL)
+            let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            try? FileManager.default.removeItem(at: docs.appendingPathComponent("Recordings"))
         }
     }
 

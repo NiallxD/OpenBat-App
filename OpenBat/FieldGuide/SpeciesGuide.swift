@@ -36,9 +36,25 @@ struct SpeciesGuide: Codable {
     static let empty = SpeciesGuide(schemaVersion: supportedSchemaVersion,
                                     dataVersion: 0, updatedAt: nil, regions: [], species: [])
 
+    /// `ISO8601DateFormatter()`'s default format options require a full
+    /// date-time (`withInternetDateTime`) — a date-only string like
+    /// "2026-07-21" (the natural thing to hand-type in a PR editing
+    /// `contributors`/`updatedAt`) silently fails to parse against it. Falls
+    /// back to a date-only parse before giving up.
+    private static let fullDateTimeFormatter = ISO8601DateFormatter()
+    private static let dateOnlyFormatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withFullDate]
+        return f
+    }()
+
+    static func parseISO8601(_ string: String) -> Date? {
+        fullDateTimeFormatter.date(from: string) ?? dateOnlyFormatter.date(from: string)
+    }
+
     /// Parsed `updatedAt`, if present and well-formed.
     var updatedDate: Date? {
-        updatedAt.flatMap { ISO8601DateFormatter().date(from: $0) }
+        updatedAt.flatMap(Self.parseISO8601)
     }
 
     func species(in region: GuideRegion) -> [GuideSpecies] {
@@ -124,7 +140,7 @@ struct SpeciesContributor: Codable, Hashable {
     var note: String?   // e.g. "Added echolocation measurements"
 
     var parsedDate: Date? {
-        ISO8601DateFormatter().date(from: date)
+        SpeciesGuide.parseISO8601(date)
     }
 }
 

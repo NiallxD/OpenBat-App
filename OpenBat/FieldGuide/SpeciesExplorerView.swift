@@ -45,6 +45,11 @@ struct SpeciesExplorerView: View {
     /// Globe starts invisible and fades in once imagery has had a moment to
     /// load, instead of popping in already fully opaque.
     @State private var globeOpacity: Double = 0
+    /// The opening swoop's repeating Timer — retained so `.onDisappear` can
+    /// invalidate it if the user navigates away mid-swoop. Otherwise it keeps
+    /// firing and mutating `camera` on an off-screen view for the rest of its
+    /// ~`swoopDuration` regardless of navigation.
+    @State private var swoopTimer: Timer?
 
     private static let fallbackCenter = CLLocationCoordinate2D(latitude: 30, longitude: -10)
     /// Opening camera position — Null Island (0, 0), out in the Atlantic —
@@ -212,6 +217,10 @@ struct SpeciesExplorerView: View {
                 animateSwoop(to: userCoordinate ?? Self.fallbackCenter)
             }
         }
+        .onDisappear {
+            swoopTimer?.invalidate()
+            swoopTimer = nil
+        }
     }
 
     /// Steps `camera` from its current position to `destination` over
@@ -224,7 +233,7 @@ struct SpeciesExplorerView: View {
         let startDistance = 60_000_000.0
         let endDistance = 40_000_000.0
         var step = 0
-        Timer.scheduledTimer(withTimeInterval: Self.swoopStepInterval, repeats: true) { timer in
+        swoopTimer = Timer.scheduledTimer(withTimeInterval: Self.swoopStepInterval, repeats: true) { timer in
             step += 1
             let t = min(Double(step) / Double(steps), 1.0)
             // easeInOut
