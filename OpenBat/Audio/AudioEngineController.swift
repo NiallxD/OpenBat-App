@@ -35,6 +35,16 @@ final class AudioEngineController {
     /// since @Observable notifies on every set, changed or not).
     private(set) var activeSampleRate: Double = 0
     private(set) var activeInputName = "—"
+    /// True when the current output route is the built-in speaker rather than
+    /// headphones/Bluetooth/AirPlay. Same equality-guarded-mirror pattern as
+    /// `activeSampleRate` — set only from `updateInputDiagnostics()`. Drives the
+    /// feedback-risk warning: heterodyne/RTE audio played out the speaker gets
+    /// picked back up acoustically by the mic and reprocessed as a spurious
+    /// low-pitch "call" layered on the real one. There's no software fix for
+    /// acoustic coupling short of full echo cancellation, which risks degrading
+    /// the ultrasonic capture path — so this only surfaces a warning telling the
+    /// user to wear headphones, which is confirmed to fix it.
+    private(set) var isOutputOnSpeaker = false
     private(set) var isRunning = false
     /// User-facing status / error line.
     private(set) var status = "Idle"
@@ -290,6 +300,8 @@ final class AudioEngineController {
         diagnostics.sessionSampleRate = session.sampleRate
         // Provisional until the first real buffer arrives and flushStats corrects it.
         if diagnostics.actualSampleRate == 0 { diagnostics.actualSampleRate = session.sampleRate }
+        let outputPort = session.currentRoute.outputs.first
+        isOutputOnSpeaker = outputPort?.portType == .builtInSpeaker
         syncSlowDiagnostics()
     }
 

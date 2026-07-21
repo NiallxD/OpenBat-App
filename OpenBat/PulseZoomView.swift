@@ -30,6 +30,9 @@ import SwiftUI
 struct PulseZoomView: View {
     let pulseDetector: PulseDetector
 
+    /// Independent of the spectrogram's own log toggle — see PulseSettingsView.
+    @AppStorage("display.pulseLogFrequency") private var pulseLogFrequency = false
+
     @State private var pulseZoomScale: CGFloat = 1
     @State private var pulseZoomBaseScale: CGFloat = 1
     @State private var pulsePanX: CGFloat = 0
@@ -37,10 +40,99 @@ struct PulseZoomView: View {
     @State private var pulsePanBaseX: CGFloat = 0
     @State private var pulsePanBaseY: CGFloat = 0
 
+    /// Row-remapped copy of `pulseDetector.lastPulseImage` for log-frequency display.
+    /// Cached (not recomputed every body evaluation, which happens on every pinch/pan
+    /// frame) — only rebuilt when a new pulse arrives or the toggle flips.
+    @State private var warpedImage: UIImage?
+
+    private var displayedImage: UIImage? {
+        pulseLogFrequency ? (warpedImage ?? pulseDetector.lastPulseImage) : pulseDetector.lastPulseImage
+    }
+
     var body: some View {
         GeometryReader { geo in
             pulseZoomContent(geo: geo)
         }
+        .onAppear { rebuildWarp() }
+        .onChange(of: pulseDetector.lastDetectionDate) { _, _ in rebuildWarp() }
+        .onChange(of: pulseLogFrequency) { _, _ in rebuildWarp() }
+    }
+
+    private func rebuildWarp() {
+        guard pulseLogFrequency, let img = pulseDetector.lastPulseImage else {
+            warpedImage = nil
+            return
+        }
+        warpedImage = Self.logFrequencyWarp(img,
+                                            loHz: pulseDetector.capturedWideFreqMin,
+                                            hiHz: pulseDetector.capturedWideFreqMax)
+    }
+
+    /// Remaps `image`'s rows (row 0 = top = `hiHz`, last row = bottom = `loHz`, evenly
+    /// spaced in Hz — PulseImageRenderer's native layout) so that row *position*
+    /// instead follows a log frequency scale. Nearest-neighbour row copy: for each
+    /// destination row, find the Hz a log axis puts there, then find which row of the
+    /// SOURCE (linear) image already shows that Hz, and copy it across. Only the
+    /// display copy is warped — thumbnails and the underlying renderer stay linear.
+    private static func logFrequencyWarp(_ image: UIImage, loHz: Double, hiHz: Double) -> UIImage? {
+        guard hiHz > loHz, loHz > 0,
+              let cg = image.cgImage,
+              let dataProvider = cg.dataProvider,
+              let data = dataProvider.data,
+              let srcPtr = CFDataGetBytePtr(data)
+        else { return image }
+
+        let width = cg.width
+        let height = cg.height
+        guard height > 1 else { return image }
+        let bytesPerRow = cg.bytesPerRow
+        var out = [UInt8](repeating: 0, count: bytesPerRow * height)
+        let logSpan = log(hiHz / loHz)
+
+        out.withUnsafeMutableBytes { dst in
+            guard let dstBase = dst.baseAddress else { return }
+            for y in 0..<height {
+                let v = Double(y) / Double(height - 1)                 // 0 = top, 1 = bottom
+                let hz = loHz * exp((1 - v) * logSpan)                 // log-axis Hz at this row
+                let linearFrac = (hiHz - hz) / (hiHz - loHz)           // where that Hz sits in the linear source
+                let srcY = min(height - 1, max(0, Int((linearFrac * Double(height - 1)).rounded())))
+                memcpy(dstBase.advanced(by: y * bytesPerRow),
+                       srcPtr.advanced(by: srcY * bytesPerRow),
+                       bytesPerRow)
+            }
+        }
+
+        guard let provider = CGDataProvider(data: Data(out) as CFData),
+              let warped = CGImage(width: width, height: height,
+                                   bitsPerComponent: cg.bitsPerComponent, bitsPerPixel: cg.bitsPerPixel,
+                                   bytesPerRow: bytesPerRow,
+                                   space: cg.colorSpace ?? CGColorSpaceCreateDeviceRGB(),
+                                   bitmapInfo: cg.bitmapInfo, provider: provider, decode: nil,
+                                   shouldInterpolate: true, intent: .defaultIntent)
+        else { return image }
+        return UIImage(cgImage: warped)
+    }
+
+    /// Converts a Hz value to a v-fraction (0 = top/high, 1 = bottom/low) within
+    /// [lo, hi], honouring the current log/linear display mode — shared by the zoom
+    /// geometry (which needs to know where the tight call band sits within the
+    /// warped image) and the axis labels (which need the inverse, see `vFracToHz`).
+    private static func hzToVFrac(_ hz: Double, lo: Double, hi: Double, log logMode: Bool) -> Double {
+        guard hi > lo else { return 0.5 }
+        if logMode, lo > 0 {
+            let hzC = min(max(hz, lo), hi)
+            return 1 - (log(hzC / lo) / log(hi / lo))
+        }
+        return (hi - hz) / (hi - lo)
+    }
+
+    /// Inverse of `hzToVFrac`.
+    private static func vFracToHz(_ v: Double, lo: Double, hi: Double, log logMode: Bool) -> Double {
+        guard hi > lo else { return lo }
+        if logMode, lo > 0 {
+            return lo * exp((1 - v) * log(hi / lo))
+        }
+        return hi - v * (hi - lo)
     }
 
     private func pulseZoomContent(geo: GeometryProxy) -> some View {
@@ -52,7 +144,7 @@ struct PulseZoomView: View {
         let scaleY = max(1, freqZoomGeometry.defaultScale * pulseZoomScale)
 
         return ZStack(alignment: .topLeading) {
-            if let img = pulseDetector.lastPulseImage {
+            if let img = displayedImage {
                 // .high interpolation looks crisp instead of a blurry upscale.
                 Image(uiImage: img)
                     .resizable()
@@ -145,10 +237,9 @@ struct PulseZoomView: View {
         let wideHi = pulseDetector.capturedWideFreqMax
         let tightLo = pulseDetector.capturedFreqMin
         let tightHi = pulseDetector.capturedFreqMax
-        let span = wideHi - wideLo
-        guard span > 0, tightHi > tightLo else { return (1, 0.5) }
-        let leftFrac = (wideHi - tightHi) / span     // tight band's top edge, high freq = top = 0
-        let rightFrac = (wideHi - tightLo) / span    // tight band's bottom edge
+        guard wideHi > wideLo, tightHi > tightLo else { return (1, 0.5) }
+        let leftFrac = Self.hzToVFrac(tightHi, lo: wideLo, hi: wideHi, log: pulseLogFrequency)   // tight band's top edge
+        let rightFrac = Self.hzToVFrac(tightLo, lo: wideLo, hi: wideHi, log: pulseLogFrequency)  // tight band's bottom edge
         return axisZoomGeometry(leftFrac: leftFrac, rightFrac: rightFrac)
     }
 
@@ -160,22 +251,47 @@ struct PulseZoomView: View {
     private var freqTightMidFrac: Double { freqZoomGeometry.midFrac }
     private var timeTightMidFrac: Double { timeZoomGeometry.midFrac }
 
+    /// Screen-edge v-fractions (within the WIDE image's v-space, 0 = top/high,
+    /// 1 = bottom/low) for the current zoom/pan. Shared by `visiblePulseFreqRange`
+    /// (hi/lo labels) and `tickFreqValues` (evenly-spaced intermediate ticks).
+    /// Inverts the same screen(v) relationship the render uses.
+    private var visibleVRange: (top: Double, bottom: Double) {
+        let s = Double(max(1, freqZoomGeometry.defaultScale * pulseZoomScale))
+        guard s > 0 else { return (0, 1) }
+        let offset = Double(pulsePanY)
+        // screen(v) = 0.5 + (v-0.5)*s + offset; solving for v at screen = 0 / 1.
+        return (top: 0.5 - (0.5 + offset) / s, bottom: 0.5 + (0.5 - offset) / s)
+    }
+
     /// Effective visible frequency range for the current zoom/pan — used by
-    /// `pulseFrequencyAxis` so the labels track what's on screen, not just the
-    /// default view. Inverts the same screen(v) relationship the render uses.
+    /// `pulseFrequencyAxis` so the hi/lo labels track what's on screen, not just
+    /// the default view.
     private var visiblePulseFreqRange: (lo: Double, hi: Double) {
         let wideLo = pulseDetector.capturedWideFreqMin
         let wideHi = pulseDetector.capturedWideFreqMax
-        let span = wideHi - wideLo
-        let s = Double(max(1, freqZoomGeometry.defaultScale * pulseZoomScale))
-        guard span > 0, s > 0 else {
+        guard wideHi > wideLo else {
             return (pulseDetector.capturedFreqMin, pulseDetector.capturedFreqMax)
         }
-        let offset = Double(pulsePanY)
-        // screen(v) = 0.5 + (v-0.5)*s + offset; solving for v at screen = 0 / 1.
-        let vTop = 0.5 - (0.5 + offset) / s
-        let vBottom = 0.5 + (0.5 - offset) / s
-        return (lo: wideHi - vBottom * span, hi: wideHi - vTop * span)
+        let (vTop, vBottom) = visibleVRange
+        return (lo: Self.vFracToHz(vBottom, lo: wideLo, hi: wideHi, log: pulseLogFrequency),
+                hi: Self.vFracToHz(vTop, lo: wideLo, hi: wideHi, log: pulseLogFrequency))
+    }
+
+    /// Evenly spaced (in screen position) tick Hz values across the currently
+    /// visible window, top to bottom — same log/linear v→Hz mapping as the
+    /// rendered (possibly warped) image, so labels line up with what's on screen.
+    private func tickFreqValues(count: Int) -> [Double] {
+        let wideLo = pulseDetector.capturedWideFreqMin
+        let wideHi = pulseDetector.capturedWideFreqMax
+        guard count > 1, wideHi > wideLo else {
+            let (lo, hi) = visiblePulseFreqRange
+            return [(lo + hi) / 2]
+        }
+        let (vTop, vBottom) = visibleVRange
+        return (0..<count).map { i in
+            let v = vTop + Double(i) / Double(count - 1) * (vBottom - vTop)
+            return Self.vFracToHz(v, lo: wideLo, hi: wideHi, log: pulseLogFrequency)
+        }
     }
 
     /// Pinch range: down to whichever axis's full-wide-content multiplier is
@@ -263,13 +379,12 @@ struct PulseZoomView: View {
     }
 
     private var pulseFrequencyAxis: some View {
-        let (lo, hi) = visiblePulseFreqRange
+        let ticks = tickFreqValues(count: pulseLogFrequency ? 8 : 5)
         return VStack {
-            axisLabel(hi)
-            Spacer()
-            axisLabel((lo + hi) / 2)
-            Spacer()
-            axisLabel(lo)
+            ForEach(ticks.indices, id: \.self) { i in
+                axisLabel(ticks[i])
+                if i < ticks.count - 1 { Spacer() }
+            }
         }
     }
 

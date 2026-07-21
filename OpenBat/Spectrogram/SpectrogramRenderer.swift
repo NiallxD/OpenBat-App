@@ -40,6 +40,10 @@ final class SpectrogramRenderer: NSObject, MTKViewDelegate {
     var bandLow: Float = 0
     var bandHigh: Float = 1
 
+    /// Display the frequency axis log-scaled within the visible band instead of
+    /// linear. Independent of the pulse view's own toggle — set from Settings.
+    var logFrequency: Bool = false
+
     // MARK: User scroll state
 
     var isScrolling: Bool = false {
@@ -64,6 +68,12 @@ final class SpectrogramRenderer: NSObject, MTKViewDelegate {
 
     /// Pulse detector fed once per drained column. Set from updateUIView.
     var pulseDetector: PulseDetector?
+
+    /// Explicit palette override, independent of `pulseDetector.displayPalette` —
+    /// for callers with no live PulseDetector (e.g. PlaybackView, which renders a
+    /// file's spectrogram rather than the live detector's). Takes precedence over
+    /// `pulseDetector` when set; falls back to inferno if neither is set.
+    var palette: Palette?
 
     // MARK: Private Metal state
 
@@ -265,7 +275,8 @@ final class SpectrogramRenderer: NSObject, MTKViewDelegate {
         var high = bandHigh
         // Independent noise-floor setting from the pulse view's, applied live in the shader.
         var floor = pulseDetector?.spectrogramNoiseFloor ?? 0
-        var paletteIndex = Float((pulseDetector?.displayPalette ?? .inferno).rawValue)
+        var paletteIndex = Float((palette ?? pulseDetector?.displayPalette ?? .inferno).rawValue)
+        var logFreq: Float = logFrequency ? 1 : 0
 
         encoder.setRenderPipelineState(pipeline)
         encoder.setFragmentTexture(renderTexture, index: 0)
@@ -277,6 +288,7 @@ final class SpectrogramRenderer: NSObject, MTKViewDelegate {
         encoder.setFragmentBytes(&floor,      length: MemoryLayout<Float>.size, index: 5)
         encoder.setFragmentBytes(&isRing,     length: MemoryLayout<Float>.size, index: 6)
         encoder.setFragmentBytes(&paletteIndex, length: MemoryLayout<Float>.size, index: 7)
+        encoder.setFragmentBytes(&logFreq,    length: MemoryLayout<Float>.size, index: 8)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         encoder.endEncoding()
 

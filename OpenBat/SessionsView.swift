@@ -24,6 +24,11 @@ struct SessionsView: View {
     /// Sessions queued by a swipe-delete, pending user confirmation (deleting a
     /// session irreversibly removes all its IDs and thumbnails).
     @State private var sessionsPendingDelete: [RecordingSession] = []
+    /// Hides NoID recordings (triggered, but never classified confidently enough to
+    /// call a species OR the model's own noise class) — shared with PlaybackListView
+    /// and RecordingDetailView via the same UserDefaults key, off by default since a
+    /// single-pulse-or-ambiguous trigger is mostly clutter to browse past.
+    @AppStorage("display.showNoID") private var showNoID = false
 
     private enum SessionTab { case sessions, listening }
 
@@ -47,7 +52,14 @@ struct SessionsView: View {
         .navigationTitle("Sessions")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            if selectedTab == .listening && !store.listeningPasses.isEmpty {
+            ToolbarItem(placement: .topBarTrailing) {
+                Toggle(isOn: $showNoID) {
+                    Image(systemName: showNoID ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
+                }
+                .toggleStyle(.button)
+                .accessibilityLabel(showNoID ? "Hide unclassified recordings" : "Show unclassified recordings")
+            }
+            if selectedTab == .listening && !store.listeningRecordings.isEmpty {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button(role: .destructive) { showClearConfirm = true } label: {
                         Image(systemName: "trash")
@@ -105,25 +117,35 @@ struct SessionsView: View {
         }
     }
 
+    private var filteredListeningRecordings: [Recording] {
+        store.listeningRecordings.filteredByNoID(showNoID: showNoID)
+    }
+
     @ViewBuilder private var listeningContent: some View {
-        if store.listeningPasses.isEmpty {
+        if store.listeningRecordings.isEmpty {
             ContentUnavailableView(
-                "No IDs yet",
+                "No recordings yet",
                 systemImage: "waveform.badge.magnifyingglass",
-                description: Text("Bat passes detected while Just Listening appear here.")
+                description: Text("Recordings made while Just Listening (with recording turned on) appear here.")
+            )
+        } else if filteredListeningRecordings.isEmpty {
+            ContentUnavailableView(
+                "No classified recordings",
+                systemImage: "line.3.horizontal.decrease.circle",
+                description: Text("Every recording here is unclassified (NoID) — tap the filter icon to show them.")
             )
         } else {
             List {
-                ForEach(groupPassesByDay(store.listeningPasses), id: \.key) { group in
+                ForEach(groupRecordingsByDay(filteredListeningRecordings), id: \.key) { group in
                     Section(group.title) {
-                        ForEach(group.passes) { pass in
+                        ForEach(group.recordings) { recording in
                             NavigationLink {
-                                PassDetailView(pass: pass, store: store)
+                                RecordingDetailView(recording: recording, store: store)
                             } label: {
-                                PassRow(pass: pass, store: store)
+                                RecordingRow(recording: recording, store: store)
                             }
                         }
-                        .onDelete { offsets in offsets.map { group.passes[$0] }.forEach(store.delete) }
+                        .onDelete { offsets in offsets.map { group.recordings[$0] }.forEach(store.delete) }
                     }
                 }
             }
@@ -137,7 +159,10 @@ private struct SessionRow: View {
     let store: ClassificationStore
 
     var body: some View {
-        let passes = store.passes(inSession: session.id)
+        // Excludes NOISE/NoID — same filter SessionSpeciesSummary applies — so the
+        // count and dominant-species label read as actual species IDs, not
+        // inflated by triggers that never resolved to one.
+        let passes = store.passes(inSession: session.id).filter { !$0.isNoise && !$0.isNoID }
         VStack(alignment: .leading, spacing: 3) {
             Text(session.title).font(.headline).lineLimit(1)
             Text(timeRange).font(.caption).foregroundStyle(.secondary)
@@ -174,6 +199,7 @@ struct SessionDetailView: View {
     let session: RecordingSession
     @Bindable var store: ClassificationStore
     let settings: AutoIDSettings
+    @AppStorage("display.showNoID") private var showNoID = false
 
     var body: some View {
         List {
@@ -192,26 +218,46 @@ struct SessionDetailView: View {
             if !session.notes.isEmpty {
                 Section("Notes") { Text(session.notes) }
             }
-            Section("IDs") {
-                if sessionPasses.isEmpty {
-                    Text("No IDs logged.").foregroundStyle(.secondary)
+            if !sessionPasses.isEmpty {
+                Section("Species") {
+                    SessionSpeciesSummary(passes: sessionPasses)
+                }
+            }
+            Section("Recordings") {
+                if sessionRecordings.isEmpty {
+                    Text(store.recordings(inSession: session.id).isEmpty
+                         ? "No recordings in this session."
+                         : "Every recording here is unclassified (NoID) — tap the filter icon to show them.")
+                        .foregroundStyle(.secondary)
                 } else {
-                    ForEach(sessionPasses) { pass in
+                    ForEach(sessionRecordings) { recording in
                         NavigationLink {
-                            PassDetailView(pass: pass, store: store)
+                            RecordingDetailView(recording: recording, store: store)
                         } label: {
-                            PassRow(pass: pass, store: store)
+                            RecordingRow(recording: recording, store: store)
                         }
                     }
-                    .onDelete { offsets in offsets.map { sessionPasses[$0] }.forEach(store.delete) }
+                    .onDelete { offsets in offsets.map { sessionRecordings[$0] }.forEach(store.delete) }
                 }
             }
         }
         .navigationTitle(session.title)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Toggle(isOn: $showNoID) {
+                    Image(systemName: showNoID ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
+                }
+                .toggleStyle(.button)
+                .accessibilityLabel(showNoID ? "Hide unclassified recordings" : "Show unclassified recordings")
+            }
+        }
     }
 
     private var sessionPasses: [PassRecord] { store.passes(inSession: session.id) }
+    private var sessionRecordings: [Recording] {
+        store.recordings(inSession: session.id).filteredByNoID(showNoID: showNoID)
+    }
     private var mappablePasses: [PassRecord] { sessionPasses.filter(settings.isMappable) }
     private var trackCoords: [CLLocationCoordinate2D] { session.track.map(\.coordinate) }
     private var hasGeo: Bool { !trackCoords.isEmpty || !mappablePasses.isEmpty }
@@ -269,6 +315,16 @@ private func groupPassesByDay(_ passes: [PassRecord]) -> [PassDayGroup] {
     }
 }
 
+private struct RecordingDayGroup { let key: Date; let title: String; let recordings: [Recording] }
+private func groupRecordingsByDay(_ recordings: [Recording]) -> [RecordingDayGroup] {
+    let cal = Calendar.current
+    let dict = Dictionary(grouping: recordings) { cal.startOfDay(for: $0.date) }
+    return dict.keys.sorted(by: >).map { day in
+        RecordingDayGroup(key: day, title: dayTitle(day),
+                          recordings: dict[day]!.sorted { $0.date > $1.date })
+    }
+}
+
 private struct SessionDayGroup { let key: Date; let title: String; let sessions: [RecordingSession] }
 private func groupSessionsByDay(_ sessions: [RecordingSession]) -> [SessionDayGroup] {
     let cal = Calendar.current
@@ -288,7 +344,7 @@ private func dayTitle(_ date: Date) -> String {
 
 // MARK: - Pass row
 
-private struct PassRow: View {
+struct PassRow: View {
     let pass: PassRecord
     let store: ClassificationStore
 
@@ -309,14 +365,21 @@ private struct PassRow: View {
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                 }
+                if pass.isNoID {
+                    Text("Triggered, but couldn't be classified")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
                 Text("\(pass.pulseCount) pulse\(pass.pulseCount == 1 ? "" : "s") · \(Self.time(pass.date))")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            VStack(alignment: .trailing, spacing: 4) {
-                ConfidenceBadge(confidence: pass.confidence)
-                ComplexIndicator(pass: pass)
+            if !pass.isNoID {
+                VStack(alignment: .trailing, spacing: 4) {
+                    ConfidenceBadge(confidence: pass.confidence)
+                    ComplexIndicator(pass: pass)
+                }
             }
         }
         .padding(.vertical, 2)
@@ -362,11 +425,18 @@ struct PassDetailView: View {
                     HStack {
                         Text(pass.species).font(.title2.bold())
                         Spacer()
-                        ConfidenceBadge(confidence: pass.confidence)
+                        if !pass.isNoID {
+                            ConfidenceBadge(confidence: pass.confidence)
+                        }
                     }
                     Text(pass.commonName).foregroundStyle(.secondary)
                     if pass.isNoise {
                         Text("NOISE means it wasn't a bat")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
+                    if pass.isNoID {
+                        Text("Triggered, but couldn't be classified")
                             .font(.caption)
                             .foregroundStyle(.tertiary)
                     }

@@ -53,7 +53,7 @@ final class AutoIDSettings {
     /// definition), so it's excluded from the map even though it still appears in
     /// the species list.
     func isMappable(_ pass: PassRecord) -> Bool {
-        !pass.isNoise
+        !pass.isNoise && !pass.isNoID
             && pass.coordinate != nil
             && pass.confidence >= mapPinMinConfidence
             && pass.pulseCount >= mapPinMinPulseCount

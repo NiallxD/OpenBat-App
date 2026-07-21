@@ -61,7 +61,7 @@ struct PulseRecord: Codable, Identifiable {
     var imageSpanMs: Double?
 }
 
-struct PassRecord: Codable, Identifiable {
+struct PassRecord: Codable, Identifiable, NoIDFilterable {
     let id: UUID
     let date: Date               // when the pass closed
     let species: String
@@ -105,6 +105,59 @@ struct PassRecord: Codable, Identifiable {
     /// list (so the user can see "we heard something, it wasn't a bat"), but excluded
     /// from the session map (see `AutoIDSettings.isMappable`).
     var isNoise: Bool { species == "NOISE" }
+    /// True when a pulse triggered the detector and was classified, but the pass's
+    /// mean raw confidence never cleared the model's NoID threshold (or the winning
+    /// species didn't clear the user's own confidence/pulse-count gates) — see
+    /// `PassAggregation.aggregate`'s nil return, recorded by `PulseDetector.finalizePass()`
+    /// instead of being silently dropped. Distinct from `isNoise`: NOISE is a
+    /// confident "this wasn't a bat" call from the model, NOID is "not enough
+    /// evidence either way".
+    var isNoID: Bool { species == "NOID" }
+}
+
+/// Conformed by `PassRecord` and `Recording` so both can share the "hide NoID
+/// unless the user's toggled it on" filter (`Array.filteredByNoID`) — the same
+/// `display.showNoID` `@AppStorage` toggle gates both lists.
+protocol NoIDFilterable {
+    var isNoID: Bool { get }
+}
+
+extension Array where Element: NoIDFilterable {
+    func filteredByNoID(showNoID: Bool) -> [Element] {
+        showNoID ? self : filter { !$0.isNoID }
+    }
+}
+
+/// One saved WAV file — the unit `AudioRecorder`'s bout-based trigger produces (see
+/// CLAUDE.md's recording-subsystem notes): everything from the pre-roll before the
+/// first pulse through the silence gap after the last one, in a single file. Distinct
+/// from `PassRecord`, which is PulseDetector's own finer-grained "one run of pulses"
+/// grouping — a single Recording can span several PassRecords (e.g. a bat making
+/// more than one approach within the same bout). `commonName`/`species`/`confidence`
+/// here are the recorder's own whole-file aggregate (same rule as `PassAggregation`,
+/// computed independently over every pulse in the file — see AudioRecorder's
+/// `speciesAutoID`), matching what's baked into the WAV's filename and GUANO tag.
+struct Recording: Codable, Identifiable, NoIDFilterable {
+    let id: UUID
+    let date: Date                  // segment start (pre-roll included)
+    let durationSeconds: Double
+    let species: String             // never "NOISE" — those are rejected before saving
+    let commonName: String
+    let confidence: Float?          // nil for a NoID recording
+    let pulseCount: Int
+    var sessionID: UUID?            // nil = Listening bucket
+    var latitude: Double?
+    var longitude: Double?
+    /// Path to the WAV, relative to the Documents directory — never store an absolute
+    /// URL, since the app's container path can change between launches.
+    let relativeWavPath: String
+    /// Spectrogram JPEG filename under the store's images dir, nil if rendering failed.
+    var spectrogramImageFile: String?
+    var isNoID: Bool { species == "NOID" }
+    var coordinate: CLLocationCoordinate2D? {
+        guard let latitude, let longitude else { return nil }
+        return .init(latitude: latitude, longitude: longitude)
+    }
 }
 
 // MARK: - Transient capture (handed to the store before persistence)
@@ -132,6 +185,7 @@ final class ClassificationStore {
 
     private(set) var passes: [PassRecord] = []      // newest first
     private(set) var sessions: [RecordingSession] = []   // newest first
+    private(set) var recordings: [Recording] = []   // newest first
     /// The in-progress session (set while a "New Session" run is detecting).
     private(set) var activeSessionID: UUID?
 
@@ -142,6 +196,7 @@ final class ClassificationStore {
     private let imagesDir: URL
     private let jsonURL: URL
     private let sessionsURL: URL
+    private let recordingsURL: URL
     private let io = DispatchQueue(label: "bat.ClassificationStore.io", qos: .utility)
     /// Throttle full sessions.json rewrites while a track streams in points.
     private var lastSessionPersist: Date = .distantPast
@@ -155,6 +210,7 @@ final class ClassificationStore {
         imagesDir   = dir.appendingPathComponent("images", isDirectory: true)
         jsonURL     = dir.appendingPathComponent("passes.json")
         sessionsURL = dir.appendingPathComponent("sessions.json")
+        recordingsURL = dir.appendingPathComponent("recordings.json")
         try? FileManager.default.createDirectory(at: imagesDir, withIntermediateDirectories: true)
         load()
     }
@@ -210,6 +266,21 @@ final class ClassificationStore {
     func passes(inSession id: UUID) -> [PassRecord] { passes.filter { $0.sessionID == id } }
     var listeningPasses: [PassRecord] { passes.filter { $0.sessionID == nil } }
 
+    func recordings(inSession id: UUID) -> [Recording] { recordings.filter { $0.sessionID == id } }
+    var listeningRecordings: [Recording] { recordings.filter { $0.sessionID == nil } }
+
+    /// Every pass whose date falls inside `recording`'s time span — the per-pulse IDs
+    /// display for a Recording's detail page, reusing `PassRecord`/`PulseRecord`
+    /// (PulseDetector's own finer-grained grouping) rather than duplicating pulse
+    /// data onto `Recording` itself. Scoped to the same session bucket so a Listening
+    /// recording can't pick up a session pass that happens to share a timestamp.
+    func passes(forRecording recording: Recording) -> [PassRecord] {
+        let end = recording.date.addingTimeInterval(recording.durationSeconds)
+        return passes.filter {
+            $0.sessionID == recording.sessionID && $0.date >= recording.date && $0.date <= end
+        }
+    }
+
     /// Merlin-style "recently detected" stack: one row per species, most-recently-
     /// heard pass on top. `passes` is already newest-first (inserted at index 0),
     /// so keeping the first occurrence of each species per source scope is enough —
@@ -233,6 +304,7 @@ final class ClassificationStore {
         if activeSessionID == session.id { activeSessionID = nil }
         sessions.removeAll { $0.id == session.id }
         for pass in passes(inSession: session.id) { delete(pass) }   // removes images too
+        for recording in recordings(inSession: session.id) { delete(recording) }   // removes WAVs too
         persistSessions(force: true)
     }
 
@@ -293,6 +365,35 @@ final class ClassificationStore {
         }
     }
 
+    /// Record a finished, kept WAV segment (see `AudioRecorder.closeAndKeep`). Safe to
+    /// call from any thread; the spectrogram JPEG write happens off-thread, matching
+    /// `addPass`'s pattern.
+    func addRecording(id: UUID = UUID(), date: Date, durationSeconds: Double,
+                      species: String, confidence: Float?, pulseCount: Int,
+                      sessionID: UUID?, coordinate: CLLocationCoordinate2D?,
+                      relativeWavPath: String, spectrogramImage: UIImage?) {
+        io.async { [weak self] in
+            guard let self else { return }
+            var file: String?
+            if let img = spectrogramImage, let data = img.jpegData(compressionQuality: 0.8) {
+                let name = "\(id.uuidString)_spectrogram.jpg"
+                try? data.write(to: self.imagesDir.appendingPathComponent(name))
+                file = name
+            }
+            let recording = Recording(id: id, date: date, durationSeconds: durationSeconds,
+                                      species: species,
+                                      commonName: SpeciesInfo.commonName[species] ?? species,
+                                      confidence: confidence, pulseCount: pulseCount,
+                                      sessionID: sessionID,
+                                      latitude: coordinate?.latitude, longitude: coordinate?.longitude,
+                                      relativeWavPath: relativeWavPath, spectrogramImageFile: file)
+            DispatchQueue.main.async {
+                self.recordings.insert(recording, at: 0)
+                self.persistRecordings()
+            }
+        }
+    }
+
     // MARK: Delete
 
     func delete(_ pass: PassRecord) {
@@ -306,6 +407,23 @@ final class ClassificationStore {
         persist()
     }
 
+    /// Removes the Recording's entry, its spectrogram thumbnail, AND the underlying
+    /// WAV file itself — unlike a pass (a log entry with no separate asset besides
+    /// small thumbnails), a Recording's whole reason for existing is the WAV, so an
+    /// orphaned multi-minute file left behind on delete would just waste space.
+    func delete(_ recording: Recording) {
+        recordings.removeAll { $0.id == recording.id }
+        io.async { [weak self] in
+            guard let self else { return }
+            if let file = recording.spectrogramImageFile {
+                try? FileManager.default.removeItem(at: self.imagesDir.appendingPathComponent(file))
+            }
+            let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            try? FileManager.default.removeItem(at: docs.appendingPathComponent(recording.relativeWavPath))
+        }
+        persistRecordings()
+    }
+
     func clearAll() {
         passes.removeAll()
         imageCache.removeAllObjects()
@@ -317,9 +435,10 @@ final class ClassificationStore {
         }
     }
 
-    /// Clear only the Listening bucket (passes not owned by a session).
+    /// Clear only the Listening bucket (passes and recordings not owned by a session).
     func clearListening() {
         for pass in listeningPasses { delete(pass) }
+        for recording in listeningRecordings { delete(recording) }   // removes WAVs too
     }
 
     // MARK: Image loading
@@ -331,6 +450,22 @@ final class ClassificationStore {
         else { return nil }
         imageCache.setObject(img, forKey: file as NSString)
         return img
+    }
+
+    func spectrogramImage(for recording: Recording) -> UIImage? {
+        guard let file = recording.spectrogramImageFile else { return nil }
+        if let cached = imageCache.object(forKey: file as NSString) { return cached }
+        guard let img = UIImage(contentsOfFile: imagesDir.appendingPathComponent(file).path)
+        else { return nil }
+        imageCache.setObject(img, forKey: file as NSString)
+        return img
+    }
+
+    /// Resolves a Recording's WAV to an absolute URL — never persisted as one (see
+    /// `Recording.relativeWavPath`), only ever computed at use time.
+    func wavURL(for recording: Recording) -> URL {
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        return docs.appendingPathComponent(recording.relativeWavPath)
     }
 
     // MARK: Private
@@ -363,12 +498,29 @@ final class ClassificationStore {
         return scaled.jpegData(compressionQuality: 0.7)
     }
 
+    // Deliberately NO automatic count-based eviction for recordings, unlike
+    // `prune()` above for passes. A pass's only asset is a small disposable
+    // thumbnail; a Recording's entire reason for existing IS the WAV — silently
+    // deleting someone's actual field recordings once they cross an arbitrary
+    // count would be real, unprompted data loss. Deletion only ever happens via
+    // an explicit `delete(_:)` call (swipe-to-delete, clear-all, etc.).
+
     private func persist() {
         let snapshot = passes
         io.async { [weak self] in
             guard let self else { return }
             if let data = try? JSONEncoder().encode(snapshot) {
                 try? data.write(to: self.jsonURL)
+            }
+        }
+    }
+
+    private func persistRecordings() {
+        let snapshot = recordings
+        io.async { [weak self] in
+            guard let self else { return }
+            if let data = try? JSONEncoder().encode(snapshot) {
+                try? data.write(to: self.recordingsURL)
             }
         }
     }
@@ -395,6 +547,10 @@ final class ClassificationStore {
         if let data = try? Data(contentsOf: sessionsURL),
            let decoded = try? JSONDecoder().decode([RecordingSession].self, from: data) {
             sessions = decoded
+        }
+        if let data = try? Data(contentsOf: recordingsURL),
+           let decoded = try? JSONDecoder().decode([Recording].self, from: data) {
+            recordings = decoded
         }
     }
 }
@@ -429,6 +585,7 @@ enum SpeciesInfo {
         "MYVO": "Long-legged Myotis",
         "MYYU": "Yuma Myotis",
         "NOISE": "Non-bat noise",
+        "NOID": "Unidentified",
         "NYHU": "Evening Bat",
         "NYMA": "Big Free-tailed Bat",
         "PAHE": "Canyon Bat",

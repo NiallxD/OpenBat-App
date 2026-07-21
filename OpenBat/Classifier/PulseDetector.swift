@@ -301,7 +301,17 @@ final class PulseDetector {
             minPulseCount: autoIDSettings?.minPassPulseCount ?? 1,
             rawConfidenceThreshold: descriptor?.noidRawConfidenceThreshold ?? PassAggregation.noidRawConfidenceThreshold,
             noiseClassName: descriptor?.noiseClassName
-        ) else { return }   // NoID
+        ) else {
+            // NoID: pulses were captured and classified, but the pass never cleared
+            // the confidence gates for a species OR the noise class. Previously this
+            // pass just vanished with no trace; recording it as its own "NOID" species
+            // lets the ID list show "something triggered, we couldn't tell what" instead
+            // of silently dropping evidence the user did see/hear.
+            store?.addPass(species: "NOID", confidence: 0, pulses: passPulses,
+                           sessionID: activeSessionID,
+                           coordinate: activeSessionID != nil ? coordinateProvider?() : nil)
+            return
+        }
 
         let passResult = ClassificationResult(
             species: outcome.species,

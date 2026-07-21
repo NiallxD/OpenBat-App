@@ -157,6 +157,11 @@ private struct SpeciesFeedRow: View {
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
         }
+        if pass.isNoID {
+            Text("Triggered, but couldn't be classified")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
         if let runnerUp = pass.runnerUpSpecies {
             Text("Runner-up: \(SpeciesInfo.commonName[runnerUp] ?? runnerUp)"
                  + (pass.runnerUpConfidence.map { String(format: " (%.0f%%)", $0 * 100) } ?? ""))
@@ -165,10 +170,15 @@ private struct SpeciesFeedRow: View {
         }
     }
 
-    private var trailingBadges: some View {
-        VStack(alignment: .trailing, spacing: 4) {
-            ConfidenceBadge(confidence: pass.confidence)
-            ComplexIndicator(pass: pass)
+    @ViewBuilder private var trailingBadges: some View {
+        // A NOID pass has no meaningful confidence number (it's exactly the case
+        // where the model never settled on anything) — showing "0%" would read as
+        // a real score rather than "we don't know".
+        if !pass.isNoID {
+            VStack(alignment: .trailing, spacing: 4) {
+                ConfidenceBadge(confidence: pass.confidence)
+                ComplexIndicator(pass: pass)
+            }
         }
     }
 

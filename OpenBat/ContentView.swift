@@ -75,17 +75,22 @@ struct ContentView: View {
     // Toggled from each panel's own config popover (bandButton / pulseViewButton).
     @AppStorage("display.spectrogramShowsSpeciesID") private var spectrogramShowsSpeciesID = false
     @AppStorage("display.pulseShowsSpeciesID") private var pulseShowsSpeciesID = false
+    /// Independent of the pulse view's own toggle (`display.pulseLogFrequency`,
+    /// declared in PulseSettingsView) — set from the spectrogram's frequency-band popover.
+    @AppStorage("display.spectrogramLogFrequency") private var spectrogramLogFrequency = false
 
     /// Top-level sections, switched from the leading toolbar menu (replaces the old
     /// bottom tab bar). The audio pipeline keeps running across switches.
     private enum AppSection: String, CaseIterable {
         case detector  = "Detector"
         case sessions  = "Sessions"
+        case playback  = "Playback"
         case species   = "Species"
         var icon: String {
             switch self {
             case .detector:  "waveform"
             case .sessions:  "square.stack.3d.up"
+            case .playback:  "play.circle"
             case .species:   "book.closed"
             }
         }
@@ -110,22 +115,32 @@ struct ContentView: View {
                         ToolbarItem(placement: .topBarTrailing) { optionsMenu }
                     }
                 }
-                // Hidden during the tour: the Liquid Glass toolbar buttons sit
-                // above the dim and keep re-adapting to the animated backdrop
-                // beneath them (random-looking pulsing). They're not usable
+                // Pin the nav bar to a fully OPAQUE background instead of Liquid
+                // Glass's default adaptive-on-scroll material. `.toolbarBackground(
+                // .visible, for:)` alone (the boolean visibility API) only forces the
+                // system's glass material to always render — that material is still
+                // translucent, so the leading/trailing toolbar buttons kept sampling
+                // through it, and any perpetually-animating content sitting near the
+                // bar (e.g. MicStatusPill's repeatForever breathe/flash in statsStrip,
+                // which sits right under the bar in portraitLayout) still shimmered
+                // through the glass. An explicit solid Color background (the
+                // ShapeStyle overload) blocks that sampling outright. Same root cause
+                // the tour dim overlay hit below.
+                .toolbarBackground(Color(.systemBackground), for: .navigationBar)
+                // Hidden during the tour: even with a fixed toolbar background, the
+                // dim overlay's cutout ring sits directly under the bar and its own
+                // animation still reads as motion to the buttons. They're not usable
                 // mid-tour anyway; the bar returns when the tour ends.
                 //
                 // The reveal must NOT be animated: finish() flips tourActive
                 // inside a 0.25 s withAnimation so the dim overlay can fade out,
                 // and if the toolbar's .hidden→.visible rode along in that same
-                // transaction, the Liquid Glass buttons would fade back in while
-                // the busy dim backdrop was still animating underneath them —
-                // re-triggering the same adaptive-material pulsing, except this
-                // time it got stuck oscillating instead of settling. Snapping
-                // the toolbar in instantly (no shared animation with the dim
-                // fade) keeps the buttons still while any backdrop motion is
-                // happening, so Liquid Glass never has a moving backdrop to
-                // react to.
+                // transaction, the buttons would fade back in while the busy dim
+                // backdrop was still animating underneath them — re-triggering the
+                // same pulsing, except this time it got stuck oscillating instead of
+                // settling. Snapping the toolbar in instantly (no shared animation
+                // with the dim fade) keeps the buttons still while any backdrop
+                // motion is happening.
                 .toolbar(tourActive ? .hidden : .visible, for: .navigationBar)
                 .animation(nil, value: tourActive)
                 .sheet(isPresented: $showDiagnostics) {
@@ -133,7 +148,13 @@ struct ContentView: View {
                 }
                 // onDismiss (not just the Done button) so per-model AutoID edits
                 // survive a swipe-down dismissal of the sheet too.
-                .sheet(isPresented: $showSettings, onDismiss: { autoIDSettings.save() }) {
+                .sheet(isPresented: $showSettings, onDismiss: {
+                    autoIDSettings.save()
+                    // minPassConfidence/minPassPulseCount are per-model and editable
+                    // in this sheet — repush in case they changed.
+                    recorder.setPassGates(minConfidence: autoIDSettings.minPassConfidence,
+                                          minPulseCount: autoIDSettings.minPassPulseCount)
+                }) {
                     SettingsView(settings: autoIDSettings, rteSettings: rteSettings,
                                  pulseDetector: pulseDetector, recorder: recorder,
                                  location: location)
@@ -211,6 +232,16 @@ struct ContentView: View {
             pulseDetector.onPulseActiveChanged = { [recorder] active in
                 recorder.setPulseActive(active)
             }
+            recorder.onRecordingSaved = { [classStore] report in
+                classStore.addRecording(date: report.date, durationSeconds: report.durationSeconds,
+                                        species: report.species, confidence: report.confidence,
+                                        pulseCount: report.pulseCount, sessionID: report.sessionID,
+                                        coordinate: report.coordinate.map {
+                                            CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon)
+                                        },
+                                        relativeWavPath: report.relativeWavPath,
+                                        spectrogramImage: report.spectrogramImage)
+            }
             processor.sampleRate = audio.diagnostics.actualSampleRate
             pulseDetector.pcmProvider = { [processor] count, endAbsolute in
                 processor.pcmSnapshot(count: count, endingAtAbsolute: endAbsolute)
@@ -218,6 +249,8 @@ struct ContentView: View {
             pulseDetector.autoIDSettings = autoIDSettings
             pulseDetector.store = classStore
             recorder.setActiveModel(id: autoIDSettings.activeModelID)
+            recorder.setPassGates(minConfidence: autoIDSettings.minPassConfidence,
+                                  minPulseCount: autoIDSettings.minPassPulseCount)
             pulseDetector.coordinateProvider = { [location] in location.currentCoordinate }
             location.store = classStore
             applyBand()
@@ -252,6 +285,10 @@ struct ContentView: View {
         .onChange(of: autoIDSettings.activeModelID) { _, id in
             pulseDetector.refreshModel()
             recorder.setActiveModel(id: id)
+            // minPassConfidence/minPassPulseCount are per-model — switching models
+            // switches which values apply.
+            recorder.setPassGates(minConfidence: autoIDSettings.minPassConfidence,
+                                  minPulseCount: autoIDSettings.minPassPulseCount)
         }
         .onChange(of: rteSettings.minFrequencyKHz) { _, _ in rteSettings.apply(to: audio.timeExpansion) }
         .onChange(of: rteSettings.marginDB)    { _, _ in rteSettings.apply(to: audio.timeExpansion) }
@@ -366,6 +403,7 @@ struct ContentView: View {
         switch section {
         case .detector:  detectorLayout
         case .sessions:  SessionsView(store: classStore, settings: autoIDSettings)
+        case .playback:  PlaybackListView(store: classStore, rteSettings: rteSettings)
         case .species:   SpeciesExplorerView(store: speciesGuide, rangeStore: speciesRange, userCoordinate: location.currentCoordinate)
         }
     }
@@ -541,7 +579,8 @@ struct ContentView: View {
                             bandHigh: bandHigh,
                             timeWindowSeconds: timeWindowSeconds,
                             pulseDetector: pulseDetector,
-                            isPaused: menuIsOpen)
+                            isPaused: menuIsOpen,
+                            logFrequency: spectrogramLogFrequency)
                 .overlay(alignment: .topTrailing) { tunedPillOverlay }
                 .opacity(spectrogramShowsSpeciesID ? 0 : 1)
                 .allowsHitTesting(!spectrogramShowsSpeciesID)
@@ -615,6 +654,8 @@ struct ContentView: View {
                             .foregroundStyle(.secondary)
                         Spacer()
                         HStack(spacing: 8) {
+                            speakerFeedbackWarning
+                            sessionStatusPill
                             micStatusPill
                             resetButton
                         }
@@ -647,6 +688,8 @@ struct ContentView: View {
                             .font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(.secondary)
                         Spacer()
+                        speakerFeedbackWarning
+                        sessionStatusPill
                         resetButton
                     }
                     .padding(.horizontal, 8)
@@ -688,6 +731,19 @@ struct ContentView: View {
             .tourTarget(.micStatus)
     }
 
+    /// Session-status pill (Off / Listening / Session) for the portrait stats
+    /// header, next to the mic pill. Same scoping rationale — see
+    /// `SessionStatusPillView`.
+    private var sessionStatusPill: some View {
+        SessionStatusPillView(audio: audio, classStore: classStore)
+    }
+
+    /// Feedback-risk warning for heterodyne/RTE on the speaker. See
+    /// `SpeakerFeedbackWarningPill` — same scoping rationale as `sessionStatusPill`.
+    private var speakerFeedbackWarning: some View {
+        SpeakerFeedbackWarningPill(audio: audio)
+    }
+
     private var resetButton: some View {
         Button {
             pulseDetector.resetStats()
@@ -696,7 +752,7 @@ struct ContentView: View {
             Image(systemName: "arrow.counterclockwise")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.secondary)
-                .padding(6)
+                .frame(width: StatusPillMetrics.height, height: StatusPillMetrics.height)
                 .background(.ultraThinMaterial, in: Circle())
         }
         .buttonStyle(.plain)
@@ -799,6 +855,7 @@ struct ContentView: View {
     private var pulseViewButton: some View {
         Button { showPulseView.toggle() } label: {
             Image(systemName: "slider.horizontal.3").font(.callout)
+                .frame(width: 18, height: 18)
         }
         .tint(.secondary)
         .accessibilityLabel("Pulse view settings")
@@ -935,6 +992,7 @@ struct ContentView: View {
 
     private var paletteMenuLabel: some View {
         Image(systemName: "paintpalette").font(.callout)
+            .frame(width: 18, height: 18)
     }
 
     private func paletteMenu(@ViewBuilder label: () -> some View) -> some View {
@@ -980,6 +1038,7 @@ struct ContentView: View {
     private var bandButton: some View {
         Button { showBand.toggle() } label: {
             Image(systemName: "slider.horizontal.3").font(.callout)
+                .frame(width: 18, height: 18)
         }
         .tint(.secondary)
         .accessibilityLabel("Frequency range")
@@ -987,7 +1046,8 @@ struct ContentView: View {
             FrequencyBandControl(low: $bandLow, high: $bandHigh,
                                  maxFrequency: nyquist,
                                  timeWindowSeconds: $timeWindowSeconds,
-                                 noiseFloor: $pulseDetector.spectrogramNoiseFloor)
+                                 noiseFloor: $pulseDetector.spectrogramNoiseFloor,
+                                 logFrequency: $spectrogramLogFrequency)
         }
         .tourTarget(.bandSettings)
     }
@@ -1060,8 +1120,8 @@ struct ContentView: View {
             classStore.endSession()
             location.stopTracking()
             pulseDetector.activeSessionID = nil
-            recorder.setActiveSession(id: nil, label: "Listening only")
-            screenRecorder.activeSessionID = nil
+            recorder.setActiveSession(id: nil, startDate: nil, label: "Listening only")
+            screenRecorder.activeSessionFolder = nil
         }
     }
 
@@ -1079,18 +1139,19 @@ struct ContentView: View {
         }
         if newSession {
             let id = classStore.startSession()
-            let label = classStore.sessions.first(where: { $0.id == id })?.title ?? "Session"
+            let session = classStore.sessions.first(where: { $0.id == id })
+            let label = session?.title ?? "Session"
             pulseDetector.activeSessionID = id
-            recorder.setActiveSession(id: id, label: label)
-            screenRecorder.activeSessionID = id
+            recorder.setActiveSession(id: id, startDate: session?.startDate ?? Date(), label: label)
+            screenRecorder.activeSessionFolder = (session?.startDate).map(AudioRecorder.sessionFolderFormatter.string)
             location.startTracking(geocodeSessionID: id)
             if autoRecordOnSessionStart {
                 recorder.setArmed(true)
                 if screenCaptureEnabled { screenRecorder.start() }
             }
         } else {
-            recorder.setActiveSession(id: nil, label: "Listening only")
-            screenRecorder.activeSessionID = nil
+            recorder.setActiveSession(id: nil, startDate: nil, label: "Listening only")
+            screenRecorder.activeSessionFolder = nil
         }
         Task { await audio.start() }
     }

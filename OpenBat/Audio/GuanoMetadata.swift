@@ -45,4 +45,34 @@ enum GuanoMetadata {
     }
 
     private static func le32(_ v: UInt32) -> Data { withUnsafeBytes(of: v.littleEndian) { Data($0) } }
+
+    /// Reads the `guan` chunk back out of a WAV `AudioRecorder` wrote (see
+    /// `AudioRecorder.closeAndKeep` for the exact layout: 44-byte header, `dataBytes`
+    /// of PCM, then this chunk) — used by `RecordingMigration` to backfill `Recording`
+    /// entries for WAVs saved before that model existed. Returns a plain key→value
+    /// dictionary (last-line-wins on a duplicate key, which never happens in practice);
+    /// nil if the file is too short or has no `guan` chunk where one's expected.
+    static func read(from url: URL) -> [String: String]? {
+        guard let header = WavHeader.read(url: url) else { return nil }
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        guard (try? handle.seek(toOffset: UInt64(44) + UInt64(header.dataBytes))) != nil else { return nil }
+        guard let chunkHeader = try? handle.read(upToCount: 8), chunkHeader.count == 8,
+              String(decoding: chunkHeader.prefix(4), as: UTF8.self) == "guan"
+        else { return nil }
+        let size = chunkHeader.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 4, as: UInt32.self) }
+        guard let textData = try? handle.read(upToCount: Int(size)), textData.count == Int(size) else { return nil }
+
+        var fields: [String: String] = [:]
+        for line in String(decoding: textData, as: UTF8.self).split(separator: "\n") {
+            // `tightColon` fields ("Loc Position") have no space after the colon;
+            // everything else does — try the space-separated form first.
+            if let range = line.range(of: ": ") {
+                fields[String(line[..<range.lowerBound])] = String(line[range.upperBound...])
+            } else if let colon = line.firstIndex(of: ":") {
+                fields[String(line[..<colon])] = String(line[line.index(after: colon)...])
+            }
+        }
+        return fields
+    }
 }

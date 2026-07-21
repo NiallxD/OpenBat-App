@@ -260,18 +260,18 @@ struct SettingsView: View {
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                 }
-                Slider(value: $recorder.preRollSeconds, in: 0.1...2.0, step: 0.1)
+                Slider(value: $recorder.preRollSeconds, in: 0.5...5.0, step: 0.5)
 
-                LabeledContent("Post-roll") {
+                LabeledContent("Close after silence") {
                     Text(String(format: "%.1f s", recorder.postRollSeconds))
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                 }
-                Slider(value: $recorder.postRollSeconds, in: 0.2...3.0, step: 0.1)
+                Slider(value: $recorder.postRollSeconds, in: 1.0...10.0, step: 0.5)
             } header: {
-                Text("Pass buffer")
+                Text("Activity bout")
             } footer: {
-                Text("How much audio is kept before and after a detected pass in each saved WAV.")
+                Text("Recording starts this many seconds before the first detected pulse. It keeps extending with every further pulse and only closes once nothing has triggered for the \"close after silence\" duration — so one bat giving several passes in a row lands in a single WAV instead of fragmenting into many.")
             }
         }
     }

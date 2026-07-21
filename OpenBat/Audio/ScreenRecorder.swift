@@ -39,9 +39,11 @@ final class ScreenRecorder: @unchecked Sendable {
 
     var isAvailable: Bool { recorder.isAvailable }
 
-    /// Active session id (main thread), so recordings land in the same folder as
-    /// the session's WAV passes. nil = Listening bucket. Set from ContentView.
-    var activeSessionID: UUID?
+    /// Active session's date-stamped folder name (main thread) — matches
+    /// `AudioRecorder.sessionFolderFormatter`'s output exactly, so recordings land in
+    /// the SAME folder as the session's WAV passes. nil = Listening bucket. Set from
+    /// ContentView.
+    var activeSessionFolder: String?
 
     func start() {
         guard recorder.isAvailable, !recorder.isRecording else { return }
@@ -154,8 +156,8 @@ final class ScreenRecorder: @unchecked Sendable {
         let stamp = Self.stampFormatter.string(from: Date())
         // Same layout as AudioRecorder.makeURL(), so video sits beside the WAVs.
         let dir: URL
-        if let sid = activeSessionID {
-            dir = docs.appendingPathComponent("Recordings/Sessions/\(sid.uuidString)", isDirectory: true)
+        if let folder = activeSessionFolder {
+            dir = docs.appendingPathComponent("Recordings/Sessions/\(folder)", isDirectory: true)
         } else {
             let day = Self.dayFormatter.string(from: Date())
             dir = docs.appendingPathComponent("Recordings/Listening/\(day)", isDirectory: true)

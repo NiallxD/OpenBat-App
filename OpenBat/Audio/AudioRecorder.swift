@@ -16,6 +16,26 @@
 import AVFoundation
 import Accelerate
 import Observation
+import CoreGraphics
+import UIKit
+
+/// Everything ClassificationStore needs to persist a finished, kept segment as a
+/// `Recording` — handed back via `AudioRecorder.onRecordingSaved` rather than
+/// AudioRecorder building a `Recording` itself, so the recorder stays decoupled from
+/// ClassificationStore's model (same pattern as `onPulseClassified` handing back a
+/// plain `ClassificationResult` instead of a `PassRecord`).
+struct RecordingReport {
+    let date: Date
+    let durationSeconds: Double
+    let species: String
+    let confidence: Float?
+    let pulseCount: Int
+    let sessionID: UUID?
+    let coordinate: (lat: Double, lon: Double)?
+    /// Relative to the Documents directory — see `Recording.relativeWavPath`.
+    let relativeWavPath: String
+    let spectrogramImage: UIImage?
+}
 
 @Observable
 final class AudioRecorder: @unchecked Sendable {
@@ -29,11 +49,22 @@ final class AudioRecorder: @unchecked Sendable {
     /// Sample rate actually written into the most recent recording file.
     private(set) var lastWrittenSampleRate: Double = 0
 
+    /// Fired (on the main thread) each time a segment closes and is kept (i.e. not
+    /// rejected as NOISE) — set from ContentView to persist it as a `Recording`.
+    var onRecordingSaved: ((RecordingReport) -> Void)?
+
     // MARK: Config
 
-    var preRollSeconds = 0.3
-    var postRollSeconds = 0.5
-    var maxSegmentSeconds = 30.0   // safety cap so a noisy environment can't make one huge file
+    /// Pre-trigger buffer kept rolling while idle, so a segment can start with audio
+    /// from BEFORE the triggering pulse instead of clipping its onset.
+    var preRollSeconds = 3.0
+    /// How long to keep a segment open after the last detected pulse before closing
+    /// it off — i.e. the silence gap that ends one activity "bout". Reset on every
+    /// new pulse while the segment is open, so a bat giving several passes with
+    /// gaps shorter than this all land in ONE file instead of fragmenting into many.
+    /// User-configurable in Settings (SettingsView's Recording tab).
+    var postRollSeconds = 3.0
+    var maxSegmentSeconds = 600.0   // safety cap so a very long continuous bout can't make one unbounded file
 
     // MARK: Queue-local state (recorder queue only)
 
@@ -41,7 +72,8 @@ final class AudioRecorder: @unchecked Sendable {
     private var sampleRate: Double = 384_000
     private var armedQ = false
     private var activeQ = false
-    private var sessionDirQ: String?     // queue-local: active session's subfolder (nil = Listening)
+    private var sessionDirQ: String?     // queue-local: active session's date-stamped subfolder (nil = Listening)
+    private var sessionIDQ: UUID?        // queue-local: active session's id, for RecordingReport.sessionID
     // Queue-local metadata for the GUANO chunk written at segment close.
     private var segmentStartDate: Date?
     private var sessionLabelQ = "Listening only"
@@ -52,6 +84,15 @@ final class AudioRecorder: @unchecked Sendable {
     // `speciesAutoID`'s NoID/NOISE gate can use the SAME model's calibration
     // PulseDetector itself uses, instead of always assuming NABat.
     private var activeModelIDQ: String?
+    // User-tunable pass gates (AutoIDSettings.minPassConfidence/minPassPulseCount for
+    // the active model) — set from `setPassGates(minConfidence:minPulseCount:)`,
+    // pushed from ContentView alongside activeModelID. Without these, a single
+    // confidently-scored pulse could tag a whole recording with a species even when
+    // the user has set e.g. "min pulses: 2" — a single pulse in a file isn't reliable
+    // enough to call a species on its own, same reasoning the in-app pass log
+    // (PulseDetector.finalizePass) already applies.
+    private var minPassConfidenceQ: Float = 0.05
+    private var minPassPulseCountQ: Int = 1
     // Classified pulses land here (from PulseDetector.onPulseClassified) tagged with
     // their capture date, carrying both raw and prior-adjusted scores so
     // `speciesAutoID` can run the same `PassAggregation` rule PulseDetector uses for
@@ -86,11 +127,16 @@ final class AudioRecorder: @unchecked Sendable {
 
     func toggleArmed() { setArmed(!isArmed) }
 
-    /// Route recordings into the active session's folder (nil = Listening bucket) and
-    /// record the human label embedded as `OpenBat|Session` in each file's GUANO chunk.
-    func setActiveSession(id: UUID?, label: String) {
+    /// Route recordings into the active session's folder (nil = Listening bucket),
+    /// record the human label embedded as `OpenBat|Session` in each file's GUANO
+    /// chunk, and tag reported Recordings with the session's id. `startDate` names
+    /// the folder — date-stamped (e.g. "2026-07-20_21-15-03") rather than the
+    /// session's random UUID, so Files-app browsing is meaningful without opening
+    /// each folder. Pass nil id/startDate to return to the Listening bucket.
+    func setActiveSession(id: UUID?, startDate: Date?, label: String) {
         queue.async { [weak self] in
-            self?.sessionDirQ = id?.uuidString
+            self?.sessionIDQ = id
+            self?.sessionDirQ = startDate.map { Self.sessionFolderFormatter.string(from: $0) }
             self?.sessionLabelQ = label
         }
     }
@@ -125,6 +171,17 @@ final class AudioRecorder: @unchecked Sendable {
     /// `AutoIDSettings.activeModelID` changes (see ContentView).
     func setActiveModel(id: String?) {
         queue.async { [weak self] in self?.activeModelIDQ = id }
+    }
+
+    /// Push the active model's `AutoIDSettings` pass gates — call once at startup
+    /// and again whenever they might have changed (active model switch, or the
+    /// Settings sheet closing, since minPassConfidence/minPassPulseCount are
+    /// per-model and user-editable there).
+    func setPassGates(minConfidence: Float, minPulseCount: Int) {
+        queue.async { [weak self] in
+            self?.minPassConfidenceQ = minConfidence
+            self?.minPassPulseCountQ = minPulseCount
+        }
     }
 
     func setArmed(_ on: Bool) {
@@ -183,7 +240,7 @@ final class AudioRecorder: @unchecked Sendable {
     }
 
     private func startSegment() {
-        segmentStartDate = Date()
+        let triggerDate = Date()
         let url = makeURL()
         let sr = sampleRate
         FileManager.default.createFile(atPath: url.path, contents: nil)
@@ -198,33 +255,89 @@ final class AudioRecorder: @unchecked Sendable {
         postRollRemaining = Int(postRollSeconds * sr)
 
         if !preRoll.isEmpty {
+            // segmentStartDate must be the timestamp of the file's actual FIRST
+            // sample, not the trigger moment — the pre-roll pushes real audio
+            // earlier than the trigger. Getting this wrong shifted every
+            // Recording's reported start (and its `passes(forRecording:)` time
+            // window in ClassificationStore) later than the file's true content by
+            // ~preRollSeconds, which could both exclude pulses that are audibly IN
+            // the file and bleed into the next recording's window.
+            segmentStartDate = triggerDate.addingTimeInterval(-Double(preRoll.count) / sr)
             write(preRoll)
             writtenSamples += preRoll.count
             preRoll.removeAll(keepingCapacity: true)
+        } else {
+            segmentStartDate = triggerDate
         }
         DispatchQueue.main.async { [weak self] in self?.isWriting = true }
     }
 
     private func closeSegment() {
-        guard let h = handle else { return }
-        // Append the GUANO metadata chunk after the data chunk, then patch the sizes.
-        let guano = makeGuanoChunk(filename: currentURL?.lastPathComponent ?? "")
+        guard let h = handle, let url = currentURL else { return }
+        let outcome = speciesAutoID(segmentStart: segmentStartDate ?? Date())
+
+        // NOISE is the model's own confident "not a bat" call — reject it outright
+        // rather than saving a WAV nobody will want. Every other outcome (a real
+        // species OR "couldn't be classified") is kept: only NOISE is discarded.
+        guard case .noise = outcome else {
+            try? closeAndKeep(handle: h, url: url, outcome: outcome)
+            return
+        }
+        try? h.close()
+        try? FileManager.default.removeItem(at: url)
+        handle = nil
+        currentURL = nil
+        writtenSamples = 0
+        dataBytes = 0
+        DispatchQueue.main.async { [weak self] in self?.isWriting = false }
+    }
+
+    /// Appends the GUANO chunk, patches the RIFF/data sizes, closes the file handle,
+    /// renames the file to its final `<stamp>_<SPECIES>.wav` form now that the
+    /// segment's classification outcome is known, then renders its spectrogram and
+    /// reports the finished `Recording` back via `onRecordingSaved`.
+    private func closeAndKeep(handle h: FileHandle, url: URL, outcome: AutoIDOutcome) throws {
+        let finalURL = url.deletingLastPathComponent()
+            .appendingPathComponent("\(url.deletingPathExtension().lastPathComponent)_\(Self.filenameSuffix(for: outcome)).wav")
+        let guano = makeGuanoChunk(filename: finalURL.lastPathComponent, outcome: outcome)
         try? h.seek(toOffset: UInt64(44 + dataBytes)); try? h.write(contentsOf: guano)   // append after the data chunk
         // RIFF size (offset 4) now spans the data + guano chunks; data size (offset 40)
         // is unchanged.
         try? h.seek(toOffset: 4);  try? h.write(contentsOf: Self.le32(UInt32(36 + dataBytes + guano.count)))
         try? h.seek(toOffset: 40); try? h.write(contentsOf: Self.le32(UInt32(dataBytes)))
         try? h.close()
+        try? FileManager.default.moveItem(at: url, to: finalURL)
         handle = nil
-        let name = currentURL?.lastPathComponent
         currentURL = nil
+        let closedDataBytes = dataBytes
+        let sr = sampleRate
         writtenSamples = 0
         dataBytes = 0
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             isWriting = false
-            if let name { lastSavedFilename = name; segmentCount += 1 }
+            lastSavedFilename = finalURL.lastPathComponent
+            segmentCount += 1
         }
+
+        // Spectrogram render + report run on THIS (recorder) queue too — real file
+        // IO and FFT work, kept off the audio-thread-adjacent main-thread hop above.
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let relativePath = String(finalURL.path.dropFirst(docs.path.count + 1))
+        let image = RecordingSpectrogramRenderer.render(wavURL: finalURL)
+        let (species, confidence, pulseCount): (String, Float?, Int)
+        switch outcome {
+        case .species(let code, let conf, let count): (species, confidence, pulseCount) = (code, conf, count)
+        case .noID(let count): (species, confidence, pulseCount) = ("NOID", nil, count)
+        case .noise: (species, confidence, pulseCount) = ("NOISE", nil, 0)   // unreachable — rejected before this is called
+        }
+        let report = RecordingReport(
+            date: segmentStartDate ?? Date(),
+            durationSeconds: sr > 0 ? Double(closedDataBytes / 2) / sr : 0,
+            species: species, confidence: confidence, pulseCount: pulseCount,
+            sessionID: sessionIDQ, coordinate: lastCoordinateQ,
+            relativeWavPath: relativePath, spectrogramImage: image)
+        DispatchQueue.main.async { [weak self] in self?.onRecordingSaved?(report) }
     }
 
     // Reused scratch for the vectorised float→Int16 conversion in write().
@@ -254,7 +367,7 @@ final class AudioRecorder: @unchecked Sendable {
     // MARK: GUANO metadata
 
     /// Build the GUANO chunk for the segment being closed, from queue-local context.
-    private func makeGuanoChunk(filename: String) -> Data {
+    private func makeGuanoChunk(filename: String, outcome: AutoIDOutcome) -> Data {
         let sr = sampleRate
         let durationS = sr > 0 ? Double(dataBytes / 2) / sr : 0
         var fields: [GuanoMetadata.Field] = [
@@ -270,50 +383,74 @@ final class AudioRecorder: @unchecked Sendable {
             fields.append(.init("Loc Position",
                                 String(format: "%.6f %.6f", c.lat, c.lon), tightColon: true))
         }
-        let (species, confidence, pulseCount) = speciesAutoID(segmentStart: segmentStartDate ?? Date())
-        fields.append(.init("Species Auto ID", species))
-        fields.append(.init("Species Manual ID", ""))
-        if let confidence {
+        switch outcome {
+        case .species(let code, let confidence, let pulseCount):
+            fields.append(.init("Species Auto ID", code))
             fields.append(.init("OpenBat|Species Confidence", String(format: "%.3f", confidence)))
             fields.append(.init("OpenBat|Species Pulse Count", String(pulseCount)))
+        case .noID(let pulseCount):
+            fields.append(.init("Species Auto ID", "No ID"))
+            fields.append(.init("OpenBat|Species Pulse Count", String(pulseCount)))
+        case .noise:
+            fields.append(.init("Species Auto ID", "NOISE"))   // unreachable — rejected before this is called
         }
+        fields.append(.init("Species Manual ID", ""))
+        fields.append(.init("OpenBat|AutoID Model", ModelRegistry.descriptor(id: activeModelIDQ)?.displayName ?? "None"))
         fields.append(.init("OpenBat|Session", sessionLabelQ))
         fields.append(.init("OpenBat|App Version", Self.appVersion))
         fields.append(.init("OpenBat|Host", Self.deviceModel))
         return GuanoMetadata.chunk(fields: fields)
     }
 
-    /// Winning species (GUANO/Wildlife-Acoustics-style code, "NOISE", or "No ID")
-    /// across the pulses classified during this segment's time span, plus its mean
-    /// confidence and contributing pulse count. Uses the same `PassAggregation` rule
-    /// as `PulseDetector.finalizePass`, gated with whichever model's
-    /// `noidRawConfidenceThreshold`/`noiseClassName` was active when these pulses were
-    /// classified (see `setActiveModel(id:)`) — so a WAV's GUANO species tag can't
-    /// disagree with what the app itself would report for that model. Falls back to
-    /// NABat's calibration if no model is set (matches the prior, model-blind
+    /// A segment's classified outcome, aggregated across every pulse whose date falls
+    /// inside its time span — same `PassAggregation` rule `PulseDetector.finalizePass`
+    /// uses, so a WAV's GUANO species tag/filename can't disagree with what the app
+    /// itself would report for the active model. `.noise` is REJECTED (deleted, not
+    /// saved) at close — every other outcome, including `.noID`, is kept: a triggered
+    /// pulse that couldn't be classified is still evidence something happened, and
+    /// only the model's own "definitely not a bat" call is discarded.
+    enum AutoIDOutcome {
+        case species(code: String, confidence: Float, pulseCount: Int)
+        /// `pulseCount` is however many pulses WERE classified during the segment
+        /// (0 when none were — e.g. recording armed with no AutoID model active, or
+        /// classification just didn't keep up) — never assume it's 0.
+        case noID(pulseCount: Int)
+        case noise
+    }
+
+    /// Winning outcome across the pulses classified during this segment's time span.
+    /// Gated with whichever model's `noidRawConfidenceThreshold`/`noiseClassName` was
+    /// active when these pulses were classified (see `setActiveModel(id:)`). Falls
+    /// back to NABat's calibration if no model is set (matches the prior, model-blind
     /// behavior). The extra `minPassConfidence`/`minPassPulseCount` strictness
     /// PulseDetector applies on top (AutoIDSettings, user-tunable) isn't applied here
     /// either — this is only the reference pipeline's own NoID/NOISE gate.
-    private func speciesAutoID(segmentStart: Date) -> (species: String, confidence: Float?, pulseCount: Int) {
+    private func speciesAutoID(segmentStart: Date) -> AutoIDOutcome {
         let inSegment = recentClassificationsQ.filter { $0.date >= segmentStart }
-        guard !inSegment.isEmpty else { return ("No ID", nil, 0) }
+        guard !inSegment.isEmpty else { return .noID(pulseCount: 0) }
 
         let descriptor = ModelRegistry.descriptor(id: activeModelIDQ)
+        // NOT `descriptor?.noiseClassName ?? "NOISE"` — that would silently overwrite
+        // BatDetect2's deliberate `nil` (no noise class) with "NOISE". `.map` preserves
+        // the distinction between "no descriptor found" (fall back to "NOISE") and
+        // "descriptor found, and it has no noise class".
+        let noiseClassName: String? = descriptor.map { $0.noiseClassName } ?? "NOISE"
         let pulses = inSegment.map { PassAggregation.Pulse(rawScores: $0.raw, adjustedScores: $0.adjusted) }
         guard let outcome = PassAggregation.aggregate(
             pulses,
-            minAdjustedConfidence: 0,
-            minPulseCount: 1,
+            minAdjustedConfidence: minPassConfidenceQ,
+            minPulseCount: minPassPulseCountQ,
             rawConfidenceThreshold: descriptor?.noidRawConfidenceThreshold ?? PassAggregation.noidRawConfidenceThreshold,
-            // NOT `descriptor?.noiseClassName ?? "NOISE"` — that would silently
-            // overwrite BatDetect2's deliberate `nil` (no noise class) with "NOISE".
-            // `.map` preserves the distinction between "no descriptor found" (fall
-            // back to "NOISE") and "descriptor found, and it has no noise class".
-            noiseClassName: descriptor.map { $0.noiseClassName } ?? "NOISE"
+            noiseClassName: noiseClassName
         ) else {
-            return ("No ID", nil, 0)
+            // Real evidence exists (inSegment isn't empty) — either the raw-confidence
+            // gate wasn't cleared, or it was but the user's own minPassConfidence/
+            // minPassPulseCount gate wasn't (e.g. a single pulse when min pulses = 2).
+            // Report the actual count either way, not 0.
+            return .noID(pulseCount: inSegment.count)
         }
-        return (outcome.species, outcome.confidence, inSegment.count)
+        if let noiseClassName, outcome.species == noiseClassName { return .noise }
+        return .species(code: outcome.species, confidence: outcome.confidence, pulseCount: inSegment.count)
     }
 
     private static let iso8601: ISO8601DateFormatter = {
@@ -360,25 +497,47 @@ final class AudioRecorder: @unchecked Sendable {
     private static func le32(_ v: UInt32) -> Data { withUnsafeBytes(of: v.littleEndian) { Data($0) } }
     private static func le16(_ v: UInt16) -> Data { withUnsafeBytes(of: v.littleEndian) { Data($0) } }
 
+    /// Working filename while a segment is being written — species isn't known until
+    /// classification results for the whole bout are aggregated at close, so this is
+    /// renamed to its final `<stamp>_<SPECIES>.wav` form in `closeSegment()`.
     private func makeURL() -> URL {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let stamp = Self.stampFormatter.string(from: Date())
-        // Session passes group under the session id; Listening keeps the dated folders.
+        // Session passes group under the session's own date-stamped folder; Listening
+        // keeps the dated day folders.
         let dir: URL
-        if let sid = sessionDirQ {
-            dir = docs.appendingPathComponent("Recordings/Sessions/\(sid)", isDirectory: true)
+        if let sessionDir = sessionDirQ {
+            dir = docs.appendingPathComponent("Recordings/Sessions/\(sessionDir)", isDirectory: true)
         } else {
             let day = Self.dayFormatter.string(from: Date())
             dir = docs.appendingPathComponent("Recordings/Listening/\(day)", isDirectory: true)
         }
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent("pass-\(stamp).wav")
+        return dir.appendingPathComponent("\(stamp).wav")
+    }
+
+    /// Species code suffix for the final filename — filesystem-safe by construction
+    /// (species codes are short uppercase letters, "NOISE" is rejected before this is
+    /// ever called, and "No ID" has no code to sanitize).
+    private static func filenameSuffix(for outcome: AutoIDOutcome) -> String {
+        switch outcome {
+        case .species(let code, _, _): return code
+        case .noID: return "NoID"
+        case .noise: return "NOISE"   // unreachable — rejected before renaming
+        }
     }
 
     private static let dayFormatter: DateFormatter = {
         let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"; return f
     }()
+    /// Filename stamp: date AND time, so a WAV is identifiable on its own once pulled
+    /// out of its folder (e.g. shared individually), not just relative to its parent.
     private static let stampFormatter: DateFormatter = {
-        let f = DateFormatter(); f.dateFormat = "HH-mm-ss-SSS"; return f
+        let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd_HH-mm-ss-SSS"; return f
+    }()
+    /// Session folder name — date-stamped instead of the session's UUID (Files-app
+    /// browsing should be meaningful without opening each folder).
+    static let sessionFolderFormatter: DateFormatter = {
+        let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd_HH-mm-ss"; return f
     }()
 }

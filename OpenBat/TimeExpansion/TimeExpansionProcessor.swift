@@ -97,6 +97,10 @@ nonisolated final class TimeExpansionProcessor: @unchecked Sendable {
     /// a sustained loud section gradually does (bounding gate duty). The gate opens
     /// when a block sits `marginDB` above this.
     private var noiseFloorDB: Float = -60
+    /// Fast envelope follower over the detection-band signal, used only to drive the
+    /// per-sample noise gate below — separate from `noiseFloorDB` (which tracks slowly
+    /// over whole blocks) so the gate can react within a call, not just between them.
+    private var gateEnvDB: Float = -80
     /// Samples still pushed after the level drops, to catch call tails / bridge dips.
     /// Sample-based so the gate tracks the real call extent rather than whole IO buffers.
     private var holdSamplesRemaining = 0
@@ -140,6 +144,7 @@ nonisolated final class TimeExpansionProcessor: @unchecked Sendable {
         reconfigureBand(low: low, high: high)
         reconfigureDetection(minFreq: Double(minFrequencyHz))
         noiseFloorDB = -60
+        gateEnvDB = -80
         holdSamplesRemaining = 0
         writeIndexA.store(0, ordering: .relaxed)
         readIndexA.store(0, ordering: .relaxed)
@@ -213,9 +218,30 @@ nonisolated final class TimeExpansionProcessor: @unchecked Sendable {
             var x = channel[i]
             if applyHP { x = bandHPb.process(bandHPa.process(x)) }
             if applyLP { x = bandLPb.process(bandLPa.process(x)) }
-            scratch.append(x)
             let d = applyDetHP ? detHPb.process(detHPa.process(channel[i])) : channel[i]
             detScratch.append(d)
+
+            // Per-sample noise gate/expander, sidechained off the detection-band
+            // envelope: the block-level gate below decides WHEN to enqueue audio, but
+            // a whole enqueued block still carries its between-call hiss at full level.
+            // This knocks that hiss down (not to full silence, to avoid a choppy
+            // digital-silence texture) while leaving loud call transients untouched,
+            // so 8x time expansion doesn't also stretch the noise floor into an
+            // audible hiss under the call.
+            let mag = abs(d)
+            let instDB = mag > 0 ? 20 * log10(mag) : -120
+            let attack: Float = instDB > gateEnvDB ? 0.35 : 0.02
+            gateEnvDB += attack * (instDB - gateEnvDB)
+            let aboveFloor = gateEnvDB - noiseFloorDB
+            let knee: Float = 6 // dB soft-knee width
+            let floorGain: Float = 0.12 // -18 dB, not full mute — avoids abrupt cutoff
+            let gateGain: Float
+            if aboveFloor >= knee { gateGain = 1 }
+            else if aboveFloor <= 0 { gateGain = floorGain }
+            else { gateGain = floorGain + (1 - floorGain) * (aboveFloor / knee) }
+            x *= gateGain
+
+            scratch.append(x)
         }
 
         // Sub-buffer gate: scan short blocks, measure the detection-band RMS, and open

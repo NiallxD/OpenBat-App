@@ -13,6 +13,16 @@
 
 import SwiftUI
 
+/// Shared sizing for the stats-header status pills (session status, mic status,
+/// speaker-feedback warning) and the circular reset button beside them, so they
+/// render at a consistent height regardless of each one's own icon/text content —
+/// left to their own padding, the reset button's uniform 6pt padding around an
+/// 11pt icon came out visibly taller than the pills' 7h/4v padding around a
+/// 10pt icon + 9pt text.
+enum StatusPillMetrics {
+    static let height: CGFloat = 26
+}
+
 // MARK: - Heterodyne tuning pill
 
 /// Draggable pill showing the heterodyne LO frequency. A standalone View struct:
@@ -63,6 +73,91 @@ struct TunedPillView: View {
     }
 }
 
+// MARK: - Session status pill
+
+/// Small always-visible indicator of what a currently-detecting run is: a logged
+/// "Session" (IDs + GPS track) vs a bare "Listening" bucket, or "Off" when nothing
+/// is running — shown beside `MicStatusPill`. A standalone View struct for the same
+/// reason as the other status pills — `audio.isRunning`/`classStore.activeSessionID`
+/// are stored properties on churning `@Observable` objects, so scoping the read here
+/// keeps it from invalidating ContentView.body (see the @Observable-churn note in
+/// CLAUDE.md).
+struct SessionStatusPillView: View {
+    let audio: AudioEngineController
+    let classStore: ClassificationStore
+
+    private var isSession: Bool { classStore.activeSessionID != nil }
+
+    private var icon: String {
+        guard audio.isRunning else { return "pause.circle" }
+        return isSession ? "location.fill" : "ear"
+    }
+
+    private var label: String {
+        guard audio.isRunning else { return "Off" }
+        return isSession ? "Session" : "Listening"
+    }
+
+    private var tint: Color {
+        audio.isRunning ? .toggleOn : .secondary
+    }
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: icon)
+                .font(.system(size: 10, weight: .semibold))
+            Text(label)
+                .font(.system(size: 9, weight: .semibold))
+        }
+        .foregroundStyle(tint)
+        .padding(.horizontal, 7)
+        .frame(height: StatusPillMetrics.height)
+        .background(.ultraThinMaterial, in: Capsule())
+        .accessibilityLabel(audio.isRunning ? (isSession ? "Recording a session" : "Listening, not in a session") : "Not detecting")
+    }
+}
+
+// MARK: - Speaker feedback warning pill
+
+/// Warns when heterodyne/RTE is playing out the built-in speaker: the mic picks
+/// the playback back up acoustically and reprocesses it as a spurious low-pitch
+/// "call" layered on the real one (confirmed fixed by wearing headphones — there's
+/// no clean software fix for the acoustic coupling itself). Only shown while
+/// actually listening on the speaker, so it doesn't nag when detection is silent
+/// or headphones are already in. Same standalone-View-struct scoping as the other
+/// status pills (`audio.isOutputOnSpeaker`/`listenMode` are on the churning
+/// AudioEngineController).
+struct SpeakerFeedbackWarningPill: View {
+    let audio: AudioEngineController
+    @State private var showExplainer = false
+
+    var body: some View {
+        if audio.isListening && audio.isOutputOnSpeaker {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.yellow)
+                .frame(width: StatusPillMetrics.height, height: StatusPillMetrics.height)
+                .background(.ultraThinMaterial, in: Circle())
+                .contentShape(Circle())
+                .onTapGesture { showExplainer = true }
+                .popover(isPresented: $showExplainer) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Feedback risk").font(.subheadline.weight(.semibold))
+                        Text("When listening through the phone speaker OpenBat's sound output may be picked up by the mic, showing as a second, lower-pitched call. Wear headphones or move the mic away from the phone to avoid it.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(12)
+                    .frame(width: 240, alignment: .leading)
+                    .presentationCompactAdaptation(.popover)
+                }
+                .accessibilityLabel("Feedback risk: listening through the speaker")
+                .accessibilityHint("Tap for details")
+        }
+    }
+}
+
 // MARK: - Mic status pill
 
 /// External-mic connection indicator: a green connector icon that slowly pulses
@@ -97,7 +192,7 @@ struct MicStatusPill: View {
             }
         }
         .padding(.horizontal, 7)
-        .padding(.vertical, 4)
+        .frame(height: StatusPillMetrics.height)
         .background(.ultraThinMaterial, in: Capsule())
         .contentShape(Capsule())
         .onTapGesture { showExplainer = true }

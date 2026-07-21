@@ -12,6 +12,9 @@ import SwiftUI
 
 struct PulseViewControls: View {
     @Bindable var detector: PulseDetector
+    /// Independent of the spectrogram's own log toggle (`display.spectrogramLogFrequency`)
+    /// — see PulseZoomView's row-warp for how this is applied to the captured image.
+    @AppStorage("display.pulseLogFrequency") private var pulseLogFrequency = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -49,6 +52,10 @@ struct PulseViewControls: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
+
+            Divider()
+
+            Toggle("Log frequency scale", isOn: $pulseLogFrequency)
         }
         .padding(12)
         .frame(width: 270)

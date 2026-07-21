@@ -133,7 +133,8 @@ fragment float4 spectro_fragment(VertexOut in [[stage_in]],
                                  constant float &bandHigh [[buffer(4)]],
                                  constant float &noiseFloor [[buffer(5)]],
                                  constant float &isRing [[buffer(6)]],
-                                 constant float &paletteIndex [[buffer(7)]]) {
+                                 constant float &paletteIndex [[buffer(7)]],
+                                 constant float &logFreq [[buffer(8)]]) {
     // Ring texture: repeat wrapping gives smooth sub-column scrolling as `rightEdge`
     // advances by fractional columns each frame. Seek texture is linear (not a
     // ring) — repeat-wrapping it would blend in texels from the opposite edge near
@@ -149,8 +150,19 @@ fragment float4 spectro_fragment(VertexOut in [[stage_in]],
     float u = fmod(column + texWidth, texWidth) / texWidth;
 
     // Frequency: texture row 0 = lowest bin (0 Hz), row count = Nyquist. Crop to
-    // the [bandLow, bandHigh] fraction so the band fills the view.
-    float v = bandLow + in.uv.y * (bandHigh - bandLow);
+    // the [bandLow, bandHigh] fraction so the band fills the view. Log mode spaces
+    // rows logarithmically across the same crop instead of linearly, giving low
+    // frequencies (where most calls' harmonic detail sits) more screen height —
+    // clamped to a small positive floor since log(0) is undefined and a 0 Hz low
+    // edge is the common default.
+    float v;
+    if (logFreq > 0.5) {
+        float lo = max(bandLow, 0.01);
+        float hi = max(bandHigh, lo * 1.001);
+        v = lo * exp(in.uv.y * log(hi / lo));
+    } else {
+        v = bandLow + in.uv.y * (bandHigh - bandLow);
+    }
 
     float intensity = ring ? tex.sample(ringSampler, float2(u, v)).r
                            : tex.sample(seekSampler, float2(u, v)).r;

@@ -15,6 +15,7 @@ struct FrequencyBandControl: View {
     var maxFrequency: Double            // Nyquist, Hz
     @Binding var timeWindowSeconds: Double
     @Binding var noiseFloor: Float
+    @Binding var logFrequency: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -38,6 +39,8 @@ struct FrequencyBandControl: View {
                 Spacer()
                 cutoffLabel("Low-pass", high)
             }
+
+            Toggle("Log frequency scale", isOn: $logFrequency)
 
             Divider()
 

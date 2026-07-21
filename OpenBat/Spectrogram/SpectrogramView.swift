@@ -20,6 +20,8 @@ private struct MetalSpectrogramView: UIViewRepresentable {
     let scrollColumnOffset: Double
     let pulseDetector: PulseDetector?
     let isPaused: Bool
+    let logFrequency: Bool
+    let palette: Palette?
 
     func makeCoordinator() -> SpectrogramRenderer? {
         SpectrogramRenderer(processor: processor)
@@ -44,10 +46,12 @@ private struct MetalSpectrogramView: UIViewRepresentable {
         }
         coordinator.bandLow = Float(bandLow)
         coordinator.bandHigh = Float(bandHigh)
+        coordinator.logFrequency = logFrequency
         coordinator.timeWindowSeconds = timeWindowSeconds
         coordinator.isScrolling = isScrolling
         coordinator.scrollColumnOffset = scrollColumnOffset
         coordinator.pulseDetector = pulseDetector
+        coordinator.palette = palette
         // Stopping the 60 Hz Metal render loop (which drains FFT columns and
         // feeds the pulse detector inline, all on the main thread) is what
         // frees the main run loop up for gesture recognition while a sheet/
@@ -70,6 +74,12 @@ struct SpectrogramView: View {
     /// draining and pulse-detector feeding) entirely — for use while a sheet
     /// or popover is covering the spectrogram and doesn't need it live.
     var isPaused: Bool = false
+    /// Display the frequency axis log-scaled within [bandLow, bandHigh] instead of
+    /// linear — a Settings toggle independent of the pulse view's own.
+    var logFrequency: Bool = false
+    /// Explicit palette override — see `SpectrogramRenderer.palette`. nil (the
+    /// default) falls back to `pulseDetector?.displayPalette`.
+    var palette: Palette? = nil
 
     @State private var isScrolling = false
     @State private var scrollColumnOffset: Double = 0
@@ -91,7 +101,9 @@ struct SpectrogramView: View {
                                      isScrolling: isScrolling,
                                      scrollColumnOffset: scrollColumnOffset,
                                      pulseDetector: pulseDetector,
-                                     isPaused: isPaused)
+                                     isPaused: isPaused,
+                                     logFrequency: logFrequency,
+                                     palette: palette)
                     .clipShape(RoundedRectangle(cornerRadius: 12))
 
                 gridOverlay
@@ -171,13 +183,33 @@ struct SpectrogramView: View {
 
     // MARK: Frequency axis
 
+    /// Evenly spaced (in screen position) tick Hz values, top to bottom — must match
+    /// whatever the shader actually draws at each row: log-interpolated in log mode
+    /// (matching Spectrogram.metal's log interpolation), linear otherwise. More ticks
+    /// in log mode since the compressed top of the band otherwise reads as empty.
+    private func tickHzValues(count: Int) -> [Double] {
+        guard count > 1 else { return [(bandLow + bandHigh) / 2 * maxFrequency] }
+        if logFrequency {
+            let lo = max(bandLow, 0.01)
+            let hi = max(bandHigh, lo * 1.001)
+            return (0..<count).map { i in
+                let v = Double(i) / Double(count - 1)              // 0 = top, 1 = bottom
+                return lo * exp((1 - v) * log(hi / lo)) * maxFrequency
+            }
+        }
+        return (0..<count).map { i in
+            let v = Double(i) / Double(count - 1)
+            return (bandHigh - v * (bandHigh - bandLow)) * maxFrequency
+        }
+    }
+
     private var frequencyAxis: some View {
-        VStack {
-            axisLabel(bandHigh * maxFrequency)
-            Spacer()
-            axisLabel((bandLow + bandHigh) / 2 * maxFrequency)
-            Spacer()
-            axisLabel(bandLow * maxFrequency)
+        let ticks = tickHzValues(count: logFrequency ? 8 : 5)
+        return VStack {
+            ForEach(ticks.indices, id: \.self) { i in
+                axisLabel(ticks[i])
+                if i < ticks.count - 1 { Spacer() }
+            }
         }
     }
 
