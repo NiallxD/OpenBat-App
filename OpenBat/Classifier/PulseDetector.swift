@@ -269,6 +269,15 @@ final class PulseDetector {
     private var passPulseCount: Int = 0
     private var passPulses: [CapturedPulse] = []     // per-pulse detail for the history
 
+    /// Count of pulses whose capture has fired but whose (slow, CoreML-driven)
+    /// classification hasn't returned yet. `feed()`'s silence-timeout defers
+    /// `finalizePass()` while this is nonzero — otherwise a classification that
+    /// takes longer than `passTimeoutSeconds` (e.g. a cold model load, or a busy
+    /// device) arrives AFTER its pass already finalized and reset `passAggPulses`,
+    /// so it gets misattributed as the start of a new, usually-NOID pass instead
+    /// of counting toward the pass it actually belongs to.
+    private var pendingClassifications: Int = 0
+
     /// Record one classified pulse into the running pass: keep its raw + adjusted
     /// scores for pass-level aggregation, and its detail (species, confidence,
     /// thumbnail) for the Sessions history.
@@ -461,7 +470,7 @@ final class PulseDetector {
         // Close the current pass once silence exceeds the timeout.
         let effectiveTimeout = autoIDSettings?.passTimeoutSeconds ?? passTimeoutSeconds
         let passTimeoutCols = Int(effectiveTimeout * columnsPerSecond)
-        if passPulseCount > 0 && columnsSinceLastDetection > passTimeoutCols {
+        if passPulseCount > 0 && columnsSinceLastDetection > passTimeoutCols && pendingClassifications == 0 {
             finalizePass()
         }
 
@@ -581,6 +590,7 @@ final class PulseDetector {
                                  onsetAbs: Int) {
         guard !isCapturing else { return }
         isCapturing = true
+        pendingClassifications += 1
 
         // This pulse's own wall-clock capture time — NOT `lastDetectionDate`, which is
         // a display-only property gated by quality/refresh-window logic (see below) and
@@ -698,9 +708,13 @@ final class PulseDetector {
             let classification: ClassificationResult? = clsPCM.count >= clsCount
                 ? cls?.classify(pcm: clsPCM, gate: gate, prior: { priorSnapshot[$0] ?? 1.0 })
                 : nil
-            guard let classification else { return }
+            guard let classification else {
+                DispatchQueue.main.async { [weak self] in self?.pendingClassifications -= 1 }
+                return
+            }
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
+                defer { self.pendingClassifications -= 1 }
                 // A classified pulse joins the pass even when the display render
                 // failed — the ID shouldn't lose evidence over a missing thumbnail.
                 self.lastClassification = classification

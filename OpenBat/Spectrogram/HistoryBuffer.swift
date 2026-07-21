@@ -42,6 +42,18 @@ final class HistoryBuffer {
         self.scratch = [Float](repeating: 0, count: binCount)
     }
 
+    /// Shares `data` by reference (COW) instead of allocating+zero-filling a
+    /// fresh ~90 000×1024-byte buffer the caller would immediately overwrite —
+    /// see `snapshot()`, whose whole point is to be O(1).
+    private init(capacity: Int, binCount: Int, data: [UInt8], writeHead: Int, totalWritten: Int) {
+        self.capacity = capacity
+        self.binCount = binCount
+        self.data = data
+        self.writeHead = writeHead
+        self.totalWritten = totalWritten
+        self.scratch = [Float](repeating: 0, count: binCount)
+    }
+
     // MARK: Write (main thread, drain path)
 
     func append(_ column: [Float]) {
@@ -125,10 +137,7 @@ final class HistoryBuffer {
     /// Returns an independent copy of this buffer. O(1) via Swift COW; the
     /// physical copy is deferred until the next append() on `self`.
     func snapshot() -> HistoryBuffer {
-        let snap = HistoryBuffer(capacity: capacity, binCount: binCount)
-        snap.data = data
-        snap.writeHead = writeHead
-        snap.totalWritten = totalWritten
-        return snap
+        HistoryBuffer(capacity: capacity, binCount: binCount, data: data,
+                      writeHead: writeHead, totalWritten: totalWritten)
     }
 }
