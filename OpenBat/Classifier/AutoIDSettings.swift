@@ -86,8 +86,13 @@ final class AutoIDSettings {
 
     /// True while a GBIF prior refresh is in flight — surfaced so a settings
     /// screen can show a spinner instead of looking like nothing happened.
+    /// Only ever written on the main actor (see `refreshPriorsFromGBIFIfNeeded`)
+    /// so `@Observable`'s change tracking stays on the isolation SwiftUI expects;
+    /// the ACTUAL re-entrancy gate is `refreshInFlight` below, a plain
+    /// (non-Observable) Bool fully owned by `priorRefreshLock`.
     private(set) var isRefreshingPriors = false
     private let priorRefreshLock = NSLock()
+    private var refreshInFlight = false
 
     /// How far (km) the user needs to have moved since the last refresh before
     /// another one runs. Small enough to catch a real move to a different
@@ -141,15 +146,15 @@ final class AutoIDSettings {
     /// onto the main actor regardless of which thread the awaits above resume on.
     func refreshPriorsFromGBIFIfNeeded(coordinate: CLLocationCoordinate2D) async {
         priorRefreshLock.lock()
-        guard !isRefreshingPriors else { priorRefreshLock.unlock(); return }
+        guard !refreshInFlight else { priorRefreshLock.unlock(); return }
         if let last = lastPriorCheckCoordinate {
             let moved = CLLocation(latitude: last.latitude, longitude: last.longitude)
                 .distance(from: CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude))
             guard moved / 1000 >= Self.priorRefreshDistanceKm else { priorRefreshLock.unlock(); return }
         }
-        isRefreshingPriors = true
+        refreshInFlight = true
         priorRefreshLock.unlock()
-        defer { isRefreshingPriors = false }
+        await MainActor.run { isRefreshingPriors = true }
 
         // Snapshot before overwriting, so the active model's changes can be reported
         // to the user afterwards — this is the only model whose priors affect what's
@@ -174,6 +179,7 @@ final class AutoIDSettings {
             perModel = updated
             lastPriorCheckCoordinate = coordinate
             save()
+            isRefreshingPriors = false
 
             var newlyEnabled: [String] = []
             var newlyDisabled: [String] = []
@@ -194,6 +200,7 @@ final class AutoIDSettings {
                 pendingChangeSummary = summary
             }
         }
+        priorRefreshLock.lock(); refreshInFlight = false; priorRefreshLock.unlock()
     }
 
     // MARK: Init

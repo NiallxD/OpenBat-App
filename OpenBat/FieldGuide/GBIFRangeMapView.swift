@@ -61,6 +61,11 @@ struct GBIFDistributionCard: View {
     @State private var camera: MapCameraPosition = .automatic
     @State private var resolution: H3Cell.Resolution = .res2
     @State private var binnedCells: [H3BinnedCell] = []
+    /// Bumped by the "Try Again" button on the error state to force `.task(id:)`
+    /// to re-run — a network error is never written into `resolvedCache` (see
+    /// below), so without this the view would just sit on `.error` forever
+    /// since `species.id` alone doesn't change on retry.
+    @State private var retryToken = 0
     /// Whether the currently-shown points came from the committed
     /// SpeciesRangeStore snapshot rather than a live per-species GBIF fetch —
     /// only the snapshot has a meaningful dataVersion/date to show next to
@@ -105,9 +110,13 @@ struct GBIFDistributionCard: View {
                         .frame(height: mapHeight)
                         .frame(maxWidth: .infinity)
                 case .error:
-                    ContentUnavailableView("Distribution unavailable",
-                                           systemImage: "globe.desk",
-                                           description: Text("Couldn't reach GBIF for this species."))
+                    ContentUnavailableView {
+                        Label("Distribution unavailable", systemImage: "globe.desk")
+                    } description: {
+                        Text("Couldn't reach GBIF for this species.")
+                    } actions: {
+                        Button("Try Again") { retryToken += 1 }
+                    }
                         .frame(height: mapHeight)
                         .frame(maxWidth: .infinity)
                 case .loading:
@@ -116,7 +125,7 @@ struct GBIFDistributionCard: View {
             }
             attributionFooter
         }
-        .task(id: species.id) {
+        .task(id: "\(species.id)#\(retryToken)") {
             if let cached = Self.resolvedCache[species.scientificName] {
                 state = cached.state
                 usedSnapshot = cached.usedSnapshot
@@ -157,12 +166,16 @@ struct GBIFDistributionCard: View {
                 }
                 binnedCells = Self.bin(points, at: resolution)
                 state = .loaded(points)
+                Self.resolvedCache[species.scientificName] = (state, usedSnapshot)
             case .noData:
                 state = .noData
+                Self.resolvedCache[species.scientificName] = (state, usedSnapshot)
             case .networkError:
+                // Deliberately not cached: a flaky-network failure shouldn't
+                // permanently wedge this species' map for the rest of the app
+                // session. Falling through re-fetches next visit / on retry.
                 state = .error
             }
-            Self.resolvedCache[species.scientificName] = (state, usedSnapshot)
         }
         .onChange(of: resolution) { _, newResolution in
             guard case .loaded(let points) = state else { return }

@@ -282,7 +282,7 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
 
     private func closeSegment() {
         guard let h = handle, let url = currentURL else { return }
-        let outcome = speciesAutoID(segmentStart: segmentStartDate ?? Date())
+        let outcome = speciesAutoID(segmentStart: segmentStartDate ?? Date(), segmentEnd: Date())
 
         // NOISE is the model's own confident "not a bat" call — reject it outright
         // rather than saving a WAV nobody will want. Every other outcome (a real
@@ -433,8 +433,16 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
     /// behavior). The extra `minPassConfidence`/`minPassPulseCount` strictness
     /// PulseDetector applies on top (AutoIDSettings, user-tunable) isn't applied here
     /// either — this is only the reference pipeline's own NoID/NOISE gate.
-    private func speciesAutoID(segmentStart: Date) -> AutoIDOutcome {
-        let inSegment = recentClassificationsQ.filter { $0.date >= segmentStart }
+    ///
+    /// `segmentEnd` bounds the window from above (not just `segmentStart` from
+    /// below): when pre-roll (up to 5s) exceeds post-roll (down to 1s), the next
+    /// segment's retroactive `segmentStartDate` can land BEFORE this segment's own
+    /// tail pulses, and an unbounded `>= segmentStart` filter would double-count
+    /// them into both segments. Consumed pulses (anything `<= segmentEnd`) are then
+    /// dropped from the queue so a later segment can never reclaim them.
+    private func speciesAutoID(segmentStart: Date, segmentEnd: Date) -> AutoIDOutcome {
+        let inSegment = recentClassificationsQ.filter { $0.date >= segmentStart && $0.date <= segmentEnd }
+        recentClassificationsQ.removeAll { $0.date <= segmentEnd }
         guard !inSegment.isEmpty else { return .noID(pulseCount: 0) }
 
         let descriptor = ModelRegistry.descriptor(id: activeModelIDQ)

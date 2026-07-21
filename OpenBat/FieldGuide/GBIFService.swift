@@ -143,6 +143,7 @@ enum GBIFService {
 
         var points: [GBIFOccurrencePoint] = []
         var anyPageSucceeded = false
+        var pageDropped = false
         let pageSize = 300
         var offset = 0
         while offset < maxRecords {
@@ -160,7 +161,11 @@ enum GBIFService {
                 page = try JSONDecoder().decode(OccurrenceSearchResponse.self, from: data)
                 anyPageSucceeded = true
             } catch {
-                break   // keep whatever pages already succeeded rather than discarding them
+                // Keep whatever pages already succeeded rather than discarding
+                // them, but remember the drop so a mid-pagination network error
+                // doesn't get persisted to disk as if it were the complete range.
+                pageDropped = true
+                break
             }
             for record in page.results {
                 guard let lat = record.decimalLatitude, let lon = record.decimalLongitude else { continue }
@@ -171,7 +176,7 @@ enum GBIFService {
         }
 
         guard !points.isEmpty else { return anyPageSucceeded ? .noData : .networkError }
-        if let data = try? JSONEncoder().encode(points) {
+        if !pageDropped, let data = try? JSONEncoder().encode(points) {
             try? data.write(to: cacheURL, options: .atomic)
         }
         return .success(points)
