@@ -157,10 +157,27 @@ final class LocationProvider: NSObject, CLLocationManagerDelegate {
     /// than a 100 km-radius decision needs.
     private let maxAcceptableRegionAccuracyMeters: Double = 5000
 
+    /// CoreLocation can hand back a cached fix from well before this call — good
+    /// accuracy doesn't mean fresh. Rejecting a stale one during tracking just waits
+    /// for the next continuous update; a tracked session's breadcrumbs, GUANO tags,
+    /// and map pins would otherwise get a plausible-looking but wrong "current"
+    /// location if the phone had a strong old fix cached from, say, indoors an hour
+    /// earlier.
+    private let maxAcceptableAgeSeconds: TimeInterval = 30
+
+    /// Looser than `maxAcceptableAgeSeconds` for the same reason
+    /// `maxAcceptableRegionAccuracyMeters` is looser than `maxAcceptableAccuracyMeters`:
+    /// `requestLocation()` is single-shot with no retry, and a region/prior suggestion
+    /// only needs country-scale precision, so a somewhat-old cached fix is still
+    /// useful rather than worth discarding outright.
+    private let maxAcceptableRegionAgeSeconds: TimeInterval = 900
+
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
         guard let loc = locations.last else { return }
-        let threshold = tracking ? maxAcceptableAccuracyMeters : maxAcceptableRegionAccuracyMeters
-        guard loc.horizontalAccuracy > 0, loc.horizontalAccuracy <= threshold else { return }
+        let accuracyThreshold = tracking ? maxAcceptableAccuracyMeters : maxAcceptableRegionAccuracyMeters
+        guard loc.horizontalAccuracy > 0, loc.horizontalAccuracy <= accuracyThreshold else { return }
+        let ageThreshold = tracking ? maxAcceptableAgeSeconds : maxAcceptableRegionAgeSeconds
+        guard -loc.timestamp.timeIntervalSinceNow <= ageThreshold else { return }
         currentCoordinate = loc.coordinate
         guard tracking else { return }
 

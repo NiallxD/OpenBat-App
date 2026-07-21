@@ -18,10 +18,16 @@ struct DiagnosticsView: View {
     var body: some View {
         NavigationStack {
             ScrollView {
+                // Diagnostics/level meter read `audio.diagnostics`, which updates at
+                // ~15 Hz — pulled into their own leaf views (below) rather than read
+                // directly here, so that churn doesn't force this whole body (and the
+                // Share/Clear/Done buttons/toolbar it contains) to re-render on every
+                // update. Same @Observable-churn fix as ContentView's RecordButton —
+                // see CLAUDE.md.
                 VStack(spacing: 20) {
-                    statusLine
-                    diagnosticsCard
-                    levelMeter
+                    DiagnosticsStatusLine(audio: audio)
+                    DiagnosticsCard(audio: audio, recorder: recorder)
+                    DiagnosticsLevelMeter(audio: audio)
                     logSection
                 }
                 .padding()
@@ -77,14 +83,27 @@ struct DiagnosticsView: View {
         return size < 1024 ? "\(size) B" : String(format: "%.1f KB", Double(size) / 1024)
     }
 
-    private var statusLine: some View {
+}
+
+/// Leaf view isolating `audio.status` reads — see the churn note in `DiagnosticsView.body`.
+private struct DiagnosticsStatusLine: View {
+    let audio: AudioEngineController
+
+    var body: some View {
         Text(audio.status)
             .font(.footnote)
             .foregroundStyle(.secondary)
             .frame(maxWidth: .infinity, alignment: .leading)
     }
+}
 
-    private var diagnosticsCard: some View {
+/// Leaf view isolating `audio.diagnostics`/`recorder.lastWrittenSampleRate` reads — see
+/// the churn note in `DiagnosticsView.body`.
+private struct DiagnosticsCard: View {
+    let audio: AudioEngineController
+    let recorder: AudioRecorder
+
+    var body: some View {
         let d = audio.diagnostics
         return VStack(spacing: 12) {
             row("Input", d.inputName, badge: d.isUSBInput ? "USB" : nil)
@@ -117,19 +136,6 @@ struct DiagnosticsView: View {
         .background(.quaternary, in: RoundedRectangle(cornerRadius: 16))
     }
 
-    private var levelMeter: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Input level")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            ProgressView(value: AudioLevel.normalized(audio.diagnostics.currentLevelDB))
-                .tint(.green)
-            Text(String(format: "%.0f dBFS", audio.diagnostics.currentLevelDB))
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(.secondary)
-        }
-    }
-
     private func row(
         _ label: String,
         _ value: String,
@@ -150,6 +156,25 @@ struct DiagnosticsView: View {
             Text(value)
                 .font(.body.monospacedDigit())
                 .foregroundStyle(emphasis)
+        }
+    }
+}
+
+/// Leaf view isolating `audio.diagnostics.currentLevelDB` reads — see the churn note
+/// in `DiagnosticsView.body`.
+private struct DiagnosticsLevelMeter: View {
+    let audio: AudioEngineController
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Input level")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            ProgressView(value: AudioLevel.normalized(audio.diagnostics.currentLevelDB))
+                .tint(.green)
+            Text(String(format: "%.0f dBFS", audio.diagnostics.currentLevelDB))
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.secondary)
         }
     }
 }

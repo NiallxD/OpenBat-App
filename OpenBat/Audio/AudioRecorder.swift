@@ -282,6 +282,13 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
 
     private func closeSegment() {
         guard let h = handle, let url = currentURL else { return }
+
+        // A segment can close with zero PCM bytes written (e.g. armed/stopped again
+        // before any samples made it through, or a trigger whose post-roll write
+        // never actually ran) — discard rather than hand back an unreadable,
+        // headers-only WAV that Files/other apps can't play.
+        guard dataBytes > 0 else { discardSegment(handle: h, url: url); return }
+
         let outcome = speciesAutoID(segmentStart: segmentStartDate ?? Date(), segmentEnd: Date())
 
         // NOISE is the model's own confident "not a bat" call — reject it outright
@@ -291,6 +298,10 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
             try? closeAndKeep(handle: h, url: url, outcome: outcome)
             return
         }
+        discardSegment(handle: h, url: url)
+    }
+
+    private func discardSegment(handle h: FileHandle, url: URL) {
         try? h.close()
         try? FileManager.default.removeItem(at: url)
         handle = nil
