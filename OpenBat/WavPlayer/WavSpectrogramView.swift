@@ -40,19 +40,12 @@ import SwiftUI
 struct WavSpectrogramView: View {
     let wavURL: URL
     let sampleRate: Double
+    /// `overview.image`/`overview.rawTile` are kept current by WavPlayerView
+    /// (mutated in place on a noise-floor/palette change — see its
+    /// `recolorOverviewIfPossible`), so this view and `WavMinimapView`
+    /// automatically show the same up-to-date recolor with nothing extra to
+    /// pass through here.
     let overview: WavSpectrogramEngine.Overview
-    /// Pre-colormap magnitude grid behind `overview.image` — nil for the
-    /// brief window right after opening the player before its background
-    /// scan finishes (see WavPlayerView.load()). Whenever present, a
-    /// noise-floor/palette change recolors THIS instead of forcing a
-    /// PCM/FFT re-render — see `recolorOverviewIfPossible`'s doc comment.
-    let overviewRawGrid: RecordingSpectrogramRenderer.Grid?
-    /// `overview.image` recolored at the current noise-floor/palette — owned
-    /// and kept in sync by WavPlayerView (hoisted up from here so
-    /// `WavMinimapView` can share the exact same recolored image instead of
-    /// showing the stale as-saved one while this view shows the live one).
-    /// nil until the first recolor completes.
-    let recoloredOverviewImage: UIImage?
     @Binding var viewport: WavViewport
     @Binding var selection: ClosedRange<Int>?
     let isSelecting: Bool
@@ -210,8 +203,8 @@ struct WavSpectrogramView: View {
         // (`scheduleDetailRender`'s `cachedRawTile` branch) recolors that
         // tile from PCM already read for the current viewport, not a fresh
         // whole-file read. The zoomed-out (overview) case is handled by
-        // WavPlayerView recoloring `recoloredOverviewImage` directly — see
-        // its own `.onChange(of: recoloredOverviewImage)` below.
+        // WavPlayerView recoloring `overview.image` in place directly — see
+        // its own `.onChange(of: overview.image)` below.
         .onChange(of: noiseFloor) { old, new in
             WavPlayerDebugLog.log("WavSpectrogram", "noiseFloor onChange fired: \(old) -> \(new)")
             scheduleForceRenderDebounced()
@@ -220,13 +213,13 @@ struct WavSpectrogramView: View {
             WavPlayerDebugLog.log("WavSpectrogram", "palette onChange fired: \(old) -> \(new)")
             scheduleForceRenderDebounced()
         }
-        .onChange(of: recoloredOverviewImage) { _, _ in
+        .onChange(of: overview.image) { _, _ in
             // WavPlayerView just recolored the overview (noise-floor/palette
-            // change, or the background raw-grid scan just landed) — only
-            // matters for display here if we're currently showing the
-            // overview crop rather than a detail tile, but `rebuildWarpedImage`
-            // is cheap enough (a crop + optional log-warp) that it's simpler
-            // to always refresh than to duplicate the "which one is showing"
+            // change, or the initial render just landed) — only matters for
+            // display here if we're currently showing the overview crop
+            // rather than a detail tile, but `rebuildWarpedImage` is cheap
+            // enough (a crop + optional log-warp) that it's simpler to
+            // always refresh than to duplicate the "which one is showing"
             // check `currentSourceImage` already does.
             rebuildWarpedImage()
         }
@@ -404,11 +397,7 @@ struct WavSpectrogramView: View {
     /// during a pan or a frequency-trim drag, not just the last committed
     /// one — see its doc comment.
     private func croppedOverviewImage(start: Int, end: Int, minHz: Double, maxHz: Double) -> UIImage? {
-        // Prefer the recolored image (current noise-floor/palette) once one
-        // exists — see `recoloredOverviewImage`'s doc comment. Same pixel
-        // dimensions as `overview.image` either way, since both come from
-        // the same underlying grid.
-        guard let cg = (recoloredOverviewImage ?? overview.image).cgImage, overview.totalSamples > 0 else { return nil }
+        guard let cg = overview.image.cgImage, overview.totalSamples > 0 else { return nil }
         let width = cg.width, height = cg.height
         let leftFrac = Double(start) / Double(overview.totalSamples)
         let rightFrac = Double(end) / Double(overview.totalSamples)

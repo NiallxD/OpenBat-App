@@ -22,12 +22,6 @@ struct WavTuningControl: View {
     @Bindable var rteSettings: RTESettings
     @Binding var logFrequency: Bool
     @Binding var noiseFloor: Double
-    /// True until `WavPlayerView`'s background whole-file scan
-    /// (`overviewRawGrid`) finishes — moving the slider before then has
-    /// nothing to recolor yet (see WavPlayerView.recolorOverviewIfPossible),
-    /// which on a long recording can take a genuinely noticeable few seconds.
-    /// Surfacing that here beats letting the slider look simply broken.
-    var isPreparing: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -37,18 +31,9 @@ struct WavTuningControl: View {
 
             VStack(alignment: .leading, spacing: 4) {
                 LabeledContent("Noise floor") {
-                    if isPreparing {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        Text(String(format: "%.2f", noiseFloor)).monospacedDigit().foregroundStyle(.secondary)
-                    }
+                    Text(String(format: "%.2f", noiseFloor)).monospacedDigit().foregroundStyle(.secondary)
                 }
                 Slider(value: $noiseFloor, in: 0...0.9, step: 0.05)
-                if isPreparing {
-                    Text("Preparing — this recording is still being analyzed, adjustments will apply shortly.")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
             }
 
             Divider()

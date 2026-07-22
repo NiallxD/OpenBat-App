@@ -55,14 +55,20 @@ struct STFTGridTests {
         #expect(peakVal <= 1.0 && peakVal >= 0.0, "normalized grid values must stay in [0,1], got \(peakVal)")
     }
 
-    @Test func streamPooledGridBoundsOutputToTargetColumns() {
-        let sampleRate = 384_000.0
+    @Test func streamPooledGridFromFileBoundsOutputToTargetColumns() {
         // A span whose native column count is much larger than the requested
         // target — this is the exact case the streaming path exists for.
-        let pcm = makeTone(frequency: 30_000, sampleRate: sampleRate, seconds: 1.0)
+        // Also a WHOLE-FILE-shaped span (the case that used to require a
+        // completely separate, bulk-load-then-sample pipeline) — 1s of audio
+        // is nowhere near a real recording's length, but exercises the same
+        // "read far less than the full span" code path via `oversample`.
+        let url = TestWavFactory.make(sampleRate: 384_000, seconds: 1.0, toneFrequency: 30_000)
+        defer { try? FileManager.default.removeItem(at: url) }
         var scratch = STFTGrid.Scratch()
-        guard let (grid, nCols) = STFTGrid.streamPooledGrid(pcm: pcm, targetColumns: 256, scratch: &scratch) else {
-            Issue.record("streamPooledGrid returned nil for a valid 1s buffer")
+        guard let (grid, nCols) = STFTGrid.streamPooledGridFromFile(
+            wavURL: url, startSample: 0, endSample: Int(384_000 * 1.0), targetColumns: 256, scratch: &scratch)
+        else {
+            Issue.record("streamPooledGridFromFile returned nil for a valid 1s file")
             return
         }
         #expect(nCols == 256, "expected pooling down to the requested target column count, got \(nCols)")
@@ -73,20 +79,44 @@ struct STFTGridTests {
         #expect(grid.allSatisfy { $0 > -1000 && $0.isFinite })
     }
 
-    @Test func streamPooledGridMatchesComputeWhenNativeColumnsFitWithinTarget() {
-        // When targetColumns comfortably exceeds the native frame count, the
-        // streaming path's per-frame values (pre-normalization) should equal
-        // a plain per-frame dB computation to a plausible bin — sanity check
-        // that pooling with colsPerBucket == 1 doesn't distort short spans.
+    @Test func streamPooledGridFromFileMatchesComputeWhenNativeColumnsFitWithinTarget() {
+        // When targetColumns comfortably exceeds the native frame count, no
+        // pooling (stride > 1) should occur — sanity check that visiting
+        // every native frame via oversample doesn't distort short spans.
         let sampleRate = 384_000.0
-        let pcm = makeTone(frequency: 50_000, sampleRate: sampleRate, seconds: 0.01)
+        let seconds = 0.01
+        let url = TestWavFactory.make(sampleRate: UInt32(sampleRate), seconds: seconds, toneFrequency: 50_000)
+        defer { try? FileManager.default.removeItem(at: url) }
         var scratch = STFTGrid.Scratch()
-        guard let (grid, nCols) = STFTGrid.streamPooledGrid(pcm: pcm, targetColumns: 10_000, scratch: &scratch) else {
-            Issue.record("streamPooledGrid returned nil")
+        let totalSamples = Int(sampleRate * seconds)
+        guard let (grid, nCols) = STFTGrid.streamPooledGridFromFile(
+            wavURL: url, startSample: 0, endSample: totalSamples, targetColumns: 10_000, scratch: &scratch)
+        else {
+            Issue.record("streamPooledGridFromFile returned nil")
             return
         }
-        let nativeFrames = 1 + (pcm.count - STFTGrid.windowLen) / STFTGrid.hop
+        let nativeFrames = 1 + (totalSamples - STFTGrid.windowLen) / STFTGrid.hop
         #expect(nCols == nativeFrames, "targetColumns exceeds native frames, so no pooling should occur")
         #expect(grid.count == STFTGrid.binCount * nCols)
+    }
+
+    @Test func streamPooledGridFromFileHandlesWholeFileSpanBounded() {
+        // Confirms the actual load-bearing property this function exists
+        // for: a span many times longer than the target column count still
+        // returns promptly and bounded — no attempt to read/hold the whole
+        // span in memory. 5s stands in for "much longer than the screen
+        // could ever show at native resolution" without making the test slow.
+        let url = TestWavFactory.make(sampleRate: 384_000, seconds: 5.0, toneFrequency: 45_000)
+        defer { try? FileManager.default.removeItem(at: url) }
+        var scratch = STFTGrid.Scratch()
+        guard let (grid, nCols) = STFTGrid.streamPooledGridFromFile(
+            wavURL: url, startSample: 0, endSample: Int(384_000 * 5.0), targetColumns: 1536, scratch: &scratch)
+        else {
+            Issue.record("streamPooledGridFromFile returned nil for a valid 5s file")
+            return
+        }
+        #expect(nCols == 1536)
+        #expect(grid.count == STFTGrid.binCount * nCols)
+        #expect(grid.allSatisfy { $0 > -1000 && $0.isFinite })
     }
 }

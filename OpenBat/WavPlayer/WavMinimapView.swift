@@ -13,14 +13,10 @@
 import SwiftUI
 
 struct WavMinimapView: View {
+    /// `overview.image` is kept current by WavPlayerView (mutated in place
+    /// on a noise-floor/palette change), so this always shows the same
+    /// recolor the main spectrogram does with nothing extra to pass through.
     let overview: WavSpectrogramEngine.Overview
-    /// `overview.image` recolored at the current noise-floor/palette, owned
-    /// by WavPlayerView — nil until the first recolor completes, in which
-    /// case falls back to `overview.image` (whatever floor/palette it was
-    /// saved with). Previously this view always showed `overview.image`
-    /// regardless of the live noise-floor setting, so the minimap silently
-    /// diverged from what the main spectrogram was showing.
-    let recoloredImage: UIImage?
     let viewport: WavViewport
     let engine: PlaybackEngine
     let onRecenter: (Int) -> Void   // new center sample
@@ -28,7 +24,7 @@ struct WavMinimapView: View {
     var body: some View {
         GeometryReader { geo in
             ZStack(alignment: .topLeading) {
-                Image(uiImage: recoloredImage ?? overview.image)
+                Image(uiImage: overview.image)
                     .resizable()
                     .interpolation(.low)
                     .frame(width: geo.size.width, height: geo.size.height)

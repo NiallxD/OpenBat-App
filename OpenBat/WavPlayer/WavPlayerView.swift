@@ -36,22 +36,14 @@ struct WavPlayerView: View {
     let rteSettings: RTESettings
 
     @State private var engine = PlaybackEngine()
+    /// Holds both the whole-file raw dB grid AND its colorized `image`
+    /// together (see WavSpectrogramEngine's doc comment for why one
+    /// pipeline now produces both) — a noise-floor/palette change recolors
+    /// `overview.rawTile` and mutates `overview.image` in place, so
+    /// WavSpectrogramView and WavMinimapView (which both just read
+    /// `overview.image`) automatically show the same up-to-date recolor
+    /// with no separate "recolored image" property to keep in sync.
     @State private var overview: WavSpectrogramEngine.Overview?
-    /// The pre-colormap magnitude grid behind `overview.image` — same
-    /// dimensions, arrives a moment later (see `load()`'s second detached
-    /// task, kept independent of the one that sets `overview` itself so
-    /// neither has to wait on the other's completion order). Lets us
-    /// recolor a whole-file (zoomed-out) view instantly on a noise-floor/
-    /// palette change instead of re-reading PCM — see
-    /// RecordingSpectrogramRenderer.renderGrid's doc comment for why re-
-    /// reading PCM for that case used to be the "slider doesn't work" bug.
-    @State private var overviewRawGrid: RecordingSpectrogramRenderer.Grid?
-    /// `overview.image` recolored at the current noise-floor/palette — owned
-    /// here (not WavSpectrogramView) so WavMinimapView can show the exact
-    /// same recolored image instead of the stale as-saved one; previously
-    /// only the main spectrogram reflected noise-floor changes, not the
-    /// minimap. nil until the first recolor completes.
-    @State private var recoloredOverviewImage: UIImage?
     @State private var recolorDebounceTask: Task<Void, Never>?
     @State private var recolorGeneration = 0
     /// Set when `WavSpectrogramEngine.renderOverview` itself fails (distinct
@@ -106,8 +98,7 @@ struct WavPlayerView: View {
                 .frame(maxHeight: .infinity)
 
             if let overview {
-                WavMinimapView(overview: overview, recoloredImage: recoloredOverviewImage,
-                               viewport: viewport, engine: engine, onRecenter: recenter)
+                WavMinimapView(overview: overview, viewport: viewport, engine: engine, onRecenter: recenter)
                     .frame(height: 32)
                     .padding(.horizontal, 8)
                     .padding(.top, 4)
@@ -145,8 +136,7 @@ struct WavPlayerView: View {
                 }
                 .accessibilityLabel("Heterodyne / RTE tuning")
                 .popover(isPresented: $showTuning) {
-                    WavTuningControl(rteSettings: rteSettings, logFrequency: $logFrequency, noiseFloor: $noiseFloor,
-                                     isPreparing: overviewRawGrid == nil)
+                    WavTuningControl(rteSettings: rteSettings, logFrequency: $logFrequency, noiseFloor: $noiseFloor)
                 }
             }
         }
@@ -177,8 +167,7 @@ struct WavPlayerView: View {
             VStack(spacing: 10) {
                 ZStack {
                     WavSpectrogramView(wavURL: store.wavURL(for: recording), sampleRate: overview.sampleRate,
-                                       overview: overview, overviewRawGrid: overviewRawGrid,
-                                       recoloredOverviewImage: recoloredOverviewImage, viewport: $viewport,
+                                       overview: overview, viewport: $viewport,
                                        selection: $selection, isSelecting: isSelecting,
                                        palette: palette, noiseFloor: Float(noiseFloor),
                                        logFrequency: logFrequency,
@@ -305,37 +294,35 @@ struct WavPlayerView: View {
     }
 
     /// Recolors `overview.image` at the current noise-floor/palette from the
-    /// cached `overviewRawGrid` — bounded, in-memory pixel math (see
-    /// `DisplayColormap.makeLUT`'s doc comment for why this is now fast; it
-    /// used to take 1.6-5.3 SECONDS per pass before that fix), no file IO, no
-    /// FFT. Debounced by `scheduleRecolorDebounced` (a real on-device drag
-    /// through six 0.05 noise-floor steps once fired six undebounced
-    /// recolors here, all racing concurrently) and generation-guarded against
-    /// whichever still manages to overlap.
+    /// already-resident `overview.rawTile` — bounded, in-memory pixel math
+    /// (see `DisplayColormap.makeLUT`'s doc comment for why this is now
+    /// fast; it used to take 1.6-5.3 SECONDS per pass before that fix), no
+    /// file IO, no FFT. Debounced (a real on-device drag through six 0.05
+    /// noise-floor steps once fired six undebounced recolors here, all
+    /// racing concurrently) and generation-guarded against whichever still
+    /// manages to overlap.
     private func recolorOverviewIfPossible() {
-        guard let grid = overviewRawGrid else {
-            WavPlayerDebugLog.log("WavPlayer", "recolorOverviewIfPossible: no grid yet, skipping")
-            return
-        }
+        guard let raw = overview?.rawTile else { return }
         recolorGeneration += 1
         let myGeneration = recolorGeneration
-        let pal = palette, floor = Float(noiseFloor)
-        WavPlayerDebugLog.log("WavPlayer", "recolorOverviewIfPossible: recoloring grid \(grid.width)x\(grid.binCount) at floor=\(floor) palette=\(pal), generation=\(myGeneration)")
+        let pal = palette, floor = Float(noiseFloor), sr = overview?.sampleRate ?? 0
+        WavPlayerDebugLog.log("WavPlayer", "recolorOverviewIfPossible: recoloring \(raw.nCols) cols at floor=\(floor) palette=\(pal), generation=\(myGeneration)")
         Task.detached(priority: .userInitiated) {
-            let image = WavPlayerDebugLog.time("WavPlayer", "overview colorize \(grid.width)x\(grid.binCount)") {
-                RecordingSpectrogramRenderer.colorize(grid, palette: pal, noiseFloor: floor)
+            let tile = WavPlayerDebugLog.time("WavPlayer", "overview colorize \(raw.nCols) cols") {
+                WavSpectrogramEngine.colorize(raw, sampleRate: sr, minFreqHz: 0, maxFreqHz: sr / 2,
+                                              palette: pal, noiseFloor: floor)
             }
             await MainActor.run {
                 guard myGeneration == self.recolorGeneration else {
                     WavPlayerDebugLog.log("WavPlayer", "recolor SUPERSEDED (generation \(myGeneration) != \(self.recolorGeneration))")
                     return
                 }
-                guard let image else {
+                guard let tile else {
                     WavPlayerDebugLog.log("WavPlayer", "colorize returned nil")
                     return
                 }
-                WavPlayerDebugLog.log("WavPlayer", "colorize succeeded, size=\(image.size), assigning recoloredOverviewImage")
-                self.recoloredOverviewImage = image
+                WavPlayerDebugLog.log("WavPlayer", "colorize succeeded, size=\(tile.image.size), updating overview.image")
+                self.overview?.image = tile.image
             }
         }
     }
@@ -345,21 +332,16 @@ struct WavPlayerView: View {
     private func load() {
         let url = store.wavURL(for: recording)
         overviewError = nil
-        overviewRawGrid = nil
-        recoloredOverviewImage = nil
+        overview = nil
         engine.load(url: url)
         rteSettings.apply(to: engine.timeExpansion)
         applyBand()
 
-        // Read on the main actor (ClassificationStore is main-actor by
-        // default) before handing off to the detached task — see
-        // WavSpectrogramEngine.renderOverview's doc comment for why this
-        // avoids a full re-decode+re-FFT of the whole file on every open.
-        let cached = store.spectrogramImage(for: recording)
-        WavPlayerDebugLog.log("WavPlayer", "load: starting renderOverview for \(url.lastPathComponent), cached=\(cached != nil)")
+        let pal = palette, floor = Float(noiseFloor)
+        WavPlayerDebugLog.log("WavPlayer", "load: starting renderOverview for \(url.lastPathComponent)")
         Task.detached(priority: .userInitiated) {
             let result = WavPlayerDebugLog.time("WavPlayer", "renderOverview") {
-                WavSpectrogramEngine.renderOverview(wavURL: url, cachedImage: cached)
+                WavSpectrogramEngine.renderOverview(wavURL: url, palette: pal, noiseFloor: floor)
             }
             await MainActor.run {
                 guard let result else {
@@ -379,30 +361,6 @@ struct WavPlayerView: View {
                 let whole = WavViewport.wholeFile(totalSamples: result.totalSamples, maxFreqHz: result.maxFreqHz)
                 viewport = WavViewportMath.viewportForTimeZoom(
                     committed: whole, zoomFraction: 0.5, totalSamples: result.totalSamples)
-            }
-        }
-
-        // Populates `overviewRawGrid` a moment after `overview` itself —
-        // bounded-memory streaming scan (see renderRawGrid's doc comment),
-        // separate from the `cachedImage` fast path above so opening the
-        // player still paints instantly from the cached JPEG. Once this
-        // lands, we can recolor a whole-file view for free on every
-        // noise-floor/palette tick instead of re-reading PCM.
-        // `.userInitiated`, not `.utility` — this gates a control (the noise-
-        // floor slider) the user is actively trying to use right now; at
-        // `.utility` it can get starved behind other work on a busy system,
-        // making an already-slow scan (see renderGrid's doc comment) worse.
-        WavPlayerDebugLog.log("WavPlayer", "load: starting renderRawGrid for \(url.lastPathComponent)")
-        Task.detached(priority: .userInitiated) {
-            guard let grid = WavPlayerDebugLog.time("WavPlayer", "renderRawGrid", { WavSpectrogramEngine.renderRawGrid(wavURL: url) }) else {
-                WavPlayerDebugLog.log("WavPlayer", "renderRawGrid FAILED for \(url.lastPathComponent)")
-                return
-            }
-            WavPlayerDebugLog.log("WavPlayer", "renderRawGrid OK: \(grid.width)x\(grid.binCount) for \(url.lastPathComponent)")
-            await MainActor.run {
-                overviewRawGrid = grid
-                WavPlayerDebugLog.log("WavPlayer", "overviewRawGrid assigned")
-                recolorOverviewIfPossible()
             }
         }
     }

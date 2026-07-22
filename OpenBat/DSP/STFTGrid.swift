@@ -12,17 +12,20 @@
 //    • `compute` — one-shot: the whole `pcm` slice becomes one dB grid at
 //      native resolution. Fine for a short span (a single pulse capture, or a
 //      WavPlayer detail-tile narrow enough that native columns stay bounded).
-//    • `streamPooledGrid` — for spans whose native column count would make
-//      `compute`'s full grid too large to hold at once (a WavPlayer detail
-//      tile spanning many seconds): pools each frame's per-bin peak (max) into
-//      `targetColumns` buckets as it goes, so memory never exceeds
-//      O(targetColumns * binCount) regardless of how long `pcm` is. Returns
-//      RAW (non peak-normalized) dB — the caller normalizes over the small
-//      pooled result afterward, since the global peak isn't known until every
-//      frame's been seen.
+//    • `streamPooledGridFromFile` — for spans whose native column count would
+//      make `compute`'s full grid too large to hold at once (a WavPlayer
+//      detail tile spanning many seconds, or a whole-file overview spanning
+//      minutes): pools each frame's per-bin peak (max) into `targetColumns`
+//      buckets, reading PCM directly off disk per sampled frame rather than
+//      requiring the whole span pre-loaded — see its own doc comment for why
+//      that's what lets ONE pipeline cover every zoom level, whole file
+//      included. Returns RAW (non peak-normalized) dB — the caller normalizes
+//      over the small pooled result afterward, since the global peak isn't
+//      known until every frame's been seen.
 //
 
 import Accelerate
+import Foundation
 
 nonisolated enum STFTGrid {
 
@@ -162,42 +165,57 @@ nonisolated enum STFTGrid {
         return (dB, nFrames)
     }
 
-    /// Streaming variant for spans whose native STFT grid would be too large
-    /// to materialize (see the file doc comment). Pools each frame's per-bin
-    /// dB peak (max, not average — preserves a brief loud call instead of
-    /// smearing it into quiet neighbours, same rationale as
-    /// RecordingSpectrogramRenderer's column pooling) directly into
-    /// `targetColumns` buckets. At no point does more than one frame's worth
-    /// of scratch plus the O(targetColumns * binCount) accumulator exist.
-    /// Returns RAW (non peak-normalized) dB values, row-major
-    /// [bin*width+bucket] where `width = min(nFrames, targetColumns)`.
+    /// Disk-native pooling — reads PCM directly from `wavURL` per sampled
+    /// frame (one small seek+read, `windowLen` samples, ~1KB) instead of
+    /// requiring the whole `[startSample, endSample)` span pre-loaded into
+    /// memory. This is what makes it safe to call for a WHOLE-FILE span —
+    /// total bytes actually read stays O(targetColumns * oversample *
+    /// windowLen) regardless of how long the file is, matching the same
+    /// bound this function already puts on FFT work (see below). An earlier
+    /// version of this function took an in-memory `pcm: [Float]` (bulk-
+    /// loaded by the caller first) — fine for a small, already-zoomed-in
+    /// detail-tile span, but reading a WHOLE multi-minute recording into one
+    /// array just to sample ~1% of it via `oversample` striding was the
+    /// actual reason a SEPARATE, cheaper (but visually different —
+    /// different FFT hop, different normalization) pipeline had to exist
+    /// just for the whole-file overview case. Bounding the read here too
+    /// means one pipeline now covers every zoom level, whole file included —
+    /// see WavSpectrogramEngine's doc comment for the rest of that story.
+    ///
+    /// Pools each frame's per-bin dB peak (max, not average — preserves a
+    /// brief loud call instead of smearing it into quiet neighbours) directly
+    /// into `targetColumns` buckets. Returns RAW (non peak-normalized) dB
+    /// values, row-major [bin*width+bucket] where
+    /// `width = min(nFrames, targetColumns)`.
     ///
     /// Only visits up to `oversample` native-hop frames PER OUTPUT BUCKET,
     /// not every native frame — bounding total FFT work to
     /// O(width * oversample) regardless of how many native frames the span
-    /// actually spans. Without this, a wide span (e.g. a several-second
-    /// detail tile, or the whole file at native hop = 12,000 frames/sec)
-    /// computed the STFT at every one of potentially hundreds of thousands
-    /// of native frames just to pool the result down to ~1500 buckets —
-    /// the difference between this being instant and taking multiple
-    /// seconds, which is what made re-rendering on every noise-floor slider
-    /// tick painfully slow. Each bucket still visits AT LEAST one frame
-    /// (`bucketStart`), so the "never left at the sentinel" guarantee below
-    /// holds regardless of `oversample`.
-    static func streamPooledGrid(pcm: [Float], targetColumns: Int,
-                                 scratch: inout Scratch, oversample: Int = 8) -> (dBGrid: [Float], nCols: Int)? {
-        guard pcm.count >= windowLen, targetColumns > 0 else {
-            WavPlayerDebugLog.log("STFTGrid", "streamPooledGrid: pcm.count=\(pcm.count) targetColumns=\(targetColumns), aborting")
+    /// actually spans. Each bucket still visits AT LEAST one frame
+    /// (`bucketStart`), so every bucket is guaranteed to be written
+    /// regardless of how coarse the stride gets.
+    static func streamPooledGridFromFile(wavURL: URL, startSample: Int, endSample: Int,
+                                         targetColumns: Int, scratch: inout Scratch,
+                                         oversample: Int = 8) -> (dBGrid: [Float], nCols: Int)? {
+        guard endSample > startSample, targetColumns > 0 else {
+            WavPlayerDebugLog.log("STFTGrid", "streamPooledGridFromFile: invalid range \(startSample)-\(endSample) targetColumns=\(targetColumns), aborting")
+            return nil
+        }
+        guard let handle = try? FileHandle(forReadingFrom: wavURL) else {
+            WavPlayerDebugLog.log("STFTGrid", "streamPooledGridFromFile: FileHandle open FAILED for \(wavURL.lastPathComponent)")
+            return nil
+        }
+        defer { try? handle.close() }
+
+        let spanSamples = endSample - startSample
+        guard spanSamples >= windowLen else {
+            WavPlayerDebugLog.log("STFTGrid", "streamPooledGridFromFile: spanSamples=\(spanSamples) < windowLen=\(windowLen), aborting")
             return nil
         }
         let bins = binCount
-        let nFrames = 1 + (pcm.count - windowLen) / hop
-        guard nFrames >= 1 else {
-            WavPlayerDebugLog.log("STFTGrid", "streamPooledGrid: nFrames=\(nFrames) < 1, aborting")
-            return nil
-        }
+        let nFrames = 1 + (spanSamples - windowLen) / hop
         let width = min(nFrames, targetColumns)
-        WavPlayerDebugLog.log("STFTGrid", "streamPooledGrid: nFrames=\(nFrames) -> width=\(width), oversample=\(oversample)")
+        WavPlayerDebugLog.log("STFTGrid", "streamPooledGridFromFile: \(wavURL.lastPathComponent) \(startSample)-\(endSample), nFrames=\(nFrames) -> width=\(width), oversample=\(oversample)")
 
         var accum = [Float](repeating: -.greatestFiniteMagnitude, count: bins * width)
         var windowed = scratch.windowed; scratch.windowed = []
@@ -209,13 +227,15 @@ nonisolated enum STFTGrid {
         if imagp.count != bins { imagp = [Float](repeating: 0, count: bins) }
         if mags.count  != bins { mags  = [Float](repeating: 0, count: bins) }
         let scale: Float = 1.0 / Float(fftLen)
+        // Small per-frame read buffer — reused across every sampled frame,
+        // the disk-native equivalent of the in-memory version's direct
+        // slice into a pre-loaded `pcm` array.
+        var frameBuf = [Float](repeating: 0, count: windowLen)
 
-        WavPlayerDebugLog.time("STFTGrid", "streamPooledGrid (\(width) buckets x oversample \(oversample))") {
-        pcm.withUnsafeBufferPointer { pBuf in
+        WavPlayerDebugLog.time("STFTGrid", "streamPooledGridFromFile (\(width) buckets x oversample \(oversample))") {
             // Iterate by OUTPUT bucket (not by native frame) so each bucket's
             // own native-frame range can be strided independently — a fixed
-            // global stride can't guarantee every bucket gets visited (see
-            // the old per-frame version's own comment on that), but a
+            // global stride can't guarantee every bucket gets visited, but a
             // per-bucket range always starts its loop at `bucketStart`, so
             // every bucket is guaranteed at least one sample regardless of
             // how coarse the stride gets.
@@ -226,9 +246,29 @@ nonisolated enum STFTGrid {
                 let stride = max(1, bucketFrameCount / oversample)
                 var frame = bucketStart
                 while frame < bucketEnd {
-                    let start = frame * hop
-                    vDSP_vmul(pBuf.baseAddress! + start, 1, hannWindow, 1,
-                              &windowed, 1, vDSP_Length(windowLen))
+                    let sampleOffset = startSample + frame * hop
+                    guard (try? handle.seek(toOffset: UInt64(44 + sampleOffset * 2))) != nil,
+                          let data = try? handle.read(upToCount: windowLen * 2), data.count == windowLen * 2
+                    else {
+                        // A frame right at the file's tail can come up short
+                        // (e.g. endSample computed a hair past what's really
+                        // on disk) — skip it rather than abort the whole
+                        // render; every bucket still gets its `bucketStart`
+                        // frame at minimum, same guarantee the in-memory
+                        // version had.
+                        frame += stride
+                        continue
+                    }
+                    data.withUnsafeBytes { raw in
+                        let src = raw.bindMemory(to: Int16.self)
+                        frameBuf.withUnsafeMutableBufferPointer { dst in
+                            vDSP_vflt16(src.baseAddress!, 1, dst.baseAddress!, 1, vDSP_Length(windowLen))
+                        }
+                    }
+                    var pcmScale: Float = 1.0 / 32767.0
+                    vDSP_vsmul(frameBuf, 1, &pcmScale, &frameBuf, 1, vDSP_Length(windowLen))
+
+                    vDSP_vmul(frameBuf, 1, hannWindow, 1, &windowed, 1, vDSP_Length(windowLen))
                     windowed.withUnsafeBufferPointer { wBuf in
                         wBuf.baseAddress!.withMemoryRebound(to: DSPComplex.self, capacity: bins) { cplx in
                             realp.withUnsafeMutableBufferPointer { rp in
@@ -252,13 +292,12 @@ nonisolated enum STFTGrid {
                     var scale20: Float = 20.0
                     vDSP_vsmul(mags, 1, &scale20, &mags, 1, vDSP_Length(bins))
                     // Vectorized element-wise max instead of a per-bin scalar
-                    // loop — same fix as RecordingSpectrogramRenderer.renderGrid's
-                    // accumulation loop, same reasoning: this ran once per
-                    // visited frame (up to width*oversample times, e.g.
-                    // 1536*8=12,288 for a detail tile), each iterating `bins`
-                    // (1024) times. `accum`'s bin-major layout ([bin*width+bucket])
-                    // gives the write side stride `width`, which vDSP_vmax's
-                    // stride parameters take directly.
+                    // loop — this ran once per visited frame (up to
+                    // width*oversample times, e.g. 1536*8=12,288 for a detail
+                    // tile), each iterating `bins` (1024) times. `accum`'s
+                    // bin-major layout ([bin*width+bucket]) gives the write
+                    // side stride `width`, which vDSP_vmax's stride
+                    // parameters take directly.
                     accum.withUnsafeMutableBufferPointer { acc in
                         mags.withUnsafeBufferPointer { m in
                             vDSP_vmax(m.baseAddress!, 1,
@@ -271,13 +310,12 @@ nonisolated enum STFTGrid {
                 }
             }
         }
-        }
 
         scratch.windowed = windowed
         scratch.realp = realp
         scratch.imagp = imagp
         scratch.mags = mags
-        WavPlayerDebugLog.log("STFTGrid", "streamPooledGrid: done, width=\(width)")
+        WavPlayerDebugLog.log("STFTGrid", "streamPooledGridFromFile: done, width=\(width)")
         return (accum, width)
     }
 }
