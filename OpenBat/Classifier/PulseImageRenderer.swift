@@ -28,10 +28,13 @@ import UIKit
 enum PulseImageRenderer {
 
     // ── High-resolution STFT parameters (zoom view only) ─────────────────────
-    static let windowLen = 512               // Hann analysis window (samples)
-    static let fftLen    = 1024              // zero-padded FFT size
-    static let hop       = 32                // 12 000 cols/sec @ 384 kHz
-    static var binCount: Int { fftLen / 2 }  // 512
+    // Mirrors of STFTGrid's own constants (the STFT loop itself now lives
+    // there — see `STFTGrid.compute`, called from step 1-2 below) kept here
+    // too since callers throughout this file reference them directly.
+    static let windowLen = STFTGrid.windowLen
+    static let fftLen    = STFTGrid.fftLen
+    static let hop       = STFTGrid.hop
+    static var binCount: Int { STFTGrid.binCount }
 
     /// Dynamic range (dB below the window peak) mapped onto the colormap. 48 dB
     /// gives crisp contrast on a bat call while still showing harmonic structure.
@@ -70,35 +73,16 @@ enum PulseImageRenderer {
         let quality: Float
     }
 
-    // 1024 = 2^10 — radix-2 real FFT (window is zero-padded up to this length).
-    private static let log2n = vDSP_Length(10)
-    private static let fftSetup: FFTSetup = {
-        guard let s = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2)) else {
-            fatalError("PulseImageRenderer: FFT setup failed")
-        }
-        return s
-    }()
-    private static let hannWindow: [Float] = {
-        var w = [Float](repeating: 0, count: windowLen)
-        vDSP_hann_window(&w, vDSP_Length(windowLen), Int32(vDSP_HANN_NORM))
-        return w
-    }()
-
     // ── Scratch buffers reused across captures ───────────────────────────────
     //  `render` is only ever invoked from PulseDetector's serial captureQueue
     //  (gated by isCapturing), so one set of buffers can be recycled instead of
-    //  reallocating ~4 MB per pulse. Each call STEALS the arrays (leaving the
-    //  statics empty) so the working copies stay uniquely referenced — Swift COW
-    //  then mutates them in place — and hands them back before returning. The
-    //  variable-size ones (dB, pixels) grow to the largest capture seen and are
-    //  never shrunk; every used element is overwritten each call, so no zeroing
-    //  is needed on reuse (windowed's zero-pad tail past windowLen is written
-    //  once at allocation and never touched again).
-    private static var dbScratch: [Float] = []
-    private static var windowedScratch: [Float] = []
-    private static var realpScratch: [Float] = []
-    private static var imagpScratch: [Float] = []
-    private static var magsScratch: [Float] = []
+    //  reallocating ~4 MB per pulse. `sttfScratch` backs steps 1-2 (now
+    //  STFTGrid.compute, below); `pixelScratch` backs the pixel buffer built in
+    //  step 7. Each grows to the largest capture seen and is never shrunk;
+    //  every used element is overwritten each call, so no zeroing is needed on
+    //  reuse (windowed's zero-pad tail past windowLen is written once at
+    //  allocation and never touched again — see STFTGrid.compute).
+    private static var sttfScratch = STFTGrid.Scratch()
     private static var pixelScratch: [UInt8] = []
 
     /// Render `pcm` (raw samples at `sampleRate`) into a sharp pulse spectrogram.
@@ -123,72 +107,15 @@ enum PulseImageRenderer {
                        onsetFraction: Double,
                        expectedOnsetSample: Int,
                        palette: Palette = .inferno) -> Result? {
-        guard pcm.count >= windowLen else { return nil }
+        let bins = binCount
 
-        let bins    = binCount
-        let nFrames = 1 + (pcm.count - windowLen) / hop
-        guard nFrames >= 2 else { return nil }
-
-        // ── 1. STFT → magnitude → dB, row-major [bin * nFrames + frame] ──────
-        //  A `windowLen` Hann window is copied into a zero-padded `fftLen` buffer,
-        //  so the FFT interpolates to `bins` frequency points at full time res.
-        let dbCount = bins * nFrames
-        var dB = Self.dbScratch; Self.dbScratch = []
-        if dB.count < dbCount { dB = [Float](repeating: 0, count: dbCount) }
-        var windowed = Self.windowedScratch; Self.windowedScratch = []
-        if windowed.count != fftLen { windowed = [Float](repeating: 0, count: fftLen) } // tail stays zero (pad)
-        var realp = Self.realpScratch; Self.realpScratch = []
-        var imagp = Self.imagpScratch; Self.imagpScratch = []
-        var mags  = Self.magsScratch;  Self.magsScratch  = []
-        if realp.count != bins { realp = [Float](repeating: 0, count: bins) }
-        if imagp.count != bins { imagp = [Float](repeating: 0, count: bins) }
-        if mags.count  != bins { mags  = [Float](repeating: 0, count: bins) }
-        let scale: Float = 1.0 / Float(fftLen)
-
-        pcm.withUnsafeBufferPointer { pBuf in
-            for frame in 0..<nFrames {
-                let start = frame * hop
-                vDSP_vmul(pBuf.baseAddress! + start, 1, hannWindow, 1,
-                          &windowed, 1, vDSP_Length(windowLen))
-                windowed.withUnsafeBufferPointer { wBuf in
-                    wBuf.baseAddress!.withMemoryRebound(to: DSPComplex.self, capacity: bins) { cplx in
-                        // realp/imagp pointers must stay valid across all three vDSP calls, not
-                        // just DSPSplitComplex's own init — nest under withUnsafeMutableBufferPointer
-                        // (matching SpectrogramProcessor.makeColumn's equivalent FFT) rather than
-                        // taking `&realp`/`&imagp` directly, which only guarantees the pointer for
-                        // the init call itself and could dangle for the reads/writes after it.
-                        realp.withUnsafeMutableBufferPointer { rp in
-                            imagp.withUnsafeMutableBufferPointer { ip in
-                                var split = DSPSplitComplex(realp: rp.baseAddress!, imagp: ip.baseAddress!)
-                                vDSP_ctoz(cplx, 2, &split, 1, vDSP_Length(bins))
-                                vDSP_fft_zrip(fftSetup, &split, 1, log2n, FFTDirection(FFT_FORWARD))
-                                vDSP_zvabs(&split, 1, &mags, 1, vDSP_Length(bins))
-                            }
-                        }
-                    }
-                }
-                var s = scale
-                vDSP_vsmul(mags, 1, &s, &mags, 1, vDSP_Length(bins))
-                for bin in 0..<bins {
-                    dB[bin * nFrames + frame] = 20.0 * log10f(max(mags[bin], 1e-9))
-                }
-            }
-        }
-
-        // ── 2. Normalize to [0,1] over [peakDB − dynamicRange, peakDB] ───────
-        //  Lengths are `dbCount`, not `dB.count`: the reused scratch may be larger
-        //  than this capture's used region, and stale tail values must not feed
-        //  the max or get rescaled.
-        var maxDB: Float = -.greatestFiniteMagnitude
-        vDSP_maxv(dB, 1, &maxDB, vDSP_Length(dbCount))
-        let minDB = maxDB - dynamicRangeDB
-        var negMin = -minDB
-        var inv = 1.0 / dynamicRangeDB
-        vDSP_vsadd(dB, 1, &negMin, &dB, 1, vDSP_Length(dbCount))
-        vDSP_vsmul(dB, 1, &inv,    &dB, 1, vDSP_Length(dbCount))
-        var lo: Float = 0, hi: Float = 1
-        vDSP_vclip(dB, 1, &lo, &hi, &dB, 1, vDSP_Length(dbCount))   // → norm in [0,1]
-        let norm = dB
+        // ── 1-2. STFT → magnitude → dB, peak-normalized to [0,1], row-major
+        //  [bin * nFrames + frame] — now shared with WavSpectrogramEngine via
+        //  STFTGrid.compute (a `windowLen` Hann window zero-padded to `fftLen`,
+        //  so the FFT interpolates to `bins` frequency points at full time res).
+        guard let (norm, nFrames) = STFTGrid.compute(pcm: pcm, scratch: &Self.sttfScratch,
+                                                      dynamicRangeDB: dynamicRangeDB)
+        else { return nil }
 
         let hzPerBin = (sampleRate / 2) / Double(bins)
         let minBinAllowed = max(1, Int(minFrequencyHz / hzPerBin))
@@ -318,15 +245,11 @@ enum PulseImageRenderer {
         }
 
         // Copy only the used prefix into the provider (the reused scratch may be
-        // larger), then hand every scratch buffer back before either exit below.
+        // larger) — STFTGrid.compute already handed its own scratch back
+        // internally; only `pixelScratch` (this file's own buffer) needs it here.
         let providerData = pixels.withUnsafeBufferPointer {
             Data(bytes: $0.baseAddress!, count: pixelCount)
         }
-        Self.dbScratch = dB
-        Self.windowedScratch = windowed
-        Self.realpScratch = realp
-        Self.imagpScratch = imagp
-        Self.magsScratch = mags
         Self.pixelScratch = pixels
 
         guard

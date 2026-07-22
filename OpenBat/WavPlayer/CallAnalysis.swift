@@ -1,0 +1,207 @@
+//
+//  CallAnalysis.swift
+//  OpenBat
+//
+//  Bioacoustic call-parameter measurement over an arbitrary sample range —
+//  either an auto-detected pulse marker (padded window around a PulseRecord)
+//  or a manual drag-to-select region in WavSpectrogramView. Reuses
+//  PulseImageRenderer's proven threshold-based formulas (peak frequency,
+//  duration from a -12dB envelope, frequency extent from a -15dB threshold),
+//  generalized to a plain [0, nFrames) search range instead of an
+//  onset-locked capture window — the caller is trusted to have already
+//  bounded the selection to roughly one call, so no onset/search-region
+//  narrowing is needed here.
+//
+//  Characteristic/knee frequency (CF) has NO existing algorithm anywhere in
+//  this codebase (it only appears as a per-species REFERENCE value in the
+//  static field guide JSON) — this is new work. Heuristic: the median of the
+//  per-column dominant frequency over the last `cfTailFraction` of the call's
+//  active duration, where FM sweeps typically flatten into a quasi-CF tail.
+//  `cfTailFraction` is exposed as a tunable (SettingsView, same
+//  "starting default, not a settled value" treatment as
+//  `display.playbackThumbnailNoiseFloor`) since it will need calibration
+//  against real recordings.
+//
+
+import Foundation
+
+nonisolated enum CallAnalysis {
+
+    struct Result {
+        let peakFreqHz: Double
+        /// nil if the active duration is too short to have a measurable tail
+        /// (fewer than 2 columns).
+        let characteristicFreqHz: Double?
+        let bandwidthHz: Double
+        let freqMinHz: Double
+        let freqMaxHz: Double
+        let durationMs: Double
+        let startFreqHz: Double
+        let endFreqHz: Double
+        /// Signed: (endFreqHz - startFreqHz) / durationMs. Negative for a
+        /// typical downward FM sweep.
+        let sweepRateHzPerMs: Double
+        /// 0-1, same meaning as PulseImageRenderer's quality score: how much
+        /// the loudest column stands out above the analyzed region's mean.
+        let quality: Float
+    }
+
+    /// Manual selections wider than this are clamped before analysis — a
+    /// multi-second drag likely spans many calls, which doesn't have one
+    /// meaningful PF/CF/duration anyway.
+    static let maxAnalysisSpanSeconds: Double = 2.0
+    static let defaultCFTailFraction: Double = 0.25
+    private static let dynamicRangeDB: Float = 48
+
+    /// Reads `[startSample, endSample)` (clamped to `maxAnalysisSpanSeconds`)
+    /// from `wavURL` and analyzes it.
+    static func analyze(wavURL: URL, sampleRate: Double,
+                        startSample: Int, endSample: Int,
+                        minFrequencyHz: Double, noiseFloor: Float,
+                        cfTailFraction: Double = defaultCFTailFraction) -> Result? {
+        let maxSpanSamples = Int(maxAnalysisSpanSeconds * sampleRate)
+        let clampedEnd = min(endSample, startSample + maxSpanSamples)
+        guard clampedEnd > startSample else {
+            WavPlayerDebugLog.log("CallAnalysis", "analyze: degenerate range \(startSample)-\(endSample), aborting")
+            return nil
+        }
+        guard let pcm = WavPCMReader.readSamples(wavURL: wavURL, startSample: startSample,
+                                                 count: clampedEnd - startSample)
+        else {
+            WavPlayerDebugLog.log("CallAnalysis", "analyze: WavPCMReader.readSamples FAILED for \(startSample)-\(clampedEnd)")
+            return nil
+        }
+        WavPlayerDebugLog.log("CallAnalysis", "analyze: read \(pcm.count) samples (\(startSample)-\(clampedEnd), requested \(clampedEnd - startSample))")
+        return WavPlayerDebugLog.time("CallAnalysis", "analyze") {
+            analyze(pcm: pcm, sampleRate: sampleRate, minFrequencyHz: minFrequencyHz,
+                   noiseFloor: noiseFloor, cfTailFraction: cfTailFraction)
+        }
+    }
+
+    /// Pure-data entry point (no file I/O) — what the file-based `analyze`
+    /// above delegates to, and what tests drive directly.
+    static func analyze(pcm: [Float], sampleRate: Double,
+                        minFrequencyHz: Double, noiseFloor: Float,
+                        cfTailFraction: Double = defaultCFTailFraction) -> Result? {
+        var scratch = STFTGrid.Scratch()
+        guard let (norm, nFrames) = STFTGrid.compute(pcm: pcm, scratch: &scratch, dynamicRangeDB: dynamicRangeDB)
+        else {
+            WavPlayerDebugLog.log("CallAnalysis", "analyze: STFTGrid.compute FAILED (pcm.count=\(pcm.count), windowLen=\(STFTGrid.windowLen))")
+            return nil
+        }
+        WavPlayerDebugLog.log("CallAnalysis", "analyze: STFTGrid.compute OK, nFrames=\(nFrames)")
+
+        let bins = STFTGrid.binCount
+        let hzPerBin = (sampleRate / 2) / Double(bins)
+        let minBinAllowed = max(1, Int(minFrequencyHz / hzPerBin))
+        guard minBinAllowed < bins else {
+            WavPlayerDebugLog.log("CallAnalysis", "analyze: minBinAllowed=\(minBinAllowed) >= bins=\(bins), aborting")
+            return nil
+        }
+
+        func columnPeak(_ col: Int) -> Float {
+            var m: Float = 0
+            for bin in minBinAllowed..<bins {
+                let v = norm[bin * nFrames + col]
+                if v > m { m = v }
+            }
+            return m
+        }
+
+        func loudestBin(atCol col: Int) -> Int {
+            var bBin = minBinAllowed
+            var bVal: Float = -1
+            for bin in minBinAllowed..<bins {
+                let v = norm[bin * nFrames + col]
+                if v > bVal { bVal = v; bBin = bin }
+            }
+            return bBin
+        }
+
+        // Peak (dominant freq + loudest column) over the WHOLE passed-in
+        // range — the caller already bounded the selection, so no onset-lock
+        // / search-region narrowing (unlike PulseImageRenderer) is needed.
+        var peakValue: Float = 0
+        var peakBin = minBinAllowed
+        var peakCol = 0
+        var peakColVal: Float = 0
+        var totalColPeak: Float = 0
+        for col in 0..<nFrames {
+            var colMax: Float = 0
+            for bin in minBinAllowed..<bins {
+                let v = norm[bin * nFrames + col]
+                if v > colMax { colMax = v }
+                if v > peakValue { peakValue = v; peakBin = bin }
+            }
+            totalColPeak += colMax
+            if colMax > peakColVal { peakColVal = colMax; peakCol = col }
+        }
+        guard peakColVal > 0 else {
+            WavPlayerDebugLog.log("CallAnalysis", "analyze: peakColVal is 0 (silent/below-threshold selection), aborting")
+            return nil
+        }
+
+        let floor = min(max(noiseFloor, 0), 0.99)
+
+        // Duration from the -12dB energy envelope around the loudest column.
+        let durThreshold = max(floor, peakColVal - 12.0 / dynamicRangeDB)
+        var durStart = peakCol, durEnd = peakCol
+        while durStart - 1 >= 0,       columnPeak(durStart - 1) >= durThreshold { durStart -= 1 }
+        while durEnd + 1 < nFrames,    columnPeak(durEnd + 1)   >= durThreshold { durEnd += 1 }
+        let durationCols = durEnd - durStart + 1
+        let secondsPerCol = Double(STFTGrid.hop) / sampleRate
+        let durationMs = Double(durationCols) * secondsPerCol * 1000
+
+        // Frequency extent (bandwidth) from a -15dB threshold, scanned only
+        // over the active duration columns — keeps quiet inter-call frames
+        // from widening the band.
+        let freqThreshold = max(floor, peakValue - 15.0 / dynamicRangeDB)
+        var minBin = bins - 1, maxBin = minBinAllowed
+        for bin in minBinAllowed..<bins {
+            let base = bin * nFrames
+            for col in durStart...durEnd where norm[base + col] >= freqThreshold {
+                if bin < minBin { minBin = bin }
+                if bin > maxBin { maxBin = bin }
+                break
+            }
+        }
+        if minBin > maxBin { minBin = minBinAllowed; maxBin = bins - 1 }
+
+        // Start/end frequency: the loudest in-band bin at the first/last
+        // active column.
+        let startFreqHz = Double(loudestBin(atCol: durStart)) * hzPerBin
+        let endFreqHz = Double(loudestBin(atCol: durEnd)) * hzPerBin
+        let sweepRateHzPerMs = durationMs > 0 ? (endFreqHz - startFreqHz) / durationMs : 0
+
+        // Characteristic/knee frequency: median dominant-bin frequency over
+        // the last `cfTailFraction` of the active duration.
+        let tailCount = Int((Double(durationCols) * cfTailFraction).rounded())
+        var characteristicFreqHz: Double?
+        if tailCount >= 2 {
+            let tailStart = durEnd - tailCount + 1
+            var freqs = (tailStart...durEnd).map { Double(loudestBin(atCol: $0)) * hzPerBin }
+            freqs.sort()
+            let mid = freqs.count / 2
+            characteristicFreqHz = freqs.count % 2 == 0 ? (freqs[mid - 1] + freqs[mid]) / 2 : freqs[mid]
+        }
+
+        // Quality: how much the peak column stands above the analyzed
+        // region's background mean.
+        let meanColPeak = totalColPeak / Float(max(1, nFrames))
+        let quality: Float = 1.0 - (meanColPeak / peakColVal)
+
+        WavPlayerDebugLog.log("CallAnalysis", "analyze: peak=\(Int(Double(peakBin) * hzPerBin))Hz durationCols=\(durationCols) (\(String(format: "%.1f", durationMs))ms) quality=\(String(format: "%.2f", quality))")
+        return Result(
+            peakFreqHz: Double(peakBin) * hzPerBin,
+            characteristicFreqHz: characteristicFreqHz,
+            bandwidthHz: Double(maxBin - minBin + 1) * hzPerBin,
+            freqMinHz: Double(minBin) * hzPerBin,
+            freqMaxHz: Double(maxBin + 1) * hzPerBin,
+            durationMs: durationMs,
+            startFreqHz: startFreqHz,
+            endFreqHz: endFreqHz,
+            sweepRateHzPerMs: sweepRateHzPerMs,
+            quality: quality
+        )
+    }
+}

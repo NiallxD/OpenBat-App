@@ -110,6 +110,21 @@ nonisolated enum DisplayColormap {
         return (UInt8(c.0 * fade * 255), UInt8(c.1 * fade * 255), UInt8(c.2 * fade * 255))
     }
 
+    /// Precomputes `rgb(_:palette:)` at `steps` evenly-spaced points — for any
+    /// caller about to call `rgb` in a bulk per-pixel loop (a colorize pass
+    /// over a whole spectrogram image, easily several million pixels).
+    /// Measured on-device: `rgb` itself is dominated by a dictionary lookup
+    /// (`stops[palette]`) plus a linear stop-search, repeated per pixel — a
+    /// 4096x1024 colorize pass (the WavPlayer overview) took 1.6–5.3 SECONDS
+    /// doing that per-pixel, the actual cause behind the "shows the coarse
+    /// overview for ages before the sharp tile pops in" complaint, not a
+    /// resolution/design issue. Build this ONCE per colorize call (256
+    /// iterations through the slow path, negligible) and index into it
+    /// per-pixel (O(1), no dictionary, no search) instead.
+    static func makeLUT(palette: Palette, steps: Int = 256) -> [(UInt8, UInt8, UInt8)] {
+        (0..<steps).map { i in rgb(Float(i) / Float(steps - 1), palette: palette) }
+    }
+
     private static func sample(_ t: Float, palette: Palette) -> RGB {
         let table = stops[palette] ?? stops[.inferno]!
         for i in 0..<table.count - 1 {

@@ -84,6 +84,7 @@ struct SpectrogramView: View {
     @State private var isScrolling = false
     @State private var scrollColumnOffset: Double = 0
     @State private var lastDragTranslation: CGFloat = 0
+    @State private var momentum = ScrollMomentum()
 
     /// Columns produced per second = sampleRate / hop = (2 * Nyquist) / hopSize.
     private var columnsPerSecond: Double {
@@ -125,6 +126,7 @@ struct SpectrogramView: View {
     private func dragGesture(viewWidth: CGFloat) -> some Gesture {
         DragGesture(minimumDistance: 8)
             .onChanged { value in
+                momentum.cancel()
                 if !isScrolling {
                     isScrolling = true
                     lastDragTranslation = 0
@@ -135,8 +137,16 @@ struct SpectrogramView: View {
                 let columnsPerPoint = columnsPerSecond * timeWindowSeconds / Double(max(viewWidth, 1))
                 scrollColumnOffset = max(0, scrollColumnOffset + dx * columnsPerPoint)
             }
-            .onEnded { _ in
+            .onEnded { value in
                 lastDragTranslation = 0
+                // Let the release coast the rest of the way UIKit's own
+                // deceleration model predicts, instead of stopping dead.
+                let columnsPerPoint = columnsPerSecond * timeWindowSeconds / Double(max(viewWidth, 1))
+                let residualColumns = (value.predictedEndTranslation.width - value.translation.width) * columnsPerPoint
+                let base = scrollColumnOffset
+                momentum.start(residual: residualColumns) { delta in
+                    scrollColumnOffset = max(0, base + delta)
+                }
             }
     }
 
@@ -148,6 +158,7 @@ struct SpectrogramView: View {
             HStack {
                 Spacer()
                 Button {
+                    momentum.cancel()
                     scrollColumnOffset = 0
                     isScrolling = false
                 } label: {

@@ -163,19 +163,22 @@ private struct SessionRow: View {
         // count and dominant-species label read as actual species IDs, not
         // inflated by triggers that never resolved to one.
         let passes = store.passes(inSession: session.id).filter { !$0.isNoise && !$0.isNoID }
-        VStack(alignment: .leading, spacing: 3) {
-            Text(session.title).font(.headline).lineLimit(1)
-            Text(timeRange).font(.caption).foregroundStyle(.secondary)
-            HStack(spacing: 8) {
-                Label("\(passes.count) ID\(passes.count == 1 ? "" : "s")",
-                      systemImage: "waveform.badge.magnifyingglass")
-                if let top = dominantSpecies(passes) { Text("· \(top)") }
-                if !session.track.isEmpty {
-                    Label("GPS", systemImage: "location.fill")
+        HStack(spacing: 12) {
+            SessionMapThumbnail(track: session.track.map(\.coordinate))
+            VStack(alignment: .leading, spacing: 3) {
+                Text(session.title).font(.headline).lineLimit(1)
+                Text(timeRange).font(.caption).foregroundStyle(.secondary)
+                HStack(spacing: 8) {
+                    Label("\(passes.count) ID\(passes.count == 1 ? "" : "s")",
+                          systemImage: "waveform.badge.magnifyingglass")
+                    if let top = dominantSpecies(passes) { Text("· \(top)") }
+                    if !session.track.isEmpty {
+                        Label("GPS", systemImage: "location.fill")
+                    }
                 }
+                .font(.caption2)
+                .foregroundStyle(.secondary)
             }
-            .font(.caption2)
-            .foregroundStyle(.secondary)
         }
         .padding(.vertical, 2)
     }
@@ -191,6 +194,53 @@ private struct SessionRow: View {
         let counts = Dictionary(grouping: passes, by: \.species).mapValues(\.count)
         return counts.max { $0.value < $1.value }?.key
     }
+}
+
+/// Small non-interactive GPS-track preview for a session row — same slot/size as
+/// RecordingRow's spectrogram thumbnail. Disabled interaction so a tap still
+/// reaches the enclosing NavigationLink instead of panning the mini-map.
+private struct SessionMapThumbnail: View {
+    let track: [CLLocationCoordinate2D]
+    static let size = CGSize(width: 56, height: 40)
+
+    var body: some View {
+        Group {
+            if track.isEmpty {
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(.quaternary)
+                    .overlay { Image(systemName: "location.slash").font(.caption2).foregroundStyle(.secondary) }
+            } else {
+                Map(initialPosition: .region(fittedRegion(for: track)), interactionModes: []) {
+                    MapPolyline(coordinates: track).stroke(.blue, lineWidth: 2)
+                }
+                .mapControlVisibility(.hidden)
+                .allowsHitTesting(false)
+            }
+        }
+        .frame(width: Self.size.width, height: Self.size.height)
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+}
+
+/// Shared by `SessionMapThumbnail` and `SessionMap` — fits a region around
+/// whatever coordinates are passed in, falling back to a fixed Null Island
+/// region when there's nothing to show yet.
+private func fittedRegion(for coords: [CLLocationCoordinate2D]) -> MKCoordinateRegion {
+    guard let first = coords.first else {
+        return MKCoordinateRegion(center: .init(latitude: 0, longitude: 0),
+                                  span: .init(latitudeDelta: 1, longitudeDelta: 1))
+    }
+    var minLat = first.latitude, maxLat = first.latitude
+    var minLon = first.longitude, maxLon = first.longitude
+    for c in coords {
+        minLat = min(minLat, c.latitude); maxLat = max(maxLat, c.latitude)
+        minLon = min(minLon, c.longitude); maxLon = max(maxLon, c.longitude)
+    }
+    let center = CLLocationCoordinate2D(latitude: (minLat + maxLat) / 2,
+                                        longitude: (minLon + maxLon) / 2)
+    let span = MKCoordinateSpan(latitudeDelta: max((maxLat - minLat) * 1.4, 0.005),
+                                longitudeDelta: max((maxLon - minLon) * 1.4, 0.005))
+    return MKCoordinateRegion(center: center, span: span)
 }
 
 // MARK: - Session detail (map + IDs)
@@ -283,22 +333,7 @@ private struct SessionMap: View {
     }
 
     private var region: MKCoordinateRegion {
-        let coords = track + pins.compactMap(\.coordinate)
-        guard let first = coords.first else {
-            return MKCoordinateRegion(center: .init(latitude: 0, longitude: 0),
-                                      span: .init(latitudeDelta: 1, longitudeDelta: 1))
-        }
-        var minLat = first.latitude, maxLat = first.latitude
-        var minLon = first.longitude, maxLon = first.longitude
-        for c in coords {
-            minLat = min(minLat, c.latitude); maxLat = max(maxLat, c.latitude)
-            minLon = min(minLon, c.longitude); maxLon = max(maxLon, c.longitude)
-        }
-        let center = CLLocationCoordinate2D(latitude: (minLat + maxLat) / 2,
-                                            longitude: (minLon + maxLon) / 2)
-        let span = MKCoordinateSpan(latitudeDelta: max((maxLat - minLat) * 1.4, 0.005),
-                                    longitudeDelta: max((maxLon - minLon) * 1.4, 0.005))
-        return MKCoordinateRegion(center: center, span: span)
+        fittedRegion(for: track + pins.compactMap(\.coordinate))
     }
 }
 

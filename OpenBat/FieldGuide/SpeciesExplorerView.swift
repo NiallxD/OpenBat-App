@@ -134,7 +134,6 @@ struct SpeciesExplorerView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
-        .background(.thinMaterial, in: Capsule())
     }
 
     @ViewBuilder private var searchResults: some View {

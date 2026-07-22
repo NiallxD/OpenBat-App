@@ -343,7 +343,12 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
         // IO and FFT work, kept off the audio-thread-adjacent main-thread hop above.
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let relativePath = String(finalURL.path.dropFirst(docs.path.count + 1))
-        let image = RecordingSpectrogramRenderer.render(wavURL: finalURL)
+        // maxWidth 4096 matches what WavSpectrogramEngine.renderOverview
+        // requests for its fallback (non-cached) render path — keeping this
+        // cached render at the same resolution means the WAV player's reuse
+        // of this cache (see WavSpectrogramEngine.renderOverview) doesn't
+        // trade away overview sharpness to save the render time.
+        let image = RecordingSpectrogramRenderer.render(wavURL: finalURL, maxWidth: 4096)
         let (species, confidence, pulseCount): (String, Float?, Int)
         switch outcome {
         case .species(let code, let conf, let count): (species, confidence, pulseCount) = (code, conf, count)

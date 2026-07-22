@@ -147,7 +147,12 @@ enum RecordingMigration {
             }?.id
         }
 
-        let image = RecordingSpectrogramRenderer.render(wavURL: url)
+        // maxWidth 4096 matches AudioRecorder's own save-time render — without
+        // this, a migrated/imported recording's cached overview stayed at the
+        // default 2400 while WavPlayerView's separately-scanned raw grid (used
+        // to recolor on noise-floor/palette changes) is always 4096, causing a
+        // visible resolution jump the moment that recolor lands.
+        let image = RecordingSpectrogramRenderer.render(wavURL: url, maxWidth: 4096)
         return .parsed(Parsed(date: date, durationSeconds: durationSeconds, species: species,
                               confidence: confidence, pulseCount: pulseCount, sessionID: sessionID,
                               coordinate: coordinate, relativeWavPath: relativePath, image: image))

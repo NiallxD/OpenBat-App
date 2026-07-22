@@ -63,76 +63,9 @@ struct PulseZoomView: View {
             warpedImage = nil
             return
         }
-        warpedImage = Self.logFrequencyWarp(img,
+        warpedImage = LogFrequencyWarp.warp(img,
                                             loHz: pulseDetector.capturedWideFreqMin,
                                             hiHz: pulseDetector.capturedWideFreqMax)
-    }
-
-    /// Remaps `image`'s rows (row 0 = top = `hiHz`, last row = bottom = `loHz`, evenly
-    /// spaced in Hz — PulseImageRenderer's native layout) so that row *position*
-    /// instead follows a log frequency scale. Nearest-neighbour row copy: for each
-    /// destination row, find the Hz a log axis puts there, then find which row of the
-    /// SOURCE (linear) image already shows that Hz, and copy it across. Only the
-    /// display copy is warped — thumbnails and the underlying renderer stay linear.
-    private static func logFrequencyWarp(_ image: UIImage, loHz: Double, hiHz: Double) -> UIImage? {
-        guard hiHz > loHz, loHz > 0,
-              let cg = image.cgImage,
-              let dataProvider = cg.dataProvider,
-              let data = dataProvider.data,
-              let srcPtr = CFDataGetBytePtr(data)
-        else { return image }
-
-        let width = cg.width
-        let height = cg.height
-        guard height > 1 else { return image }
-        let bytesPerRow = cg.bytesPerRow
-        var out = [UInt8](repeating: 0, count: bytesPerRow * height)
-        let logSpan = log(hiHz / loHz)
-
-        out.withUnsafeMutableBytes { dst in
-            guard let dstBase = dst.baseAddress else { return }
-            for y in 0..<height {
-                let v = Double(y) / Double(height - 1)                 // 0 = top, 1 = bottom
-                let hz = loHz * exp((1 - v) * logSpan)                 // log-axis Hz at this row
-                let linearFrac = (hiHz - hz) / (hiHz - loHz)           // where that Hz sits in the linear source
-                let srcY = min(height - 1, max(0, Int((linearFrac * Double(height - 1)).rounded())))
-                memcpy(dstBase.advanced(by: y * bytesPerRow),
-                       srcPtr.advanced(by: srcY * bytesPerRow),
-                       bytesPerRow)
-            }
-        }
-
-        guard let provider = CGDataProvider(data: Data(out) as CFData),
-              let warped = CGImage(width: width, height: height,
-                                   bitsPerComponent: cg.bitsPerComponent, bitsPerPixel: cg.bitsPerPixel,
-                                   bytesPerRow: bytesPerRow,
-                                   space: cg.colorSpace ?? CGColorSpaceCreateDeviceRGB(),
-                                   bitmapInfo: cg.bitmapInfo, provider: provider, decode: nil,
-                                   shouldInterpolate: true, intent: .defaultIntent)
-        else { return image }
-        return UIImage(cgImage: warped)
-    }
-
-    /// Converts a Hz value to a v-fraction (0 = top/high, 1 = bottom/low) within
-    /// [lo, hi], honouring the current log/linear display mode — shared by the zoom
-    /// geometry (which needs to know where the tight call band sits within the
-    /// warped image) and the axis labels (which need the inverse, see `vFracToHz`).
-    private static func hzToVFrac(_ hz: Double, lo: Double, hi: Double, log logMode: Bool) -> Double {
-        guard hi > lo else { return 0.5 }
-        if logMode, lo > 0 {
-            let hzC = min(max(hz, lo), hi)
-            return 1 - (log(hzC / lo) / log(hi / lo))
-        }
-        return (hi - hz) / (hi - lo)
-    }
-
-    /// Inverse of `hzToVFrac`.
-    private static func vFracToHz(_ v: Double, lo: Double, hi: Double, log logMode: Bool) -> Double {
-        guard hi > lo else { return lo }
-        if logMode, lo > 0 {
-            return lo * exp((1 - v) * log(hi / lo))
-        }
-        return hi - v * (hi - lo)
     }
 
     private func pulseZoomContent(geo: GeometryProxy) -> some View {
@@ -238,8 +171,8 @@ struct PulseZoomView: View {
         let tightLo = pulseDetector.capturedFreqMin
         let tightHi = pulseDetector.capturedFreqMax
         guard wideHi > wideLo, tightHi > tightLo else { return (1, 0.5) }
-        let leftFrac = Self.hzToVFrac(tightHi, lo: wideLo, hi: wideHi, log: pulseLogFrequency)   // tight band's top edge
-        let rightFrac = Self.hzToVFrac(tightLo, lo: wideLo, hi: wideHi, log: pulseLogFrequency)  // tight band's bottom edge
+        let leftFrac = LogFrequencyWarp.hzToVFrac(tightHi, lo: wideLo, hi: wideHi, log: pulseLogFrequency)   // tight band's top edge
+        let rightFrac = LogFrequencyWarp.hzToVFrac(tightLo, lo: wideLo, hi: wideHi, log: pulseLogFrequency)  // tight band's bottom edge
         return axisZoomGeometry(leftFrac: leftFrac, rightFrac: rightFrac)
     }
 
@@ -273,8 +206,8 @@ struct PulseZoomView: View {
             return (pulseDetector.capturedFreqMin, pulseDetector.capturedFreqMax)
         }
         let (vTop, vBottom) = visibleVRange
-        return (lo: Self.vFracToHz(vBottom, lo: wideLo, hi: wideHi, log: pulseLogFrequency),
-                hi: Self.vFracToHz(vTop, lo: wideLo, hi: wideHi, log: pulseLogFrequency))
+        return (lo: LogFrequencyWarp.vFracToHz(vBottom, lo: wideLo, hi: wideHi, log: pulseLogFrequency),
+                hi: LogFrequencyWarp.vFracToHz(vTop, lo: wideLo, hi: wideHi, log: pulseLogFrequency))
     }
 
     /// Evenly spaced (in screen position) tick Hz values across the currently
@@ -290,7 +223,7 @@ struct PulseZoomView: View {
         let (vTop, vBottom) = visibleVRange
         return (0..<count).map { i in
             let v = vTop + Double(i) / Double(count - 1) * (vBottom - vTop)
-            return Self.vFracToHz(v, lo: wideLo, hi: wideHi, log: pulseLogFrequency)
+            return LogFrequencyWarp.vFracToHz(v, lo: wideLo, hi: wideHi, log: pulseLogFrequency)
         }
     }
 

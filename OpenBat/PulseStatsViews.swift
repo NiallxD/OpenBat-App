@@ -13,8 +13,9 @@
 import SwiftUI
 
 /// One labelled stat readout (title, big value, small unit) — a leaf View so it
-/// carries no dependencies of its own; used by `PulseStatsRow`/`PulseStatsColumn`.
-private struct StatCell: View {
+/// carries no dependencies of its own; used by `PulseStatsRow`/`PulseStatsColumn`
+/// and (not `private` for this reason) `CallAnalysisPanel` in the WavPlayer.
+struct StatCell: View {
     let title: String
     let value: String
     let unit: String

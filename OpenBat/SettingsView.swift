@@ -53,6 +53,18 @@ struct SettingsView: View {
 
     @AppStorage("recording.screenCaptureEnabled") private var screenCaptureEnabled = false
     @AppStorage("recording.autoRecordOnSessionStart") private var autoRecordOnSessionStart = true
+    /// Read directly by RecordingSpectrogramRenderer (off-main, no live settings
+    /// reference) the same way it already reads `pulse.displayPalette`. 0.5 is a
+    /// starting default, not a settled value — surfaced here so it can be tuned
+    /// without a code change until a final number is picked.
+    @AppStorage("display.playbackThumbnailNoiseFloor") private var playbackThumbnailNoiseFloor = 0.5
+    /// Read directly by WavPlayerView/CallAnalysisPanel — the fraction of a
+    /// measured call's active duration averaged (median) to estimate
+    /// characteristic/knee frequency. No existing algorithm to calibrate
+    /// against; 0.25 is a starting default per CallAnalysis's own doc comment,
+    /// surfaced here (same treatment as the noise floor above) so it can be
+    /// tuned against real recordings without a code change.
+    @AppStorage("display.cfTailFraction") private var cfTailFraction = CallAnalysis.defaultCFTailFraction
 
     // MARK: Pulse tab
 
@@ -272,6 +284,32 @@ struct SettingsView: View {
                 Text("Activity bout")
             } footer: {
                 Text("Recording starts this many seconds before the first detected pulse. It keeps extending with every further pulse and only closes once nothing has triggered for the \"close after silence\" duration — so one bat giving several passes in a row lands in a single WAV instead of fragmenting into many.")
+            }
+
+            Section {
+                LabeledContent("Noise floor") {
+                    Text(String(format: "%.2f", playbackThumbnailNoiseFloor))
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                }
+                Slider(value: $playbackThumbnailNoiseFloor, in: 0...0.9, step: 0.05)
+            } header: {
+                Text("Playback thumbnails")
+            } footer: {
+                Text("Gates faint background energy out of the whole-recording spectrogram thumbnails shown in the Playback and Sessions lists, so a quiet recording reads as mostly black instead of speckled with low-level noise. Temporary while a final default is settled.")
+            }
+
+            Section {
+                LabeledContent("CF tail fraction") {
+                    Text(String(format: "%.0f%%", cfTailFraction * 100))
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                }
+                Slider(value: $cfTailFraction, in: 0.1...0.5, step: 0.05)
+            } header: {
+                Text("Call analysis")
+            } footer: {
+                Text("Characteristic/knee frequency is estimated as the median frequency over the last this-much of a measured call's duration, where FM sweeps typically flatten into a quasi-constant-frequency tail. No prior calibration exists for this — treat as a starting default until checked against real recordings.")
             }
         }
     }

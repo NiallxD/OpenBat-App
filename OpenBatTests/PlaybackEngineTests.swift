@@ -10,6 +10,7 @@
 
 import Testing
 import Foundation
+import AVFoundation
 @testable import OpenBat
 
 @MainActor
@@ -19,7 +20,8 @@ struct PlaybackEngineTests {
     private static func le16(_ v: UInt16) -> Data { withUnsafeBytes(of: v.littleEndian) { Data($0) } }
 
     /// Mirrors AudioRecorder.wavHeader + the closeAndKeep size patch exactly.
-    private func makeTestWav(sampleRate: UInt32 = 384_000, seconds: Double = 1.0) -> URL {
+    private func makeTestWav(sampleRate: UInt32 = 384_000, seconds: Double = 1.0,
+                              toneFrequency: Double = 40_000) -> URL {
         let channels: UInt16 = 1
         let bits: UInt16 = 16
         let byteRate = sampleRate * UInt32(channels) * UInt32(bits / 8)
@@ -42,11 +44,11 @@ struct PlaybackEngineTests {
         d.append(contentsOf: Array("data".utf8))
         d.append(Self.le32(dataBytes))
 
-        // 40 kHz-ish tone scaled to 16-bit so there's real signal in the file.
+        // Tone scaled to 16-bit so there's real signal in the file.
         var pcm = [Int16](repeating: 0, count: sampleCount)
         for i in 0..<sampleCount {
             let t = Double(i) / Double(sampleRate)
-            pcm[i] = Int16(sin(2 * .pi * 40_000 * t) * 20000)
+            pcm[i] = Int16(sin(2 * .pi * toneFrequency * t) * 20000)
         }
         pcm.withUnsafeBufferPointer { d.append(Data(buffer: $0)) }
 
@@ -106,5 +108,113 @@ struct PlaybackEngineTests {
 
         engine.stop()
         try? FileManager.default.removeItem(at: url)
+    }
+
+    /// Regression coverage for "can't hear anything / volume slider greyed
+    /// out": AudioEngineController leaves the SHARED AVAudioSession in
+    /// `.record` category (no output route at all) whenever the live
+    /// Detector screen isn't actively listening — a previous fix here only
+    /// switched session MODE, never CATEGORY, so playback's own
+    /// AVAudioSourceNode had no audible route whenever the session was still
+    /// `.record`. `play()` must claim an output-capable category itself.
+    @Test func playClaimsAnOutputCapableSessionCategory() {
+        // Simulates AudioEngineController's own non-listening configuration —
+        // exactly what the shared session looks like before any live capture
+        // has ever engaged listen mode.
+        try? AVAudioSession.sharedInstance().setCategory(.record, mode: .measurement, options: [])
+
+        let url = makeTestWav(seconds: 0.5)
+        let engine = PlaybackEngine()
+        engine.load(url: url)
+        engine.play()
+
+        #expect(AVAudioSession.sharedInstance().category == .playback,
+                "session category is \(AVAudioSession.sharedInstance().category) after play() — still can't route audio to the speaker")
+
+        engine.stop()
+        try? FileManager.default.removeItem(at: url)
+    }
+
+    /// Regression coverage for the "heterodyne playback stopped working" bug:
+    /// PlaybackEngine's HeterodyneProcessor was never retuned away from its class
+    /// default (a fixed 40 kHz LO) — only a recorded call within the ~4 kHz IF
+    /// passband around 40 kHz was ever audible; everything else played back
+    /// silent. `PlaybackDriver.start()` now auto-tunes the LO from the pacing
+    /// thread's own SpectrogramProcessor, same as the live Detector screen does
+    /// from PulseDetector triggers. This drives playback through a call well away
+    /// from 40 kHz (25 kHz, a typical Noctule-range call) and checks the LO
+    /// actually moved — a race-free check (`loFrequency`'s getter is lock-guarded,
+    /// no ring-buffer consumption involved), unlike reading `render()` directly
+    /// while the real output engine's audio thread is also consuming it.
+    @Test func heterodyneAutoTuneRetunesAwayFromDefaultDuringPlayback() async {
+        let url = makeTestWav(seconds: 1.0, toneFrequency: 25_000)
+        let engine = PlaybackEngine()
+        engine.load(url: url)
+        engine.listenMode = .heterodyne
+        engine.play()
+        #expect(engine.isPlaying == true)
+
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        #expect(engine.currentTimeSeconds > 0, "currentTimeSeconds didn't advance in heterodyne mode")
+
+        let lo = engine.heterodyne.loFrequency
+        #expect(abs(lo - 40_000) > 5_000,
+                "LO is still at/near its 40 kHz class default (\(lo)) — auto-tune never engaged for a 25 kHz call")
+        #expect(lo < 25_000, "expected the LO parked below the detected 25 kHz call, got \(lo)")
+
+        engine.stop()
+        try? FileManager.default.removeItem(at: url)
+    }
+
+    /// Builds a mono float buffer of a single tone — used by the isolated
+    /// HeterodyneProcessor tests below, which drive the DSP directly (no engine,
+    /// no threads) to avoid the SPSC ring's single-consumer contract: calling
+    /// `render()` concurrently with a running `AVAudioEngine`'s own render thread
+    /// (as `play()` sets up) is a genuine second-consumer race, not something to
+    /// paper over in a test.
+    private func makeToneBuffer(frequency: Double, sampleRate: Double, seconds: Double = 0.05) -> AVAudioPCMBuffer {
+        let frameCount = Int(sampleRate * seconds)
+        let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1)!
+        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frameCount))!
+        buffer.frameLength = AVAudioFrameCount(frameCount)
+        let ch = buffer.floatChannelData![0]
+        for i in 0..<frameCount {
+            let t = Double(i) / sampleRate
+            ch[i] = Float(sin(2 * .pi * frequency * t)) * 0.5
+        }
+        return buffer
+    }
+
+    /// Documents the DSP's correct-use case: with the LO parked `audibleOffsetHz`
+    /// below the call (as auto-tune now does), heterodyne produces a real,
+    /// audible difference tone.
+    @Test func heterodyneProducesAudioWhenLOIsProperlyTuned() {
+        let het = HeterodyneProcessor()
+        het.reset(inputSampleRate: 384_000)
+        het.setGate(true)
+        het.loFrequency = 40_000 - 1_500
+        het.process(makeToneBuffer(frequency: 40_000, sampleRate: 384_000))
+
+        var out = [Float](repeating: 0, count: 2048)
+        out.withUnsafeMutableBufferPointer { het.render($0.baseAddress!, frames: $0.count) }
+        let peak = out.map { abs($0) }.max() ?? 0
+        #expect(peak > 0.1, "expected a strong difference tone when LO is parked audibleOffsetHz below the call, got peak=\(peak)")
+    }
+
+    /// Documents the actual pre-fix failure mode: with the LO stuck at its class
+    /// default (40 kHz — what PlaybackEngine's HeterodyneProcessor sat at for
+    /// every file before auto-tune was added), a call 15 kHz away mixes down to a
+    /// difference frequency the ~4 kHz low-pass filter throws away entirely.
+    @Test func heterodyneDefaultLOIsNearSilentForAnOffCenterCall() {
+        let het = HeterodyneProcessor()
+        het.reset(inputSampleRate: 384_000)
+        het.setGate(true)
+        // loFrequency left at its class default — no explicit tuning at all.
+        het.process(makeToneBuffer(frequency: 25_000, sampleRate: 384_000))
+
+        var out = [Float](repeating: 0, count: 2048)
+        out.withUnsafeMutableBufferPointer { het.render($0.baseAddress!, frames: $0.count) }
+        let peak = out.map { abs($0) }.max() ?? 0
+        #expect(peak < 0.01, "a call 15 kHz from a fixed 40 kHz LO should fall outside the ~4 kHz IF passband, got peak=\(peak)")
     }
 }

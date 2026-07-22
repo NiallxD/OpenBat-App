@@ -92,6 +92,16 @@ Defined identically in `Spectrogram.metal` (GPU) and `PulseDetector.colormap()` 
 
 SourceKit frequently reports spurious errors like "Cannot find 'UIKit' in scope", "Cannot find type 'SpectrogramProcessor' in scope", "Reference to member 'shaderRead' cannot be resolved", etc. These are **indexing artifacts** — the project builds and runs correctly. Ignore them.
 
+## Build/test policy
+
+Don't boot a simulator or run `xcodebuild test` unless it's genuinely necessary (e.g. no other way to check a fix) — the user runs actual builds/tests themselves on-device or in their own simulator session. To check for compile errors, use a **build-only** invocation that doesn't launch a simulator instance:
+
+```
+xcodebuild -project OpenBat.xcodeproj -scheme OpenBat -destination 'generic/platform=iOS Simulator' -configuration Debug build
+```
+
+This compiles against the simulator SDK without booting one. Prefer this over picking a concrete `-destination ... ,name:/id:` simulator, which will boot it.
+
 ## Pending / future work
 
 - **NABat ML v2.0 integration**: Convert USGS Python model to CoreML. Notes in `mlconversion.md`. Prior-based species filtering: disabled species → weight=0 → renormalize remaining softmax outputs.

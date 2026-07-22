@@ -45,7 +45,20 @@ final class AudioEngineController {
     /// the ultrasonic capture path — so this only surfaces a warning telling the
     /// user to wear headphones, which is confirmed to fix it.
     private(set) var isOutputOnSpeaker = false
-    private(set) var isRunning = false
+    private(set) var isRunning = false {
+        didSet {
+            guard oldValue != isRunning else { return }
+            Self.isAnyInstanceRunning = isRunning
+        }
+    }
+    /// Nonisolated, thread-safe mirror of `isRunning` — lets `PlaybackDriver`
+    /// (which has no reference to this @MainActor instance, and whose own
+    /// AVAudioEngine/session setup runs off-main) check whether the live
+    /// Detector screen currently owns the shared AVAudioSession before forcing
+    /// it into `.playback` category. See `PlaybackEngine.startEngineIfNeeded`'s
+    /// doc comment for why clobbering the category while this is true would
+    /// break live capture out from under it.
+    nonisolated(unsafe) static var isAnyInstanceRunning = false
     /// User-facing status / error line.
     private(set) var status = "Idle"
 
