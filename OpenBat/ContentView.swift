@@ -1333,21 +1333,11 @@ struct RecordButtonCompact: View {
 }
 
 private extension View {
-    /// Transparent rounded card with a thin hairline border — used to tighten up
-    /// the spectrogram and pulse-view panels without a heavy filled background.
     /// Fixed-size control-bar icon: keeps every button the same width and stops it
     /// resizing when the SF Symbol swaps (play↔stop, the listen-mode icons, etc.).
     func controlIcon() -> some View {
         font(.body)
             .frame(width: 24, height: 22)
-    }
-
-    func panelCard(cornerRadius: CGFloat = 10) -> some View {
-        clipShape(RoundedRectangle(cornerRadius: cornerRadius))
-            .overlay(
-                RoundedRectangle(cornerRadius: cornerRadius)
-                    .strokeBorder(Color.white.opacity(0.15), lineWidth: 1)
-            )
     }
 }
 

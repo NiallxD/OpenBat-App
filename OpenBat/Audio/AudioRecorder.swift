@@ -394,10 +394,21 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
     private func makeGuanoChunk(filename: String, outcome: AutoIDOutcome) -> Data {
         let sr = sampleRate
         let durationS = sr > 0 ? Double(dataBytes / 2) / sr : 0
+        // GUANO Make/Model describe the recording HARDWARE, not the app:
+        // `Make` is the ultrasonic input device (the Griff mic's detected
+        // port name — the closest thing to a hardware name we have; falls
+        // back to the host model if no external device was named), `Model`
+        // is the host iPhone. The APP goes in `Firmware Version` (GUANO's
+        // conventional slot for recording software), so downstream tools and
+        // the in-app File Info card read "OpenBat …" as the app rather than
+        // as the device. (An earlier version set `Make: OpenBat`, conflating
+        // the app into the device make.)
+        let hardwareName = inputNameQ == "—" ? Self.deviceModel : inputNameQ
         var fields: [GuanoMetadata.Field] = [
             .init("GUANO|Version", "1.0"),
-            .init("Make", "OpenBat"),
-            .init("Model", inputNameQ),
+            .init("Make", hardwareName),
+            .init("Model", Self.deviceModel),
+            .init("Firmware Version", "OpenBat \(Self.appVersion)"),
             .init("Timestamp", Self.iso8601.string(from: segmentStartDate ?? Date())),
             .init("Length", String(format: "%.3f", durationS)),
             .init("Samplerate", String(Int(sr.rounded()))),

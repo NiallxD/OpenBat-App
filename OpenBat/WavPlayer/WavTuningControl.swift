@@ -22,6 +22,14 @@ struct WavTuningControl: View {
     @Bindable var rteSettings: RTESettings
     @Binding var logFrequency: Bool
     @Binding var noiseFloor: Double
+    @Binding var hideSilence: Bool
+    /// 0 = only near-total quiet counts as silence, 1 = aggressive — see
+    /// SilenceMap.thresholdDB for the dB mapping.
+    @Binding var silenceSensitivity: Double
+    /// Seconds of audio kept on EACH side of every detected pulse before the
+    /// silence is cut — larger keeps more context (and merges close pulses),
+    /// smaller cuts tighter. See SilenceMap.compute's `padSeconds`.
+    @Binding var silencePadding: Double
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -34,6 +42,22 @@ struct WavTuningControl: View {
                     Text(String(format: "%.2f", noiseFloor)).monospacedDigit().foregroundStyle(.secondary)
                 }
                 Slider(value: $noiseFloor, in: 0...0.9, step: 0.05)
+            }
+
+            Toggle("Hide silence", isOn: $hideSilence)
+            if hideSilence {
+                VStack(alignment: .leading, spacing: 4) {
+                    LabeledContent("Silence sensitivity") {
+                        Text(String(format: "%.2f", silenceSensitivity)).monospacedDigit().foregroundStyle(.secondary)
+                    }
+                    Slider(value: $silenceSensitivity, in: 0...1, step: 0.05)
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    LabeledContent("Pulse margin") {
+                        Text(String(format: "%.0f ms", silencePadding * 1000)).monospacedDigit().foregroundStyle(.secondary)
+                    }
+                    Slider(value: $silencePadding, in: 0.005...0.1, step: 0.005)
+                }
             }
 
             Divider()

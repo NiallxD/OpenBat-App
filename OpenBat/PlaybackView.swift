@@ -104,29 +104,55 @@ struct PlaybackListView: View {
 /// View struct for exactly that reason — see its own doc comment.
 struct PlaybackControlsView: View {
     @Bindable var engine: PlaybackEngine
-    @Binding var palette: Palette
+    /// Called when the share button is tapped — the palette control moved to
+    /// the spectrogram header pill (see WavPlayerView), and this slot now
+    /// exports the recording.
+    let onShare: () -> Void
 
     var body: some View {
         VStack(spacing: 20) {
             HStack(spacing: 40) {
                 listenModeButton
                 playPauseButton
-                paletteButton
+                shareButton
             }
         }
         .padding(.vertical, 16)
+    }
+
+    private var shareButton: some View {
+        Button(action: onShare) {
+            VStack(spacing: 4) {
+                Image(systemName: "square.and.arrow.up").font(.title2)
+                Text("Share").font(.caption2)
+            }
+            .frame(width: 64)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.secondary)
+        .accessibilityLabel("Export recording")
+    }
+
+    /// True once playback has run to the end and stopped — the transport
+    /// button then offers "replay" (tapping `togglePlaying`/`play` restarts
+    /// from 0, see PlaybackEngine.play) rather than a plain play.
+    private var atEnd: Bool {
+        !engine.isPlaying && engine.durationSeconds > 0
+            && engine.currentTimeSeconds >= engine.durationSeconds
     }
 
     private var playPauseButton: some View {
         Button {
             engine.togglePlaying()
         } label: {
-            Image(systemName: engine.isPlaying ? "pause.circle.fill" : "play.circle.fill")
+            Image(systemName: engine.isPlaying
+                  ? "pause.circle.fill"
+                  : (atEnd ? "arrow.counterclockwise.circle.fill" : "play.circle.fill"))
                 .font(.system(size: 54))
         }
         .buttonStyle(.plain)
         .foregroundStyle(Color.batAccent)
-        .accessibilityLabel(engine.isPlaying ? "Pause" : "Play")
+        .accessibilityLabel(engine.isPlaying ? "Pause" : (atEnd ? "Replay" : "Play"))
     }
 
     /// Cycles Off → Heterodyne → Time expansion → Off, same order and icons as the
@@ -146,48 +172,6 @@ struct PlaybackControlsView: View {
         .accessibilityLabel("Listen mode: \(listenModeName)")
     }
 
-    /// Same iOS 26 FixedMenu workaround as the live Detector screen's palette
-    /// Menu (ContentView.paletteButton): without the `GlassEffectContainer` +
-    /// `.glassEffect(.identity)` wrapping, Liquid Glass hides this Menu's
-    /// label the whole time it's open and then visibly fades/pulses it back
-    /// in seconds after dismissal.
-    private var paletteButton: some View {
-        Group {
-            if #available(iOS 26.0, *) {
-                GlassEffectContainer {
-                    paletteMenuContent {
-                        paletteMenuLabel.glassEffect(.identity)
-                    }
-                    .clipped()
-                }
-            } else {
-                paletteMenuContent { paletteMenuLabel }
-            }
-        }
-        .foregroundStyle(.secondary)
-        .accessibilityLabel("Colour palette")
-    }
-
-    private var paletteMenuLabel: some View {
-        VStack(spacing: 4) {
-            Image(systemName: "paintpalette").font(.title2)
-            Text("Palette").font(.caption2)
-        }
-        .frame(width: 64)
-    }
-
-    private func paletteMenuContent(@ViewBuilder label: () -> some View) -> some View {
-        Menu {
-            Picker("Palette", selection: $palette) {
-                ForEach(Palette.allCases) { p in
-                    Text(p.displayName).tag(p)
-                }
-            }
-        } label: {
-            label()
-        }
-    }
-
     private var nextListenMode: ListenMode {
         switch engine.listenMode {
         case .off:           .heterodyne
@@ -204,13 +188,15 @@ struct PlaybackControlsView: View {
         }
     }
 
-    // Spelled out (not "RTE") — same rationale as the live listen-mode button's
-    // VoiceOver label: the visible cue is an icon, not text.
+    // Shown as the visible label under the mode icon (unlike the live
+    // Detector button, which is icon-only), so the compact "RTE" keeps the
+    // row neat and matches the "Heterodyne / RTE" wording in this screen's
+    // tuning popover and Settings.
     private var listenModeName: String {
         switch engine.listenMode {
         case .off:           "Off"
         case .heterodyne:    "Heterodyne"
-        case .timeExpansion: "Time expansion"
+        case .timeExpansion: "RTE"
         }
     }
 

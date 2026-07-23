@@ -44,6 +44,17 @@ nonisolated enum CallAnalysis {
         /// 0-1, same meaning as PulseImageRenderer's quality score: how much
         /// the loudest column stands out above the analyzed region's mean.
         let quality: Float
+        /// Labelled call landmarks for on-spectrogram annotation (Hi f, Peak,
+        /// Fc, Lo f). `sampleOffset` is in REAL samples relative to the
+        /// analyzed range's first sample — the caller adds its own absolute
+        /// start (and maps through the silence map, if any) to place them.
+        let points: [Point]
+
+        struct Point {
+            let label: String
+            let sampleOffset: Int
+            let freqHz: Double
+        }
     }
 
     /// Manual selections wider than this are clamped before analysis — a
@@ -177,18 +188,32 @@ nonisolated enum CallAnalysis {
         // the last `cfTailFraction` of the active duration.
         let tailCount = Int((Double(durationCols) * cfTailFraction).rounded())
         var characteristicFreqHz: Double?
+        var fcCol: Int?
         if tailCount >= 2 {
             let tailStart = durEnd - tailCount + 1
             var freqs = (tailStart...durEnd).map { Double(loudestBin(atCol: $0)) * hzPerBin }
             freqs.sort()
             let mid = freqs.count / 2
             characteristicFreqHz = freqs.count % 2 == 0 ? (freqs[mid - 1] + freqs[mid]) / 2 : freqs[mid]
+            fcCol = (tailStart + durEnd) / 2   // draw the Fc marker at the tail's midpoint
         }
 
         // Quality: how much the peak column stands above the analyzed
         // region's background mean.
         let meanColPeak = totalColPeak / Float(max(1, nFrames))
         let quality: Float = 1.0 - (meanColPeak / peakColVal)
+
+        // Annotation landmarks (column -> real-sample offset from the range
+        // start). Hi f / Lo f sit at the first/last active columns, Peak at
+        // the loudest column, Fc at the tail midpoint.
+        var points: [Result.Point] = [
+            .init(label: "Hi f", sampleOffset: durStart * STFTGrid.hop, freqHz: startFreqHz),
+            .init(label: "Peak", sampleOffset: peakCol * STFTGrid.hop, freqHz: Double(peakBin) * hzPerBin),
+            .init(label: "Lo f", sampleOffset: durEnd * STFTGrid.hop, freqHz: endFreqHz),
+        ]
+        if let cf = characteristicFreqHz, let fcCol {
+            points.append(.init(label: "Fc", sampleOffset: fcCol * STFTGrid.hop, freqHz: cf))
+        }
 
         WavPlayerDebugLog.log("CallAnalysis", "analyze: peak=\(Int(Double(peakBin) * hzPerBin))Hz durationCols=\(durationCols) (\(String(format: "%.1f", durationMs))ms) quality=\(String(format: "%.2f", quality))")
         return Result(
@@ -201,7 +226,8 @@ nonisolated enum CallAnalysis {
             startFreqHz: startFreqHz,
             endFreqHz: endFreqHz,
             sweepRateHzPerMs: sweepRateHzPerMs,
-            quality: quality
+            quality: quality,
+            points: points
         )
     }
 }

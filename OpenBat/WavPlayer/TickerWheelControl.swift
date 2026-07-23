@@ -70,7 +70,7 @@ struct TickerWheelControl: View {
             .onChanged { drag in
                 if liveValue == nil { dragStartValue = value }
                 // See file doc comment for the sign convention.
-                let deltaSteps = Double(-drag.translation.width / pointsPerStep)
+                let deltaSteps = Self.acceleratedSteps(forTranslation: -drag.translation.width, pointsPerStep: pointsPerStep)
                 let raw = dragStartValue + deltaSteps * step
                 let clamped = min(max(raw, range.lowerBound), range.upperBound)
                 liveValue = clamped
@@ -86,6 +86,26 @@ struct TickerWheelControl: View {
                 }
                 liveValue = nil
             }
+    }
+
+    /// Translation-to-steps mapping with mild quadratic acceleration: the
+    /// per-point rate right at the start of a drag matches `pointsPerStep`
+    /// exactly (fine control for a small nudge is unchanged), but each
+    /// additional point of travel counts for progressively more. A pure
+    /// linear mapping (the original `translation / pointsPerStep`) made
+    /// reaching the far end of a wide, fine-grained range — the Range
+    /// wheel's 500Hz steps across 0.5–192kHz — take several dozen
+    /// screen-widths of dragging to reach a commonly-used value like 20kHz.
+    /// The 0.24 coefficient was picked so a single ~3–4-width swipe (roughly
+    /// 400–500pts, one comfortable continuous thumb drag) comfortably
+    /// crosses that wheel's full span, while a short drag still moves in
+    /// fine single/double steps.
+    private static func acceleratedSteps(forTranslation t: CGFloat, pointsPerStep: CGFloat) -> Double {
+        guard pointsPerStep > 0 else { return 0 }
+        let accelerationFactor = 0.24
+        let sign: Double = t < 0 ? -1 : 1
+        let mag = Double(abs(t)) / Double(pointsPerStep)
+        return sign * (mag + accelerationFactor * mag * mag)
     }
 }
 

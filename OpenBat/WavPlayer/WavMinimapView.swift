@@ -19,12 +19,21 @@ struct WavMinimapView: View {
     let overview: WavSpectrogramEngine.Overview
     let viewport: WavViewport
     let engine: PlaybackEngine
-    let onRecenter: (Int) -> Void   // new center sample
+    /// Non-nil while hide-silence is on: `overview` is then the COMPRESSED
+    /// overview and this strip's whole horizontal axis is VIRTUAL samples —
+    /// scrubbing maps back to real time for the engine, and the playhead
+    /// maps the engine's real position forward (same seams as everywhere
+    /// else; see SilenceMap).
+    let silenceMap: SilenceMap?
+    let onRecenter: (Int) -> Void   // new center sample (display domain)
+    /// Debug-only red/green pan-buffer visualization — see its own doc
+    /// comment and `WavSpectrogramView.renderChunkedStep` (the writer).
+    let bufferDebugStatus: BufferDebugStatus
 
     var body: some View {
         GeometryReader { geo in
             ZStack(alignment: .topLeading) {
-                Image(uiImage: overview.image)
+                Image(uiImage: displayImage)
                     .resizable()
                     .interpolation(.low)
                     .frame(width: geo.size.width, height: geo.size.height)
@@ -32,18 +41,47 @@ struct WavMinimapView: View {
                 let x0 = CGFloat(Double(viewport.startSample) / Double(max(overview.totalSamples, 1))) * geo.size.width
                 let x1 = CGFloat(Double(viewport.endSample) / Double(max(overview.totalSamples, 1))) * geo.size.width
                 Rectangle()
-                    .stroke(Color.white, lineWidth: 1.5)
-                    .background(Color.white.opacity(0.08))
+                    .stroke(Color.batAccent.opacity(0.7), lineWidth: 1)
+                    .background(Color.batAccent.opacity(0.15))
                     .frame(width: max(2, x1 - x0), height: geo.size.height)
                     .position(x: (x0 + x1) / 2, y: geo.size.height / 2)
                     .allowsHitTesting(false)
 
+                BufferDebugOverlay(status: bufferDebugStatus, totalSamples: overview.totalSamples, geoSize: geo.size)
+
                 MinimapPlayheadOverlay(engine: engine, totalSamples: overview.totalSamples,
-                                       sampleRate: overview.sampleRate, geoSize: geo.size)
+                                       sampleRate: overview.sampleRate, silenceMap: silenceMap,
+                                       geoSize: geo.size)
             }
             .contentShape(Rectangle())
             .gesture(scrubGesture(geoSize: geo.size))
         }
+    }
+
+    /// The overview image cropped to the viewport's CURRENT frequency
+    /// window — so the minimap's vertical extent always represents whatever
+    /// band the main spectrogram is showing (e.g. zoomed to 50–90kHz) rather
+    /// than always the full 0–Nyquist range regardless of zoom. Time
+    /// (horizontal) is left alone — this stays the scrub bar for the WHOLE
+    /// recording, just frequency-scoped to match the current view, same
+    /// "position AND range" both matter the way the time rectangle already
+    /// shows position within the full time axis.
+    private var displayImage: UIImage {
+        croppedToFreqRange(overview.image) ?? overview.image
+    }
+
+    private func croppedToFreqRange(_ image: UIImage) -> UIImage? {
+        guard let cg = image.cgImage else { return nil }
+        let nyquist = overview.maxFreqHz
+        guard nyquist > 0 else { return nil }
+        let height = cg.height
+        let topFrac = 1 - viewport.maxFreqHz / nyquist
+        let bottomFrac = 1 - viewport.minFreqHz / nyquist
+        let y0 = max(0, min(height - 1, Int((topFrac * Double(height)).rounded())))
+        let y1 = max(y0 + 1, min(height, Int((bottomFrac * Double(height)).rounded())))
+        guard let cropped = cg.cropping(to: CGRect(x: 0, y: y0, width: cg.width, height: y1 - y0))
+        else { return nil }
+        return UIImage(cgImage: cropped)
     }
 
     /// `minimumDistance: 0` covers a plain tap (one `onChanged` at the touch
@@ -70,8 +108,9 @@ struct WavMinimapView: View {
         // those, throttling this would change what the user hears while
         // dragging (continuous audio feedback vs. silent-until-release),
         // a real UX tradeoff and not a pure bug fix.
+        let realSample = silenceMap?.virtualToReal(sample) ?? sample
         WavPlayerDebugLog.time("WavMinimapView", "scrub -> engine.seek") {
-            engine.seek(toSeconds: Double(sample) / max(overview.sampleRate, 1))
+            engine.seek(toSeconds: Double(realSample) / max(overview.sampleRate, 1))
         }
     }
 }
@@ -87,13 +126,14 @@ private struct MinimapPlayheadOverlay: View {
     let engine: PlaybackEngine
     let totalSamples: Int
     let sampleRate: Double
+    let silenceMap: SilenceMap?
     let geoSize: CGSize
 
     var body: some View {
         TimelineView(.animation(minimumInterval: 1.0 / 30)) { _ in
             if let x = playheadX() {
                 Rectangle()
-                    .fill(Color.white.opacity(0.9))
+                    .fill(Color.batAccent)
                     .frame(width: 1.5)
                     .position(x: x, y: geoSize.height / 2)
                     .frame(height: geoSize.height)
@@ -104,8 +144,49 @@ private struct MinimapPlayheadOverlay: View {
 
     private func playheadX() -> CGFloat? {
         guard totalSamples > 0, sampleRate > 0, geoSize.width > 0 else { return nil }
-        let currentSample = engine.currentTimeSeconds * sampleRate
+        let realSample = engine.currentTimeSeconds * sampleRate
+        let currentSample = silenceMap.map { Double($0.realToVirtual(Int(realSample))) } ?? realSample
         let frac = min(max(currentSample / Double(totalSamples), 0), 1)
         return CGFloat(frac) * geoSize.width
+    }
+}
+
+/// DEBUGGING AID: two thin strips along the bottom edge of the minimap
+/// showing the pan buffer's actual state — GREEN for the current detail
+/// tile's own bounds (already rendered), RED for whatever span the
+/// background stepper (`WavSpectrogramView.renderChunkedStep`) is
+/// currently computing. Stacked (not overlaid) so both stay visible even
+/// when they overlap in time, since the "rendering" step is usually
+/// growing right at the edge of the "ready" region. A separate leaf View
+/// for the same isolation reason as `MinimapPlayheadOverlay`: `status` is
+/// `@Observable` and updates on every render step, so reading it inline in
+/// the parent's body would invalidate the whole minimap (and its scrub
+/// gesture) on every step instead of just this thin strip.
+private struct BufferDebugOverlay: View {
+    let status: BufferDebugStatus
+    let totalSamples: Int
+    let geoSize: CGSize
+
+    private static let barHeight: CGFloat = 2.5
+
+    var body: some View {
+        ZStack(alignment: .bottom) {
+            if status.hasReady {
+                bar(start: status.readyStart, end: status.readyEnd, color: .green, bottomInset: 0)
+            }
+            if status.isRendering {
+                bar(start: status.renderingStart, end: status.renderingEnd, color: .red, bottomInset: Self.barHeight)
+            }
+        }
+        .allowsHitTesting(false)
+    }
+
+    private func bar(start: Int, end: Int, color: Color, bottomInset: CGFloat) -> some View {
+        let x0 = CGFloat(Double(start) / Double(max(totalSamples, 1))) * geoSize.width
+        let x1 = CGFloat(Double(end) / Double(max(totalSamples, 1))) * geoSize.width
+        return Rectangle()
+            .fill(color.opacity(0.85))
+            .frame(width: max(1, x1 - x0), height: Self.barHeight)
+            .position(x: (x0 + x1) / 2, y: geoSize.height - bottomInset - Self.barHeight / 2)
     }
 }

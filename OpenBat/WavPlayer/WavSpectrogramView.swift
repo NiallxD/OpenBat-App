@@ -17,9 +17,12 @@
 //       tile (if the zoom level warrants one — see `needsDetailTile`) renders
 //       in the background and swaps in once ready.
 //
-//  Interaction model: ZOOM is NOT a gesture here — the time axis via
-//  WavPlayerView's "Zoom" ticker wheel, the frequency axis's WIDTH via its
-//  "Range" ticker wheel. PAN (position) IS a gesture on this view, though:
+//  Interaction model: ZOOM is both a gesture AND the ticker wheels — a
+//  two-finger PER-AXIS pinch (horizontal spread = time, vertical spread =
+//  frequency width; see TwoAxisPinchView for why it's a UIKit overlay, not
+//  a composed SwiftUI MagnifyGesture) on top of WavPlayerView's "Zoom"/
+//  "Range" ticker wheels, which remain as the precise/deterministic
+//  controls and as readouts. PAN (position) is a gesture on this view too:
 //  a two-axis drag — horizontal shifts time (with momentum/coast), vertical
 //  shifts the frequency window (no momentum on that axis) — or a
 //  drag-to-select box when `isSelecting`, plus tap-to-seek in pan mode. Both
@@ -46,15 +49,37 @@ struct WavSpectrogramView: View {
     /// automatically show the same up-to-date recolor with nothing extra to
     /// pass through here.
     let overview: WavSpectrogramEngine.Overview
+    /// Non-nil while hide-silence is on: `overview` is then the COMPRESSED
+    /// overview and every sample coordinate in this view (viewport, tiles,
+    /// seeks) is a VIRTUAL sample on the compressed timeline — the only
+    /// thing this view does differently is route detail renders through
+    /// `renderRawTileStitched` (and hand `onSeek` a virtual position, which
+    /// WavPlayerView's closure maps back to real time).
+    let silenceMap: SilenceMap?
     @Binding var viewport: WavViewport
     @Binding var selection: ClosedRange<Int>?
+    /// Measured call landmarks (Hi f / Peak / Fc / Lo f) for the current
+    /// selection, in this view's display-sample domain — drawn by
+    /// `CallAnnotationOverlay`. Empty when nothing is selected/measured.
+    let annotations: [CallAnnotation]
     let isSelecting: Bool
     let palette: Palette
     let noiseFloor: Float
     /// Display-only Y-axis remap (see `LogFrequencyWarp`) — independent of
     /// the underlying data, which stays linear-frequency throughout.
     let logFrequency: Bool
+    /// True while playback is scrolling the view (WavPlayerView's follow
+    /// loop is writing `viewport` at ~30Hz). Switches viewport-change
+    /// rendering from the resetting debounce (which never fires under
+    /// continuous change, leaving only the coarse overview crop — the
+    /// "very blurry while playing" report) to a throttled scheduler that
+    /// fires periodically DURING the scroll, so a medium-res margined tile
+    /// stays resident and the scroll rides it sharp instead.
+    let isPlaying: Bool
     let onSeek: (Double) -> Void
+    /// Debug-only red/green buffer visualization surfaced on the minimap —
+    /// see `renderChunkedStep` (writer) and `WavMinimapView` (reader).
+    let bufferDebugStatus: BufferDebugStatus
 
     // Live pan state — transient, reset to identity every time a new
     // viewport commits (see `commitPan`). `DragGesture.translation` is
@@ -92,43 +117,42 @@ struct WavSpectrogramView: View {
     /// reset at every commit.
     @State private var isInteracting = false
 
+    /// True while a background prefetch render (see `maybePrefetchTile`) is
+    /// in flight — prevents a fast/long drag from spawning a new margined
+    /// render on every single frame while one is already computing; the
+    /// throttle (`lastPrefetchTime`/`minPrefetchInterval`) alone isn't
+    /// enough since a render can legitimately take longer than the throttle
+    /// interval.
+    @State private var prefetchInFlight = false
+    @State private var lastPrefetchTime: Date?
+
     @State private var detailTile: WavSpectrogramEngine.DetailTile?
-    /// The raw (un-colorized) STFT grid behind `detailTile`, kept around so a
-    /// noise-floor/palette-only change (`forceRender`) can recolor it
-    /// directly instead of re-reading PCM and re-running the FFT just to
-    /// change a tone-mapping parameter that step doesn't even depend on —
-    /// see `scheduleDetailRender`.
+    /// The raw (un-colorized) STFT grid behind `detailTile` — covers a TIME
+    /// MARGIN around whatever viewport it was rendered for (see
+    /// `scheduleDetailRender`'s doc comment), not just the exact requested
+    /// span, and (regardless of margin) always has every one of STFTGrid's
+    /// 1024 frequency bins, since the FFT stage never crops bins away —
+    /// only `colorize` does, for display. Kept around so ANY of the
+    /// following can reuse it instead of re-reading PCM and re-running the
+    /// FFT: a noise-floor/palette change, a frequency-only pan (the raw grid
+    /// already has every bin), or a time-pan that's still within the
+    /// tile's own margin.
     @State private var cachedRawTile: WavSpectrogramEngine.RawTile?
     @State private var renderGeneration = 0
     @State private var commitTask: Task<Void, Never>?
-    /// Debounces `scheduleDetailRender` itself for ANY `viewport` change,
-    /// regardless of source — confirmed necessary on-device: the time-zoom
-    /// slider (a plain continuous `Slider`, unlike the frequency-trim
-    /// slider's own already-debounced live-value split) writes `viewport`
-    /// directly on every tick with no debounce upstream, so a single drag
-    /// fired `scheduleDetailRender` — a real `WavPCMReader` read +
-    /// `STFTGrid.streamPooledGrid` FFT — well over 100 times, almost all
-    /// immediately superseded before even finishing. `renderGeneration`
-    /// already discards a STALE RESULT once computed, but does nothing to
-    /// stop the wasted computation from starting in the first place — this
-    /// is what actually stops that. Safe to debounce unconditionally: the
-    /// always-instant overview crop (`rebuildWarpedImage`, called
-    /// separately and NOT debounced) keeps the view visually responsive
-    /// while this settles.
-    @State private var viewportRenderTask: Task<Void, Never>?
-    /// Debounces the noise-floor/palette-triggered `forceRender` — without
-    /// this, each step of the (0.05-step) noise-floor slider fired its own
-    /// `scheduleDetailRender(forceRender: true)` immediately. At the default
-    /// whole-file zoom there's no `cachedRawTile` yet, so every one of those
-    /// went through the FULL renderRawTile path (a whole-file
-    /// `WavPCMReader.readSamples` plus `STFTGrid.streamPooledGrid`) — and
-    /// since `renderGeneration` invalidates the previous in-flight render the
-    /// moment a new one is scheduled, a continuous drag meant no render ever
-    /// won the race before being superseded: the spectrogram looked like it
-    /// was ignoring the slider entirely. Coalescing rapid ticks into one
-    /// render after they settle (same pattern WavPlayerView's frequency-trim
-    /// slider already uses) fixes that without touching the render itself.
-    @State private var forceRenderTask: Task<Void, Never>?
+    /// Debounces `scheduleDetailRender` for ANY trigger — a viewport change
+    /// (pan settling, either ticker wheel) OR a noise-floor/palette change —
+    /// confirmed necessary on-device: e.g. the time-zoom ticker writes
+    /// `viewport` directly on every settled tick with no debounce upstream,
+    /// so a single drag fired `scheduleDetailRender` well over 100 times,
+    /// almost all immediately superseded before even finishing.
+    /// `renderGeneration` already discards a STALE RESULT once computed, but
+    /// does nothing to stop the wasted computation from starting in the
+    /// first place — this is what actually stops that. Safe to debounce
+    /// unconditionally: the always-instant overview crop (`rebuildWarpedImage`,
+    /// called separately and NOT debounced) keeps the view visually
+    /// responsive while this settles.
+    @State private var renderDebounceTask: Task<Void, Never>?
     @State private var liveSelection: ClosedRange<Int>?
     /// Log-frequency-remapped copy of whichever source image
     /// (`currentSourceImage()`) is currently displayed — cached, not
@@ -153,8 +177,72 @@ struct WavSpectrogramView: View {
     @State private var gestureBaseOffsetY: CGFloat = 0
     @State private var dragTranslationYAtLastCommit: CGFloat = 0
 
+    // Live two-axis pinch state (see TwoAxisPinchView) — identity (scale 1,
+    // offset 0) whenever no pinch is active, so `commitPan`/`liveViewport`
+    // can always fold these in unconditionally. The offsets hold the
+    // anchor-preserving term `(anchor - 0.5) * (1 - scale)` plus any
+    // two-finger centroid drag, in the same screen-fraction space as
+    // `gestureOffsetX`/`gestureOffsetY`.
+    @State private var pinchScaleX: Double = 1
+    @State private var pinchScaleY: Double = 1
+    @State private var pinchOffsetX: Double = 0
+    @State private var pinchOffsetY: Double = 0
+    /// True from the pinch recognizer's .began to its .ended — the pan
+    /// DragGesture (which tracks ONE of the same two fingers) checks this to
+    /// stand down while the pinch owns the touch (see panGesture's guards).
+    @State private var isPinching = false
+    /// Set at pinch END, cleared by the drag's FIRST event afterwards. The
+    /// in-pinch rebase in `panGesture.onChanged` only runs when drag events
+    /// actually arrive during the pinch — on a FAST pinch SwiftUI often
+    /// delivers none, then flushes one late event AFTER the pinch commits,
+    /// carrying the tracked finger's whole cumulative movement (the entire
+    /// pinch spread). Without this flag that event was applied as a pan
+    /// (`dxSinceCommit` against a stale baseline) — the "fast pinch jumps
+    /// back/away on release" bug — or, via `onEnded`, seeded a bogus
+    /// coast/tap from pinch-contaminated translation and velocity.
+    @State private var postPinchRebasePending = false
+
+    /// Which axis THIS touch has committed to, decided once total movement
+    /// clears `axisLockThreshold` — nil beforehand (movement too small to
+    /// tell intent yet). A real touch is never perfectly straight; without
+    /// this, ANY drag — including one the user experiences as "just
+    /// scrolling through time" — always had some incidental vertical
+    /// component, which `commitPan` applied to the frequency window every
+    /// time (see `resolvedViewport`'s `freqOffset`). That's what was behind
+    /// "why does panning change the range": a horizontal drag nudging the
+    /// frequency window by a few Hz on every single pan, invisible most of
+    /// the time but occasionally enough (combined with the independent-
+    /// clamp bug `resolvedViewport` used to have at the 0/Nyquist edges) to
+    /// visibly shift the Range value — and enough, even without hitting an
+    /// edge, to leave the cached detail tile's `minFreqHz/maxFreqHz`
+    /// slightly off from the newly committed viewport, so the very next
+    /// touch's live crop (`tileCovers`) immediately missed and fell back to
+    /// the overview. Locking to whichever axis clearly dominates once the
+    /// touch is unambiguous (matching `UIScrollView`'s own directional-lock
+    /// behavior) means a horizontal pan now writes ZERO frequency offset,
+    /// not just a small one.
+    @State private var lockedAxis: PanAxis? = nil
+    private enum PanAxis { case horizontal, vertical }
+    private static let axisLockThreshold: CGFloat = 8
+
     private static let liveDebounceSeconds = 0.2
     private static let targetColumns = 1536
+    /// Hard ceiling on a rendered tile's column count, margin included. The
+    /// margin logic below sizes the buffer in SECONDS of audio
+    /// (`minBufferSeconds`), but every step renders at `targetColumns`-per-
+    /// viewport-span density — so at deep zoom the two multiply into
+    /// unbounded tiles: a ~50ms viewport with a 3s-per-side buffer wanted
+    /// ~190k columns (~10k after the nFrames clamp), and each one of those
+    /// columns costs FFT work, a ~4KB grid row, and colorize time.
+    /// Measured on-device: the staged chain ran 1536->2895->...->9688-wide
+    /// steps, each fully re-rendered, ~7s of background churn per settle.
+    /// Capping total columns instead caps the margin at deep zoom to
+    /// whatever this many columns can cover (4x the viewport span at the
+    /// 4x-targetColumns value below) — less runway than 3s, but every tile
+    /// stays cheap enough (~150-400ms raw render) that the prefetch
+    /// re-centers fast enough to keep up with a drag anyway, which the
+    /// multi-second unbounded tiles never could.
+    private static let maxTileColumns = targetColumns * 4
     /// Coast distance = `dragVelocityX * coastTimeConstant` — how many
     /// seconds' worth of the release-moment velocity the momentum carries
     /// forward. Tuned for feel, not physically derived — bumped up from an
@@ -164,6 +252,52 @@ struct WavSpectrogramView: View {
     /// from looking broken, so there's no correctness reason to keep this
     /// conservative.
     private static let coastTimeConstant: Double = 0.4
+
+    /// How much wider (in samples) a rendered detail tile is than the
+    /// viewport it was rendered for — e.g. 3.0 renders 3x the visible span,
+    /// centered on the same point. This is the actual "buffer" a pan can
+    /// move through before a brand new render is needed: same idea as the
+    /// live Metal spectrogram's `ringTextureWidth = maxVisibleColumns + 512
+    /// guard`, sized here as a multiple of the viewport rather than a fixed
+    /// pixel margin since detail-tile viewports span many different zoom
+    /// levels.
+    private static let tileMarginFactor: Double = 3.0
+    /// Absolute floor on the buffer beyond the visible frame, regardless of
+    /// zoom — `tileMarginFactor` alone ties the margin to the CURRENT
+    /// viewport's own span, which collapses to almost nothing at the zoom
+    /// levels this player is actually used at: a typical echolocation call
+    /// view (tens to a couple hundred ms wide) only got tens to a couple
+    /// hundred ms of real buffered audio beyond it (`tileMarginFactor - 1`
+    /// = 2x that span) — an ordinary screen drag covers that much real time
+    /// in well under a second, so the margin was exhausted almost the
+    /// instant a drag started, falling back to the coarse overview crop
+    /// immediately. This floor is expressed in real SECONDS of audio, not a
+    /// multiple of the viewport, so deep zoom gets a genuinely useful
+    /// amount of runway too — whichever of the two (proportional or this
+    /// floor) is larger wins, so a WIDE zoom (where 3x the span already
+    /// exceeds 3 seconds) is unaffected. Whichever wins is then capped by
+    /// `maxTileColumns` (see its doc comment) — at deep zoom this floor
+    /// would otherwise multiply with per-span column density into
+    /// unboundedly wide tiles.
+    private static let minBufferSeconds: Double = 3.0
+    /// Size of one staged buffer-build step (see `renderChunkedStep`) — the
+    /// visible frame renders first (fastest, since it carries no margin
+    /// yet), then the tile grows by this much at a time toward the full
+    /// margin computed in `scheduleDetailRender`, instead of gating on one
+    /// single multi-second render before anything sharper than the overview
+    /// shows at all.
+    private static let chunkSeconds: Double = 1.0
+    /// Once the NEARER edge of the live (uncommitted) pan position gets
+    /// this close — as a fraction of the current viewport span — to the
+    /// edge of the cached tile's own margin, kick off a background render
+    /// for a freshly re-centered tile. Firing well before the margin is
+    /// actually exhausted (not at the exact edge) gives the new tile time
+    /// to land before it's needed; 0.35 empirically leaves enough runway
+    /// for a `tileMarginFactor = 3.0` tile (each edge starts with a full
+    /// viewport-span of margin either side) without re-triggering on every
+    /// frame near the middle of a long drag.
+    private static let prefetchMarginFraction: Double = 0.35
+    private static let minPrefetchInterval: TimeInterval = 0.25
 
     var body: some View {
         GeometryReader { geo in
@@ -178,6 +312,23 @@ struct WavSpectrogramView: View {
 
                 WavAxisOverlay(viewport: viewport, sampleRate: sampleRate, geoSize: geo.size,
                                logFrequency: logFrequency)
+
+                if !annotations.isEmpty {
+                    CallAnnotationOverlay(annotations: annotations, viewport: viewport,
+                                          sampleRate: sampleRate, logFrequency: logFrequency,
+                                          geoSize: geo.size)
+                }
+
+                // Two-finger, per-axis pinch zoom — a UIKit overlay rather
+                // than a composed SwiftUI gesture; see TwoAxisPinchView's
+                // doc comment for why. Pan-mode only: while selecting, two
+                // fingers should do nothing rather than silently rescale
+                // the view mid-measurement.
+                if !isSelecting {
+                    TwoAxisPinchView(onBegan: pinchBegan,
+                                     onChanged: pinchChanged,
+                                     onEnded: pinchEnded)
+                }
             }
             .frame(width: geo.size.width, height: geo.size.height)
             .contentShape(Rectangle())
@@ -195,23 +346,52 @@ struct WavSpectrogramView: View {
             // comment for why: confirmed on-device via the generation
             // counter reaching 238 during a single zoom-slider drag, each
             // one a real render spawned and then immediately discarded.
-            scheduleDetailRenderDebounced(for: newValue)
+            // During playback scroll the debounce never fires (continuous
+            // change keeps resetting it), so a throttled scheduler renders
+            // periodically instead — see `isPlaying`'s doc comment.
+            if isPlaying {
+                scheduleDetailRenderThrottled()
+            } else if renderImmediatelyOnCommit {
+                // A gesture just SETTLED (pinch/pan commit) — render the
+                // sharp tile now instead of waiting out the debounce. Since
+                // the ticker wheels were removed, `viewport` only changes at
+                // a settled commit or a minimap scrub, so there's nothing
+                // mid-gesture to protect against here; skipping the ~150ms
+                // wait shrinks the window where the coarse overview crop
+                // (positioned slightly differently than the sharp tile —
+                // see the alignment discussion) is what's on screen.
+                renderImmediatelyOnCommit = false
+                renderDebounceTask?.cancel()
+                scheduleDetailRender(for: newValue)
+            } else {
+                // Not a gesture commit (e.g. a minimap scrub, which DOES
+                // fire rapidly on every drag frame) — keep debouncing.
+                scheduleDetailRenderDebounced(for: newValue)
+            }
             rebuildWarpedImage()
         }
-        // `scheduleForceRenderDebounced` — only matters once a detail tile is
-        // already showing (zoomed in); its own cheap path
-        // (`scheduleDetailRender`'s `cachedRawTile` branch) recolors that
-        // tile from PCM already read for the current viewport, not a fresh
-        // whole-file read. The zoomed-out (overview) case is handled by
-        // WavPlayerView recoloring `overview.image` in place directly — see
-        // its own `.onChange(of: overview.image)` below.
+        .onChange(of: isPlaying) { _, nowPlaying in
+            // Playback just stopped: the last scroll position was rendered
+            // via the throttle (which may have a trailing render pending or
+            // none), so kick a normal debounced render to guarantee a final
+            // sharp tile at the paused position.
+            if !nowPlaying { scheduleDetailRenderDebounced(for: viewport) }
+        }
+        // A noise-floor/palette change reuses the SAME debounced scheduler
+        // as a viewport change — `scheduleDetailRender`'s cheap path (the
+        // cached raw tile already covers the CURRENT viewport, since
+        // nothing about it changed) recolors directly instead of re-reading
+        // PCM/re-running the FFT. Only matters once a detail tile is
+        // already showing (zoomed in); the zoomed-out (overview) case is
+        // handled by WavPlayerView recoloring `overview.image` in place
+        // directly — see its own `.onChange(of: overview.image)` below.
         .onChange(of: noiseFloor) { old, new in
             WavPlayerDebugLog.log("WavSpectrogram", "noiseFloor onChange fired: \(old) -> \(new)")
-            scheduleForceRenderDebounced()
+            scheduleDetailRenderDebounced(for: viewport)
         }
         .onChange(of: palette) { old, new in
             WavPlayerDebugLog.log("WavSpectrogram", "palette onChange fired: \(old) -> \(new)")
-            scheduleForceRenderDebounced()
+            scheduleDetailRenderDebounced(for: viewport)
         }
         .onChange(of: overview.image) { _, _ in
             // WavPlayerView just recolored the overview (noise-floor/palette
@@ -225,6 +405,18 @@ struct WavSpectrogramView: View {
         }
         .onChange(of: logFrequency) { _, new in
             WavPlayerDebugLog.log("WavSpectrogram", "logFrequency onChange fired: \(new)")
+            rebuildWarpedImage()
+        }
+        .onChange(of: silenceMap) { _, _ in
+            // Hide-silence toggled or its sensitivity changed: the sample
+            // DOMAIN itself changed (real <-> virtual, or a different
+            // compression), so every cached tile's coordinates are
+            // meaningless now — never let the cheap-recolor path resurrect
+            // one. WavPlayerView remaps `viewport` in the same update, and
+            // the debounced render below picks up the new domain.
+            cachedRawTile = nil
+            detailTile = nil
+            scheduleDetailRenderDebounced(for: viewport)
             rebuildWarpedImage()
         }
     }
@@ -252,106 +444,97 @@ struct WavSpectrogramView: View {
         }
     }
 
-    private func tileMatchesViewport(_ tile: WavSpectrogramEngine.DetailTile) -> Bool {
-        tile.startSample == viewport.startSample && tile.endSample == viewport.endSample
+    /// True when `tile` has pixel data for the ENTIRE `[start, end) x
+    /// [minHz, maxHz]` rectangle being asked for — not an exact-bounds
+    /// match. A detail tile's time bounds are now a MARGIN around whatever
+    /// viewport it was rendered for (see `scheduleDetailRender`), so a live
+    /// pan that's drifted within that margin should still crop straight
+    /// from the tile instead of falling back to the coarse overview — this
+    /// containment check is what makes that possible. The small epsilon on
+    /// the frequency check absorbs `colorize`'s bin quantization (its
+    /// returned `minFreqHz/maxFreqHz` are always AT LEAST as wide as
+    /// whatever was requested, never narrower, but not always bit-identical
+    /// to it).
+    private func tileCovers(_ tile: WavSpectrogramEngine.DetailTile, start: Int, end: Int, minHz: Double, maxHz: Double) -> Bool {
+        start >= tile.startSample && end <= tile.endSample
+            && minHz >= tile.minFreqHz - 1 && maxHz <= tile.maxFreqHz + 1
     }
 
     /// Whichever image is currently the right one to display, along with the
-    /// ACTUAL frequency bounds it covers (a detail tile's own
-    /// `minFreqHz/maxFreqHz` may be bin-quantized slightly differently from
-    /// the live `viewport`'s exact request; a crop's bounds are exactly
-    /// whatever Y-bounds were asked for).
+    /// ACTUAL frequency bounds it covers.
     ///
-    /// A pan/coast in progress (`isInteracting`) makes the COMMITTED
-    /// `viewport` stale for display purposes, on BOTH axes at once (time via
-    /// `liveSampleRange`, frequency via `liveFreqRangeFromPan`) — a detail
-    /// tile or a crop only ever has pixel data for the exact range it was
-    /// rendered for — showing one anyway (via a CSS-style `.offset()`
-    /// transform, or just leaving Y-bounds stale) means the displayed image
-    /// silently stops tracking the input the moment it diverges from what
-    /// was last committed. Recropping the whole-file overview at whatever
-    /// the live bounds currently are sidesteps that entirely: it has no
-    /// "edge" to fall off (except the file's own real start/end/0/Nyquist),
-    /// so it's always valid to show, at the cost of resolution during the
-    /// live interaction itself — expected/matches this view's own stated
-    /// design (coarse-but-immediate while live, sharp once settled).
+    /// Previously this always fell back to the whole-file overview crop
+    /// while `isInteracting` (mid-drag/coast), on the reasoning that a
+    /// detail tile only ever had pixel data for its own exact,
+    /// already-committed bounds — showing it during a live pan that had
+    /// since diverged meant either stale content or a distorted `.offset()`
+    /// transform. Detail tiles now carry a TIME MARGIN wider than the
+    /// viewport they were rendered for (see `scheduleDetailRender`), so
+    /// that's no longer true in general: as long as the live range is still
+    /// WITHIN the cached tile's own bounds (`tileCovers`), cropping straight
+    /// from it is exactly as valid as cropping from the overview, just
+    /// sharper — this is what keeps a long continuous drag looking sharp
+    /// instead of reverting to the coarse overview the instant a finger
+    /// moves. Once the live range outgrows the tile's margin, `tileCovers`
+    /// naturally fails and this falls back to the overview crop, same as
+    /// before — `maybePrefetchTile` exists precisely to keep a fresh,
+    /// re-centered tile arriving before that happens during a long drag.
     private func currentSourceImage() -> (image: UIImage, loHz: Double, hiHz: Double)? {
-        // A live pan in progress (drag on the spectrogram, both axes
-        // together) always recrops the overview live — a detail tile only
-        // ever has pixel data for its own fixed, already-committed bounds,
-        // so it can't track a live drag.
+        let start: Int, end: Int
+        let minHz: Double, maxHz: Double
         if isInteracting {
-            let (start, end) = liveSampleRange()
-            let (minHz, maxHz) = liveFreqRangeFromPan()
-            guard let cropped = croppedOverviewImage(start: start, end: end, minHz: minHz, maxHz: maxHz) else { return nil }
+            (start, end) = liveSampleRange()
+            (minHz, maxHz) = liveFreqRangeFromPan()
+        } else {
+            start = viewport.startSample; end = viewport.endSample
+            minHz = viewport.minFreqHz; maxHz = viewport.maxFreqHz
+        }
+        if let tile = detailTile, tileCovers(tile, start: start, end: end, minHz: minHz, maxHz: maxHz),
+           let cropped = crop(image: tile.image, imageStartSample: tile.startSample, imageEndSample: tile.endSample,
+                              imageMinHz: tile.minFreqHz, imageMaxHz: tile.maxFreqHz,
+                              cropStart: start, cropEnd: end, minHz: minHz, maxHz: maxHz) {
             return (cropped, minHz, maxHz)
         }
-        if let tile = detailTile, tileMatchesViewport(tile) {
-            return (tile.image, tile.minFreqHz, tile.maxFreqHz)
-        }
-        if let cropped = croppedOverviewImage(start: viewport.startSample, end: viewport.endSample,
-                                              minHz: viewport.minFreqHz, maxHz: viewport.maxFreqHz) {
-            return (cropped, viewport.minFreqHz, viewport.maxFreqHz)
+        if let cropped = crop(image: overview.image, imageStartSample: 0, imageEndSample: overview.totalSamples,
+                              imageMinHz: 0, imageMaxHz: overview.maxFreqHz,
+                              cropStart: start, cropEnd: end, minHz: minHz, maxHz: maxHz) {
+            return (cropped, minHz, maxHz)
         }
         return nil
     }
 
-    /// `viewport` shifted by the live (not-yet-committed) drag/coast offset.
-    /// `gestureOffsetX` is already a FRACTION of the view's width (not raw
-    /// points); since `viewport.sampleSpan` maps onto exactly that width on
-    /// screen, the sample-domain shift is `gestureOffsetX * sampleSpan` —
-    /// same relationship `WavViewportMath.resolvedViewport` uses to turn a
-    /// gesture offset into a new committed viewport, evaluated live here
-    /// instead of only at commit time.
+    /// The viewport implied by ALL live (not-yet-committed) gesture state —
+    /// pan offsets AND pinch scale/offset — via the same
+    /// `WavViewportMath.resolvedViewport` call `commitPan` makes, evaluated
+    /// live for display instead of only at commit time. Replaces the old
+    /// hand-rolled `liveSampleRange`/`liveFreqRangeFromPan` shift math,
+    /// which was exactly `resolvedViewport` at scale 1 (same "clamp both
+    /// edges together, never independently" behavior — see that function's
+    /// doc comment for the balloon-outward bug independent clamping causes);
+    /// going through the shared function is what lets the pinch's live
+    /// preview reuse the identical path with scales != 1.
     ///
-    /// Clamped to `[0, totalSamples]` WITHOUT changing the span: dragging
-    /// past the start (or end) of the file shifts BOTH edges back into
-    /// bounds together, same "if start < 0 { end -= start; start = 0 }"
-    /// pattern `WavPlayerView.recenter`/`viewportForTimeZoom` already use.
-    /// Clamping `start`/`end` independently (each just `min(max(_,0),
-    /// total)` on its own) silently SHRINKS the span the instant either
-    /// edge goes out of bounds — the cropped sample range narrows while
-    /// still being stretched across the full screen width, so whatever's
-    /// on screen balloons outward. That's the "dragging past the edge
-    /// makes it expand" bug: the fix isn't "clamp the numbers", it's "clamp
-    /// the numbers together."
-    private func liveSampleRange() -> (start: Int, end: Int) {
-        let shift = Double(gestureOffsetX) * Double(viewport.sampleSpan)
-        var start = Double(viewport.startSample) - shift
-        var end = Double(viewport.endSample) - shift
-        let total = Double(overview.totalSamples)
-        if start < 0 { end -= start; start = 0 }
-        if end > total { start -= (end - total); end = total }
-        start = max(0, start)
-        end = min(total, end)
-        return (Int(start.rounded()), Int(end.rounded()))
+    /// Pan sign conventions (unchanged, now enforced by `resolvedViewport`):
+    /// `gestureOffsetX`/`gestureOffsetY` are fractions of the view's
+    /// width/height; content follows the finger on both axes — drag right
+    /// reveals earlier time, drag down reveals higher frequency (top =
+    /// high frequency throughout this view).
+    private func liveViewport() -> WavViewport {
+        WavViewportMath.resolvedViewport(
+            committed: viewport,
+            timeScale: pinchScaleX, timeOffset: Double(gestureOffsetX) + pinchOffsetX,
+            freqScale: pinchScaleY, freqOffset: Double(gestureOffsetY) + pinchOffsetY,
+            totalSamples: overview.totalSamples, nyquistHz: sampleRate / 2)
     }
 
-    /// `viewport`'s frequency window shifted by the live (not-yet-committed)
-    /// vertical drag offset — the frequency-axis analog of `liveSampleRange`
-    /// above, same "clamp both edges together" reasoning (shrinking the span
-    /// independently at an edge is the same balloon-outward bug on this axis
-    /// too). `gestureOffsetY` is a fraction of the view's HEIGHT; since
-    /// `viewport.freqSpan` maps onto exactly that height on screen, the
-    /// Hz-domain shift is `gestureOffsetY * freqSpan` — mirrors how
-    /// `gestureOffsetX * sampleSpan` gives the time-domain shift.
-    /// Sign convention: dragging DOWN (positive translation.height, see
-    /// `panGesture`) shifts the window UP in frequency — "content follows
-    /// finger" the same way horizontal pan does (drag right reveals earlier
-    /// time content sliding in from the left; drag down reveals higher-
-    /// frequency content sliding in from the top, since top=high-frequency
-    /// throughout this view).
+    private func liveSampleRange() -> (start: Int, end: Int) {
+        let live = liveViewport()
+        return (live.startSample, live.endSample)
+    }
+
     private func liveFreqRangeFromPan() -> (min: Double, max: Double) {
-        let range = viewport.freqSpan
-        let shift = Double(gestureOffsetY) * range
-        var newMin = viewport.minFreqHz + shift
-        var newMax = viewport.maxFreqHz + shift
-        let nyquist = sampleRate / 2
-        if newMin < 0 { newMax -= newMin; newMin = 0 }
-        if newMax > nyquist { newMin -= (newMax - nyquist); newMax = nyquist }
-        newMin = max(0, newMin)
-        newMax = min(nyquist, newMax)
-        return (newMin, newMax)
+        let live = liveViewport()
+        return (live.minFreqHz, live.maxFreqHz)
     }
 
     /// True whenever the source image is changing every frame (a live pan/
@@ -389,24 +572,32 @@ struct WavSpectrogramView: View {
         warpedDisplayImage = LogFrequencyWarp.warp(source.image, loHz: source.loHz, hiHz: source.hiHz)
     }
 
-    /// Cheap, always-available fallback: crops the whole-file overview image
-    /// to `[start, end)` (in samples) and `[minHz, maxHz]` — coarser than a
-    /// detail tile once zoomed in, but instant and never blank. Takes
-    /// explicit bounds rather than always reading `viewport` directly so
-    /// `currentSourceImage` can crop at LIVE (not-yet-committed) positions
-    /// during a pan or a frequency-trim drag, not just the last committed
-    /// one — see its doc comment.
-    private func croppedOverviewImage(start: Int, end: Int, minHz: Double, maxHz: Double) -> UIImage? {
-        guard let cg = overview.image.cgImage, overview.totalSamples > 0 else { return nil }
+    /// Crops `image` — which is understood to span `[imageStartSample,
+    /// imageEndSample)` samples and `[imageMinHz, imageMaxHz]` Hz across its
+    /// full width/height — down to the `[cropStart, cropEnd) x [minHz,
+    /// maxHz]` sub-rectangle. General enough to crop EITHER the whole-file
+    /// overview (`imageStartSample: 0, imageEndSample: overview.totalSamples,
+    /// imageMinHz: 0, imageMaxHz: overview.maxFreqHz`) or a detail tile
+    /// (using ITS OWN, possibly time-margined, bounds) with the same code —
+    /// both are just "an image covering some known rectangle", and cropping
+    /// only needs the requested sub-rectangle to be a subset of it
+    /// (`tileCovers` is what checks that for a tile; the overview's bounds
+    /// are the whole file, so any viewport is always a subset).
+    private func crop(image: UIImage, imageStartSample: Int, imageEndSample: Int,
+                      imageMinHz: Double, imageMaxHz: Double,
+                      cropStart: Int, cropEnd: Int, minHz: Double, maxHz: Double) -> UIImage? {
+        guard let cg = image.cgImage else { return nil }
+        let sampleSpan = imageEndSample - imageStartSample
+        guard sampleSpan > 0 else { return nil }
         let width = cg.width, height = cg.height
-        let leftFrac = Double(start) / Double(overview.totalSamples)
-        let rightFrac = Double(end) / Double(overview.totalSamples)
+        let leftFrac = Double(cropStart - imageStartSample) / Double(sampleSpan)
+        let rightFrac = Double(cropEnd - imageStartSample) / Double(sampleSpan)
         let x0 = max(0, min(width - 1, Int((leftFrac * Double(width)).rounded())))
         let x1 = max(x0 + 1, min(width, Int((rightFrac * Double(width)).rounded())))
 
-        let nyquist = overview.maxFreqHz
-        let topFrac = 1 - maxHz / max(nyquist, 1)
-        let bottomFrac = 1 - minHz / max(nyquist, 1)
+        let hzSpan = max(imageMaxHz - imageMinHz, 1)
+        let topFrac = 1 - (maxHz - imageMinHz) / hzSpan
+        let bottomFrac = 1 - (minHz - imageMinHz) / hzSpan
         let y0 = max(0, min(height - 1, Int((topFrac * Double(height)).rounded())))
         let y1 = max(y0 + 1, min(height, Int((bottomFrac * Double(height)).rounded())))
 
@@ -417,25 +608,54 @@ struct WavSpectrogramView: View {
 
     // MARK: Viewport commit + detail-tile rendering
 
-    private static let forceRenderDebounceSeconds = 0.12
-
-    private func scheduleForceRenderDebounced() {
-        forceRenderTask?.cancel()
-        forceRenderTask = Task {
-            try? await Task.sleep(nanoseconds: UInt64(Self.forceRenderDebounceSeconds * 1_000_000_000))
-            guard !Task.isCancelled else { return }
-            await MainActor.run { scheduleDetailRender(for: viewport, forceRender: true) }
-        }
-    }
-
     private static let viewportRenderDebounceSeconds = 0.15
 
     private func scheduleDetailRenderDebounced(for target: WavViewport) {
-        viewportRenderTask?.cancel()
-        viewportRenderTask = Task {
+        renderDebounceTask?.cancel()
+        renderDebounceTask = Task {
             try? await Task.sleep(nanoseconds: UInt64(Self.viewportRenderDebounceSeconds * 1_000_000_000))
             guard !Task.isCancelled else { return }
             await MainActor.run { scheduleDetailRender(for: target) }
+        }
+    }
+
+    /// Minimum spacing between renders while playback is scrolling the view.
+    /// Unlike the debounce (which fires `interval` after motion STOPS, i.e.
+    /// never during a continuous scroll), this fires periodically DURING the
+    /// scroll: a leading render immediately if enough time has passed, else
+    /// a single trailing one. Each render carries the usual time margin, so
+    /// the playhead scrolls SHARPLY through the resident tile between fires,
+    /// only briefly touching the coarse overview when it outruns the margin
+    /// just before the next fire lands. ~0.3s keeps the tile fresh without
+    /// spawning renders faster than they complete (~150-400ms each).
+    private static let playbackRenderThrottleSeconds = 0.3
+    @State private var lastPlaybackRenderTime: Date?
+    @State private var playbackRenderTask: Task<Void, Never>?
+    /// Set by `commitPan` (a settled gesture) so the next `viewport`
+    /// `.onChange` renders the sharp tile immediately instead of debouncing
+    /// — see that `.onChange` for why this is safe now that the ticker
+    /// wheels are gone.
+    @State private var renderImmediatelyOnCommit = false
+
+    private func scheduleDetailRenderThrottled() {
+        let now = Date()
+        if let last = lastPlaybackRenderTime, now.timeIntervalSince(last) < Self.playbackRenderThrottleSeconds {
+            // Too soon — schedule a single trailing render for the position
+            // the scroll has reached by then (reads the current `viewport`,
+            // not a captured stale one).
+            playbackRenderTask?.cancel()
+            let delay = Self.playbackRenderThrottleSeconds - now.timeIntervalSince(last)
+            playbackRenderTask = Task {
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    lastPlaybackRenderTime = Date()
+                    scheduleDetailRender(for: viewport)
+                }
+            }
+        } else {
+            lastPlaybackRenderTime = now
+            scheduleDetailRender(for: viewport)
         }
     }
 
@@ -450,56 +670,98 @@ struct WavSpectrogramView: View {
 
     @MainActor
     private func commitPan() {
+        // Pinch scale/offset fold in here too (identity when no pinch is
+        // active) — a pinch that began mid-drag commits the frozen pan
+        // offset and the pinch's own scale+offset as ONE resolvedViewport
+        // application, same math the live preview (`liveViewport`) shows.
+        // Captured BEFORE the reset below so the log reflects the actual
+        // inputs, not the zeroed-out state.
+        let inScaleX = pinchScaleX, inScaleY = pinchScaleY
+        let inOffX = Double(gestureOffsetX) + pinchOffsetX
+        let inOffY = Double(gestureOffsetY) + pinchOffsetY
         let resolved = WavViewportMath.resolvedViewport(
             committed: viewport,
-            timeScale: 1, timeOffset: Double(gestureOffsetX),
-            freqScale: 1, freqOffset: Double(gestureOffsetY),
+            timeScale: pinchScaleX, timeOffset: Double(gestureOffsetX) + pinchOffsetX,
+            freqScale: pinchScaleY, freqOffset: Double(gestureOffsetY) + pinchOffsetY,
             totalSamples: overview.totalSamples, nyquistHz: sampleRate / 2)
         gestureOffsetX = 0; gestureBaseOffsetX = 0
         gestureOffsetY = 0; gestureBaseOffsetY = 0
+        pinchScaleX = 1; pinchScaleY = 1
+        pinchOffsetX = 0; pinchOffsetY = 0
         isInteracting = false
         dragTranslationXAtLastCommit = lastDragTranslationX
         dragTranslationYAtLastCommit = lastDragTranslationY
-        WavPlayerDebugLog.log("WavSpectrogram", "commitPan: \(viewport.startSample)-\(viewport.endSample)/\(Int(viewport.minFreqHz))-\(Int(viewport.maxFreqHz))Hz -> \(resolved.startSample)-\(resolved.endSample)/\(Int(resolved.minFreqHz))-\(Int(resolved.maxFreqHz))Hz")
+        WavPlayerDebugLog.log("WavSpectrogram", "commitPan: inputs[scaleX=\(String(format: "%.3f", inScaleX)) offX=\(String(format: "%.3f", inOffX)) scaleY=\(String(format: "%.3f", inScaleY)) offY=\(String(format: "%.3f", inOffY))] \(viewport.startSample)-\(viewport.endSample)/\(Int(viewport.minFreqHz))-\(Int(viewport.maxFreqHz))Hz -> \(resolved.startSample)-\(resolved.endSample)/\(Int(resolved.minFreqHz))-\(Int(resolved.maxFreqHz))Hz (span \(viewport.sampleSpan)->\(resolved.sampleSpan))")
+        // Only flag an immediate render when the commit actually MOVES the
+        // viewport — otherwise `.onChange` won't fire and the flag would
+        // leak onto the next (possibly non-settle) viewport change.
+        if resolved != viewport { renderImmediatelyOnCommit = true }
         viewport = resolved   // triggers .onChange -> scheduleDetailRender
     }
 
     /// Single place responsible for detail-tile fetching, reacting to ANY
     /// viewport change regardless of source (pan commit, zoom/frequency
-    /// slider, minimap recenter) — kept separate from `commitPan` so those
-    /// other callers don't need to know anything about rendering.
+    /// slider, minimap recenter), a noise-floor/palette change, AND a
+    /// background prefetch (`isPrefetch: true` — see `maybePrefetchTile`) —
+    /// kept separate from `commitPan` so those other callers don't need to
+    /// know anything about rendering.
     ///
-    /// `forceRender` (fired by a noise-floor/palette change — see the
-    /// `.onChange` handlers above) ONLY matters when a detail tile is
-    /// already showing: it takes the cheap `cachedRawTile` recolor branch
-    /// below. It deliberately does NOT bypass `needsDetailTile`'s zoom
-    /// check the way an earlier version of this function did — that
-    /// version forced a FULL render (a fresh `WavPCMReader.readSamples` +
-    /// FFT over the whole committed viewport) on every tick even when
-    /// zoomed out to the whole file, which meant reading the entire
-    /// recording into memory on every noise-floor tick. That's now handled
-    /// for free by `recolorOverviewIfPossible` recoloring the cached
-    /// whole-file grid instead — nothing here needs to re-derive a detail
-    /// tile just to reflect a floor/palette change when there isn't one to
-    /// begin with.
-    private func scheduleDetailRender(for target: WavViewport, forceRender: Bool = false) {
+    /// Renders a TIME-MARGINED span around `target` (`tileMarginFactor`x
+    /// wider, centered on the same point) rather than `target`'s own exact
+    /// bounds — see the cheap-path check below, which is what actually pays
+    /// off that margin: any LATER call whose `target` still falls inside
+    /// the cached raw tile's bounds (a small pan, a frequency-only change, a
+    /// noise-floor/palette tick) recolors directly instead of re-reading
+    /// PCM and re-running the FFT. That one check now covers what used to
+    /// be three separate code paths:
+    ///  - a noise-floor/palette change (`target == viewport`, unchanged —
+    ///    trivially covered),
+    ///  - a frequency-only pan settling (the raw STFT grid always has every
+    ///    one of its bins regardless of what was last colorized — only
+    ///    `colorize` crops those away for display — so a pure frequency
+    ///    change never needs a new FFT either),
+    ///  - a horizontal pan/prefetch that's still within the cached tile's
+    ///    time margin.
+    private func scheduleDetailRender(for target: WavViewport, isPrefetch: Bool = false) {
         renderGeneration += 1
         let myGeneration = renderGeneration
 
-        // Cheap path: `forceRender` fired for a noise-floor/palette change,
-        // not a viewport change, and we already have the raw STFT grid for
-        // this exact time range — recolor it directly instead of re-reading
-        // PCM and re-running the FFT (the expensive part) just to change a
-        // parameter that step doesn't even feed into. Skipping this used to
-        // mean every tick of the noise-floor slider queued a full re-render,
-        // so the LAST tick's result sat behind a pile of redundant ones
-        // still computing — "takes an age to apply". Deliberately doesn't
-        // clear `detailTile` first: recoloring is fast enough that doing so
-        // would just flash the (differently-graded) overview crop for one
-        // frame before the recolored tile replaced it.
-        if forceRender, let raw = cachedRawTile,
-           raw.startSample == target.startSample, raw.endSample == target.endSample {
-            WavPlayerDebugLog.log("WavSpectrogram", "scheduleDetailRender: cheap recolor path, generation=\(myGeneration)")
+        // Containment alone isn't enough to take the cheap path: `colorize`
+        // never re-buckets columns, so recoloring a WIDE raw tile (say, one
+        // rendered as the margin around a much-less-zoomed-in previous
+        // viewport) produces an image whose column density still matches
+        // THAT wider span — cropping it down to a much narrower `target`
+        // just blows up the same coarse pixels rather than showing more
+        // detail. This is what was actually causing "the high-res tile
+        // never pops in": containment held (a zoom-in's narrower target
+        // sits well within the previous tile's bounds), so every zoom kept
+        // taking the cheap path and reusing stale, too-coarse column data
+        // forever, never triggering the fresh, denser FFT render the new
+        // zoom level actually needed. Requiring the raw tile's OWN density
+        // (its columns, scaled down to just `target`'s share of its span)
+        // to still clear the same threshold `needsDetailTile` uses is what
+        // makes a real zoom-in fall through to a full re-render instead.
+        let rawStillSharpEnough: Bool = {
+            guard let raw = cachedRawTile, target.startSample >= raw.startSample, target.endSample <= raw.endSample else { return false }
+            let rawSpan = max(raw.endSample - raw.startSample, 1)
+            let colsForTarget = Double(raw.nCols) * Double(target.sampleSpan) / Double(rawSpan)
+            // Cap the density requirement by how many native STFT frames the
+            // target span physically contains — at deep zoom that's fewer
+            // than `targetColumns` (e.g. ~980 frames for a ~80ms span), and
+            // a raw tile already holding every one of them is as sharp as a
+            // re-render could ever be. Without this cap the fixed
+            // `targetColumns * 0.8` threshold was unreachable at exactly
+            // those zoom levels, so EVERY frequency-only Range tick and
+            // noise-floor/palette change re-read PCM and re-ran the FFT
+            // (confirmed in the on-device log: eight consecutive full
+            // staged renders during one Range drag) instead of taking the
+            // recolor path this check exists to enable.
+            let nativeFrames = Double(max(1, 1 + (target.sampleSpan - STFTGrid.windowLen) / STFTGrid.hop))
+            return colsForTarget >= min(Double(Self.targetColumns) * 0.8, nativeFrames)
+        }()
+
+        if rawStillSharpEnough, let raw = cachedRawTile {
+            WavPlayerDebugLog.log("WavSpectrogram", "scheduleDetailRender: cheap recolor path (raw \(raw.startSample)-\(raw.endSample) covers \(target.startSample)-\(target.endSample), density OK), isPrefetch=\(isPrefetch), generation=\(myGeneration)")
             let sr = sampleRate, pal = palette, floor = noiseFloor
             let minHz = target.minFreqHz, maxHz = target.maxFreqHz
             Task.detached(priority: .userInitiated) {
@@ -508,6 +770,7 @@ struct WavSpectrogramView: View {
                                                   palette: pal, noiseFloor: floor)
                 }
                 await MainActor.run {
+                    if isPrefetch { self.prefetchInFlight = false }
                     guard myGeneration == self.renderGeneration else {
                         WavPlayerDebugLog.log("WavSpectrogram", "cheap recolor SUPERSEDED (generation \(myGeneration) != \(self.renderGeneration))")
                         return
@@ -519,46 +782,259 @@ struct WavSpectrogramView: View {
             return
         }
 
-        detailTile = nil   // fall back to the overview crop immediately
-        // No `forceRender ||` bypass here — a floor/palette change with no
-        // detail tile in play (the cheap branch above already handles the
-        // case where one exists) means we're showing the overview crop,
-        // which `recolorOverviewIfPossible` already keeps current. Nothing
-        // to gain from deriving a detail tile just because the floor moved.
         let needsDetail = Self.needsDetailTile(
             viewport: target, overviewTotalSamples: overview.totalSamples,
             overviewWidth: Int(overview.image.size.width),
             overviewHeight: Int(overview.image.size.height),
             nyquistHz: sampleRate / 2, targetColumns: Self.targetColumns)
-        WavPlayerDebugLog.log("WavSpectrogram", "scheduleDetailRender: span=\(target.sampleSpan) freqSpan=\(target.freqSpan) overviewSize=\(Int(overview.image.size.width))x\(Int(overview.image.size.height)) needsDetailTile=\(needsDetail), generation=\(myGeneration)")
-        guard needsDetail else { return }
+        WavPlayerDebugLog.log("WavSpectrogram", "scheduleDetailRender: span=\(target.sampleSpan) freqSpan=\(target.freqSpan) needsDetailTile=\(needsDetail), isPrefetch=\(isPrefetch), generation=\(myGeneration)")
+        guard needsDetail else {
+            if isPrefetch { prefetchInFlight = false }
+            return
+        }
+        if isPrefetch {
+            guard !prefetchInFlight else { return }
+            prefetchInFlight = true
+        }
+        // Deliberately NOT clearing `detailTile` here (an earlier version
+        // did, unconditionally, to fall back to the overview crop while a
+        // new render was in flight) — `currentSourceImage`'s own
+        // `tileCovers` check already falls back to the overview the moment
+        // the EXISTING tile stops covering whatever's on screen, so there's
+        // no window where a stale tile could wrongly be shown instead.
+        // Leaving it in place means the still-valid tile keeps displaying,
+        // uninterrupted, while a wider/re-centered replacement renders in
+        // the background — the whole point of the margin below.
 
-        let url = wavURL, sr = sampleRate, pal = palette, floor = noiseFloor, cols = Self.targetColumns
+        let span = max(target.sampleSpan, 1)
+        let center = (target.startSample + target.endSample) / 2
+
+        // Bias the EXTRA buffer (everything beyond the visible span itself)
+        // toward whichever direction the view has actually been moving —
+        // 75/25 rather than all-or-nothing: an earlier version put 100% of
+        // the margin ahead and ZERO behind, which meant the instant a pan
+        // REVERSED direction it exited the tile and fell back to the blurry
+        // overview — the "even the pulse I'm looking at re-renders" flicker
+        // during back-and-forth panning at deep zoom. The trailing quarter
+        // keeps a reversal sharp long enough for the re-centered render to
+        // land.
+        // Direction is inferred by comparing this render's center to the
+        // last rendered raw tile's own center: the side just come FROM was
+        // either already covered a moment ago or is trivially cheap to
+        // re-render if the user reverses, while the side headed TOWARD is
+        // what actually determines whether a continued pan in the same
+        // direction keeps hitting the cheap-recolor path instead of falling
+        // back to the overview. A steady pan previously got the same 1x
+        // margin behind as ahead — wasted, since "behind" is the ground
+        // already scrolled past. No prior tile (the very first render) means
+        // no known direction, so the split stays even, same as before.
+        var bias: Double = 0
+        if let raw = cachedRawTile {
+            let oldCenter = (raw.startSample + raw.endSample) / 2
+            if center > oldCenter { bias = 1 } else if center < oldCenter { bias = -1 }
+        }
+
+        let proportionalExtra = max(0, min(overview.totalSamples, Int(Double(span) * Self.tileMarginFactor)) - span)
+        let absoluteFloorExtra = min(max(0, overview.totalSamples - span), Int(Self.minBufferSeconds * sampleRate) * 2)
+        // Cap the margin so the full tile never exceeds `maxTileColumns` at
+        // this zoom's EFFECTIVE column density — see that constant's doc
+        // comment for the unbounded-growth pathology this prevents. The
+        // effective density is the requested one (`targetColumns` per
+        // viewport span) OR the native hop density, whichever is LOWER:
+        // `streamPooledGridFromFile` clamps its width to the span's native
+        // frame count, so at deep zoom (where the whole viewport holds
+        // fewer than `targetColumns` native frames) the same column budget
+        // buys far more margin than the requested-density formula alone
+        // suggests — ~0.5s of real audio at `maxTileColumns = 6144`, hop
+        // 32. Using the requested density unconditionally (as this
+        // originally did) shrank the deep-zoom buffer to ~4 viewport spans
+        // (tens of ms), which a pan blew through almost immediately —
+        // constant fallback to the blurry overview crop, "flickers on
+        // every touch".
+        let requestedColsPerSample = Double(Self.targetColumns) / Double(span)
+        let nativeColsPerSample = 1.0 / Double(STFTGrid.hop)
+        let colsPerSample = min(requestedColsPerSample, nativeColsPerSample)
+        let maxTileSpanForColumnCap = Int(Double(Self.maxTileColumns) / colsPerSample)
+        let maxExtraForColumnCap = max(0, maxTileSpanForColumnCap - span)
+        let totalExtra = min(max(proportionalExtra, absoluteFloorExtra), maxExtraForColumnCap)
+        let rightExtra = Int((Double(totalExtra) * (1 + 0.5 * bias) / 2).rounded())
+        let leftExtra = totalExtra - rightExtra
+        let halfSpan = span / 2
+        var finalStart = center - halfSpan - leftExtra
+        var finalEnd = center + (span - halfSpan) + rightExtra
+        finalStart = max(0, finalStart)
+        finalEnd = min(overview.totalSamples, finalEnd)
+
+        WavPlayerDebugLog.log("WavSpectrogram", "scheduleDetailRender: staging buffer toward \(finalStart)-\(finalEnd) (target \(target.startSample)-\(target.endSample)), isPrefetch=\(isPrefetch), generation=\(myGeneration)")
+
+        // Stage the render in `chunkSeconds` steps instead of one big
+        // multi-second render: the VISIBLE FRAME (`target`'s own bounds)
+        // renders FIRST — the fastest possible render, since it carries no
+        // margin at all yet — and becomes the displayed tile the instant it
+        // lands, rather than gating on the full margin finishing before
+        // anything sharper than the overview shows. See `renderChunkedStep`
+        // for how each subsequent step grows it further.
+        renderChunkedStep(myGeneration: myGeneration, isPrefetch: isPrefetch, target: target,
+                          currentStart: target.startSample, currentEnd: target.endSample,
+                          finalStart: finalStart, finalEnd: finalEnd)
+    }
+
+    /// One step of the staged buffer build-out `scheduleDetailRender` kicks
+    /// off: renders exactly `[currentStart, currentEnd)` and displays it
+    /// immediately, then — if that's not yet the full desired
+    /// `[finalStart, finalEnd)` margin — grows by one more `chunkSeconds`
+    /// toward WHICHEVER SIDE HAS MORE REMAINING distance to cover (so a
+    /// steady one-directional pan gets its next second, then the one after
+    /// that, before any budget goes toward the side just come from) and
+    /// schedules itself again. Each step is a complete, independently
+    /// useful render, not a fragment needing to be stitched with others —
+    /// nothing waits for the whole chain before showing something sharper
+    /// than the previous step.
+    ///
+    /// Deliberately re-renders `[currentStart, currentEnd)` from scratch
+    /// every step (not just the newly-added slice) — the simpler
+    /// alternative to splicing raw grids together column-wise, at the cost
+    /// of redundant work on the already-covered inner portion. Each step
+    /// stays individually fast (a bounded, disk-native read — see
+    /// `STFTGrid.streamPooledGridFromFile`'s own doc comment), so this
+    /// trades some total compute for a much simpler, easier-to-reason-about
+    /// chain, which is what actually needs to be robust against being
+    /// abandoned mid-flight.
+    ///
+    /// The generation is checked twice per step — once between the raw
+    /// render and the colorize (so a superseded step skips the pixel pass
+    /// entirely, see the inline comment there), and once when applying the
+    /// result — if a newer `scheduleDetailRender` call (a fresh pan, zoom,
+    /// or prefetch) has bumped `renderGeneration` in the meantime, this
+    /// step is discarded and NO FURTHER STEPS are scheduled: a rapid direction
+    /// change or a fresh zoom cleanly abandons whatever was left of the old
+    /// buffer plan instead of continuing to spend background work on a
+    /// buffer nobody wants anymore.
+    private func renderChunkedStep(myGeneration: Int, isPrefetch: Bool, target: WavViewport,
+                                   currentStart: Int, currentEnd: Int, finalStart: Int, finalEnd: Int) {
+        let span = max(target.sampleSpan, 1)
+        let stepSpan = max(currentEnd - currentStart, 1)
+        // Proportionally more columns than `targetColumns` so this step's
+        // density matches what a non-margined render of `target`'s own span
+        // would have had — same reasoning the original one-shot margin used.
+        // The `maxTileColumns` clamp is belt-and-suspenders: the margin
+        // `scheduleDetailRender` computes is already capped to this many
+        // columns' worth of span, so only rounding could ever push past it.
+        let cols = min(Self.maxTileColumns,
+                       max(Self.targetColumns, Int((Double(Self.targetColumns) * Double(stepSpan) / Double(span)).rounded())))
+
+        let url = wavURL, sr = sampleRate, pal = palette, floor = noiseFloor
+        let minHz = target.minFreqHz, maxHz = target.maxFreqHz
+        let map = silenceMap
+        bufferDebugStatus.renderingStart = currentStart
+        bufferDebugStatus.renderingEnd = currentEnd
+        bufferDebugStatus.isRendering = true
+
         Task.detached(priority: .userInitiated) {
-            guard let raw = WavPlayerDebugLog.time("WavSpectrogram", "renderRawTile span \(target.startSample)-\(target.endSample)", {
-                WavSpectrogramEngine.renderRawTile(
-                    wavURL: url, startSample: target.startSample, endSample: target.endSample, targetColumns: cols)
+            guard let raw = WavPlayerDebugLog.time("WavSpectrogram", "renderRawTile step \(currentStart)-\(currentEnd) (target \(target.startSample)-\(target.endSample), final \(finalStart)-\(finalEnd), stitched=\(map != nil))", {
+                map.map { WavSpectrogramEngine.renderRawTileStitched(wavURL: url, virtualStart: currentStart, virtualEnd: currentEnd, map: $0, targetColumns: cols) }
+                    ?? WavSpectrogramEngine.renderRawTile(wavURL: url, startSample: currentStart, endSample: currentEnd, targetColumns: cols)
             })
             else {
-                WavPlayerDebugLog.log("WavSpectrogram", "renderRawTile FAILED for span \(target.startSample)-\(target.endSample)")
+                WavPlayerDebugLog.log("WavSpectrogram", "renderRawTile step FAILED for span \(currentStart)-\(currentEnd)")
+                await MainActor.run {
+                    self.bufferDebugStatus.isRendering = false
+                    if isPrefetch { self.prefetchInFlight = false }
+                }
                 return
             }
-            WavPlayerDebugLog.log("WavSpectrogram", "renderRawTile OK: nCols=\(raw.nCols) for span \(target.startSample)-\(target.endSample)")
-            let tile = WavPlayerDebugLog.time("WavSpectrogram", "detail tile colorize") {
-                WavSpectrogramEngine.colorize(raw, sampleRate: sr, minFreqHz: target.minFreqHz,
-                                              maxFreqHz: target.maxFreqHz, palette: pal, noiseFloor: floor)
+            // Check the generation BETWEEN the two halves of the render, not
+            // just at the end: previously a superseded step still ran its
+            // full colorize before discovering it was stale, and during a
+            // rapid pan several of those stale colorizes ran concurrently —
+            // measured on-device inflating a ~180ms colorize to 4-5s through
+            // sheer CPU contention, which then starved the CURRENT render
+            // too. Bailing here costs one main-actor hop and saves the
+            // entire pixel pass.
+            let stillCurrent = await MainActor.run { () -> Bool in
+                guard myGeneration == self.renderGeneration else {
+                    WavPlayerDebugLog.log("WavSpectrogram", "detail tile step SUPERSEDED before colorize (generation \(myGeneration) != \(self.renderGeneration)) — chain abandoned")
+                    self.bufferDebugStatus.isRendering = false
+                    if isPrefetch { self.prefetchInFlight = false }
+                    return false
+                }
+                return true
+            }
+            guard stillCurrent else { return }
+            let tile = WavPlayerDebugLog.time("WavSpectrogram", "detail tile colorize (step)") {
+                WavSpectrogramEngine.colorize(raw, sampleRate: sr, minFreqHz: minHz, maxFreqHz: maxHz, palette: pal, noiseFloor: floor)
             }
             await MainActor.run {
+                self.bufferDebugStatus.isRendering = false
                 guard myGeneration == self.renderGeneration else {
-                    WavPlayerDebugLog.log("WavSpectrogram", "detail tile SUPERSEDED (generation \(myGeneration) != \(self.renderGeneration))")
+                    WavPlayerDebugLog.log("WavSpectrogram", "detail tile step SUPERSEDED (generation \(myGeneration) != \(self.renderGeneration)) — chain abandoned")
+                    if isPrefetch { self.prefetchInFlight = false }
                     return
                 }
-                WavPlayerDebugLog.log("WavSpectrogram", "detail tile APPLIED, image=\(tile?.image.size ?? .zero)")
+                WavPlayerDebugLog.log("WavSpectrogram", "detail tile step APPLIED \(currentStart)-\(currentEnd), image=\(tile?.image.size ?? .zero)")
                 self.cachedRawTile = raw
                 self.detailTile = tile
+                self.bufferDebugStatus.readyStart = currentStart
+                self.bufferDebugStatus.readyEnd = currentEnd
+                self.bufferDebugStatus.hasReady = true
                 self.rebuildWarpedImage()
+
+                let chunkSamples = max(1, Int(Self.chunkSeconds * sr))
+                let remainingRight = max(0, finalEnd - currentEnd)
+                let remainingLeft = max(0, currentStart - finalStart)
+                guard remainingRight > 0 || remainingLeft > 0 else {
+                    if isPrefetch { self.prefetchInFlight = false }
+                    return
+                }
+                var nextStart = currentStart
+                var nextEnd = currentEnd
+                if remainingRight >= remainingLeft {
+                    nextEnd = currentEnd + min(chunkSamples, remainingRight)
+                } else {
+                    nextStart = currentStart - min(chunkSamples, remainingLeft)
+                }
+                self.renderChunkedStep(myGeneration: myGeneration, isPrefetch: isPrefetch, target: target,
+                                       currentStart: nextStart, currentEnd: nextEnd,
+                                       finalStart: finalStart, finalEnd: finalEnd)
             }
         }
+    }
+
+    /// Checks whether the live pan position (mid-drag or mid-momentum-coast)
+    /// has drifted close enough to the edge of the CACHED tile's own time
+    /// margin that a fresh, re-centered tile should start rendering now, in
+    /// the background — rather than waiting for the drag to settle
+    /// (`scheduleDetailRenderDebounced`, which only fires after
+    /// `liveDebounceSeconds` of no movement) or for the margin to run out
+    /// entirely, which would otherwise mean falling back to the coarse
+    /// overview crop for the remainder of a long, continuous drag. Called
+    /// on every gesture/momentum frame, so throttled
+    /// (`lastPrefetchTime`/`minPrefetchInterval`) and deduplicated
+    /// (`prefetchInFlight`).
+    private func maybePrefetchTile() {
+        guard let tile = detailTile, !prefetchInFlight else { return }
+        let (start, end) = liveSampleRange()
+        let marginLeft = start - tile.startSample
+        let marginRight = tile.endSample - end
+        let remaining = min(marginLeft, marginRight)
+        let span = max(end - start, 1)
+        let threshold = Int(Double(span) * Self.prefetchMarginFraction)
+        guard remaining < threshold else { return }
+        if let last = lastPrefetchTime, Date().timeIntervalSince(last) < Self.minPrefetchInterval { return }
+        lastPrefetchTime = Date()
+
+        let center = (start + end) / 2
+        let halfSpan = span / 2
+        var newStart = center - halfSpan
+        var newEnd = newStart + span
+        if newStart < 0 { newEnd -= newStart; newStart = 0 }
+        if newEnd > overview.totalSamples { newStart -= (newEnd - overview.totalSamples); newEnd = overview.totalSamples }
+        newStart = max(0, newStart)
+        newEnd = min(overview.totalSamples, newEnd)
+        let target = WavViewport(startSample: newStart, endSample: newEnd,
+                                 minFreqHz: viewport.minFreqHz, maxFreqHz: viewport.maxFreqHz)
+        WavPlayerDebugLog.log("WavSpectrogram", "maybePrefetchTile: margin remaining=\(remaining) < threshold=\(threshold) (tile \(tile.startSample)-\(tile.endSample), live \(start)-\(end)) -> prefetching \(newStart)-\(newEnd)")
+        scheduleDetailRender(for: target, isPrefetch: true)
     }
 
     /// Whether the overview's own (pooled, whole-file) column/row density would
@@ -586,6 +1062,38 @@ struct WavSpectrogramView: View {
         // frequency window it renders — used here as the frequency axis's
         // equivalent of `targetColumns`, same 0.8-of-target threshold.
         return overviewRowsForSpan < Double(STFTGrid.binCount) * 0.8
+    }
+
+    // MARK: Two-axis pinch (see TwoAxisPinchView)
+
+    private func pinchBegan() {
+        WavPlayerDebugLog.log("WavSpectrogram", "PINCH began: viewport \(viewport.startSample)-\(viewport.endSample)/\(Int(viewport.minFreqHz))-\(Int(viewport.maxFreqHz))Hz | isDragging=\(isDragging) postPinchPending=\(postPinchRebasePending) gestureOffX=\(String(format: "%.3f", gestureOffsetX))")
+        momentum.cancel()
+        commitTask?.cancel()
+        isPinching = true
+        isInteracting = true
+    }
+
+    private func pinchChanged(_ value: TwoAxisPinchValue) {
+        pinchScaleX = value.scaleX
+        pinchScaleY = value.scaleY
+        WavPlayerDebugLog.log("WavSpectrogram", "PINCH changed: scaleX=\(String(format: "%.3f", value.scaleX)) scaleY=\(String(format: "%.3f", value.scaleY)) centroidDX=\(String(format: "%.3f", value.centroidDXFrac)) anchorX=\(String(format: "%.3f", value.anchorXFrac))")
+        // Anchor-preserving offset: solving `screen(v) = 0.5 + (v-0.5)*scale
+        // + offset` for "the content point that started under the pinch
+        // centroid stays under it" gives `offset = (anchor - 0.5)*(1 -
+        // scale)` (anchor as a screen fraction); the centroid-drag term on
+        // top lets a two-finger drag pan while it zooms, same content-
+        // follows-finger convention as the one-finger pan.
+        pinchOffsetX = (value.anchorXFrac - 0.5) * (1 - value.scaleX) + value.centroidDXFrac
+        pinchOffsetY = (value.anchorYFrac - 0.5) * (1 - value.scaleY) + value.centroidDYFrac
+        isInteracting = true
+    }
+
+    private func pinchEnded() {
+        WavPlayerDebugLog.log("WavSpectrogram", "PINCH ended: finalScaleX=\(String(format: "%.3f", pinchScaleX)) scaleY=\(String(format: "%.3f", pinchScaleY)) offX=\(String(format: "%.3f", pinchOffsetX)) offY=\(String(format: "%.3f", pinchOffsetY)) | isDragging=\(isDragging) -> committing + setting postPinchPending")
+        isPinching = false
+        postPinchRebasePending = true   // see the property's doc comment
+        commitPan()   // folds the pinch terms in and resets them — see commitPan
     }
 
     // MARK: Gestures
@@ -622,6 +1130,58 @@ struct WavSpectrogramView: View {
         DragGesture(minimumDistance: 0)
             .onChanged { value in
                 guard geoSize.width > 0 else { return }
+                // While a two-finger pinch is active, the pinch owns ALL
+                // movement — this drag is tracking one of the same two
+                // fingers, so panning from it here would double-count the
+                // centroid drag the pinch already applies. Rebase the
+                // commit baselines continuously so that when the pinch ends
+                // with one finger still down, the drag resumes from HERE
+                // with no jump (same reasoning as the new-touch rebase
+                // below). `isDragging = true` keeps the new-touch block
+                // from re-running (and zeroing those baselines) on the
+                // first post-pinch frame.
+                if isPinching {
+                    WavPlayerDebugLog.log("WavSpectrogram", "pan.onChanged: SWALLOW (isPinching) transl=(\(Int(value.translation.width)),\(Int(value.translation.height)))")
+                    isDragging = true
+                    lockedAxis = nil
+                    lastDragTranslationX = value.translation.width
+                    lastDragTranslationY = value.translation.height
+                    dragTranslationXAtLastCommit = value.translation.width
+                    dragTranslationYAtLastCommit = value.translation.height
+                    lastVelocitySampleTime = nil
+                    dragVelocityX = 0
+                    return
+                }
+                // After a pinch ends, a finger usually lingers (the two
+                // fingers rarely lift on the exact same frame), and the pan
+                // gesture keeps tracking it. Every event from that lingering
+                // finger must be swallowed — not just the first — or it
+                // pans and, worse, seeds a momentum coast that drifts the
+                // view after the zoom (the "snap back when zooming" bug).
+                // `isDragging` is still true here for a continuation of the
+                // pinch's own finger (set during the pinch); a genuinely NEW
+                // touch after a full lift has `isDragging == false` (cleared
+                // by the previous touch's onEnded), so it clears the flag and
+                // falls through to normal handling rather than being eaten.
+                if postPinchRebasePending {
+                    if isDragging {
+                        WavPlayerDebugLog.log("WavSpectrogram", "pan.onChanged: SWALLOW (postPinch, isDragging=true — lingering finger) transl=(\(Int(value.translation.width)),\(Int(value.translation.height)))")
+                        lockedAxis = nil
+                        lastDragTranslationX = value.translation.width
+                        lastDragTranslationY = value.translation.height
+                        dragTranslationXAtLastCommit = value.translation.width
+                        dragTranslationYAtLastCommit = value.translation.height
+                        lastVelocitySampleTime = nil
+                        dragVelocityX = 0
+                        return
+                    }
+                    // *** SUSPECTED SNAPBACK PATH *** if this fires right
+                    // after a pinch with a large transl, the lingering finger
+                    // was misclassified as a fresh touch and will pan by the
+                    // whole pinch translation.
+                    WavPlayerDebugLog.log("WavSpectrogram", "pan.onChanged: postPinch CLEAR (isDragging=false -> treated as FRESH touch) transl=(\(Int(value.translation.width)),\(Int(value.translation.height))) <<< watch for snapback")
+                    postPinchRebasePending = false   // fresh touch — resume normally
+                }
                 // `value.translation` is cumulative from THIS touch's own
                 // touch-down and resets to ~0 whenever a new physical touch
                 // begins — but `dragTranslationXAtLastCommit` doesn't, unless
@@ -632,7 +1192,7 @@ struct WavSpectrogramView: View {
                 // "jumps back to where it was". Same fix SpectrogramView's
                 // own dragGesture already applies via its `isScrolling` guard.
                 if !isDragging {
-                    WavPlayerDebugLog.log("WavSpectrogram", "panGesture: new touch begins")
+                    WavPlayerDebugLog.log("WavSpectrogram", "pan.onChanged: NEW touch begins, transl=(\(Int(value.translation.width)),\(Int(value.translation.height))) — will commit + zero baselines")
                     isDragging = true
                     momentum.cancel()
                     commitTask?.cancel()
@@ -648,14 +1208,28 @@ struct WavSpectrogramView: View {
                     gestureBaseOffsetY = 0
                     lastVelocitySampleTime = nil
                     dragVelocityX = 0
+                    lockedAxis = nil
                 }
                 lastDragTranslationX = value.translation.width
                 lastDragTranslationY = value.translation.height
+                // Decide (once) which axis this touch belongs to, as soon as
+                // total movement is unambiguous — see `lockedAxis`'s doc
+                // comment. Below the threshold neither offset has moved far
+                // from 0 anyway, so leaving it undecided a little longer
+                // costs nothing.
+                if lockedAxis == nil {
+                    let absX = abs(value.translation.width), absY = abs(value.translation.height)
+                    if max(absX, absY) > Self.axisLockThreshold {
+                        lockedAxis = absX >= absY ? .horizontal : .vertical
+                    }
+                }
                 // Delta since the last commit (identity if none happened yet
                 // this touch) — see the state doc comment above.
-                let dxSinceCommit = value.translation.width - dragTranslationXAtLastCommit
-                gestureOffsetX = gestureBaseOffsetX + dxSinceCommit / geoSize.width
-                if geoSize.height > 0 {
+                if lockedAxis != .vertical {
+                    let dxSinceCommit = value.translation.width - dragTranslationXAtLastCommit
+                    gestureOffsetX = gestureBaseOffsetX + dxSinceCommit / geoSize.width
+                }
+                if lockedAxis != .horizontal, geoSize.height > 0 {
                     let dySinceCommit = value.translation.height - dragTranslationYAtLastCommit
                     gestureOffsetY = gestureBaseOffsetY + dySinceCommit / geoSize.height
                 }
@@ -685,8 +1259,28 @@ struct WavSpectrogramView: View {
                 lastVelocitySampleTime = now
                 lastVelocitySampleX = value.translation.width
                 scheduleGestureCommit(after: Self.liveDebounceSeconds)
+                maybePrefetchTile()
             }
             .onEnded { value in
+                // A drag ending while the pinch still owns the touch (e.g.
+                // SwiftUI cancels the drag when the second finger lands, or
+                // the drag's finger lifts first) must neither coast nor
+                // commit — the pinch's own .ended does the committing.
+                if isPinching {
+                    WavPlayerDebugLog.log("WavSpectrogram", "pan.onEnded: ignored (isPinching) transl=(\(Int(value.translation.width)),\(Int(value.translation.height)))")
+                    isDragging = false
+                    return
+                }
+                // The drag ending right after a fast pinch (both fingers up
+                // before any post-pinch drag event) — its translation and
+                // velocity are pinch-contaminated, so neither a coast nor a
+                // tap-to-seek should fire; the pinch already committed.
+                if postPinchRebasePending {
+                    WavPlayerDebugLog.log("WavSpectrogram", "pan.onEnded: ignored (postPinch) transl=(\(Int(value.translation.width)),\(Int(value.translation.height))) — clearing flag")
+                    postPinchRebasePending = false
+                    isDragging = false
+                    return
+                }
                 isDragging = false
                 lastDragTranslationX = value.translation.width
                 lastDragTranslationY = value.translation.height
@@ -717,13 +1311,28 @@ struct WavSpectrogramView: View {
                 // constant (a simple "how far would this speed carry it"
                 // model). Vertical (frequency) pan has no equivalent coast —
                 // it settles exactly where released.
-                let residual = Double(dragVelocityX) * Self.coastTimeConstant / Double(geoSize.width)
+                //
+                // Scaled DOWN with zoom depth: the residual is measured in
+                // screen-widths, and while "N screen-widths of coast" feels
+                // the same at every zoom in screen terms, at deep zoom each
+                // screen-width is a full re-render of new content — a brisk
+                // flick coasted 3+ screens through a buffer only a few
+                // screens wide, flying far past whatever was being examined
+                // (and flickering through overview fallbacks on the way).
+                // Linear taper from full coast when zoomed out to 20% at
+                // the maximum zoom (`zoomFraction`: 0 = whole file, 1 =
+                // minSampleSpan).
+                let zoomFrac = WavViewportMath.zoomFraction(
+                    forSampleSpan: viewport.sampleSpan, totalSamples: overview.totalSamples)
+                let coastScale = 1.0 - 0.8 * zoomFrac
+                let residual = Double(dragVelocityX) * Self.coastTimeConstant * coastScale / Double(geoSize.width)
                 WavPlayerDebugLog.log("WavSpectrogram", "panGesture: released, velocity=\(dragVelocityX)pt/s residual=\(residual)")
                 let base = gestureOffsetX
                 momentum.start(residual: residual) { delta in
                     isInteracting = true
                     gestureOffsetX = base + delta
                     scheduleGestureCommit(after: Self.liveDebounceSeconds)
+                    maybePrefetchTile()
                 } completion: {
                     WavPlayerDebugLog.log("WavSpectrogram", "panGesture: momentum coast finished")
                     gestureBaseOffsetX = gestureOffsetX

@@ -74,10 +74,9 @@ enum WavViewportMath {
     /// scale/offset (per axis), returns the new viewport that gesture
     /// implies — clamped to `[0, totalSamples]` / `[0, nyquistHz]` and to the
     /// minimum spans above. This is what gets committed once a pan drag
-    /// settles (see WavSpectrogramView's debounce) — always called with
-    /// `freqScale: 1, freqOffset: 0` (a frequency-axis no-op passthrough)
-    /// since the frequency range is set directly by the player's Y-axis trim
-    /// slider, not panned.
+    /// settles (see WavSpectrogramView's debounce) and when a two-axis pinch
+    /// ends (TwoAxisPinchView supplies per-axis scales; a plain pan passes
+    /// scale 1 on both axes).
     static func resolvedViewport(committed: WavViewport,
                                  timeScale: Double, timeOffset: Double,
                                  freqScale: Double, freqOffset: Double,
@@ -113,12 +112,22 @@ enum WavViewportMath {
 
         // Frequency axis: top of screen (frac 0) = HIGH frequency, matching
         // PulseZoomView's top=high convention — so `topF` maps to maxFreqHz
-        // and `bottomF` maps to minFreqHz.
+        // and `bottomF` maps to minFreqHz. Clamped the SAME "shift both
+        // edges together" way the time axis just above does (and
+        // `viewportForFreqZoom` already does): clamping `newMin`/`newMax`
+        // INDEPENDENTLY — as this used to — silently SHRINKS the span the
+        // instant a vertical pan pushes either edge past 0 or Nyquist,
+        // which is exactly the "panning changes the Range value" bug: any
+        // drag with even a small vertical component (real touches are never
+        // perfectly horizontal) could clip one edge without the other,
+        // narrowing the frequency window it committed.
         let freqRange = committed.freqSpan
         var newMax = committed.maxFreqHz - topF * freqRange
         var newMin = committed.maxFreqHz - bottomF * freqRange
-        newMin = min(max(newMin, 0), nyquistHz)
-        newMax = min(max(newMax, 0), nyquistHz)
+        if newMin < 0 { newMax -= newMin; newMin = 0 }
+        if newMax > nyquistHz { newMin -= (newMax - nyquistHz); newMax = nyquistHz }
+        newMin = max(0, newMin)
+        newMax = min(nyquistHz, newMax)
         if newMax - newMin < minFreqSpanHz {
             let mid = (newMin + newMax) / 2
             newMin = max(0, mid - minFreqSpanHz / 2)

@@ -126,9 +126,12 @@ nonisolated enum WavSpectrogramEngine {
         let croppedBins = maxBin - minBin + 1
 
         var maxDB: Float = -.greatestFiniteMagnitude
-        for bin in minBin...maxBin {
-            let base = bin * nCols
-            for col in 0..<nCols where raw.grid[base + col] > maxDB { maxDB = raw.grid[base + col] }
+        raw.grid.withUnsafeBufferPointer { g in
+            for bin in minBin...maxBin {
+                var rowMax: Float = 0
+                vDSP_maxv(g.baseAddress! + bin * nCols, 1, &rowMax, vDSP_Length(nCols))
+                if rowMax > maxDB { maxDB = rowMax }
+            }
         }
         // Clamp the normalization ceiling up to `absoluteSignalFloorDB` when
         // the tile's own peak doesn't clear it — a call-free view's loudest
@@ -143,29 +146,59 @@ nonisolated enum WavSpectrogramEngine {
 
         let floor = min(max(noiseFloor, 0), 0.99)
         let invSpan = 1 / max(0.01, 1 - floor)
-        func gate(_ t: Float) -> Float { max(0, (t - floor) * invSpan) }
 
+        // Normalize + gate + LUT-index in one fused linear map per bin row via
+        // vDSP, then a trivial UInt32 gather per pixel — replaces the previous
+        // scalar per-pixel loop, which was the single largest measured cost in
+        // the whole tile pipeline (a 6k-column tile took 1.6-5.2s here on
+        // device; the FFT+file-IO half of the same render was ~150ms). The
+        // fused map is exactly equivalent to the old two-step
+        // clamp(norm)->gate composition: both are linear with clips only at
+        // the shared [0, 1] endpoints, so composing the slopes/intercepts and
+        // clipping once at the end lands every value in the same LUT slot
+        // (including the same Int truncation, via vDSP_vfixu8).
         let lut = DisplayColormap.makeLUT(palette: palette)
         let lutSteps = lut.count
-        var pixels = [UInt8](repeating: 255, count: nCols * croppedBins * 4)
-        pixels.withUnsafeMutableBufferPointer { px in
-            lut.withUnsafeBufferPointer { lutBuf in
-                for bin in minBin...maxBin {
-                    let yFlipped = maxBin - bin   // row 0 = top = high frequency within the crop
-                    let srcBase = bin * nCols
-                    for col in 0..<nCols {
-                        let norm = min(max((raw.grid[srcBase + col] - minDB) * invRange, 0), 1)
-                        let lutIdx = min(lutSteps - 1, max(0, Int(gate(norm) * Float(lutSteps - 1))))
-                        let (r, g, b) = lutBuf[lutIdx]
-                        let idx = (yFlipped * nCols + col) * 4
-                        px[idx] = r; px[idx + 1] = g; px[idx + 2] = b; px[idx + 3] = 255
+        var lut32 = [UInt32](repeating: 0, count: lutSteps)
+        for i in 0..<lutSteps {
+            let (r, g, b) = lut[i]
+            // Little-endian byte order r,g,b,a — identical memory layout to the
+            // old per-byte writes, so the CGImage bitmapInfo below is unchanged.
+            lut32[i] = UInt32(r) | (UInt32(g) << 8) | (UInt32(b) << 16) | 0xFF00_0000
+        }
+
+        var slope = invRange * invSpan * Float(lutSteps - 1)
+        var intercept = ((-minDB) * invRange - floor) * invSpan * Float(lutSteps - 1)
+        var lo: Float = 0
+        var hi = Float(lutSteps - 1)
+
+        var pixels = [UInt32](repeating: 0, count: nCols * croppedBins)
+        var tmpRow = [Float](repeating: 0, count: nCols)
+        var idxRow = [UInt8](repeating: 0, count: nCols)
+        raw.grid.withUnsafeBufferPointer { g in
+            pixels.withUnsafeMutableBufferPointer { px in
+                lut32.withUnsafeBufferPointer { lutBuf in
+                    for bin in minBin...maxBin {
+                        let src = g.baseAddress! + bin * nCols
+                        vDSP_vsmsa(src, 1, &slope, &intercept, &tmpRow, 1, vDSP_Length(nCols))
+                        vDSP_vclip(tmpRow, 1, &lo, &hi, &tmpRow, 1, vDSP_Length(nCols))
+                        tmpRow.withUnsafeBufferPointer { t in
+                            idxRow.withUnsafeMutableBufferPointer { ix in
+                                vDSP_vfixu8(t.baseAddress!, 1, ix.baseAddress!, 1, vDSP_Length(nCols))
+                            }
+                        }
+                        let dstBase = (maxBin - bin) * nCols   // row 0 = top = high frequency
+                        for col in 0..<nCols {
+                            px[dstBase + col] = lutBuf[Int(idxRow[col])]
+                        }
                     }
                 }
             }
         }
 
+        let pixelData = pixels.withUnsafeBufferPointer { Data(buffer: $0) }
         guard
-            let provider = CGDataProvider(data: Data(pixels) as CFData),
+            let provider = CGDataProvider(data: pixelData as CFData),
             let cgImage = CGImage(
                 width: nCols, height: croppedBins,
                 bitsPerComponent: 8, bitsPerPixel: 32,
@@ -197,6 +230,89 @@ nonisolated enum WavSpectrogramEngine {
         else { return nil }
         return colorize(raw, sampleRate: sampleRate, minFreqHz: minFreqHz, maxFreqHz: maxFreqHz,
                         palette: palette, noiseFloor: noiseFloor)
+    }
+
+    // MARK: Hide-silence (compressed virtual timeline — see SilenceMap)
+
+    /// Renders a detail tile for a span of the COMPRESSED virtual timeline
+    /// by rendering each underlying real slice separately and concatenating
+    /// their columns. The returned RawTile's `startSample`/`endSample` are
+    /// VIRTUAL — every consumer (tile coverage checks, cropping, the
+    /// viewport itself) operates purely in virtual samples while hide-
+    /// silence is on, so the tile is a drop-in for `renderRawTile`'s output.
+    static func renderRawTileStitched(wavURL: URL, virtualStart: Int, virtualEnd: Int,
+                                      map: SilenceMap, targetColumns: Int) -> RawTile? {
+        guard virtualEnd > virtualStart, targetColumns > 0 else { return nil }
+        let slices = map.realSlices(virtualStart: virtualStart, virtualEnd: virtualEnd)
+        guard !slices.isEmpty else { return nil }
+        let bins = STFTGrid.binCount
+        let totalVirtual = virtualEnd - virtualStart
+        var scratch = STFTGrid.Scratch()
+        var parts: [(grid: [Float], nCols: Int)] = []
+        for slice in slices {
+            let cols = max(1, Int((Double(targetColumns) * Double(slice.virtual.count)
+                                   / Double(totalVirtual)).rounded()))
+            if slice.real.count >= STFTGrid.windowLen,
+               let (grid, nCols) = STFTGrid.streamPooledGridFromFile(
+                    wavURL: wavURL, startSample: slice.real.lowerBound, endSample: slice.real.upperBound,
+                    targetColumns: cols, scratch: &scratch) {
+                parts.append((grid, nCols))
+            } else {
+                // A slice clipped at the viewport edge can be shorter than
+                // one STFT window — stand in with silence-floor columns so
+                // the stitched grid keeps its time geometry instead of
+                // failing the whole tile.
+                parts.append(([Float](repeating: -160, count: cols * bins), cols))
+            }
+        }
+        let totalCols = parts.reduce(0) { $0 + $1.nCols }
+        guard totalCols > 0 else { return nil }
+        var grid = [Float](repeating: -160, count: bins * totalCols)
+        var colOffset = 0
+        grid.withUnsafeMutableBufferPointer { dst in
+            for part in parts {
+                part.grid.withUnsafeBufferPointer { src in
+                    for bin in 0..<bins {
+                        (dst.baseAddress! + bin * totalCols + colOffset)
+                            .update(from: src.baseAddress! + bin * part.nCols, count: part.nCols)
+                    }
+                }
+                colOffset += part.nCols
+            }
+        }
+        return RawTile(grid: grid, nCols: totalCols, startSample: virtualStart, endSample: virtualEnd)
+    }
+
+    /// The compressed-timeline overview raw grid: the whole-file overview's
+    /// columns with the silent gaps' columns dropped — pure column selection
+    /// from the already-computed grid, no file IO or FFT. Bounds are
+    /// virtual: `[0, map.virtualTotal)`.
+    static func compressedOverviewRawTile(from raw: RawTile, map: SilenceMap) -> RawTile {
+        let bins = STFTGrid.binCount
+        let nCols = raw.nCols
+        let total = max(map.realTotal, 1)
+        // Per-segment source column ranges (clamped, at least one column each).
+        var colRanges: [Range<Int>] = []
+        for seg in map.segments {
+            let c0 = min(max(Int(Double(seg.realStart) * Double(nCols) / Double(total)), 0), nCols - 1)
+            let c1 = min(max(Int((Double(seg.realEnd) * Double(nCols) / Double(total)).rounded()), c0 + 1), nCols)
+            colRanges.append(c0..<c1)
+        }
+        let outCols = colRanges.reduce(0) { $0 + $1.count }
+        var grid = [Float](repeating: -160, count: bins * outCols)
+        grid.withUnsafeMutableBufferPointer { dst in
+            raw.grid.withUnsafeBufferPointer { src in
+                var colOffset = 0
+                for range in colRanges {
+                    for bin in 0..<bins {
+                        (dst.baseAddress! + bin * outCols + colOffset)
+                            .update(from: src.baseAddress! + bin * nCols + range.lowerBound, count: range.count)
+                    }
+                    colOffset += range.count
+                }
+            }
+        }
+        return RawTile(grid: grid, nCols: outCols, startSample: 0, endSample: map.virtualTotal)
     }
 
     // MARK: Overview (whole file, same pipeline as a detail tile)

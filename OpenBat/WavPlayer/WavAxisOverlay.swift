@@ -23,6 +23,16 @@ struct WavAxisOverlay: View {
     private static let tickFracs: [Double] = [0, 0.25, 0.5, 0.75, 1.0]
     private static let timeLabelHalfWidth: CGFloat = 22
     private static let freqLabelHalfHeight: CGFloat = 8
+    /// Vertical space the time axis (tick mark + label) occupies at the
+    /// bottom edge. The lowest frequency tick is clamped to sit just ABOVE
+    /// this — i.e. level with the TOP of the time ticks — rather than down
+    /// among the time labels where the two used to collide.
+    private static let timeAxisReservedHeight: CGFloat = 22
+    /// Left edge the leftmost time label is held to, so it starts just RIGHT
+    /// of the frequency tick column (drawn at x≈26) instead of colliding
+    /// with the bottom frequency label in the corner. Only affects the 0%
+    /// tick — every other time tick sits far enough right already.
+    private static let timeAxisLeftInset: CGFloat = 36
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -41,8 +51,10 @@ struct WavAxisOverlay: View {
         let seconds = Double(sample) / max(sampleRate, 1)
         // Clamp the LABEL's x so it can't spill past the frame at the 0%/100%
         // ticks — the tick mark itself moves with it, a minor cosmetic
-        // trade-off only at the very edges.
-        let x = min(max(CGFloat(frac) * geoSize.width, Self.timeLabelHalfWidth),
+        // trade-off only at the very edges. The left clamp starts past the
+        // frequency tick column (`timeAxisLeftInset`) so the corner labels
+        // don't overlap.
+        let x = min(max(CGFloat(frac) * geoSize.width, Self.timeAxisLeftInset + Self.timeLabelHalfWidth),
                     geoSize.width - Self.timeLabelHalfWidth)
         return VStack(spacing: 2) {
             Rectangle().fill(Color.white.opacity(0.6)).frame(width: 1, height: 5)
@@ -63,8 +75,11 @@ struct WavAxisOverlay: View {
         // LogFrequencyWarp.warp itself remaps rows by, so labels line up with
         // the (possibly warped) rendered image.
         let hz = LogFrequencyWarp.vFracToHz(frac, lo: viewport.minFreqHz, hi: viewport.maxFreqHz, log: logFrequency)
+        // Bottom clamp leaves room for the time axis so the lowest frequency
+        // tick lands level with the top of the time ticks, not among their
+        // labels — see `timeAxisReservedHeight`.
         let y = min(max(CGFloat(frac) * geoSize.height, Self.freqLabelHalfHeight),
-                    geoSize.height - Self.freqLabelHalfHeight)
+                    geoSize.height - Self.timeAxisReservedHeight)
         return HStack(spacing: 2) {
             Text(Self.formatFreq(hz))
                 .font(.system(size: 9, weight: .medium))
