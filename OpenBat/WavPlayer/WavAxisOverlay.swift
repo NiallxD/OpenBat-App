@@ -28,11 +28,13 @@ struct WavAxisOverlay: View {
     /// this — i.e. level with the TOP of the time ticks — rather than down
     /// among the time labels where the two used to collide.
     private static let timeAxisReservedHeight: CGFloat = 22
-    /// Left edge the leftmost time label is held to, so it starts just RIGHT
-    /// of the frequency tick column (drawn at x≈26) instead of colliding
-    /// with the bottom frequency label in the corner. Only affects the 0%
-    /// tick — every other time tick sits far enough right already.
-    private static let timeAxisLeftInset: CGFloat = 36
+    /// Small left inset the leftmost time label is held to so it doesn't
+    /// spill off the frame edge. Kept small now that the bottom frequency
+    /// tick is raised clear of the time axis (see `timeAxisReservedHeight`),
+    /// so the corner no longer needs a big horizontal gap — a large inset
+    /// left the 0% tick visibly cramped against the 25% tick instead of
+    /// near-evenly spaced with the rest.
+    private static let timeAxisLeftInset: CGFloat = 4
 
     var body: some View {
         ZStack(alignment: .topLeading) {

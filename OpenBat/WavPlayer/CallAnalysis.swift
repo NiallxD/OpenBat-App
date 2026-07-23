@@ -64,6 +64,22 @@ nonisolated enum CallAnalysis {
     static let defaultCFTailFraction: Double = 0.25
     private static let dynamicRangeDB: Float = 48
 
+    // Measurement thresholds, calibrated toward Wildlife Acoustics
+    // Kaleidoscope on real MYCA/MYYU/MYLU calls. All are dB BELOW the call's
+    // own peak; larger = includes fainter energy = wider/longer measurement.
+    // The earlier −12/−15 dB pair matched Kaleidoscope's peak/Fc well but
+    // clipped the faint high-frequency ONSET of the FM sweep, so start-freq,
+    // bandwidth and duration all read low (e.g. 52.5 vs 61 kHz, 8.6 vs 15.4
+    // kHz, 3.8 vs 5.2 ms). Widening captures the onset Kaleidoscope does.
+    private static let durationThresholdDB: Float = 18
+    private static let freqExtentThresholdDB: Float = 27
+    /// The measurement floor is CAPPED here rather than taken straight from
+    /// the display noise-floor slider: a display floor of 0.5 (≈−24 dB) would
+    /// otherwise cap analysis above the fainter call energy Kaleidoscope
+    /// measures (~−33 dB). Analysis precision shouldn't depend on a display
+    /// preference, so it uses its own (lower) floor.
+    private static let maxAnalysisFloor: Float = 0.2
+
     /// Reads `[startSample, endSample)` (clamped to `maxAnalysisSpanSeconds`)
     /// from `wavURL` and analyzes it.
     static func analyze(wavURL: URL, sampleRate: Double,
@@ -152,10 +168,12 @@ nonisolated enum CallAnalysis {
             return nil
         }
 
-        let floor = min(max(noiseFloor, 0), 0.99)
+        // Capped well below the display slider so faint call energy stays
+        // measurable regardless of the visual noise gate (see maxAnalysisFloor).
+        let floor = min(max(noiseFloor, 0), Self.maxAnalysisFloor)
 
-        // Duration from the -12dB energy envelope around the loudest column.
-        let durThreshold = max(floor, peakColVal - 12.0 / dynamicRangeDB)
+        // Duration from the energy envelope around the loudest column.
+        let durThreshold = max(floor, peakColVal - Self.durationThresholdDB / dynamicRangeDB)
         var durStart = peakCol, durEnd = peakCol
         while durStart - 1 >= 0,       columnPeak(durStart - 1) >= durThreshold { durStart -= 1 }
         while durEnd + 1 < nFrames,    columnPeak(durEnd + 1)   >= durThreshold { durEnd += 1 }
@@ -166,7 +184,7 @@ nonisolated enum CallAnalysis {
         // Frequency extent (bandwidth) from a -15dB threshold, scanned only
         // over the active duration columns — keeps quiet inter-call frames
         // from widening the band.
-        let freqThreshold = max(floor, peakValue - 15.0 / dynamicRangeDB)
+        let freqThreshold = max(floor, peakValue - Self.freqExtentThresholdDB / dynamicRangeDB)
         var minBin = bins - 1, maxBin = minBinAllowed
         for bin in minBinAllowed..<bins {
             let base = bin * nFrames

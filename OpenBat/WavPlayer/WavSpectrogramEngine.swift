@@ -92,7 +92,20 @@ nonisolated enum WavSpectrogramEngine {
             wavURL: wavURL, startSample: startSample, endSample: endSample,
             targetColumns: targetColumns, scratch: &scratch)
         else { return nil }
-        return RawTile(grid: rawDBGrid, nCols: nCols, startSample: startSample, endSample: endSample)
+        // The pooled columns span the native STFT FRAME grid, whose last
+        // frame STARTS `windowLen`-short of `endSample` — so the image
+        // actually covers `[startSample, startSample + nFrames*hop)`, not the
+        // full requested `[startSample, endSample)`. Reporting the real
+        // covered span is what makes the display crop map column->sample
+        // exactly (`(S-startSample)/coveredSpan * nCols == frame index`),
+        // which in turn makes it agree with CallAnalysis's own frame->sample
+        // maths — without it a detail tile drew features ~windowLen/2 off
+        // near its centre (the "annotations / high-res tile don't line up"
+        // bug), an error that scales with span so it was invisible on the
+        // whole-file overview but visible on a zoomed-in tile.
+        let nFrames = 1 + (endSample - startSample - STFTGrid.windowLen) / STFTGrid.hop
+        let coveredEnd = startSample + nFrames * STFTGrid.hop
+        return RawTile(grid: rawDBGrid, nCols: nCols, startSample: startSample, endSample: coveredEnd)
     }
 
     // MARK: Colorize (shared by both tiers)

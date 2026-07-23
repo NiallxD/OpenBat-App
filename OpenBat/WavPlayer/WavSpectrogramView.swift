@@ -495,7 +495,14 @@ struct WavSpectrogramView: View {
                               cropStart: start, cropEnd: end, minHz: minHz, maxHz: maxHz) {
             return (cropped, minHz, maxHz)
         }
-        if let cropped = crop(image: overview.image, imageStartSample: 0, imageEndSample: overview.totalSamples,
+        // Map against the overview's ACTUAL frame-covered span
+        // (`rawTile.endSample`), not the file length — same reason detail
+        // tiles do (see `renderRawTile`). The error is tiny on a whole-file
+        // overview but keeping it consistent means the overview crop and a
+        // detail tile place a given sample at the same x, so swapping between
+        // them doesn't nudge the image.
+        if let cropped = crop(image: overview.image, imageStartSample: overview.rawTile.startSample,
+                              imageEndSample: overview.rawTile.endSample,
                               imageMinHz: 0, imageMaxHz: overview.maxFreqHz,
                               cropStart: start, cropEnd: end, minHz: minHz, maxHz: maxHz) {
             return (cropped, minHz, maxHz)

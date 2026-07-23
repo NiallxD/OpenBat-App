@@ -122,10 +122,12 @@ struct WavPlayerView: View {
     /// `display.spectrogramLogFrequency`/`display.pulseLogFrequency`) — same
     /// "each spectrogram view owns its own toggle" pattern those follow.
     @AppStorage("display.wavPlayerLogFrequency") private var logFrequency = false
-    /// Hide-silence toggle + its detection sensitivity (0...1, mapped to a
-    /// dB threshold by `silenceThresholdDB`) — toolbar button and tuning
-    /// popover respectively.
-    @AppStorage("display.wavPlayerHideSilence") private var hideSilence = false
+    /// Hide-silence toggle — deliberately session-only (`@State`, not
+    /// persisted): silence is NEVER removed by default, so every recording
+    /// opens on the full timeline and the user turns it on per-view when they
+    /// want it. Its detection sensitivity/padding still persist as tuning
+    /// preferences below.
+    @State private var hideSilence = false
     @AppStorage("display.wavPlayerSilenceSensitivity") private var silenceSensitivity = 0.5
     /// Seconds of audio kept each side of a pulse before cutting silence —
     /// SilenceMap.compute's `padSeconds`. Small by default so silence is cut
