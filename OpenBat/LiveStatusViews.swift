@@ -117,6 +117,54 @@ struct SessionStatusPillView: View {
     }
 }
 
+// MARK: - Session timer pill
+
+/// Elapsed-time readout for the active listening/session, shown as a small pill
+/// in the spectrogram panel header. Renders nothing until `start` is set (i.e.
+/// detection is actually running). A standalone View with its own
+/// `TimelineView(.periodic)` tick so the once-a-second clock update stays
+/// confined here and never invalidates `ContentView.body` — same scoping
+/// rationale as the other status pills.
+struct SessionTimerPill: View {
+    /// When the current listening/session began; nil when not detecting.
+    let start: Date?
+
+    var body: some View {
+        if let start {
+            // Anchor the schedule to `start` so ticks land on whole elapsed
+            // seconds, and read `context.date` (not Date()) so the label is
+            // consistent with the schedule that woke it.
+            TimelineView(.periodic(from: start, by: 1)) { context in
+                let elapsed = max(0, context.date.timeIntervalSince(start))
+                HStack(spacing: 4) {
+                    Image(systemName: "timer")
+                        .font(.system(size: 10, weight: .semibold))
+                    Text(Self.timeString(elapsed))
+                        .font(.system(size: 11, weight: .semibold).monospacedDigit())
+                }
+                // Hold intrinsic width so the elapsed digits can't be squeezed
+                // to nothing (leaving just the icon) when the header row is
+                // tight on a narrow iPhone — the whole point of the pill is the
+                // number, so it wins the layout over compressing away.
+                .fixedSize()
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 8)
+                .frame(height: StatusPillMetrics.height)
+                .background(.ultraThinMaterial, in: Capsule())
+                .accessibilityLabel("Session running for \(Self.timeString(elapsed))")
+            }
+        }
+    }
+
+    /// h:mm:ss once past an hour, m:ss otherwise.
+    static func timeString(_ seconds: TimeInterval) -> String {
+        let total = Int(seconds)
+        let h = total / 3600, m = (total % 3600) / 60, s = total % 60
+        return h > 0 ? String(format: "%d:%02d:%02d", h, m, s)
+                     : String(format: "%d:%02d", m, s)
+    }
+}
+
 // MARK: - Speaker feedback warning pill
 
 /// Warns when heterodyne/RTE is playing out the built-in speaker: the mic picks

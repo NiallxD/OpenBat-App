@@ -35,6 +35,13 @@ struct WavPlayerView: View {
     @Bindable var store: ClassificationStore
     let rteSettings: RTESettings
 
+    /// iPhone landscape reports a compact vertical size class — the signal we
+    /// use to switch from the stacked portrait layout to the two-column
+    /// landscape one (spectrogram/minimap/controls left, stats/metadata right).
+    /// iPad (regular in both classes) and portrait phones keep the single
+    /// column.
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
+
     @State private var engine = PlaybackEngine()
     /// Holds both the whole-file raw dB grid AND its colorized `image`
     /// together (see WavSpectrogramEngine's doc comment for why one
@@ -52,7 +59,7 @@ struct WavPlayerView: View {
     /// no error set at all, so the UI sat on "Rendering spectrogram…" forever.
     @State private var overviewError: String?
     @State private var viewport = WavViewport(startSample: 0, endSample: 1, minFreqHz: 0, maxFreqHz: 1)
-    @State private var selection: ClosedRange<Int>?
+    @State private var selection: AnalysisBox?
     /// Default (false) is pan/zoom via drag + the ticker pills below; true
     /// switches the spectrogram's drag gesture to drawing a selection box
     /// instead.
@@ -199,42 +206,12 @@ struct WavPlayerView: View {
     }
 
     var body: some View {
-        VStack(spacing: 8) {
-            // Above the spectrogram, not below: the stat grid is now a
-            // fixed-height card regardless of whether a selection has been
-            // measured yet (see CallAnalysisPanel's doc comment) — moving it
-            // here is what that fix is actually for, since this VStack's
-            // only OTHER flexible-height element is the spectrogram itself
-            // (`frame(maxHeight: .infinity)` below); a fixed-size sibling
-            // above it can't push it around the way a resizing one below
-            // it (in the old order) could.
-            CallAnalysisPanel(result: analysisResult)
-                .padding(.horizontal, 8)
-                .padding(.top, 8)
-
-            spectrogramSection
-                .frame(maxHeight: .infinity)
-
-            if let displayOverview {
-                WavMinimapView(overview: displayOverview, viewport: viewport, engine: engine,
-                              silenceMap: silenceMap, onRecenter: recenter,
-                              bufferDebugStatus: bufferDebugStatus)
-                    .frame(height: 32)
-                    .padding(.horizontal, 8)
-                MinimapTimeLabel(engine: engine)
-                    .padding(.horizontal, 8)
-
-                WavFileInfoCard(wavURL: store.wavURL(for: recording))
-                    .padding(.horizontal, 8)
+        Group {
+            if verticalSizeClass == .compact {
+                landscapeLayout
+            } else {
+                portraitLayout
             }
-
-            // No `frame(maxHeight: .infinity)` here (unlike before) — that
-            // stretched this to fill whatever space was left and centered
-            // the button row within it, reading as floating in the middle
-            // of the screen rather than sitting with the transport controls
-            // where they belong: snug under the minimap/time readout.
-            PlaybackControlsView(engine: engine, onShare: shareRecording)
-                .padding(.bottom, 8)
         }
         .sheet(item: $shareItem) { item in
             ShareSheet(items: [item.url])
@@ -315,7 +292,10 @@ struct WavPlayerView: View {
         }
         .onChange(of: selection) { _, newValue in
             guard let newValue else { analysisResult = nil; annotations = []; return }
-            requestAnalysis(startSample: newValue.lowerBound, endSample: newValue.upperBound)
+            requestAnalysis(startSample: newValue.samples.lowerBound,
+                            endSample: newValue.samples.upperBound,
+                            minFreqHz: newValue.freqHz.lowerBound,
+                            maxFreqHz: newValue.freqHz.upperBound)
         }
         .onChange(of: viewport) { _, _ in scheduleBandSyncDebounced() }
         .onChange(of: noiseFloor) { _, _ in scheduleRecolorDebounced() }
@@ -331,6 +311,107 @@ struct WavPlayerView: View {
         .onChange(of: rteSettings.holdMs)      { _, _ in rteSettings.apply(to: engine.timeExpansion) }
         .onChange(of: rteSettings.gain)        { _, _ in rteSettings.apply(to: engine.timeExpansion) }
         .onChange(of: rteSettings.gateBlockMs) { _, _ in rteSettings.apply(to: engine.timeExpansion) }
+    }
+
+    // MARK: Layouts
+
+    /// Portrait / iPad: everything stacked in one column, the original layout.
+    @ViewBuilder private var portraitLayout: some View {
+        VStack(spacing: 8) {
+            // Above the spectrogram, not below: the stat grid is now a
+            // fixed-height card regardless of whether a selection has been
+            // measured yet (see CallAnalysisPanel's doc comment) — moving it
+            // here is what that fix is actually for, since this VStack's
+            // only OTHER flexible-height element is the spectrogram itself
+            // (`frame(maxHeight: .infinity)` below); a fixed-size sibling
+            // above it can't push it around the way a resizing one below
+            // it (in the old order) could.
+            statsPanel
+                .padding(.horizontal, 8)
+                .padding(.top, 8)
+
+            spectrogramSection
+                .frame(maxHeight: .infinity)
+
+            minimapBlock
+            fileInfoBlock
+
+            // No `frame(maxHeight: .infinity)` here (unlike before) — that
+            // stretched this to fill whatever space was left and centered
+            // the button row within it, reading as floating in the middle
+            // of the screen rather than sitting with the transport controls
+            // where they belong: snug under the minimap/time readout.
+            PlaybackControlsView(engine: engine, onShare: shareRecording)
+                .padding(.bottom, 8)
+        }
+    }
+
+    /// iPhone landscape: two columns. Left is the interactive half —
+    /// spectrogram (taking all the vertical room), then the minimap scrub bar,
+    /// time readout, and transport controls stacked beneath it. Right is the
+    /// reference half — the call-analysis stat grid and the file metadata card,
+    /// scrollable since together they can exceed the short landscape height.
+    @ViewBuilder private var landscapeLayout: some View {
+        GeometryReader { geo in
+            HStack(alignment: .top, spacing: 8) {
+                // Left column. Every card carries the SAME 8pt horizontal inset
+                // (the minimap/file cards already used it) so the spectrogram,
+                // minimap and transport row all line up on both edges instead
+                // of the spectrogram bleeding wider than the rest. The
+                // spectrogram takes all the vertical slack, pushing the (now
+                // compact) transport row snug to the bottom.
+                VStack(spacing: 6) {
+                    spectrogramSection
+                        .frame(maxHeight: .infinity)
+                        .padding(.horizontal, 8)
+                    minimapBlock
+                    PlaybackControlsView(engine: engine, onShare: shareRecording, compact: true)
+                }
+                .frame(maxWidth: .infinity)
+
+                // Right column. `statsPanel` gets the same 8pt inset the file
+                // card already has so both align; `.top` on the HStack + no top
+                // padding here means the stats card's top edge lines up with the
+                // spectrogram card's.
+                ScrollView {
+                    VStack(spacing: 8) {
+                        statsPanel
+                            .padding(.horizontal, 8)
+                        fileInfoBlock
+                    }
+                    .padding(.bottom, 8)
+                }
+                // A fixed-ish sidebar: enough for the stat grid to read, but
+                // capped so the spectrogram keeps the majority of the width.
+                .frame(width: min(max(geo.size.width * 0.34, 260), 360))
+            }
+            .padding(.top, 4)
+        }
+    }
+
+    private var statsPanel: some View {
+        CallAnalysisPanel(result: analysisResult)
+    }
+
+    /// Minimap scrub bar + elapsed/duration readout. Shared by both layouts;
+    /// renders nothing until the overview exists.
+    @ViewBuilder private var minimapBlock: some View {
+        if let displayOverview {
+            WavMinimapView(overview: displayOverview, viewport: viewport, engine: engine,
+                          silenceMap: silenceMap, onRecenter: recenter,
+                          bufferDebugStatus: bufferDebugStatus)
+                .frame(height: 32)
+                .padding(.horizontal, 8)
+            MinimapTimeLabel(engine: engine)
+                .padding(.horizontal, 8)
+        }
+    }
+
+    @ViewBuilder private var fileInfoBlock: some View {
+        if displayOverview != nil {
+            WavFileInfoCard(wavURL: store.wavURL(for: recording))
+                .padding(.horizontal, 8)
+        }
     }
 
     @ViewBuilder private var spectrogramSection: some View {
@@ -651,8 +732,14 @@ struct WavPlayerView: View {
                                minFreqHz: viewport.minFreqHz, maxFreqHz: viewport.maxFreqHz)
     }
 
-    private func requestAnalysis(startSample: Int, endSample: Int) {
+    private func requestAnalysis(startSample: Int, endSample: Int,
+                                 minFreqHz: Double, maxFreqHz: Double) {
         guard let overview else { analysisResult = nil; return }
+        // The box's low edge, floored so a drag to the very bottom can't drop
+        // the measurement into sub-ultrasonic rumble/DC; the high edge is the
+        // Kaleidoscope-style ceiling handed straight to CallAnalysis.
+        let boxMinHz = max(Self.minAnalysisFrequencyHz, minFreqHz)
+        let boxMaxHz = maxFreqHz
         analysisGeneration += 1
         let myGeneration = analysisGeneration
         let url = store.wavURL(for: recording)
@@ -671,8 +758,8 @@ struct WavPlayerView: View {
             let result = WavPlayerDebugLog.time("WavPlayer", "CallAnalysis.analyze") {
                 CallAnalysis.analyze(wavURL: url, sampleRate: sr,
                                      startSample: startSample, endSample: endSample,
-                                     minFrequencyHz: Self.minAnalysisFrequencyHz, noiseFloor: floor,
-                                     cfTailFraction: tail)
+                                     minFrequencyHz: boxMinHz, maxFrequencyHz: boxMaxHz,
+                                     noiseFloor: floor, cfTailFraction: tail)
             }
             await MainActor.run {
                 guard myGeneration == self.analysisGeneration else {

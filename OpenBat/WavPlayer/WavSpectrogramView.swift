@@ -57,7 +57,7 @@ struct WavSpectrogramView: View {
     /// WavPlayerView's closure maps back to real time).
     let silenceMap: SilenceMap?
     @Binding var viewport: WavViewport
-    @Binding var selection: ClosedRange<Int>?
+    @Binding var selection: AnalysisBox?
     /// Measured call landmarks (Hi f / Peak / Fc / Lo f) for the current
     /// selection, in this view's display-sample domain — drawn by
     /// `CallAnnotationOverlay`. Empty when nothing is selected/measured.
@@ -153,7 +153,7 @@ struct WavSpectrogramView: View {
     /// called separately and NOT debounced) keeps the view visually
     /// responsive while this settles.
     @State private var renderDebounceTask: Task<Void, Never>?
-    @State private var liveSelection: ClosedRange<Int>?
+    @State private var liveSelection: AnalysisBox?
     /// Log-frequency-remapped copy of whichever source image
     /// (`currentSourceImage()`) is currently displayed — cached, not
     /// recomputed per body evaluation (which happens on every drag frame via
@@ -305,9 +305,11 @@ struct WavSpectrogramView: View {
                 spectrogramImageLayer(geoSize: geo.size)
 
                 if isSelecting, let liveSelection {
-                    SelectionOverlay(range: liveSelection, viewport: viewport, geoSize: geo.size)
+                    SelectionOverlay(box: liveSelection, viewport: viewport,
+                                     logFrequency: logFrequency, geoSize: geo.size)
                 } else if let selection {
-                    SelectionOverlay(range: selection, viewport: viewport, geoSize: geo.size)
+                    SelectionOverlay(box: selection, viewport: viewport,
+                                     logFrequency: logFrequency, geoSize: geo.size)
                 }
 
                 WavAxisOverlay(viewport: viewport, sampleRate: sampleRate, geoSize: geo.size,
@@ -1356,13 +1358,23 @@ struct WavSpectrogramView: View {
     private func selectGesture(geoSize: CGSize) -> some Gesture {
         DragGesture(minimumDistance: 0)
             .onChanged { value in
-                guard geoSize.width > 0 else { return }
+                guard geoSize.width > 0, geoSize.height > 0 else { return }
                 let f0 = Double(value.startLocation.x / geoSize.width)
                 let f1 = Double(value.location.x / geoSize.width)
                 let s0 = committedSampleAt(frac: min(f0, f1))
                 let s1 = committedSampleAt(frac: max(f0, f1))
                 guard s1 > s0 else { return }
-                liveSelection = s0...s1
+                // Map the drag's vertical extent to a frequency band — the box
+                // top/bottom Kaleidoscope's Viewer Analysis measures within.
+                // Screen-Y is a v-fraction (0 = top/high); `vFracToHz` honours
+                // the current log/linear axis so the band matches what's drawn.
+                let vy0 = Double(min(value.startLocation.y, value.location.y) / geoSize.height)
+                let vy1 = Double(max(value.startLocation.y, value.location.y) / geoSize.height)
+                let hiHz = LogFrequencyWarp.vFracToHz(max(0, min(1, vy0)), lo: viewport.minFreqHz,
+                                                      hi: viewport.maxFreqHz, log: logFrequency)
+                let loHz = LogFrequencyWarp.vFracToHz(max(0, min(1, vy1)), lo: viewport.minFreqHz,
+                                                      hi: viewport.maxFreqHz, log: logFrequency)
+                liveSelection = AnalysisBox(samples: s0...s1, freqHz: min(loHz, hiHz)...max(loHz, hiHz))
             }
             .onEnded { value in
                 let isTap = abs(value.translation.width) < Self.tapMovementThreshold
@@ -1371,7 +1383,7 @@ struct WavSpectrogramView: View {
                     WavPlayerDebugLog.log("WavSpectrogram", "selectGesture: tap clears selection")
                     selection = nil
                 } else if let liveSelection {
-                    WavPlayerDebugLog.log("WavSpectrogram", "selectGesture: committed \(liveSelection.lowerBound)-\(liveSelection.upperBound)")
+                    WavPlayerDebugLog.log("WavSpectrogram", "selectGesture: committed \(liveSelection.samples.lowerBound)-\(liveSelection.samples.upperBound) / \(Int(liveSelection.freqHz.lowerBound))-\(Int(liveSelection.freqHz.upperBound))Hz")
                     selection = liveSelection
                 }
                 liveSelection = nil
@@ -1379,22 +1391,45 @@ struct WavSpectrogramView: View {
     }
 }
 
-/// Translucent rectangle showing a manual (or just-committed) selection range.
+/// Translucent rectangle showing a manual (or just-committed) analysis box —
+/// bounded in BOTH time and frequency, mirroring Kaleidoscope's Viewer Analysis
+/// selection. The frequency bounds restrict which bins CallAnalysis measures
+/// (see its `maxFrequencyHz`), so an out-of-call-band interferer can't corrupt
+/// the ridge.
 private struct SelectionOverlay: View {
-    let range: ClosedRange<Int>
+    let box: AnalysisBox
     let viewport: WavViewport
+    let logFrequency: Bool
     let geoSize: CGSize
 
     var body: some View {
-        let x0Frac = Double(range.lowerBound - viewport.startSample) / Double(max(viewport.sampleSpan, 1))
-        let x1Frac = Double(range.upperBound - viewport.startSample) / Double(max(viewport.sampleSpan, 1))
+        let x0Frac = Double(box.samples.lowerBound - viewport.startSample) / Double(max(viewport.sampleSpan, 1))
+        let x1Frac = Double(box.samples.upperBound - viewport.startSample) / Double(max(viewport.sampleSpan, 1))
         let x0 = CGFloat(max(0, min(1, x0Frac))) * geoSize.width
         let x1 = CGFloat(max(0, min(1, x1Frac))) * geoSize.width
+        // v-fraction is 0 at the top (high freq), so the upper frequency bound
+        // maps to the smaller y — same warp the axis labels/annotations use.
+        let vTop = LogFrequencyWarp.hzToVFrac(box.freqHz.upperBound, lo: viewport.minFreqHz,
+                                              hi: viewport.maxFreqHz, log: logFrequency)
+        let vBot = LogFrequencyWarp.hzToVFrac(box.freqHz.lowerBound, lo: viewport.minFreqHz,
+                                              hi: viewport.maxFreqHz, log: logFrequency)
+        let y0 = CGFloat(max(0, min(1, vTop))) * geoSize.height
+        let y1 = CGFloat(max(0, min(1, vBot))) * geoSize.height
         Rectangle()
             .fill(Color.white.opacity(0.15))
             .overlay(Rectangle().stroke(Color.white.opacity(0.6), lineWidth: 1))
-            .frame(width: max(2, x1 - x0), height: geoSize.height)
-            .position(x: (x0 + x1) / 2, y: geoSize.height / 2)
+            .frame(width: max(2, x1 - x0), height: max(2, y1 - y0))
+            .position(x: (x0 + x1) / 2, y: (y0 + y1) / 2)
             .allowsHitTesting(false)
     }
+}
+
+/// A manual analysis selection — a time range (display-domain samples) AND a
+/// frequency band. Both are handed to `CallAnalysis`; the frequency band is the
+/// Kaleidoscope-style box top/bottom that keeps out-of-call-band energy out of
+/// the measurement. Frequency is domain-independent (unaffected by the silence
+/// map); only `samples` is mapped real↔virtual.
+struct AnalysisBox: Equatable {
+    var samples: ClosedRange<Int>
+    var freqHz: ClosedRange<Double>
 }

@@ -36,6 +36,7 @@ struct CallAnnotationOverlay: View {
         switch label {
         case "Hi f": return (.orange, -18, -10)   // call start, top-left: label left/up
         case "Peak": return (.yellow, 0, -14)     // loudest: label up
+        case "Fk":   return (.cyan, -16, -10)     // knee/elbow: label left/up
         case "Fc":   return (Color(red: 1, green: 0.6, blue: 0.2), 16, 10)  // tail: label right/down
         case "Lo f": return (.green, 18, 12)      // call end, bottom-right: label right/down
         default:     return (.white, 0, -12)

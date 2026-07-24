@@ -23,14 +23,21 @@
 //  against real recordings.
 //
 
+import Accelerate
 import Foundation
 
 nonisolated enum CallAnalysis {
 
+    /// Which way a terminal toe turns, or `.none` if the call body runs
+    /// straight to its end. A diagnostic feature in its own right (see
+    /// *Identifying BC's Bats*, echolocation chapter — "toes, downward or
+    /// upward turned").
+    enum ToeDirection { case none, up, down }
+
     struct Result {
         let peakFreqHz: Double
-        /// nil if the active duration is too short to have a measurable tail
-        /// (fewer than 2 columns).
+        /// Characteristic frequency (Fc): the lowest frequency of the call
+        /// BODY, EXCLUDING any toe. nil if the ridge was too short to segment.
         let characteristicFreqHz: Double?
         let bandwidthHz: Double
         let freqMinHz: Double
@@ -39,8 +46,20 @@ nonisolated enum CallAnalysis {
         let startFreqHz: Double
         let endFreqHz: Double
         /// Signed: (endFreqHz - startFreqHz) / durationMs. Negative for a
-        /// typical downward FM sweep.
+        /// typical downward FM sweep. This is the WHOLE-pulse average slope
+        /// (Kaleidoscope's S1-like figure), including the steep FM onset — for
+        /// the diagnostic body slope use `bodySlopeHzPerMs`.
         let sweepRateHzPerMs: Double
+        /// Knee/elbow frequency (Fk): where the steep FM leading edge bends
+        /// into the flatter call body. nil if the ridge was too short/simple
+        /// to find a knee.
+        let kneeFreqHz: Double?
+        /// Slope of the CALL BODY only (knee → toe start), Hz/ms — the
+        /// diagnostic slope (Kaleidoscope's Sc), distinct from
+        /// `sweepRateHzPerMs`. nil if there's no resolvable body.
+        let bodySlopeHzPerMs: Double?
+        /// Direction of the terminal toe, if any.
+        let toeDirection: ToeDirection
         /// 0-1, same meaning as PulseImageRenderer's quality score: how much
         /// the loudest column stands out above the analyzed region's mean.
         let quality: Float
@@ -64,15 +83,16 @@ nonisolated enum CallAnalysis {
     static let defaultCFTailFraction: Double = 0.25
     private static let dynamicRangeDB: Float = 48
 
-    // Measurement thresholds, calibrated toward Wildlife Acoustics
-    // Kaleidoscope on real MYCA/MYYU/MYLU calls. All are dB BELOW the call's
-    // own peak; larger = includes fainter energy = wider/longer measurement.
-    // The earlier −12/−15 dB pair matched Kaleidoscope's peak/Fc well but
-    // clipped the faint high-frequency ONSET of the FM sweep, so start-freq,
-    // bandwidth and duration all read low (e.g. 52.5 vs 61 kHz, 8.6 vs 15.4
-    // kHz, 3.8 vs 5.2 ms). Widening captures the onset Kaleidoscope does.
-    private static let durationThresholdDB: Float = 18
-    private static let freqExtentThresholdDB: Float = 27
+    // Duration is measured from the energy envelope around the loudest
+    // column: how far either side the per-column peak stays within
+    // `durationThresholdDB` of the call's own peak. dB BELOW peak; larger =
+    // includes fainter energy = longer measurement.
+    //
+    // Frequency extent (Fmax/Fmin), Fc, the knee and the body slope are NOT
+    // measured from a flat dB threshold any more — they come from the
+    // dominant-frequency RIDGE (see the ridge decomposition below), which is
+    // what *Identifying BC's Bats* / Kaleidoscope actually trace.
+    private static let durationThresholdDB: Float = 22
     /// The measurement floor is CAPPED here rather than taken straight from
     /// the display noise-floor slider: a display floor of 0.5 (≈−24 dB) would
     /// otherwise cap analysis above the fainter call energy Kaleidoscope
@@ -80,11 +100,111 @@ nonisolated enum CallAnalysis {
     /// preference, so it uses its own (lower) floor.
     private static let maxAnalysisFloor: Float = 0.2
 
+    // ── Fine-resolution extent tracer ────────────────────────────────────────
+    // The main 512-sample (1.33 ms) STFT window smears fast frequency
+    // excursions — a steep onset sweeps ~18 kHz WITHIN one window — so the grid
+    // ridge reads Fmax several kHz low (verified against synthetic pulses of
+    // exact known Fmax: 512-grid read 61.9 vs true 65.0; Kaleidoscope, with
+    // finer time resolution, read 64.5). A much shorter window has the time
+    // resolution to follow the onset; zero-padding to `extentFFTLen` + parabolic
+    // peak interpolation keeps the frequency estimate precise for the locally
+    // dominant tone. Used ONLY to sharpen Fmax/Fmin — the frequency-precise
+    // 512-grid still drives the body/knee/slope/Fc (where the extra frequency
+    // resolution matters and the smear doesn't).
+    private static let extentWindowLen = 64          // 0.167 ms @ 384 kHz
+    private static let extentHop = 16
+    private static let extentFFTLen = 512            // zero-pad target (2^9)
+    private static let extentLog2 = vDSP_Length(9)
+    private static let extentTraceDB: Float = 36     // follow the trace to −36 dB
+    private static let extentClimbHeadroomHz: Double = 15_000  // max lift above grid Fmax
+    private static let extentSetup: FFTSetup = {
+        guard let s = vDSP_create_fftsetup(extentLog2, FFTRadix(kFFTRadix2)) else {
+            fatalError("CallAnalysis: extent FFT setup failed")
+        }
+        return s
+    }()
+    private static let extentHann: [Float] = {
+        var w = [Float](repeating: 0, count: extentWindowLen)
+        vDSP_hann_window(&w, vDSP_Length(extentWindowLen), Int32(vDSP_HANN_NORM))
+        return w
+    }()
+
+    /// Fine Fmax over `pcm[loSample..<hiSample)` using a short window, or nil if
+    /// the range is too short / silent. The peak search is BOUNDED to
+    /// `minBin...maxBin` — on real (noisy) audio a short window has poor
+    /// per-frame SNR and a broadband spike near Nyquist can otherwise win a
+    /// frame's argmax and clear the gate (observed: a real pulse reading Fmax =
+    /// 191 kHz). `maxBin` is set by the caller to just above the grid Fmax, so
+    /// the tracer can only ever REFINE the onset a little higher, never leap to
+    /// an out-of-band artifact. The time-ordered dominant-freq trace is then
+    /// median-smoothed to drop any remaining isolated spikes.
+    /// `fineHzPerBin`/`minBin`/`maxBin` are for the zero-padded
+    /// `extentFFTLen/2`-bin grid.
+    private static func traceExtent(pcm: [Float], loSample: Int, hiSample: Int,
+                                    fineHzPerBin: Double, minBin: Int, maxBin: Int) -> Double? {
+        let W = extentWindowLen, bins = extentFFTLen / 2
+        let hiBin = min(maxBin, bins - 1)
+        let lo = max(0, loSample), hi = min(pcm.count, hiSample)
+        guard hi - lo >= W, minBin < hiBin else { return nil }
+        var windowed = [Float](repeating: 0, count: extentFFTLen)   // tail stays zero (pad)
+        var realp = [Float](repeating: 0, count: bins)
+        var imagp = [Float](repeating: 0, count: bins)
+        var mags  = [Float](repeating: 0, count: bins)
+        var frames: [(freq: Double, mag: Float)] = []
+        pcm.withUnsafeBufferPointer { p in
+            var s = lo
+            while s + W <= hi {
+                vDSP_vmul(p.baseAddress! + s, 1, extentHann, 1, &windowed, 1, vDSP_Length(W))
+                windowed.withUnsafeBufferPointer { wb in
+                    wb.baseAddress!.withMemoryRebound(to: DSPComplex.self, capacity: bins) { cx in
+                        realp.withUnsafeMutableBufferPointer { rp in
+                            imagp.withUnsafeMutableBufferPointer { ip in
+                                var split = DSPSplitComplex(realp: rp.baseAddress!, imagp: ip.baseAddress!)
+                                vDSP_ctoz(cx, 2, &split, 1, vDSP_Length(bins))
+                                vDSP_fft_zrip(extentSetup, &split, 1, extentLog2, FFTDirection(FFT_FORWARD))
+                                vDSP_zvabs(&split, 1, &mags, 1, vDSP_Length(bins))
+                            }
+                        }
+                    }
+                }
+                var peakBin = minBin
+                var peakMag: Float = 0
+                for b in minBin...hiBin where mags[b] > peakMag { peakMag = mags[b]; peakBin = b }
+                // Parabolic (log-magnitude) interpolation for sub-bin precision
+                // — a single dominant tone's true peak sits between bins.
+                var interp = Double(peakBin)
+                if peakBin > minBin, peakBin < hiBin {
+                    let a = mags[peakBin - 1], b0 = mags[peakBin], c = mags[peakBin + 1]
+                    let denom = a - 2 * b0 + c
+                    if denom != 0 { interp += Double(0.5 * (a - c) / denom) }
+                }
+                frames.append((interp * fineHzPerBin, peakMag))
+                s += extentHop
+            }
+        }
+        guard let gPeak = frames.map(\.mag).max(), gPeak > 0 else { return nil }
+        let floorMag = gPeak * pow(10, -extentTraceDB / 20)
+        // Median-of-5 smooth the time-ordered dominant-freq trace before taking
+        // the max — a brief broadband transient (click) that survives the band
+        // bound in a couple of frames still shouldn't set Fmax.
+        let freqs = frames.map(\.freq)
+        var fmax = -Double.greatestFiniteMagnitude
+        for i in freqs.indices where frames[i].mag >= floorMag {
+            let l = max(0, i - 2), r = min(freqs.count - 1, i + 2)
+            let w = Array(freqs[l...r]).sorted()
+            let sm = w[w.count / 2]
+            if sm > fmax { fmax = sm }
+        }
+        return fmax > -Double.greatestFiniteMagnitude ? fmax : nil
+    }
+
     /// Reads `[startSample, endSample)` (clamped to `maxAnalysisSpanSeconds`)
     /// from `wavURL` and analyzes it.
     static func analyze(wavURL: URL, sampleRate: Double,
                         startSample: Int, endSample: Int,
-                        minFrequencyHz: Double, noiseFloor: Float,
+                        minFrequencyHz: Double,
+                        maxFrequencyHz: Double = .greatestFiniteMagnitude,
+                        noiseFloor: Float,
                         cfTailFraction: Double = defaultCFTailFraction) -> Result? {
         let maxSpanSamples = Int(maxAnalysisSpanSeconds * sampleRate)
         let clampedEnd = min(endSample, startSample + maxSpanSamples)
@@ -101,6 +221,7 @@ nonisolated enum CallAnalysis {
         WavPlayerDebugLog.log("CallAnalysis", "analyze: read \(pcm.count) samples (\(startSample)-\(clampedEnd), requested \(clampedEnd - startSample))")
         return WavPlayerDebugLog.time("CallAnalysis", "analyze") {
             analyze(pcm: pcm, sampleRate: sampleRate, minFrequencyHz: minFrequencyHz,
+                   maxFrequencyHz: maxFrequencyHz,
                    noiseFloor: noiseFloor, cfTailFraction: cfTailFraction)
         }
     }
@@ -108,7 +229,9 @@ nonisolated enum CallAnalysis {
     /// Pure-data entry point (no file I/O) — what the file-based `analyze`
     /// above delegates to, and what tests drive directly.
     static func analyze(pcm: [Float], sampleRate: Double,
-                        minFrequencyHz: Double, noiseFloor: Float,
+                        minFrequencyHz: Double,
+                        maxFrequencyHz: Double = .greatestFiniteMagnitude,
+                        noiseFloor: Float,
                         cfTailFraction: Double = defaultCFTailFraction) -> Result? {
         var scratch = STFTGrid.Scratch()
         guard let (norm, nFrames) = STFTGrid.compute(pcm: pcm, scratch: &scratch, dynamicRangeDB: dynamicRangeDB)
@@ -125,10 +248,23 @@ nonisolated enum CallAnalysis {
             WavPlayerDebugLog.log("CallAnalysis", "analyze: minBinAllowed=\(minBinAllowed) >= bins=\(bins), aborting")
             return nil
         }
+        // Upper frequency bound (Kaleidoscope's selection-box top). Every bin
+        // scan below is clamped to `minBinAllowed...maxBinAllowed` so a
+        // persistent out-of-call-band interferer (a continuous ultrasonic tone,
+        // or broadband noise up toward Nyquist) can't win a column's argmax and
+        // corrupt the ridge — the failure mode that gave Fmax = 191 kHz and
+        // pulled Fppeak onto a ~29 kHz tone on real, noisy passes. `.greatest-
+        // FiniteMagnitude` (the default) means "no ceiling" → whole band, same
+        // as before this parameter existed.
+        let maxBinAllowed = min(bins - 1, maxFrequencyHz.isFinite ? Int(maxFrequencyHz / hzPerBin) : bins - 1)
+        guard maxBinAllowed > minBinAllowed else {
+            WavPlayerDebugLog.log("CallAnalysis", "analyze: maxBinAllowed=\(maxBinAllowed) <= minBinAllowed=\(minBinAllowed), aborting")
+            return nil
+        }
 
         func columnPeak(_ col: Int) -> Float {
             var m: Float = 0
-            for bin in minBinAllowed..<bins {
+            for bin in minBinAllowed...maxBinAllowed {
                 let v = norm[bin * nFrames + col]
                 if v > m { m = v }
             }
@@ -138,7 +274,7 @@ nonisolated enum CallAnalysis {
         func loudestBin(atCol col: Int) -> Int {
             var bBin = minBinAllowed
             var bVal: Float = -1
-            for bin in minBinAllowed..<bins {
+            for bin in minBinAllowed...maxBinAllowed {
                 let v = norm[bin * nFrames + col]
                 if v > bVal { bVal = v; bBin = bin }
             }
@@ -155,7 +291,7 @@ nonisolated enum CallAnalysis {
         var totalColPeak: Float = 0
         for col in 0..<nFrames {
             var colMax: Float = 0
-            for bin in minBinAllowed..<bins {
+            for bin in minBinAllowed...maxBinAllowed {
                 let v = norm[bin * nFrames + col]
                 if v > colMax { colMax = v }
                 if v > peakValue { peakValue = v; peakBin = bin }
@@ -181,39 +317,213 @@ nonisolated enum CallAnalysis {
         let secondsPerCol = Double(STFTGrid.hop) / sampleRate
         let durationMs = Double(durationCols) * secondsPerCol * 1000
 
-        // Frequency extent (bandwidth) from a -15dB threshold, scanned only
-        // over the active duration columns — keeps quiet inter-call frames
-        // from widening the band.
-        let freqThreshold = max(floor, peakValue - Self.freqExtentThresholdDB / dynamicRangeDB)
-        var minBin = bins - 1, maxBin = minBinAllowed
-        for bin in minBinAllowed..<bins {
-            let base = bin * nFrames
-            for col in durStart...durEnd where norm[base + col] >= freqThreshold {
-                if bin < minBin { minBin = bin }
-                if bin > maxBin { maxBin = bin }
-                break
+        // ── Ridge decomposition: knee / call body / toe ─────────────────────
+        // Everything below follows the call-parameter model in *Identifying
+        // BC's Bats* (echolocation chapter) and mirrors Kaleidoscope's own
+        // Fmax / Fk / Fc / Fmin / Sc fields. A pulse is a steep FM leading edge
+        // that BENDS at a knee/elbow into a flatter, louder CALL BODY, which
+        // may end in a short TOE turning up or down. The diagnostic
+        // frequencies and slope are defined relative to that segmentation, NOT
+        // from a flat dB threshold over the whole pulse — the old −27 dB
+        // flood-fill dipped into the noise floor below the call (reading Fmin
+        // too low) and clipped the faint HF onset (reading Fmax too low).
+        //
+        // The ridge = the loudest bin per column across the active duration —
+        // the same dominant-frequency trace Kaleidoscope draws, and whose
+        // extremes ARE its Fmax/Fmin.
+        let ridgeCount = durEnd - durStart + 1
+        var ridgeHz = [Double](repeating: 0, count: ridgeCount)
+        for i in 0..<ridgeCount {
+            ridgeHz[i] = Double(loudestBin(atCol: durStart + i)) * hzPerBin
+        }
+        // Median-of-3 smooth: one spurious column (noise winning a column's
+        // argmax at the faint onset) shouldn't move a landmark by a whole bin.
+        if ridgeCount >= 3 {
+            var smoothed = ridgeHz
+            for i in 1..<(ridgeCount - 1) {
+                let a = ridgeHz[i - 1], b = ridgeHz[i], c = ridgeHz[i + 1]
+                smoothed[i] = max(min(a, b), min(max(a, b), c))   // median of 3
+            }
+            ridgeHz = smoothed
+        }
+        func ridgeCol(_ i: Int) -> Int { durStart + i }
+
+        // Fmax / Fmin from the ridge extremes. Fmin INCLUDES the toe (it's the
+        // absolute lowest ridge frequency); Fc below excludes it.
+        var fmaxIdx = 0, fminIdx = 0
+        for i in 0..<ridgeCount {
+            if ridgeHz[i] > ridgeHz[fmaxIdx] { fmaxIdx = i }
+            if ridgeHz[i] < ridgeHz[fminIdx] { fminIdx = i }
+        }
+        var fmaxHz = ridgeHz[fmaxIdx]
+        var fmaxCol = ridgeCol(fmaxIdx)
+        let fminHz = ridgeHz[fminIdx]
+
+        // Onset climb — Fmax only. The faint HF start of the FM sweep is often
+        // below the duration envelope's −22 dB threshold, so the in-window
+        // ridge clips Fmax (e.g. 57 vs Kaleidoscope's 65 kHz). Follow the ridge
+        // LEFT of the active window, up the onset, while column energy stays
+        // above a low trace floor (~−36 dB, roughly where Kaleidoscope's
+        // dominant-frequency dots stop following the onset). This decouples the
+        // frequency EXTENT from the (tighter) duration measurement, exactly as
+        // Kaleidoscope does — its Dur can be shorter than ours while its Fmax
+        // reads higher. Bounded so it can't wander into a preceding call.
+        let onsetFloor = peakColVal - 36 / dynamicRangeDB
+        let onsetLimit = max(0, durStart - max(8, ridgeCount))
+        var oc = durStart - 1
+        while oc >= onsetLimit, columnPeak(oc) >= onsetFloor {
+            let f = Double(loudestBin(atCol: oc)) * hzPerBin
+            if f > fmaxHz { fmaxHz = f; fmaxCol = oc }
+            oc -= 1
+        }
+
+        // Fine-resolution extent tracer: re-measure Fmax with a short window
+        // over the pulse's sample span and push it OUTWARD only (the 512-grid
+        // smears the onset inward, never outward, so a better-resolved reading
+        // can only correct upward). Fmax ONLY — the grid Fmin is already
+        // accurate (validated on synthetic pulses: 44.4 vs true 44.0), and the
+        // fine tracer would drag it ~0.5 kHz below the body's own Fc on a
+        // toe-less call, spuriously implying a toe. Bounded to the active
+        // region ±one main window so it can't pick up a neighbouring pulse.
+        let hop512 = STFTGrid.hop
+        let loSample = max(0, durStart * hop512 - STFTGrid.windowLen)
+        let hiSample = durEnd * hop512 + STFTGrid.windowLen
+        let fineHzPerBin = (sampleRate / 2) / Double(extentFFTLen / 2)
+        let fineMinBin = max(1, Int(minFrequencyHz / fineHzPerBin))
+        // Ceiling: the tracer may only lift Fmax a plausible onset's worth above
+        // the (smeared) grid value — never into out-of-band noise. The grid
+        // under-reads a fast onset by a few kHz, so `extentClimbHeadroomHz` of
+        // headroom is ample. Also hard-capped at the box top (`maxFrequencyHz`),
+        // so a user-drawn ceiling is respected exactly, not overshot by the
+        // headroom.
+        let fineBoxMaxBin = maxFrequencyHz.isFinite
+            ? Int(maxFrequencyHz / fineHzPerBin) : extentFFTLen / 2 - 1
+        let fineMaxBin = min(fineBoxMaxBin, Int((fmaxHz + extentClimbHeadroomHz) / fineHzPerBin))
+        if let fineFmax = traceExtent(pcm: pcm, loSample: loSample, hiSample: hiSample,
+                                      fineHzPerBin: fineHzPerBin, minBin: fineMinBin, maxBin: fineMaxBin),
+           fineFmax > fmaxHz {
+            fmaxHz = fineFmax
+        }
+
+        // Knee/elbow = point of maximum perpendicular distance from the chord
+        // joining the ridge's first and last samples — a parameter-free
+        // "kneedle"-style corner detector. The FM ridge is convex, so its
+        // elbow is exactly where it bulges farthest from that chord. Guarded to
+        // the first 75% of the ridge: a max-distance point in the final stretch
+        // is a toe, not the knee.
+        var kneeIdx: Int?
+        if ridgeCount >= 4 {
+            let y0 = ridgeHz[0]
+            let x1 = Double(ridgeCount - 1), y1 = ridgeHz[ridgeCount - 1]
+            let dx = x1, dy = y1 - y0
+            let denom = (dx * dx + dy * dy).squareRoot()
+            if denom > 0 {
+                var best = -1.0, bestIdx = 0
+                let lastAllowed = max(1, Int(Double(ridgeCount - 1) * 0.75))
+                for i in 1...lastAllowed {
+                    // |cross product| / |chord| = perpendicular distance.
+                    let d = abs(dy * Double(i) - dx * (ridgeHz[i] - y0)) / denom
+                    if d > best { best = d; bestIdx = i }
+                }
+                kneeIdx = bestIdx
             }
         }
-        if minBin > maxBin { minBin = minBinAllowed; maxBin = bins - 1 }
 
-        // Start/end frequency: the loudest in-band bin at the first/last
-        // active column.
-        let startFreqHz = Double(loudestBin(atCol: durStart)) * hzPerBin
-        let endFreqHz = Double(loudestBin(atCol: durEnd)) * hzPerBin
-        let sweepRateHzPerMs = durationMs > 0 ? (endFreqHz - startFreqHz) / durationMs : 0
+        // Least-squares slope (Hz per column) + intercept over [lo, hi].
+        func ridgeFit(_ lo: Int, _ hi: Int) -> (slope: Double, intercept: Double) {
+            let n = Double(hi - lo + 1)
+            var sx = 0.0, sy = 0.0, sxx = 0.0, sxy = 0.0
+            for i in lo...hi {
+                let x = Double(i), y = ridgeHz[i]
+                sx += x; sy += y; sxx += x * x; sxy += x * y
+            }
+            let d = n * sxx - sx * sx
+            guard d != 0 else { return (0, sy / n) }
+            let b = (n * sxy - sx * sy) / d
+            return (b, (sy - b * sx) / n)
+        }
 
-        // Characteristic/knee frequency: median dominant-bin frequency over
-        // the last `cfTailFraction` of the active duration.
-        let tailCount = Int((Double(durationCols) * cfTailFraction).rounded())
+        // Body = knee → end. Detect a TOE: a terminal run deviating from the
+        // body's linear trend by more than `toeThresholdHz` in a consistent
+        // direction (below trend = downturned, above = upturned). Fc is the
+        // body's low-frequency end EXCLUDING that toe.
+        let toeThresholdHz = 3 * hzPerBin
+        var toeDirection: ToeDirection = .none
         var characteristicFreqHz: Double?
-        var fcCol: Int?
-        if tailCount >= 2 {
-            let tailStart = durEnd - tailCount + 1
-            var freqs = (tailStart...durEnd).map { Double(loudestBin(atCol: $0)) * hzPerBin }
-            freqs.sort()
-            let mid = freqs.count / 2
-            characteristicFreqHz = freqs.count % 2 == 0 ? (freqs[mid - 1] + freqs[mid]) / 2 : freqs[mid]
-            fcCol = (tailStart + durEnd) / 2   // draw the Fc marker at the tail's midpoint
+        var fcIdx: Int?
+        var kneeFreqHz: Double?
+        var bodySlopeHzPerMs: Double?
+
+        if let k = kneeIdx, k <= ridgeCount - 3 {
+            kneeFreqHz = ridgeHz[k]
+            let (trendSlope, trendIntercept) = ridgeFit(k, ridgeCount - 1)
+            // Walk back from the end while the ridge stays on ONE consistent
+            // side of the trend beyond threshold — that terminal run is the toe.
+            var toeStart = ridgeCount   // exclusive: no toe yet
+            var toeSign = 0
+            var i = ridgeCount - 1
+            while i > k {
+                let resid = ridgeHz[i] - (trendIntercept + trendSlope * Double(i))
+                let sign = resid > toeThresholdHz ? 1 : (resid < -toeThresholdHz ? -1 : 0)
+                if sign == 0 { break }
+                if toeSign == 0 { toeSign = sign }
+                else if sign != toeSign { break }
+                toeStart = i
+                i -= 1
+            }
+            if toeStart < ridgeCount { toeDirection = toeSign > 0 ? .up : .down }
+            let bodyEnd = min(ridgeCount - 1, toeStart - 1)   // last body-proper index
+            if bodyEnd >= k {
+                // Fc = lowest freq of the body proper: median of its last few
+                // columns for robustness (its tail, for a downsweep).
+                let fcFrom = max(k, bodyEnd - 2)
+                let tail = Array(ridgeHz[fcFrom...bodyEnd]).sorted()
+                characteristicFreqHz = tail[tail.count / 2]
+                fcIdx = bodyEnd
+                if bodyEnd > k { bodySlopeHzPerMs = ridgeFit(k, bodyEnd).slope / (secondsPerCol * 1000) }
+            }
+        }
+
+        // Fallback when the ridge was too short to segment: the old tail-median
+        // Fc heuristic, no knee / body slope.
+        if characteristicFreqHz == nil {
+            let tailCount = Int((Double(ridgeCount) * cfTailFraction).rounded())
+            if tailCount >= 2 {
+                let tailStart = ridgeCount - tailCount
+                let freqs = Array(ridgeHz[tailStart..<ridgeCount]).sorted()
+                let mid = freqs.count / 2
+                characteristicFreqHz = freqs.count % 2 == 0 ? (freqs[mid - 1] + freqs[mid]) / 2 : freqs[mid]
+                fcIdx = (tailStart + ridgeCount - 1) / 2
+            }
+        }
+
+        // Start = Fmax, End = Fmin (both ridge-derived). Overall sweep = the
+        // whole-pulse average slope (ridge start → end); the diagnostic body
+        // slope is `bodySlopeHzPerMs` above.
+        let startFreqHz = fmaxHz
+        let endFreqHz = fminHz
+        let sweepRateHzPerMs = durationMs > 0 ? (ridgeHz[ridgeCount - 1] - ridgeHz[0]) / durationMs : 0
+
+        // Peak frequency = the peak of the call-AVERAGED power spectrum
+        // (Kaleidoscope's Fppeak), not the single loudest time-frequency
+        // point: sum each bin's energy across the active duration and take
+        // the max — the frequency the call spends the most energy at.
+        var fppeakBin = peakBin
+        var fppeakSum: Float = -1
+        for bin in minBinAllowed...maxBinAllowed {
+            let base = bin * nFrames
+            var sum: Float = 0
+            for col in durStart...durEnd { sum += norm[base + col] }
+            if sum > fppeakSum { fppeakSum = sum; fppeakBin = bin }
+        }
+        let peakFreqHz = Double(fppeakBin) * hzPerBin
+        // Draw the Peak marker where the ridge actually crosses Fppeak, so it
+        // sits on the call rather than floating at the (time-agnostic) Fppeak.
+        var peakMarkerCol = peakCol
+        var bestPeakDelta = Int.max
+        for col in durStart...durEnd {
+            let d = abs(loudestBin(atCol: col) - fppeakBin)
+            if d < bestPeakDelta { bestPeakDelta = d; peakMarkerCol = col }
         }
 
         // Quality: how much the peak column stands above the analyzed
@@ -222,28 +532,35 @@ nonisolated enum CallAnalysis {
         let quality: Float = 1.0 - (meanColPeak / peakColVal)
 
         // Annotation landmarks (column -> real-sample offset from the range
-        // start). Hi f / Lo f sit at the first/last active columns, Peak at
-        // the loudest column, Fc at the tail midpoint.
+        // start), all ridge-derived: Hi f / Lo f at the Fmax/Fmin ridge
+        // columns, Peak where the ridge crosses Fppeak, Fc at the body end
+        // (excluding toe), Fk at the knee.
         var points: [Result.Point] = [
-            .init(label: "Hi f", sampleOffset: durStart * STFTGrid.hop, freqHz: startFreqHz),
-            .init(label: "Peak", sampleOffset: peakCol * STFTGrid.hop, freqHz: Double(peakBin) * hzPerBin),
-            .init(label: "Lo f", sampleOffset: durEnd * STFTGrid.hop, freqHz: endFreqHz),
+            .init(label: "Hi f", sampleOffset: fmaxCol * STFTGrid.hop, freqHz: fmaxHz),
+            .init(label: "Peak", sampleOffset: peakMarkerCol * STFTGrid.hop, freqHz: peakFreqHz),
+            .init(label: "Lo f", sampleOffset: ridgeCol(fminIdx) * STFTGrid.hop, freqHz: fminHz),
         ]
-        if let cf = characteristicFreqHz, let fcCol {
-            points.append(.init(label: "Fc", sampleOffset: fcCol * STFTGrid.hop, freqHz: cf))
+        if let cf = characteristicFreqHz, let fcIdx {
+            points.append(.init(label: "Fc", sampleOffset: ridgeCol(fcIdx) * STFTGrid.hop, freqHz: cf))
+        }
+        if let kneeFreqHz, let kneeIdx {
+            points.append(.init(label: "Fk", sampleOffset: ridgeCol(kneeIdx) * STFTGrid.hop, freqHz: kneeFreqHz))
         }
 
-        WavPlayerDebugLog.log("CallAnalysis", "analyze: peak=\(Int(Double(peakBin) * hzPerBin))Hz durationCols=\(durationCols) (\(String(format: "%.1f", durationMs))ms) quality=\(String(format: "%.2f", quality))")
+        WavPlayerDebugLog.log("CallAnalysis", "analyze: Fppeak=\(Int(peakFreqHz))Hz Fmax=\(Int(fmaxHz)) Fmin=\(Int(fminHz)) Fk=\(kneeFreqHz.map { Int($0) } ?? -1) Fc=\(characteristicFreqHz.map { Int($0) } ?? -1) Sc=\(bodySlopeHzPerMs.map { String(format: "%.0f", $0) } ?? "nil")Hz/ms toe=\(toeDirection) durationCols=\(durationCols) (\(String(format: "%.1f", durationMs))ms)")
         return Result(
-            peakFreqHz: Double(peakBin) * hzPerBin,
+            peakFreqHz: peakFreqHz,
             characteristicFreqHz: characteristicFreqHz,
-            bandwidthHz: Double(maxBin - minBin + 1) * hzPerBin,
-            freqMinHz: Double(minBin) * hzPerBin,
-            freqMaxHz: Double(maxBin + 1) * hzPerBin,
+            bandwidthHz: fmaxHz - fminHz,
+            freqMinHz: fminHz,
+            freqMaxHz: fmaxHz,
             durationMs: durationMs,
             startFreqHz: startFreqHz,
             endFreqHz: endFreqHz,
             sweepRateHzPerMs: sweepRateHzPerMs,
+            kneeFreqHz: kneeFreqHz,
+            bodySlopeHzPerMs: bodySlopeHzPerMs,
+            toeDirection: toeDirection,
             quality: quality,
             points: points
         )

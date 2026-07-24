@@ -876,6 +876,9 @@ struct ContentView: View {
     /// (palette, frequency-range settings).
     private func spectrogramHeaderTrailing(showFullScreen: Bool) -> some View {
         HStack(spacing: 8) {
+            // Elapsed-time pill for the active listening/session, sitting to the
+            // left of the control pills. Renders nothing when not detecting.
+            SessionTimerPill(start: feedSessionStart)
             // Full-screen landscape only: transport controls (play/record/listen)
             // morph into a third pill here instead of floating over the
             // spectrogram — same icons and colors as landscapeControlsPanel,

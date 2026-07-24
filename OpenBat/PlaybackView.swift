@@ -108,16 +108,18 @@ struct PlaybackControlsView: View {
     /// the spectrogram header pill (see WavPlayerView), and this slot now
     /// exports the recording.
     let onShare: () -> Void
+    /// Landscape uses a tighter vertical footprint so the short-height
+    /// spectrogram keeps as much room as possible; portrait keeps the roomier
+    /// spacing.
+    var compact: Bool = false
 
     var body: some View {
-        VStack(spacing: 20) {
-            HStack(spacing: 40) {
-                listenModeButton
-                playPauseButton
-                shareButton
-            }
+        HStack(spacing: 40) {
+            listenModeButton
+            playPauseButton
+            shareButton
         }
-        .padding(.vertical, 16)
+        .padding(.vertical, compact ? 6 : 16)
     }
 
     private var shareButton: some View {

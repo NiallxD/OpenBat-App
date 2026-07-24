@@ -26,7 +26,7 @@ struct WavFileInfoCard: View {
                 .padding(.bottom, 4)
 
             if rows.isEmpty {
-                Text("No GUANO metadata")
+                Text("No metadata")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
                     .frame(maxWidth: .infinity, alignment: .leading)

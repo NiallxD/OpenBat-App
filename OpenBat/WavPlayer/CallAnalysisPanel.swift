@@ -24,10 +24,24 @@ import SwiftUI
 
 struct CallAnalysisPanel: View {
     let result: CallAnalysis.Result?
+    @State private var showBetaInfo = false
 
     var body: some View {
         VStack(spacing: 0) {
-            PanelTitle("Call Analysis")
+            PanelTitle("Call Analysis") {
+                Button { showBetaInfo = true } label: {
+                    Text("BETA")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.red, in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .popover(isPresented: $showBetaInfo) {
+                    BetaInfoPopover()
+                }
+            }
                 .padding(.horizontal, 8)
                 .padding(.top, 8)
                 .padding(.bottom, 4)
@@ -45,6 +59,12 @@ struct CallAnalysisPanel: View {
                     StatCell(title: "Sweep", value: values.sweep, unit: "Hz/ms")
                     StatCell(title: "Quality", value: values.quality, unit: "%")
                 }
+                HStack(spacing: 0) {
+                    StatCell(title: "Knee (Fk)", value: values.knee, unit: "")
+                    StatCell(title: "Body Sc", value: values.bodySlope, unit: "Hz/ms")
+                    StatCell(title: "Toe", value: values.toe, unit: "")
+                    StatCell(title: "", value: "", unit: "")
+                }
             }
             .padding(.horizontal, 8)
             .padding(.bottom, 8)
@@ -59,11 +79,13 @@ struct CallAnalysisPanel: View {
     /// `StatCell`'s title/unit layout identical either way.
     private struct Values {
         let peak, charFreq, bandwidth, duration, start, end, sweep, quality: String
+        let knee, bodySlope, toe: String
 
         init(_ result: CallAnalysis.Result?) {
             guard let result else {
                 peak = "–"; charFreq = "–"; bandwidth = "–"; duration = "–"
                 start = "–"; end = "–"; sweep = "–"; quality = "–"
+                knee = "–"; bodySlope = "–"; toe = "–"
                 return
             }
             peak = Self.freqString(result.peakFreqHz)
@@ -74,10 +96,46 @@ struct CallAnalysisPanel: View {
             end = Self.freqString(result.endFreqHz)
             sweep = String(format: "%.1f", result.sweepRateHzPerMs)
             quality = String(format: "%.0f", result.quality * 100)
+            knee = result.kneeFreqHz.map(Self.freqString) ?? "–"
+            bodySlope = result.bodySlopeHzPerMs.map { String(format: "%.1f", $0) } ?? "–"
+            switch result.toeDirection {
+            case .none: toe = "None"
+            case .up:   toe = "Up"
+            case .down: toe = "Down"
+            }
         }
 
         private static func freqString(_ hz: Double) -> String {
             hz >= 1000 ? String(format: "%.1f kHz", hz / 1000) : String(format: "%.0f Hz", hz)
         }
+    }
+}
+
+/// "Work in progress" explainer shown when the BETA pill is tapped.
+private struct BetaInfoPopover: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                Text("BETA")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Color.red, in: Capsule())
+                Text("Call Analysis")
+                    .font(.headline)
+            }
+            Text("These call parameters are a work in progress. The measurements are still being calibrated against reference software, and both the numbers and the way the analysis box works may change.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Text("For the most reliable reading, draw the selection box tightly around a single call — snug in both time and frequency.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(16)
+        .frame(width: 300)
+        .presentationCompactAdaptation(.popover)
     }
 }
