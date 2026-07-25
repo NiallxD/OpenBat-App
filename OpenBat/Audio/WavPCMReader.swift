@@ -36,6 +36,7 @@ nonisolated enum WavPCMReader {
             WavPlayerDebugLog.log("WavPCMReader", "readSamples: invalid range startSample=\(startSample) count=\(count)")
             return nil
         }
+        CloudStorage.ensureDownloaded(wavURL)
         guard let handle = try? FileHandle(forReadingFrom: wavURL) else {
             WavPlayerDebugLog.log("WavPCMReader", "readSamples: FileHandle open FAILED for \(wavURL.lastPathComponent)")
             return nil

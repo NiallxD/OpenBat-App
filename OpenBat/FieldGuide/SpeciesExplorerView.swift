@@ -110,6 +110,13 @@ struct SpeciesExplorerView: View {
                 SpeciesDetailView(species: species, store: store, rangeStore: rangeStore)
             }
         }
+        // Forces a fully opaque nav bar instead of the default translucent
+        // Liquid Glass material — without this, the globe's bright satellite
+        // imagery (which sits right up against the bar) samples through as a
+        // visible grey/light bar (same root cause ContentView's own
+        // `.toolbarBackground` comment describes).
+        .toolbarBackground(Color(.systemBackground), for: .navigationBar)
+        .hardTopScrollEdge()
     }
 
     // MARK: Search

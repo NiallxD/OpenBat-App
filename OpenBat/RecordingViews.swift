@@ -18,6 +18,7 @@ import SwiftUI
 struct RecordingRow: View {
     let recording: Recording
     let store: ClassificationStore
+    let consent: ConsentStore
 
     var body: some View {
         HStack(spacing: 12) {
@@ -41,11 +42,75 @@ struct RecordingRow: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
+            uploadBadge
             if let confidence = recording.confidence {
                 ConfidenceBadge(confidence: confidence)
             }
         }
         .padding(.vertical, 2)
+    }
+
+    /// Tapping this IS how a recording gets uploaded now — there's no separate
+    /// "Upload Now" sweep. `.borderless` so tapping the badge doesn't also fire
+    /// the row's own NavigationLink.
+    @ViewBuilder private var uploadBadge: some View {
+        switch recording.uploadStatus?.phase {
+        case .uploaded:
+            Image(systemName: "checkmark.icloud.fill")
+                .font(.caption)
+                .foregroundStyle(.green)
+                .accessibilityLabel("Uploaded")
+        case .converting, .encoding, .uploading:
+            ProgressView()
+                .controlSize(.mini)
+                .accessibilityLabel("Uploading")
+        case .queued, .failed:
+            // Gated on consent like every other branch: without this the button
+            // still appeared after contribution was turned off, and tapping it
+            // ran the pipeline only to hit the consent guard and silently flip
+            // the badge to "not contributing" with no explanation.
+            if consent.isGranted { uploadButton }
+        case .rejected:
+            // Was EmptyView, which made "this can never be uploaded" and "this
+            // hasn't been assessed" look identical. The reason is the useful
+            // part, so it's carried in the accessibility label and shown in full
+            // on the recording's detail page.
+            Image(systemName: "xmark.icloud")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .accessibilityLabel("Not eligible to upload: \(recording.uploadStatus?.reason ?? "unknown reason")")
+        case .notContributing, nil:
+            // `nil` covers every recording made before RecordingUploader's
+            // eligibility gates existed (or before this device relaunched with
+            // them) — it was simply never assessed, not found ineligible. Rather
+            // than leave it permanently badge-less, re-check the SAME criteria
+            // live: `.notContributing` also covers this correctly for a
+            // recording that failed the consent/confidence gate when it was
+            // SAVED but would pass now (consent since turned on). Either way,
+            // tapping runs it through the real pipeline for the first time.
+            if meetsUploadCriteriaNow {
+                uploadButton
+            }
+        }
+    }
+
+    private var meetsUploadCriteriaNow: Bool {
+        consent.isGranted
+            && recording.species != "NOID"
+            && (recording.confidence ?? 0) >= RecordingUploader.minUploadConfidence
+            && recording.durationSeconds <= RecordingUploader.maxUploadDurationSeconds
+    }
+
+    private var uploadButton: some View {
+        Button {
+            RecordingUploader.shared.uploadNow(recording)
+        } label: {
+            Image(systemName: "icloud.and.arrow.up")
+                .font(.caption)
+                .foregroundStyle(.blue)
+        }
+        .buttonStyle(.borderless)
+        .accessibilityLabel("Upload this recording")
     }
 
     @ViewBuilder private var thumbnail: some View {

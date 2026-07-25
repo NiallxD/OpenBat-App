@@ -47,7 +47,12 @@ import Accelerate
 
 nonisolated enum WavSpectrogramEngine {
 
-    private static let dynamicRangeDB: Float = 48
+    /// Matches `SpectrogramProcessor.dynamicRangeDB` — this tile's own
+    /// per-column adaptive ceiling is otherwise the exact same AGC scheme
+    /// (see the constants below), so a narrower window here than live used
+    /// to clip quieter calls to pure black before the noise-floor slider
+    /// ever saw them, regardless of the slider's value.
+    private static let dynamicRangeDB: Float = 70
     /// Absolute reference below which a tile's own peak is treated as "no
     /// real signal here, just ambient noise" — matches
     /// `SpectrogramProcessor.minCeilingDB`, the same threshold already
@@ -61,6 +66,16 @@ nonisolated enum WavSpectrogramEngine {
     /// display contrast — the "zoomed into empty space renders as pure
     /// noise" bug.
     private static let absoluteSignalFloorDB: Float = -40
+    /// Same "AGC release" `SpectrogramProcessor.runningCeilingDB` uses live, just
+    /// expressed per SECOND instead of per column — a tile's own column density
+    /// varies (an overview column can span many seconds; a detail tile's is
+    /// ~1/12 000 s) so a fixed per-column decay can't mean the same thing in
+    /// both. `colorize` converts this to a per-column step using each tile's own
+    /// density before use. ≈ SpectrogramProcessor's 0.015 dB/column @ 1500 cols/s.
+    private static let ceilingReleaseDBPerSecond: Float = 22.5
+    /// A little air above the tracked peak, not pinned to pure white — matches
+    /// `SpectrogramProcessor.ceilingHeadroomDB`.
+    private static let ceilingHeadroomDB: Float = 3
     /// Default overview width — matches what the old
     /// RecordingSpectrogramRenderer-based overview used, kept for visual
     /// continuity (and as the default in `renderOverview`'s test-covered
@@ -118,45 +133,64 @@ nonisolated enum WavSpectrogramEngine {
         let maxFreqHz: Double
     }
 
-    /// The cheap half — crops `raw` to `[minFreqHz, maxFreqHz]`, peak-relative
-    /// normalizes over just that cropped bin range (zooming into a narrow
-    /// high frequency band still gets full dynamic range, rather than being
-    /// washed out by louder energy elsewhere in the spectrum that isn't even
-    /// being displayed — clamped by `absoluteSignalFloorDB` when there's no
-    /// real signal in view at all, see its own doc comment), gates by
-    /// `noiseFloor`, and colorizes via a precomputed LUT (see
-    /// `DisplayColormap.makeLUT`'s doc comment — this used to take 700ms+ per
-    /// tile via a naive per-pixel dictionary lookup). Pure array math over an
-    /// already-computed grid — no file IO, no FFT — so this is cheap enough
+    /// The cheap half — crops `raw` to `[minFreqHz, maxFreqHz]`, tracks a
+    /// per-COLUMN adaptive ceiling across the cropped bin range with the same
+    /// decaying "AGC release" `SpectrogramProcessor` uses live (clamped by
+    /// `absoluteSignalFloorDB` when there's no real signal at all — see its own
+    /// doc comment), gates by `noiseFloor`, and colorizes via a precomputed LUT
+    /// (see `DisplayColormap.makeLUT`'s doc comment — this used to take 700ms+
+    /// per tile via a naive per-pixel dictionary lookup). Pure array math over
+    /// an already-computed grid — no file IO, no FFT — so this is cheap enough
     /// to re-run on every noise-floor/palette tick.
+    ///
+    /// Per-column, not one scalar ceiling for the whole tile: a single loud
+    /// noise burst anywhere in a multi-second tile used to pin the WHOLE tile's
+    /// contrast to that burst's level, crushing quieter real calls elsewhere in
+    /// the same tile/overview — the "even noiseFloor=0 barely shows calls" bug,
+    /// and the reason this view could look much noisier than the live Detector
+    /// screen's adaptive-ceiling spectrogram for the exact same recording.
     static func colorize(_ raw: RawTile, sampleRate: Double, minFreqHz: Double, maxFreqHz: Double,
                          palette: Palette, noiseFloor: Float) -> DetailTile? {
         let nCols = raw.nCols
+        guard nCols > 0 else { return nil }
         let bins = STFTGrid.binCount
         let hzPerBin = (sampleRate / 2) / Double(bins)
         let minBin = min(max(Int(minFreqHz / hzPerBin), 0), bins - 1)
         let maxBin = min(max(Int(maxFreqHz / hzPerBin), minBin), bins - 1)
         let croppedBins = maxBin - minBin + 1
 
-        var maxDB: Float = -.greatestFiniteMagnitude
+        // Column-wise max dB across the cropped bins — an elementwise running
+        // max accumulated one bin-row at a time (vDSP_vmax), not a per-column
+        // vDSP_maxv loop: same total work, far fewer (croppedBins, not nCols)
+        // vDSP calls.
+        var colMaxDB = [Float](repeating: Self.absoluteSignalFloorDB, count: nCols)
         raw.grid.withUnsafeBufferPointer { g in
             for bin in minBin...maxBin {
-                var rowMax: Float = 0
-                vDSP_maxv(g.baseAddress! + bin * nCols, 1, &rowMax, vDSP_Length(nCols))
-                if rowMax > maxDB { maxDB = rowMax }
+                vDSP_vmax(g.baseAddress! + bin * nCols, 1, colMaxDB, 1, &colMaxDB, 1, vDSP_Length(nCols))
             }
         }
-        // Clamp the normalization ceiling up to `absoluteSignalFloorDB` when
-        // the tile's own peak doesn't clear it — a call-free view's loudest
-        // point is just noise-floor variation, and peak-relative-stretching
-        // THAT to full contrast (using `maxDB` directly, unconditionally, as
-        // an earlier version did) is the "renders as pure noise" bug. When a
-        // real call IS present (maxDB already clears the floor), this is a
-        // no-op.
-        let ceilingDB = max(maxDB, Self.absoluteSignalFloorDB)
-        let minDB = ceilingDB - dynamicRangeDB
-        let invRange = 1.0 / dynamicRangeDB
 
+        // dB/s release converted to this tile's own per-column step — detail
+        // tiles (~12 000 cols/s) and the pooled whole-file overview (far
+        // coarser, and variable) don't share a column pitch, so a fixed
+        // per-column decay can't mean the same thing in both.
+        let spanSeconds = sampleRate > 0 ? Double(raw.endSample - raw.startSample) / sampleRate : 0
+        let secondsPerColumn = spanSeconds / Double(nCols)
+        let decayPerColumn = Float(Double(Self.ceilingReleaseDBPerSecond) * secondsPerColumn)
+
+        var effMinDB = [Float](repeating: 0, count: nCols)
+        var runningCeiling = Self.absoluteSignalFloorDB
+        for col in 0..<nCols {
+            let colMax = colMaxDB[col]
+            runningCeiling = colMax > runningCeiling ? colMax : max(colMax, runningCeiling - decayPerColumn)
+            runningCeiling = max(runningCeiling, Self.absoluteSignalFloorDB)
+            let ceilingDB = min(runningCeiling + Self.ceilingHeadroomDB, 0)
+            effMinDB[col] = ceilingDB - dynamicRangeDB
+        }
+
+        // dynamicRangeDB itself doesn't vary by column (only the ceiling/floor
+        // it's measured from does), so this part of the map stays a scalar.
+        let invRange = 1.0 / dynamicRangeDB
         let floor = min(max(noiseFloor, 0), 0.99)
         let invSpan = 1 / max(0.01, 1 - floor)
 
@@ -169,7 +203,11 @@ nonisolated enum WavSpectrogramEngine {
         // clamp(norm)->gate composition: both are linear with clips only at
         // the shared [0, 1] endpoints, so composing the slopes/intercepts and
         // clipping once at the end lands every value in the same LUT slot
-        // (including the same Int truncation, via vDSP_vfixu8).
+        // (including the same Int truncation, via vDSP_vfixu8). The intercept
+        // is now a per-column VECTOR (the ceiling varies by column) added on
+        // after a scalar multiply, rather than the single scalar-multiply-add
+        // (vDSP_vsmsa) this used to be — same call count (two per bin row
+        // instead of one), still no per-pixel scalar loop.
         let lut = DisplayColormap.makeLUT(palette: palette)
         let lutSteps = lut.count
         var lut32 = [UInt32](repeating: 0, count: lutSteps)
@@ -180,8 +218,15 @@ nonisolated enum WavSpectrogramEngine {
             lut32[i] = UInt32(r) | (UInt32(g) << 8) | (UInt32(b) << 16) | 0xFF00_0000
         }
 
+        // Slope is constant across columns (dynamicRangeDB doesn't vary, only
+        // the ceiling/floor it's measured from does) — a scalar multiply, then
+        // add the per-column intercept vector, rather than a wasted
+        // constant-filled slope vector just to satisfy vDSP_vma's shape.
         var slope = invRange * invSpan * Float(lutSteps - 1)
-        var intercept = ((-minDB) * invRange - floor) * invSpan * Float(lutSteps - 1)
+        var interceptPerCol = [Float](repeating: 0, count: nCols)
+        for col in 0..<nCols {
+            interceptPerCol[col] = ((-effMinDB[col]) * invRange - floor) * invSpan * Float(lutSteps - 1)
+        }
         var lo: Float = 0
         var hi = Float(lutSteps - 1)
 
@@ -193,7 +238,8 @@ nonisolated enum WavSpectrogramEngine {
                 lut32.withUnsafeBufferPointer { lutBuf in
                     for bin in minBin...maxBin {
                         let src = g.baseAddress! + bin * nCols
-                        vDSP_vsmsa(src, 1, &slope, &intercept, &tmpRow, 1, vDSP_Length(nCols))
+                        vDSP_vsmul(src, 1, &slope, &tmpRow, 1, vDSP_Length(nCols))
+                        vDSP_vadd(tmpRow, 1, interceptPerCol, 1, &tmpRow, 1, vDSP_Length(nCols))
                         vDSP_vclip(tmpRow, 1, &lo, &hi, &tmpRow, 1, vDSP_Length(nCols))
                         tmpRow.withUnsafeBufferPointer { t in
                             idxRow.withUnsafeMutableBufferPointer { ix in

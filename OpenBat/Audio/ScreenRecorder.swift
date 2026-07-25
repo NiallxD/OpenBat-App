@@ -152,7 +152,7 @@ final class ScreenRecorder: @unchecked Sendable {
     // MARK: - File location
 
     private func makeURL() -> URL {
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let docs = CloudStorage.baseDirectory
         let stamp = Self.stampFormatter.string(from: Date())
         // Same layout as AudioRecorder.makeURL(), so video sits beside the WAVs.
         let dir: URL

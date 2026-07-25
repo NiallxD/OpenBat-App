@@ -8,6 +8,8 @@
 
 /* Begin PBXBuildFile section */
 		691EB6C0300AE8530043F41A /* SwiftyH3 in Frameworks */ = {isa = PBXBuildFile; productRef = B1FAA001F836B3A1D8340D8A /* SwiftyH3 */; };
+		83990F19EE26D85694EDAD50 /* FLAC in Frameworks */ = {isa = PBXBuildFile; productRef = 9D3BD284CDD75E44CCD9CC0F /* FLAC */; };
+		88E2E1B3B334756115E32E3E /* ogg in Frameworks */ = {isa = PBXBuildFile; productRef = 9A57C2A7819815BD0CB67EDD /* ogg */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -44,6 +46,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				691EB6C0300AE8530043F41A /* SwiftyH3 in Frameworks */,
+				83990F19EE26D85694EDAD50 /* FLAC in Frameworks */,
+				88E2E1B3B334756115E32E3E /* ogg in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -96,6 +100,8 @@
 			name = OpenBat;
 			packageProductDependencies = (
 				B1FAA001F836B3A1D8340D8A /* SwiftyH3 */,
+				9D3BD284CDD75E44CCD9CC0F /* FLAC */,
+				9A57C2A7819815BD0CB67EDD /* ogg */,
 			);
 			productName = OpenBat;
 			productReference = 693CA9492FF0506B002CD4C1 /* OpenBat.app */;
@@ -154,6 +160,8 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				729E44F3671ED067CCCA43EA /* XCRemoteSwiftPackageReference "SwiftyH3" */,
+				506664C410FD4FF2166C1F89 /* XCRemoteSwiftPackageReference "flac-binary-xcframework" */,
+				6B5E4A071775BAEC2965DFB7 /* XCRemoteSwiftPackageReference "ogg-binary-xcframework" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 693CA94A2FF0506B002CD4C1 /* Products */;
@@ -337,29 +345,29 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = OpenBat/OpenBat.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 45;
+				CURRENT_PROJECT_VERSION = 47;
 				DEVELOPMENT_TEAM = 57P8LD6GWD;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = OpenBat;
-				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
-				INFOPLIST_KEY_NSLocationAlwaysAndWhenInUseUsageDescription = "OpenBat records a GPS course for your session and pins where each species was detected on a map, including while the screen is off.";
+				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = NO;
+				INFOPLIST_KEY_NSLocationAlwaysAndWhenInUseUsageDescription = "OpenBat records a GPS course for your session and saves accurate coordinates to each recorded audio file, including while the screen is off.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "OpenBat records a GPS course for your session and pins where each species was detected on a map.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "OpenBat needs microphone access to receive the ultrasonic audio stream from your bat detector microphone.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
-				INFOPLIST_KEY_UIFileSharingEnabled = YES;
+				INFOPLIST_KEY_UIFileSharingEnabled = NO;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
-				INFOPLIST_KEY_UISupportsDocumentBrowser = YES;
+				INFOPLIST_KEY_UISupportsDocumentBrowser = NO;
 				INFOPLIST_KEY_UIUserInterfaceStyle = Dark;
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.1.45;
+				MARKETING_VERSION = 0.2.2;
 				PRODUCT_BUNDLE_IDENTIFIER = Niall.OpenBat;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -379,29 +387,29 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = OpenBat/OpenBat.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 45;
+				CURRENT_PROJECT_VERSION = 47;
 				DEVELOPMENT_TEAM = 57P8LD6GWD;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = OpenBat;
-				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
-				INFOPLIST_KEY_NSLocationAlwaysAndWhenInUseUsageDescription = "OpenBat records a GPS course for your session and pins where each species was detected on a map, including while the screen is off.";
+				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = NO;
+				INFOPLIST_KEY_NSLocationAlwaysAndWhenInUseUsageDescription = "OpenBat records a GPS course for your session and saves accurate coordinates to each recorded audio file, including while the screen is off.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "OpenBat records a GPS course for your session and pins where each species was detected on a map.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "OpenBat needs microphone access to receive the ultrasonic audio stream from your bat detector microphone.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
-				INFOPLIST_KEY_UIFileSharingEnabled = YES;
+				INFOPLIST_KEY_UIFileSharingEnabled = NO;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
-				INFOPLIST_KEY_UISupportsDocumentBrowser = YES;
+				INFOPLIST_KEY_UISupportsDocumentBrowser = NO;
 				INFOPLIST_KEY_UIUserInterfaceStyle = Dark;
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.1.45;
+				MARKETING_VERSION = 0.2.2;
 				PRODUCT_BUNDLE_IDENTIFIER = Niall.OpenBat;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -487,6 +495,22 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
+		506664C410FD4FF2166C1F89 /* XCRemoteSwiftPackageReference "flac-binary-xcframework" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/sbooth/flac-binary-xcframework";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 0.2.0;
+			};
+		};
+		6B5E4A071775BAEC2965DFB7 /* XCRemoteSwiftPackageReference "ogg-binary-xcframework" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/sbooth/ogg-binary-xcframework";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 0.1.3;
+			};
+		};
 		729E44F3671ED067CCCA43EA /* XCRemoteSwiftPackageReference "SwiftyH3" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/pawelmajcher/SwiftyH3.git";
@@ -498,6 +522,16 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+		9A57C2A7819815BD0CB67EDD /* ogg */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 6B5E4A071775BAEC2965DFB7 /* XCRemoteSwiftPackageReference "ogg-binary-xcframework" */;
+			productName = ogg;
+		};
+		9D3BD284CDD75E44CCD9CC0F /* FLAC */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 506664C410FD4FF2166C1F89 /* XCRemoteSwiftPackageReference "flac-binary-xcframework" */;
+			productName = FLAC;
+		};
 		B1FAA001F836B3A1D8340D8A /* SwiftyH3 */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = 729E44F3671ED067CCCA43EA /* XCRemoteSwiftPackageReference "SwiftyH3" */;

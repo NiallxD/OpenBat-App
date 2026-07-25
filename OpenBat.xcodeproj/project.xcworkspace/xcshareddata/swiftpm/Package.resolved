@@ -1,6 +1,24 @@
 {
-  "originHash" : "c6013826d43b483dfc79297d9a3b6022b085c049d144fe92d439a2ac56900014",
+  "originHash" : "d1d6ab6ca78b9106e814826c03805001dc3d24b590e3ed8d5782b9327d01eba6",
   "pins" : [
+    {
+      "identity" : "flac-binary-xcframework",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/sbooth/flac-binary-xcframework",
+      "state" : {
+        "revision" : "9005dc2cd455765fb6824eb215c9703429bbe8ff",
+        "version" : "0.2.0"
+      }
+    },
+    {
+      "identity" : "ogg-binary-xcframework",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/sbooth/ogg-binary-xcframework",
+      "state" : {
+        "revision" : "48cbf24e7fb5d329b1f5e24cd2e5b048585ff770",
+        "version" : "0.1.3"
+      }
+    },
     {
       "identity" : "swiftyh3",
       "kind" : "remoteSourceControl",

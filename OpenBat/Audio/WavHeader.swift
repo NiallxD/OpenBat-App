@@ -16,6 +16,7 @@ import Foundation
 /// isolation annotation, so it inherited `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`.
 nonisolated enum WavHeader {
     static func read(url: URL) -> (sampleRate: UInt32, dataBytes: UInt32)? {
+        CloudStorage.ensureDownloaded(url)
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? handle.close() }
         guard let header = try? handle.read(upToCount: 44), header.count == 44 else { return nil }

@@ -20,6 +20,12 @@ final class LocationProvider: NSObject, CLLocationManagerDelegate {
     private(set) var currentCoordinate: CLLocationCoordinate2D?
     private(set) var authorization: CLAuthorizationStatus = .notDetermined
 
+    /// The OS-native per-app "Precise Location" toggle — read by
+    /// UploadConversionPipeline to decide whether the upload copy's GUANO
+    /// location gets fuzzed. Not something this app has any custom UI for;
+    /// the system permission dialog/Settings own this choice entirely.
+    var accuracyAuthorization: CLAccuracyAuthorization { manager.accuracyAuthorization }
+
     /// Set by ContentView so fixes append to the active session's track / title.
     @ObservationIgnored weak var store: ClassificationStore?
 
@@ -29,6 +35,7 @@ final class LocationProvider: NSObject, CLLocationManagerDelegate {
     @ObservationIgnored private var lastTrackPoint: CLLocation?
     @ObservationIgnored private var pendingGeocodeSessionID: UUID?
     @ObservationIgnored private var pendingRegionFix = false
+    @ObservationIgnored private var authorizationContinuation: CheckedContinuation<CLAuthorizationStatus, Never>?
 
     override init() {
         super.init()
@@ -36,6 +43,43 @@ final class LocationProvider: NSObject, CLLocationManagerDelegate {
         manager.desiredAccuracy = kCLLocationAccuracyBest
         manager.activityType = .otherNavigation
         authorization = manager.authorizationStatus
+    }
+
+    /// Requests when-in-use authorization and suspends until the OS dialog has actually
+    /// been resolved (granted/denied/restricted) — used by onboarding so the soft-ask
+    /// screen stays on screen behind the real system alert instead of advancing the
+    /// instant the request fires. A no-op wait (returns immediately) if authorization
+    /// was already decided before this is called.
+    func requestAuthorizationDecision() async -> CLAuthorizationStatus {
+        guard manager.authorizationStatus == .notDetermined else { return manager.authorizationStatus }
+        // Timed out rather than waiting unconditionally: if the delegate
+        // callback never arrives (already-resolved status racing the guard
+        // above, or a restricted-profile edge case), onboarding would suspend
+        // here forever with its Continue button disabled and no way forward.
+        // Whatever the status actually is at that point is a fine answer —
+        // nothing branches on it synchronously.
+        let timeout = Task {
+            try? await Task.sleep(for: .seconds(60))
+            resumeAuthorizationContinuation(with: manager.authorizationStatus)
+        }
+        defer { timeout.cancel() }
+
+        return await withCheckedContinuation { continuation in
+            // A second caller must not strand the first one's continuation —
+            // a checked continuation that is never resumed leaks its task.
+            resumeAuthorizationContinuation(with: manager.authorizationStatus)
+            authorizationContinuation = continuation
+            manager.requestWhenInUseAuthorization()
+        }
+    }
+
+    /// Resumes the pending authorization continuation exactly once, if there is
+    /// one. Every resume path goes through here so none can double-resume
+    /// (a runtime crash) or drop one.
+    private func resumeAuthorizationContinuation(with status: CLAuthorizationStatus) {
+        guard let continuation = authorizationContinuation else { return }
+        authorizationContinuation = nil
+        continuation.resume(returning: status)
     }
 
     /// One-shot fix for region-based feature suggestions (e.g. "a model is available for
@@ -122,6 +166,7 @@ final class LocationProvider: NSObject, CLLocationManagerDelegate {
 
     func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
         authorization = manager.authorizationStatus
+        resumeAuthorizationContinuation(with: manager.authorizationStatus)
         if pendingRegionFix {
             pendingRegionFix = false
             switch manager.authorizationStatus {

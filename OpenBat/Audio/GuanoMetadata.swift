@@ -58,6 +58,7 @@ nonisolated enum GuanoMetadata {
     /// dictionary (last-line-wins on a duplicate key, which never happens in practice);
     /// nil if the file is too short or has no `guan` chunk where one's expected.
     static func read(from url: URL) -> [String: String]? {
+        CloudStorage.ensureDownloaded(url)
         guard let header = WavHeader.read(url: url) else { return nil }
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? handle.close() }

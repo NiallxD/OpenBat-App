@@ -1,0 +1,15 @@
+{
+  "name": "openbat-consent-worker",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:apply": "wrangler d1 execute openbat-consent --file=schema.sql",
+    "db:migrate": "wrangler d1 execute openbat-consent --file=migrations/001_add_token_issued.sql",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260722.1",
+    "wrangler": "^4.0.0"
+  }
+}

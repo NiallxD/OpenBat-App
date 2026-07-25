@@ -341,7 +341,7 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
 
         // Spectrogram render + report run on THIS (recorder) queue too — real file
         // IO and FFT work, kept off the audio-thread-adjacent main-thread hop above.
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let docs = CloudStorage.baseDirectory
         let relativePath = String(finalURL.path.dropFirst(docs.path.count + 1))
         // maxWidth 4096 matches what WavSpectrogramEngine.renderOverview
         // requests for its fallback (non-cached) render path — keeping this
@@ -544,7 +544,7 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
     /// classification results for the whole bout are aggregated at close, so this is
     /// renamed to its final `<stamp>_<SPECIES>.wav` form in `closeSegment()`.
     private func makeURL() -> URL {
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let docs = CloudStorage.baseDirectory
         let stamp = Self.stampFormatter.string(from: Date())
         // Session passes group under the session's own date-stamped folder; Listening
         // keeps the dated day folders.

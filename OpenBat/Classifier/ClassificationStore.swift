@@ -153,6 +153,9 @@ struct Recording: Codable, Identifiable, NoIDFilterable {
     let relativeWavPath: String
     /// Spectrogram JPEG filename under the store's images dir, nil if rendering failed.
     var spectrogramImageFile: String?
+    /// nil means no upload was ever attempted (recorded before this field existed,
+    /// or while community-science contribution was off) — see UploadStatus.swift.
+    var uploadStatus: UploadStatus? = nil
     var isNoID: Bool { species == "NOID" }
     var coordinate: CLLocationCoordinate2D? {
         guard let latitude, let longitude else { return nil }
@@ -205,7 +208,7 @@ final class ClassificationStore {
     private var imageCache = NSCache<NSString, UIImage>()
 
     init() {
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let docs = CloudStorage.baseDirectory
         dir         = docs.appendingPathComponent("Classifications", isDirectory: true)
         imagesDir   = dir.appendingPathComponent("images", isDirectory: true)
         jsonURL     = dir.appendingPathComponent("passes.json")
@@ -367,11 +370,17 @@ final class ClassificationStore {
 
     /// Record a finished, kept WAV segment (see `AudioRecorder.closeAndKeep`). Safe to
     /// call from any thread; the spectrogram JPEG write happens off-thread, matching
-    /// `addPass`'s pattern.
+    /// `addPass`'s pattern. `onInserted` fires on the main actor once the Recording is
+    /// actually in `recordings` — callers that need to act on this exact entry
+    /// (RecordingUploader's `updateUploadStatus`) MUST wait for this rather than
+    /// proceeding immediately after calling `addRecording`: this function returns
+    /// before the (asynchronous, JPEG-write-gated) insert has happened, so anything
+    /// that raced ahead of it would silently no-op against a not-yet-existing id.
     func addRecording(id: UUID = UUID(), date: Date, durationSeconds: Double,
                       species: String, confidence: Float?, pulseCount: Int,
                       sessionID: UUID?, coordinate: CLLocationCoordinate2D?,
-                      relativeWavPath: String, spectrogramImage: UIImage?) {
+                      relativeWavPath: String, spectrogramImage: UIImage?,
+                      onInserted: (() -> Void)? = nil) {
         io.async { [weak self] in
             guard let self else { return }
             var file: String?
@@ -390,8 +399,38 @@ final class ClassificationStore {
             DispatchQueue.main.async {
                 self.recordings.insert(recording, at: 0)
                 self.persistRecordings()
+                onInserted?()
             }
         }
+    }
+
+    // MARK: Upload status
+
+    /// Called by RecordingUploader at each phase of the convert→FLAC→upload
+    /// pipeline, and by its retry sweep — see UploadStatus.swift. A no-op if
+    /// the recording was deleted out from under an in-flight upload.
+    func updateUploadStatus(recordingID: UUID, status: UploadStatus) {
+        guard let index = recordings.firstIndex(where: { $0.id == recordingID }) else { return }
+        var status = status
+        // Carry the consecutive-failure tally here rather than in
+        // RecordingUploader: this is the only place that can see the previous
+        // value. Any phase that isn't `.failed` means a fresh attempt got
+        // further than the last one did, so the count starts over — which is
+        // also what re-enables automatic retries after a manual tap.
+        status.failureCount = status.phase == .failed
+            ? (recordings[index].uploadStatus?.failureCount ?? 0) + 1
+            : 0
+        recordings[index].uploadStatus = status
+        persistRecordings()
+    }
+
+    /// Called only after a successful `ConsentStore.eraseAllData()` — every recording
+    /// this device ever uploaded no longer exists server-side, so their local
+    /// "Uploaded" status would otherwise keep showing stale entries in the upload
+    /// queue forever. Resets every recording back to untouched (nil = not contributing).
+    func clearAllUploadStatus() {
+        for index in recordings.indices { recordings[index].uploadStatus = nil }
+        persistRecordings()
     }
 
     // MARK: Delete
@@ -412,14 +451,42 @@ final class ClassificationStore {
     /// small thumbnails), a Recording's whole reason for existing is the WAV, so an
     /// orphaned multi-minute file left behind on delete would just waste space.
     func delete(_ recording: Recording) {
-        recordings.removeAll { $0.id == recording.id }
+        delete([recording])
+    }
+
+    /// Bulk delete — the only one that actually touches state, with the
+    /// single-recording form above delegating to it.
+    ///
+    /// Deleting one at a time in a loop was O(n²): every `delete` did its own
+    /// `removeAll` scan, its own `io.async` hop, and its own `persistRecordings`,
+    /// which snapshots and JSON-encodes the ENTIRE recordings array. "Delete All"
+    /// over a few thousand recordings meant a few thousand full encodes of a
+    /// shrinking array — a multi-second main-thread stall — and, now that
+    /// `recordings.json` lives in the iCloud container, a few thousand
+    /// sync-triggering writes with it.
+    func delete(_ toDelete: [Recording]) {
+        guard !toDelete.isEmpty else { return }
+        // Stop any transfer already under way — without this, a recording the
+        // user just deleted could still finish uploading to the community
+        // project seconds later.
+        for recording in toDelete {
+            RecordingUploader.shared.cancelUpload(recordingID: recording.id)
+        }
+
+        let doomed = Set(toDelete.map(\.id))
+        recordings.removeAll { doomed.contains($0.id) }
+
+        let imageFiles = toDelete.compactMap(\.spectrogramImageFile)
+        let wavPaths = toDelete.map(\.relativeWavPath)
         io.async { [weak self] in
             guard let self else { return }
-            if let file = recording.spectrogramImageFile {
+            let docs = CloudStorage.baseDirectory
+            for file in imageFiles {
                 try? FileManager.default.removeItem(at: self.imagesDir.appendingPathComponent(file))
             }
-            let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            try? FileManager.default.removeItem(at: docs.appendingPathComponent(recording.relativeWavPath))
+            for path in wavPaths {
+                try? FileManager.default.removeItem(at: docs.appendingPathComponent(path))
+            }
         }
         persistRecordings()
     }
@@ -439,7 +506,7 @@ final class ClassificationStore {
             try? FileManager.default.createDirectory(at: self.imagesDir, withIntermediateDirectories: true)
             try? FileManager.default.removeItem(at: self.jsonURL)
             try? FileManager.default.removeItem(at: self.recordingsURL)
-            let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            let docs = CloudStorage.baseDirectory
             try? FileManager.default.removeItem(at: docs.appendingPathComponent("Recordings"))
         }
     }
@@ -447,7 +514,28 @@ final class ClassificationStore {
     /// Clear only the Listening bucket (passes and recordings not owned by a session).
     func clearListening() {
         for pass in listeningPasses { delete(pass) }
-        for recording in listeningRecordings { delete(recording) }   // removes WAVs too
+        delete(listeningRecordings)   // removes WAVs too
+    }
+
+    /// Deletes every Recording (and its WAV + thumbnail) — NOT `passes`, the
+    /// separate lighter-weight per-pulse ID log entries sessions/species-feed
+    /// are built from, which survive. Settings ▸ Recordings' "Delete All"; the
+    /// disk-heavy WAVs are the actual storage problem being solved there.
+    func deleteAllRecordings() {
+        delete(recordings)
+    }
+
+    /// Settings ▸ Recordings' "Delete NoID" — triggered, but never classified
+    /// confidently enough to call a species (usually just noise).
+    func deleteNoIDRecordings() {
+        delete(recordings.filter(\.isNoID))
+    }
+
+    /// Settings ▸ Recordings' "Delete Low-Confidence" — a real species ID, just
+    /// under `threshold`. Excludes NoID (nil confidence): that's its own
+    /// separate action above, not folded into "low confidence".
+    func deleteRecordings(belowConfidence threshold: Float) {
+        delete(recordings.filter { !$0.isNoID && ($0.confidence ?? 0) < threshold })
     }
 
     // MARK: Image loading
@@ -473,7 +561,7 @@ final class ClassificationStore {
     /// Resolves a Recording's WAV to an absolute URL — never persisted as one (see
     /// `Recording.relativeWavPath`), only ever computed at use time.
     func wavURL(for recording: Recording) -> URL {
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let docs = CloudStorage.baseDirectory
         return docs.appendingPathComponent(recording.relativeWavPath)
     }
 

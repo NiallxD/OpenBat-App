@@ -59,7 +59,7 @@ final class ClassificationLogger {
     }()
 
     private init() {
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let docs = CloudStorage.baseDirectory
         // v2: the header (and thus column layout) changed with the model column + union
         // score columns, so use a fresh filename rather than appending rows with a new
         // shape onto a pre-fix `bat_classifier_log.csv`.

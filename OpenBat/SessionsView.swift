@@ -19,8 +19,8 @@ import MapKit
 struct SessionsView: View {
     @Bindable var store: ClassificationStore
     let settings: AutoIDSettings
+    let consent: ConsentStore
     @State private var selectedTab: SessionTab = .sessions
-    @State private var showClearConfirm = false
     /// Sessions queued by a swipe-delete, pending user confirmation (deleting a
     /// session irreversibly removes all its IDs and thumbnails).
     @State private var sessionsPendingDelete: [RecordingSession] = []
@@ -36,7 +36,7 @@ struct SessionsView: View {
         VStack(spacing: 0) {
             Picker("", selection: $selectedTab) {
                 Text("Sessions").tag(SessionTab.sessions)
-                Text("Listening Recordings").tag(SessionTab.listening)
+                Text("Recordings").tag(SessionTab.listening)
             }
             .pickerStyle(.segmented)
             .padding(.horizontal)
@@ -51,27 +51,26 @@ struct SessionsView: View {
         }
         .navigationTitle("Sessions")
         .navigationBarTitleDisplayMode(.inline)
+        // Forces a fully opaque nav bar instead of the default translucent
+        // Liquid Glass material — without this, this section's own grouped-list
+        // background samples through as a visible grey bar (same root cause
+        // ContentView's own `.toolbarBackground` comment describes; that outer
+        // one wasn't enough to keep this section's bar consistent with the rest).
+        .toolbarBackground(Color(.systemBackground), for: .navigationBar)
+        .hardTopScrollEdge()
         .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Toggle(isOn: $showNoID) {
-                    Image(systemName: showNoID ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
-                }
-                .toggleStyle(.button)
-                .accessibilityLabel(showNoID ? "Hide unclassified recordings" : "Show unclassified recordings")
-            }
-            if selectedTab == .listening && !store.listeningRecordings.isEmpty {
+            // Only filters `filteredListeningRecordings` (the Recordings tab) —
+            // sessionsContent doesn't read `showNoID` at all, so the toggle has
+            // no effect on the Sessions tab and stays hidden there.
+            if selectedTab == .listening {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button(role: .destructive) { showClearConfirm = true } label: {
-                        Image(systemName: "trash")
+                    Toggle(isOn: $showNoID) {
+                        Image(systemName: showNoID ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
                     }
-                    .accessibilityLabel("Clear all")
+                    .toggleStyle(.button)
+                    .accessibilityLabel(showNoID ? "Hide unclassified recordings" : "Show unclassified recordings")
                 }
             }
-        }
-        .confirmationDialog("Delete all Listening IDs?",
-                            isPresented: $showClearConfirm, titleVisibility: .visible) {
-            Button("Delete All", role: .destructive) { store.clearListening() }
-            Button("Cancel", role: .cancel) { }
         }
         .confirmationDialog("Delete this session and all its IDs?",
                             isPresented: Binding(
@@ -102,7 +101,7 @@ struct SessionsView: View {
                     Section(group.title) {
                         ForEach(group.sessions) { session in
                             NavigationLink {
-                                SessionDetailView(session: session, store: store, settings: settings)
+                                SessionDetailView(session: session, store: store, settings: settings, consent: consent)
                             } label: {
                                 SessionRow(session: session, store: store)
                             }
@@ -142,7 +141,7 @@ struct SessionsView: View {
                             NavigationLink {
                                 RecordingDetailView(recording: recording, store: store)
                             } label: {
-                                RecordingRow(recording: recording, store: store)
+                                RecordingRow(recording: recording, store: store, consent: consent)
                             }
                         }
                         .onDelete { offsets in offsets.map { group.recordings[$0] }.forEach(store.delete) }
@@ -249,6 +248,7 @@ struct SessionDetailView: View {
     let session: RecordingSession
     @Bindable var store: ClassificationStore
     let settings: AutoIDSettings
+    let consent: ConsentStore
     @AppStorage("display.showNoID") private var showNoID = false
 
     var body: some View {
@@ -284,7 +284,7 @@ struct SessionDetailView: View {
                         NavigationLink {
                             RecordingDetailView(recording: recording, store: store)
                         } label: {
-                            RecordingRow(recording: recording, store: store)
+                            RecordingRow(recording: recording, store: store, consent: consent)
                         }
                     }
                     .onDelete { offsets in offsets.map { sessionRecordings[$0] }.forEach(store.delete) }

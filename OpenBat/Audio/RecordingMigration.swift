@@ -32,7 +32,7 @@ enum RecordingMigration {
     }
 
     static func run(store: ClassificationStore) async -> Result {
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let docs = CloudStorage.baseDirectory
         let root = docs.appendingPathComponent("Recordings", isDirectory: true)
         let known = Set(store.recordings.map { $0.relativeWavPath })
         // Snapshot on the main actor — Parsed work below runs off it, so it can't

@@ -23,9 +23,11 @@ import SwiftUI
 struct PlaybackListView: View {
     @Bindable var store: ClassificationStore
     let rteSettings: RTESettings
+    let consent: ConsentStore
 
     /// Shared with SessionsView/RecordingDetailView via the same UserDefaults key.
     @AppStorage("display.showNoID") private var showNoID = false
+    @State private var showUploadQueue = false
 
     private var listeningRecordings: [Recording] {
         store.listeningRecordings.filteredByNoID(showNoID: showNoID)
@@ -56,7 +58,7 @@ struct PlaybackListView: View {
                                 NavigationLink {
                                     WavPlayerView(recording: recording, store: store, rteSettings: rteSettings)
                                 } label: {
-                                    RecordingRow(recording: recording, store: store)
+                                    RecordingRow(recording: recording, store: store, consent: consent)
                                 }
                             }
                         }
@@ -70,7 +72,7 @@ struct PlaybackListView: View {
                                     NavigationLink {
                                         WavPlayerView(recording: recording, store: store, rteSettings: rteSettings)
                                     } label: {
-                                        RecordingRow(recording: recording, store: store)
+                                        RecordingRow(recording: recording, store: store, consent: consent)
                                     }
                                 }
                             }
@@ -82,7 +84,22 @@ struct PlaybackListView: View {
         }
         .navigationTitle("Playback")
         .navigationBarTitleDisplayMode(.inline)
+        // See SessionsView's identical fix: forces an opaque nav bar instead of the
+        // default translucent Liquid Glass material sampling this List's background.
+        .toolbarBackground(Color(.systemBackground), for: .navigationBar)
+        .hardTopScrollEdge()
         .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                // Uploading itself now happens per-recording, by tapping its own
+                // eligible badge in the list (RecordingRow.uploadBadge) — this just
+                // opens the read-only status view.
+                Button {
+                    showUploadQueue = true
+                } label: {
+                    Image(systemName: "tray.full")
+                }
+                .accessibilityLabel("Upload Queue")
+            }
             ToolbarItem(placement: .topBarTrailing) {
                 Toggle(isOn: $showNoID) {
                     Image(systemName: showNoID ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
@@ -90,6 +107,9 @@ struct PlaybackListView: View {
                 .toggleStyle(.button)
                 .accessibilityLabel(showNoID ? "Hide unclassified recordings" : "Show unclassified recordings")
             }
+        }
+        .sheet(isPresented: $showUploadQueue) {
+            UploadQueueView(classStore: store, consent: consent)
         }
     }
 }

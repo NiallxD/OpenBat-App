@@ -39,10 +39,21 @@ struct ContentView: View {
     @State private var rteSettings = RTESettings()
     @State private var classStore = ClassificationStore()
     @State private var location = LocationProvider()
+    // Not `@State`: the store outlives any one screen and is shared with
+    // onboarding. `@Observable` tracks property reads in `body` regardless of
+    // how the reference is held, so this still updates the view.
+    private let consent = ConsentStore.shared
     @Environment(\.scenePhase) private var scenePhase
     @State private var showStartPrompt = false
+    @State private var showMicDeniedAlert = false
+    // Easter egg: tap the footer version number 10x within the reset window
+    // below to send a swarm of bats across the screen — see BatSwarmOverlay.
+    @State private var versionTapCount = 0
+    @State private var versionTapResetWork: DispatchWorkItem?
+    @State private var showBatSwarm = false
     @State private var showDiagnostics = false
     @State private var showSettings = false
+    @State private var showHelp = false
     @State private var showInfo = false
     // Guided spotlight tour (launched from Info). tourActive gates the overlay;
     // tourIndex is the current step. tourPending is set by the Info sheet's tour
@@ -146,6 +157,9 @@ struct ContentView: View {
                 .sheet(isPresented: $showDiagnostics) {
                     DiagnosticsView(audio: audio, recorder: recorder)
                 }
+                .sheet(isPresented: $showHelp) {
+                    SafariView(url: PrivacyLinks.helpURL)
+                }
                 // onDismiss (not just the Done button) so per-model AutoID edits
                 // survive a swipe-down dismissal of the sheet too.
                 .sheet(isPresented: $showSettings, onDismiss: {
@@ -157,7 +171,7 @@ struct ContentView: View {
                 }) {
                     SettingsView(settings: autoIDSettings, rteSettings: rteSettings,
                                  pulseDetector: pulseDetector, recorder: recorder,
-                                 location: location)
+                                 location: location, consent: consent, classStore: classStore)
                 }
                 .sheet(isPresented: Binding(
             get: { autoIDSettings.pendingChangeSummary != nil },
@@ -218,6 +232,19 @@ struct ContentView: View {
         // its live per-species GBIF fetch.
         .task { await speciesRange.refreshFromRemote() }
         .onAppear {
+            RecordingUploader.shared.activate()
+            RecordingUploader.shared.classStore = classStore
+            // recordistName/uploadOverWiFiOnly/autoUploadEnabled read fresh from
+            // UserDefaults each call (not captured) — see RecordingUploader's
+            // doc comment on why a captured @AppStorage snapshot goes stale.
+            RecordingUploader.shared.retryContextProvider = { [consent, location] in
+                UploadRetryContext(
+                    consent: consent,
+                    recordistName: UserDefaults.standard.string(forKey: "community.recordistName") ?? "",
+                    locationAuthorization: location.accuracyAuthorization,
+                    wifiOnly: UserDefaults.standard.bool(forKey: "community.uploadOverWiFiOnly"),
+                    autoUploadEnabled: UserDefaults.standard.bool(forKey: "community.autoUploadEnabled"))
+            }
             audio.bufferSink = { [processor, recorder] buffer in
                 processor.process(buffer)
                 recorder.append(buffer)
@@ -232,15 +259,33 @@ struct ContentView: View {
             pulseDetector.onPulseActiveChanged = { [recorder] active in
                 recorder.setPulseActive(active)
             }
-            recorder.onRecordingSaved = { [classStore] report in
-                classStore.addRecording(date: report.date, durationSeconds: report.durationSeconds,
+            recorder.onRecordingSaved = { [classStore, consent, location] report in
+                // Shared between both calls so RecordingUploader's status
+                // updates land on the exact Recording classStore just created.
+                let recordingID = UUID()
+                classStore.addRecording(id: recordingID, date: report.date, durationSeconds: report.durationSeconds,
                                         species: report.species, confidence: report.confidence,
                                         pulseCount: report.pulseCount, sessionID: report.sessionID,
                                         coordinate: report.coordinate.map {
                                             CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon)
                                         },
                                         relativeWavPath: report.relativeWavPath,
-                                        spectrogramImage: report.spectrogramImage)
+                                        spectrogramImage: report.spectrogramImage) { [consent, location] in
+                    // Only runs once the Recording actually exists in classStore.recordings —
+                    // see addRecording's doc comment on the race this closes.
+                    let docs = CloudStorage.baseDirectory
+                    RecordingUploader.shared.handleRecordingSaved(
+                        recordingID: recordingID,
+                        originalWavURL: docs.appendingPathComponent(report.relativeWavPath),
+                        date: report.date, durationSeconds: report.durationSeconds,
+                        species: report.species, confidence: report.confidence,
+                        coordinate: report.coordinate,
+                        consent: consent,
+                        recordistName: UserDefaults.standard.string(forKey: "community.recordistName") ?? "",
+                        locationAuthorization: location.accuracyAuthorization,
+                        wifiOnly: UserDefaults.standard.bool(forKey: "community.uploadOverWiFiOnly"),
+                        autoUploadEnabled: UserDefaults.standard.bool(forKey: "community.autoUploadEnabled"))
+                }
             }
             processor.sampleRate = audio.diagnostics.actualSampleRate
             pulseDetector.pcmProvider = { [processor] count, endAbsolute in
@@ -268,6 +313,14 @@ struct ContentView: View {
         } message: {
             Text("A session logs IDs and a GPS track on a map. Listening just records to the Listening log.")
         }
+        // AudioEngineController.start() sets this exact status string when
+        // AVAudioApplication.requestRecordPermission (or a prior denial) blocks
+        // capture — surfaced here as an actionable alert instead of leaving users
+        // to find the silent "ear" button doing nothing. Pulled into a single
+        // extension call (rather than chaining .onChange/.alert inline) because
+        // this body's modifier chain is already long enough that the type
+        // checker times out on any more inline closures added directly to it.
+        .micPermissionAlert(status: audio.status, isPresented: $showMicDeniedAlert)
         // audio.activeSampleRate / activeInputName (not diagnostics.*) in the
         // onChange reads below and in `nyquist`: the diagnostics struct churns at
         // the 15 Hz stats flush, and reading ANY of its fields here invalidates
@@ -334,6 +387,15 @@ struct ContentView: View {
         }
         .onDisappear {
             UIApplication.shared.isIdleTimerDisabled = false
+        }
+        .overlayPreferenceValue(VersionFooterAnchorKey.self) { anchor in
+            GeometryReader { proxy in
+                if showBatSwarm, let anchor {
+                    let rect = proxy[anchor]
+                    BatSwarmOverlay(origin: CGPoint(x: rect.midX, y: rect.midY))
+                }
+            }
+            .ignoresSafeArea()
         }
     }
 
@@ -403,8 +465,8 @@ struct ContentView: View {
     @ViewBuilder private var sectionContent: some View {
         switch section {
         case .detector:  detectorLayout
-        case .sessions:  SessionsView(store: classStore, settings: autoIDSettings)
-        case .playback:  PlaybackListView(store: classStore, rteSettings: rteSettings)
+        case .sessions:  SessionsView(store: classStore, settings: autoIDSettings, consent: consent)
+        case .playback:  PlaybackListView(store: classStore, rteSettings: rteSettings, consent: consent)
         case .species:   SpeciesExplorerView(store: speciesGuide, rangeStore: speciesRange, userCoordinate: location.currentCoordinate)
         }
     }
@@ -459,12 +521,12 @@ struct ContentView: View {
             if #available(iOS 26.0, *) {
                 GlassEffectContainer {
                     optionsMenuContent {
-                        Image(systemName: "ellipsis.circle").glassEffect(.identity)
+                        Image(systemName: "gearshape").glassEffect(.identity)
                     }
                     .clipped()
                 }
             } else {
-                optionsMenuContent { Image(systemName: "ellipsis.circle") }
+                optionsMenuContent { Image(systemName: "gearshape") }
             }
         }
         .accessibilityLabel("Menu")
@@ -474,6 +536,9 @@ struct ContentView: View {
         Menu {
             Button { showSettings = true } label: {
                 Label("Settings", systemImage: "gearshape")
+            }
+            Button { showHelp = true } label: {
+                Label("Help", systemImage: "questionmark.circle")
             }
             Divider()
             Button { showDiagnostics = true } label: {
@@ -827,7 +892,7 @@ struct ContentView: View {
     /// zoom (showPulseView) and frequency-band (showBand) popovers: those are
     /// meant to be used while watching the live feed.
     private var menuIsOpen: Bool {
-        showDiagnostics || showSettings || showInfo || autoIDSettings.pendingChangeSummary != nil
+        showDiagnostics || showSettings || showHelp || showInfo || autoIDSettings.pendingChangeSummary != nil
     }
 
     private func applyBand() {
@@ -1135,6 +1200,53 @@ struct ContentView: View {
             .font(.caption2)
             .foregroundStyle(.tertiary)
             .padding(.bottom, 4)
+            .contentShape(Rectangle())
+            .onTapGesture { registerVersionTap() }
+            .versionFooterAnchor()
+    }
+
+    /// Counts taps on the version footer within a rolling window; 10 taps
+    /// before the window lapses triggers the bat swarm. Each tap restarts
+    /// the reset timer so a burst of slower-than-instant-but-still-rapid
+    /// taps still counts, but a stray single tap days apart never does.
+    private func registerVersionTap() {
+        versionTapResetWork?.cancel()
+        versionTapCount += 1
+        if versionTapCount >= 10 {
+            versionTapCount = 0
+            showBatSwarm = true
+            flourishBatSwarmHaptics()
+            DispatchQueue.main.asyncAfter(deadline: .now() + BatSwarmOverlay.totalDuration) {
+                showBatSwarm = false
+            }
+            return
+        }
+        // A light tick just acknowledges the tap registered — the real payoff
+        // is the haptic flourish timed to the bats actually flying out below.
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        let resetWork = DispatchWorkItem { versionTapCount = 0 }
+        versionTapResetWork = resetWork
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2, execute: resetWork)
+    }
+
+    /// A volley of impacts timed to the swarm's emergence trickle (bats leave
+    /// the origin over roughly the first second — see `BatFlight.startDelay`),
+    /// ramping light → heavy, capped off with a success notification once the
+    /// last bat is airborne — so the haptic buildup rides the actual flight
+    /// rather than the taps that triggered it.
+    private func flourishBatSwarmHaptics() {
+        let pulseCount = 10
+        for i in 0..<pulseCount {
+            let delay = Double(i) / Double(pulseCount - 1) * 1.0
+            let style: UIImpactFeedbackGenerator.FeedbackStyle =
+                i < 4 ? .light : (i < 8 ? .medium : .heavy)
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                UIImpactFeedbackGenerator(style: style).impactOccurred()
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) {
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+        }
     }
 
     private var playStopButton: some View {
@@ -1341,6 +1453,24 @@ private extension View {
     func controlIcon() -> some View {
         font(.body)
             .frame(width: 24, height: 22)
+    }
+
+    /// See the call site in `ContentView.body` for why this is a single extension
+    /// call rather than inline `.onChange`/`.alert` modifiers.
+    func micPermissionAlert(status: String, isPresented: Binding<Bool>) -> some View {
+        onChange(of: status) { _, newValue in
+            if newValue.contains("permission denied") { isPresented.wrappedValue = true }
+        }
+        .alert("Microphone Access Needed", isPresented: isPresented) {
+            Button("Open Settings") {
+                if let url = URL(string: UIApplication.openSettingsURLString) {
+                    UIApplication.shared.open(url)
+                }
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("OpenBat can't detect or record without microphone access. Enable it for OpenBat in the Settings app.")
+        }
     }
 }
 
