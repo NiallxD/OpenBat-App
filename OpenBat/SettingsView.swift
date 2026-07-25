@@ -107,6 +107,14 @@ struct SettingsView: View {
                      : "Recordings and session history are stored only on this device, and are permanently lost if you delete OpenBat. Nothing is stored in iCloud.")
             }
 
+            if case .awaitingDownloads(let count) = CloudStorage.lastMigrationResult {
+                Section {
+                    Label("\(count) recording\(count == 1 ? "" : "s") still need downloading from iCloud before they can be moved to this device. That's been started — reopen OpenBat once it finishes and the move will complete. Nothing has been moved or lost in the meantime.",
+                          systemImage: "arrow.down.circle")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
             if case .failed(let reason) = CloudStorage.lastMigrationResult {
                 Section {
                     Label("Couldn't move your recordings: \(reason) Nothing was moved — your library is still where it was. Try again, or free up space first.",

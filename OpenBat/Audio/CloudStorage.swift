@@ -113,6 +113,10 @@ nonisolated enum CloudStorage {
         /// iCloud was asked for but the container can't be resolved right now.
         /// The preference is left pending so a later launch retries.
         case iCloudUnavailable
+        /// Moving OUT of iCloud was deferred because some files exist only as
+        /// placeholders on this device. Downloads have been requested; a later
+        /// launch retries. Carries how many files are still to come.
+        case awaitingDownloads(Int)
         /// Nothing was moved — the library is intact where it was.
         case failed(String)
     }
@@ -149,6 +153,26 @@ nonisolated enum CloudStorage {
         let destination = wantsICloud ? cloud : local
 
         let manager = FileManager.default
+
+        // Moving OUT of iCloud, the source may hold files that exist only as
+        // placeholders on this device — recorded on another device, or evicted
+        // under storage pressure, or not yet pulled down after a reinstall.
+        // `setUbiquitous(false, ...)` on a placeholder is not guaranteed to
+        // materialise the contents first, and a "successful" move that yields a
+        // zero-length WAV would destroy the only copy: the iCloud original is
+        // gone and the local file is empty. So refuse, request the downloads,
+        // and let a later launch do it once the bytes are actually here.
+        //
+        // Only reached on the launch after the user changes the setting, so the
+        // cost of walking the tree isn't paid on a normal launch.
+        if currentlyICloud && !wantsICloud {
+            let pending = undownloadedFiles(under: source)
+            if !pending.isEmpty {
+                for url in pending { try? manager.startDownloadingUbiquitousItem(at: url) }
+                return .awaitingDownloads(pending.count)
+            }
+        }
+
         try? manager.createDirectory(at: destination, withIntermediateDirectories: true)
         guard let items = try? manager.contentsOfDirectory(at: source, includingPropertiesForKeys: nil) else {
             return .failed("Couldn't read the current storage location.")
@@ -186,6 +210,28 @@ nonisolated enum CloudStorage {
 
         defaults.set(wantsICloud, forKey: rootChoiceKey)
         return .moved(toICloud: wantsICloud)
+    }
+
+    /// Every file under `root` whose contents aren't on this device yet.
+    ///
+    /// `.notDownloaded` is the only status that means "no local contents" —
+    /// `.downloaded` and `.current` both have the bytes (they differ only in
+    /// whether a newer version exists remotely). A nil status means the item
+    /// isn't ubiquitous at all, which is fine. Directories are skipped: only
+    /// files carry contents worth losing.
+    private static func undownloadedFiles(under root: URL) -> [URL] {
+        let keys: [URLResourceKey] = [.ubiquitousItemDownloadingStatusKey, .isDirectoryKey]
+        guard let enumerator = FileManager.default.enumerator(
+            at: root, includingPropertiesForKeys: keys) else { return [] }
+
+        var pending: [URL] = []
+        for case let url as URL in enumerator {
+            guard let values = try? url.resourceValues(forKeys: Set(keys)),
+                  values.isDirectory != true,
+                  let status = values.ubiquitousItemDownloadingStatus else { continue }
+            if status == .notDownloaded { pending.append(url) }
+        }
+        return pending
     }
 
     private static func ubiquityDocuments() -> URL? {
