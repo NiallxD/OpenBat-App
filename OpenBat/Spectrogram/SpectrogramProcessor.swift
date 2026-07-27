@@ -133,6 +133,16 @@ nonisolated final class SpectrogramProcessor: @unchecked Sendable {
     // Renderer hand-off.
     private let lock = NSLock()
     private var pending: [Column] = []
+    /// Backpressure cap on `pending` (≈2 s at 1500 cols/s) — without this, a main-thread
+    /// stall (the MTKView's display link can pause mid-frame during UIKit gesture
+    /// tracking, e.g. dragging the noise-floor `Slider` in `FrequencyBandControl`'s
+    /// popover, which isn't in `menuIsOpen`'s pause list because it's meant to stay
+    /// live) leaves this array growing unbounded on the audio thread — several MB/s of
+    /// `Column`s nobody's draining — while `draw()` would then have to synchronously
+    /// catch up through the whole backlog once it resumes, delaying the next frame
+    /// further and compounding the stall. Dropping the oldest excess instead means
+    /// `draw()` always jumps straight back to "live" rather than replaying a stale queue.
+    private static let maxPendingColumns = 3000
 
     // Raw PCM ring buffer for the classifier (written on audio thread, read on main thread).
     // 10 s @ 384 kHz = 3,840,000 samples ≈ 15 MB.
@@ -277,6 +287,9 @@ nonisolated final class SpectrogramProcessor: @unchecked Sendable {
         guard !columns.isEmpty else { return }
         lock.lock()
         pending.append(contentsOf: columns)
+        if pending.count > Self.maxPendingColumns {
+            pending.removeFirst(pending.count - Self.maxPendingColumns)
+        }
         lock.unlock()
     }
 

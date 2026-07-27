@@ -108,6 +108,16 @@ private struct DiagnosticsCard: View {
         return VStack(spacing: 12) {
             row("Input", d.inputName, badge: d.isUSBInput ? "USB" : nil)
             Divider()
+            // Both shown raw, unsanitized, so the values a real microphone
+            // reports can be inspected directly — the only reliable way to
+            // confirm a given mic doesn't put a serial in its product string.
+            // Neither is ever contributed in this form (see
+            // AnonymizedUploadBuilder.sanitizedHardwareName); the UID is never
+            // contributed at all.
+            row("Input contributed as", AnonymizedUploadBuilder.sanitizedHardwareName(d.inputName))
+            Divider()
+            row("Input UID (local only)", d.inputUID)
+            Divider()
             row(
                 "Session rate",
                 d.sessionSampleRate > 0 ? "\(Int(d.sessionSampleRate)) Hz" : "—",

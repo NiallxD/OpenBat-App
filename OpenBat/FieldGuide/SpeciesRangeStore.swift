@@ -70,7 +70,7 @@ final class SpeciesRangeStore {
         static let supportedSchemaVersion = 1
     }
 
-    private static let cacheURL: URL = {
+    nonisolated private static let cacheURL: URL = {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory,
                                            in: .userDomainMask)[0]
             .appendingPathComponent("SpeciesGuide", isDirectory: true)
@@ -78,8 +78,20 @@ final class SpeciesRangeStore {
         return dir.appendingPathComponent("SpeciesRangeData.json")
     }()
 
-    init() {
-        guard let cached = Self.decode(from: Self.cacheURL) else { return }
+    /// Cheap on purpose — see `SpeciesGuideStore.init()`'s doc comment for why:
+    /// this runs inline as `ContentView`'s `@State` default value, which is
+    /// constructed inside `OpenBatApp`'s `WindowGroup` content closure and
+    /// re-evaluates every time that closure does. `loadLocal()`, called once
+    /// from `ContentView`'s `.task`, does the actual (off-main) cache read.
+    init() {}
+
+    /// Loads the cached range data off the main thread, then hands the result
+    /// back to the main actor. Call once, e.g. from a `.task` alongside
+    /// `refreshFromRemote()`.
+    func loadLocal() async {
+        guard let cached = await Task.detached(priority: .userInitiated, operation: {
+            Self.decode(from: Self.cacheURL)
+        }).value else { return }
         ranges = Self.convert(cached.ranges)
         dataVersion = cached.dataVersion
         updatedAt = cached.updatedAt
@@ -117,10 +129,15 @@ final class SpeciesRangeStore {
         }
     }
 
-    private static func decode(from url: URL) -> RangeData? {
-        guard let data = try? Data(contentsOf: url),
-              let decoded = try? JSONDecoder().decode(RangeData.self, from: data),
-              decoded.schemaVersion <= RangeData.supportedSchemaVersion else { return nil }
+    nonisolated private static func decode(from url: URL) -> RangeData? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        guard let decoded = try? JSONDecoder().decode(RangeData.self, from: data),
+              decoded.schemaVersion <= RangeData.supportedSchemaVersion else {
+            // Corrupt/truncated/unsupported-schema cache — self-heal instead of
+            // silently re-failing to decode it on every future launch.
+            try? FileManager.default.removeItem(at: url)
+            return nil
+        }
         return decoded
     }
 

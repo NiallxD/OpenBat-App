@@ -50,11 +50,14 @@ nonisolated struct FLACEncoder: LosslessAudioEncoder {
 
         // The source WAV's GUANO fields ride along as Vorbis comments. Without
         // this the encoder silently dropped everything after the PCM, so the
-        // uploaded file carried no device id, consent version, recordist,
-        // applied high-pass cutoff or location at all — the whole point of
-        // UploadConversionPipeline.buildDerivedGuano was being discarded one
-        // step before upload, leaving R2 objects whose only provenance was
-        // their key path.
+        // uploaded file carried no timestamp, location, species or applied
+        // high-pass cutoff at all — leaving R2 objects with no usable
+        // provenance whatsoever.
+        //
+        // Note the source here is the DERIVED copy, not the on-device original:
+        // by this point its GUANO has already been through
+        // `AnonymizedUploadBuilder`'s allowlist, so this copies forward the
+        // anonymized field set and cannot reintroduce anything stripped from it.
         let vorbisComment = Self.makeVorbisComment(from: GuanoMetadata.read(from: wavURL) ?? [:])
         defer { if let vorbisComment { FLAC__metadata_object_delete(vorbisComment) } }
         if let vorbisComment {

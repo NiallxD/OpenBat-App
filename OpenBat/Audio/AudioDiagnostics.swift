@@ -24,7 +24,15 @@ struct AudioDiagnostics: Equatable {
     /// low, iOS never granted the native rate to the session.
     var sessionSampleRate: Double = 0
     /// Human-readable name of the active input port (e.g. the Griff / a USB device).
+    /// For USB audio this is the device's own USB product string — vendor-chosen,
+    /// not ours, which is why the contributed copy runs it through
+    /// `AnonymizedUploadBuilder.sanitizedHardwareName` first.
     var inputName: String = "—"
+    /// The port's unique identifier. NEVER contributed and never written to a
+    /// recording — surfaced in Diagnostics only, because this is the field most
+    /// likely to contain a hardware serial and the only way to find out what a
+    /// given microphone actually reports is to look at it with one attached.
+    var inputUID: String = "—"
     /// Whether the active input port reports as USB audio (vs. the built-in mic).
     var isUSBInput: Bool = false
     /// Whether any USB audio input (the Griff) is attached at all, active route or

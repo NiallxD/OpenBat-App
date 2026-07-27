@@ -56,7 +56,11 @@ struct PlaybackListView: View {
                         Section("Listening") {
                             ForEach(listeningRecordings.sorted { $0.date > $1.date }) { recording in
                                 NavigationLink {
-                                    WavPlayerView(recording: recording, store: store, rteSettings: rteSettings)
+                                    // Lazy: WavPlayerView's `@State` engine is
+                                    // expensive to construct — see LazyDestination.
+                                    LazyDestination {
+                                        WavPlayerView(recording: recording, store: store, rteSettings: rteSettings)
+                                    }
                                 } label: {
                                     RecordingRow(recording: recording, store: store, consent: consent)
                                 }
@@ -70,7 +74,9 @@ struct PlaybackListView: View {
                             Section(session.title) {
                                 ForEach(recordings) { recording in
                                     NavigationLink {
-                                        WavPlayerView(recording: recording, store: store, rteSettings: rteSettings)
+                                        LazyDestination {
+                                            WavPlayerView(recording: recording, store: store, rteSettings: rteSettings)
+                                        }
                                     } label: {
                                         RecordingRow(recording: recording, store: store, consent: consent)
                                     }
@@ -87,7 +93,7 @@ struct PlaybackListView: View {
         // See SessionsView's identical fix: forces an opaque nav bar instead of the
         // default translucent Liquid Glass material sampling this List's background.
         .toolbarBackground(Color(.systemBackground), for: .navigationBar)
-        .hardTopScrollEdge()
+        .flatTopScrollEdge()
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 // Uploading itself now happens per-recording, by tapping its own

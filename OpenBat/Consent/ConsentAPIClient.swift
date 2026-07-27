@@ -32,13 +32,12 @@ nonisolated enum ConsentAPIClient {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
-        let formatter = ISO8601DateFormatter()
         let payload: [String: Any?] = [
             "device_id": deviceID,
             "consent_version": record.consentVersion,
             "status": record.status.rawValue,
-            "granted_at": record.grantedAt.map(formatter.string),
-            "revoked_at": record.revokedAt.map(formatter.string)
+            "granted_at": record.grantedAt.map(coarseTimestamp),
+            "revoked_at": record.revokedAt.map(coarseTimestamp)
         ]
         guard let body = try? JSONSerialization.data(withJSONObject: payload.compactMapValues { $0 }) else {
             return false
@@ -70,29 +69,61 @@ nonisolated enum ConsentAPIClient {
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
     }
 
-    /// GDPR-style full erasure — deletes the D1 consent row AND every R2 object
-    /// under this device_id (see the Worker's `handleErase`). Distinct from
-    /// `push(_:deviceID:)` with `.revoked`, which only stops future uploads;
-    /// this is the destructive action gated behind the app's type-to-confirm
-    /// UI. Returns the number of objects deleted on success, nil on any
-    /// failure (network error, non-200, Worker not deployed) so the caller can
-    /// tell the user the request didn't go through rather than assuming success.
-    static func eraseAllData(deviceID: String) async -> Int? {
-        guard !baseURL.isEmpty, var components = URLComponents(string: "\(baseURL)/consent") else { return nil }
+    /// Rounds a consent timestamp down to the hour before it leaves the device.
+    ///
+    /// The consent database and the recording store are deliberately unlinkable:
+    /// D1 holds device ids and consent state, R2 holds recordings with no
+    /// identifier of any kind, and no column joins them. But *time* was a
+    /// residual join — every stored object has a creation time, and a
+    /// second-precision `granted_at` sitting in D1 meant someone holding both
+    /// could try to correlate "this device consented at 21:03:12" against "an
+    /// object appeared shortly after". That correlation is weak in practice
+    /// (people consent, then go out and record, then upload hours or days
+    /// later) but it was weak by *circumstance* rather than by construction,
+    /// and it is strongest for the auto-upload minority who send on save.
+    ///
+    /// Hour granularity removes it while losing nothing that matters: proving
+    /// consent was given needs a date, not a second. Coarsened here, on the
+    /// device, so the precise value never reaches the server at all — the same
+    /// strip-at-the-edge rule the upload pipeline follows.
+    private static func coarseTimestamp(_ date: Date) -> String {
+        let hour = (date.timeIntervalSince1970 / 3600).rounded(.down) * 3600
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        formatter.timeZone = TimeZone(identifier: "UTC")
+        return formatter.string(from: Date(timeIntervalSince1970: hour))
+    }
+
+    /// Erases the consent record held for this device (see the Worker's
+    /// `handleErase`). Distinct from `push(_:deviceID:)` with `.revoked`, which
+    /// only flips status to stop future uploads; this deletes the row outright,
+    /// and is gated behind the app's type-to-confirm UI.
+    ///
+    /// It does NOT delete contributed recordings, and there is no variant of
+    /// this call that could. Contributions are stored with no device identifier,
+    /// a ~100 m grid coordinate and a 5-minute timestamp bucket — nothing links
+    /// them to a device, so there is no set of "this user's recordings" to
+    /// address. That is the point of the design, and it's disclosed up front in
+    /// `ConsentView` before anyone contributes anything.
+    ///
+    /// Returns true on success, false on any failure (network error, non-200,
+    /// Worker not deployed) so the caller can tell the user the request didn't
+    /// go through rather than assuming success. It used to return a deleted-
+    /// object count; there is no longer anything to count.
+    static func eraseConsentRecord(deviceID: String) async -> Bool {
+        guard !baseURL.isEmpty, var components = URLComponents(string: "\(baseURL)/consent") else { return false }
         components.queryItems = [URLQueryItem(name: "device_id", value: deviceID)]
-        guard let url = components.url else { return nil }
+        guard let url = components.url else { return false }
 
         var request = URLRequest(url: url)
         request.httpMethod = "DELETE"
         authorize(&request)
 
-        guard let (data, response) = try? await URLSession.shared.data(for: request),
-              let http = response as? HTTPURLResponse, http.statusCode == 200,
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let deletedObjects = json["deletedObjects"] as? Int else {
-            return nil
+        guard let (_, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            return false
         }
-        return deletedObjects
+        return true
     }
 
     /// Phase 6 uploads call this before accepting a file for a given device.

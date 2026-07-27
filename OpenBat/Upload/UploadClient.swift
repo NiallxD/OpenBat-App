@@ -18,19 +18,18 @@ nonisolated enum UploadClient {
     /// than failing loudly in that case.
     static var baseURL: String = "https://openbat-consent.niallbell.workers.dev"
 
-    private static let dateFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd"
-        f.timeZone = TimeZone(identifier: "UTC")
-        return f
-    }()
-
-    /// `{device_id}/{date}/{recording_id}.flac` — matches the object key
-    /// convention in the spec (§6) exactly, so the Worker can derive the R2
-    /// key straight from the URL path.
-    static func uploadURL(deviceID: String, date: Date, recordingID: String) -> URL? {
+    /// `{bucketed_date}/{object_id}.flac`. The key is built by
+    /// `AnonymizedUploadBuilder`, not here — this only prefixes the endpoint, so
+    /// there is no second place where an object key gets assembled and could
+    /// drift from what the anonymizer decided.
+    ///
+    /// The key used to lead with `{device_id}/`, which made every uploaded
+    /// object permanently attributable to the device that sent it (and was what
+    /// let the erase endpoint sweep a device's recordings). That prefix is gone:
+    /// see the notes' §4, and `ConsentAPIClient.eraseAllData` for what erasure
+    /// now covers instead.
+    static func uploadURL(objectKey: String) -> URL? {
         guard !baseURL.isEmpty else { return nil }
-        let dateString = dateFormatter.string(from: date)
-        return URL(string: "\(baseURL)/upload/\(deviceID)/\(dateString)/\(recordingID).flac")
+        return URL(string: "\(baseURL)/upload/\(objectKey)")
     }
 }

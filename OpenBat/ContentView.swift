@@ -34,7 +34,6 @@ struct ContentView: View {
     @State private var processor = SpectrogramProcessor()
     @State private var pulseDetector = PulseDetector()
     @State private var recorder = AudioRecorder()
-    @State private var screenRecorder = ScreenRecorder()
     @State private var autoIDSettings = AutoIDSettings()
     @State private var rteSettings = RTESettings()
     @State private var classStore = ClassificationStore()
@@ -53,6 +52,10 @@ struct ContentView: View {
     @State private var showBatSwarm = false
     @State private var showDiagnostics = false
     @State private var showSettings = false
+    /// Set once per launch when a previously-granted consent predates the
+    /// current wording — see `ConsentStore.needsReconsent`.
+    @State private var showReconsentPrompt = false
+    @State private var hasCheckedReconsent = false
     @State private var showHelp = false
     @State private var showInfo = false
     // Guided spotlight tour (launched from Info). tourActive gates the overlay;
@@ -80,8 +83,6 @@ struct ContentView: View {
     @State private var feedSessionStart: Date?
     // .compact vertical size class == iPhone landscape → use the wide layout.
     @Environment(\.verticalSizeClass) private var vSizeClass
-    // When on, arming the recorder also starts ReplayKit screen capture.
-    @AppStorage("recording.screenCaptureEnabled") private var screenCaptureEnabled = false
     @AppStorage("recording.autoRecordOnSessionStart") private var autoRecordOnSessionStart = true
     // Toggled from each panel's own config popover (bandButton / pulseViewButton).
     @AppStorage("display.spectrogramShowsSpeciesID") private var spectrogramShowsSpeciesID = false
@@ -110,8 +111,15 @@ struct ContentView: View {
     // lets automated runs exercise non-default sections without UI scripting.
     @State private var section: AppSection =
         UserDefaults.standard.string(forKey: "startSection").flatMap(AppSection.init) ?? .detector
-    /// Field-guide data (bundled → cached → GitHub). Created lazily so app
-    /// startup isn't gated on JSON decode; the remote check runs in .task below.
+    /// Field-guide data (bundled → cached → GitHub). `init()` itself is cheap —
+    /// the actual bundled/cached JSON decode happens off-main in `loadLocal()`,
+    /// called from `.task` below, not here. This constructor expression runs
+    /// inline as part of `ContentView.init()` (SwiftUI's `@State` default-value
+    /// mechanism), which is itself invoked from `OpenBatApp`'s `WindowGroup`
+    /// content closure and can re-evaluate more than once per app lifetime —
+    /// putting real work in `init()` used to mean a synchronous ~328 KB
+    /// `JSONDecoder` pass could land on the main thread at any of those points,
+    /// not just once at launch.
     @State private var speciesGuide = SpeciesGuideStore()
     @State private var speciesRange = SpeciesRangeStore()
 
@@ -137,7 +145,7 @@ struct ContentView: View {
                 // through the glass. An explicit solid Color background (the
                 // ShapeStyle overload) blocks that sampling outright. Same root cause
                 // the tour dim overlay hit below.
-                .toolbarBackground(Color(.systemBackground), for: .navigationBar)
+                .toolbarBackground(Color.black, for: .navigationBar)
                 // Hidden during the tour: even with a fixed toolbar background, the
                 // dim overlay's cutout ring sits directly under the bar and its own
                 // animation still reads as motion to the buttons. They're not usable
@@ -172,6 +180,20 @@ struct ContentView: View {
                     SettingsView(settings: autoIDSettings, rteSettings: rteSettings,
                                  pulseDetector: pulseDetector, recorder: recorder,
                                  location: location, consent: consent, classStore: classStore)
+                }
+                // Someone who opted in, then had the terms change under them,
+                // has silently stopped contributing. Settings carries the same
+                // prompt, but relying on them to wander in there means their
+                // participation just quietly ends. Asked once per launch, and
+                // only of people who actually did opt in — `needsReconsent` is
+                // false for anyone who declined or never decided.
+                .sheet(isPresented: $showReconsentPrompt) {
+                    NavigationStack {
+                        ConsentView(consent: consent) { showReconsentPrompt = false }
+                            .padding(.horizontal)
+                            .navigationTitle("Terms Updated")
+                            .navigationBarTitleDisplayMode(.inline)
+                    }
                 }
                 .sheet(isPresented: Binding(
             get: { autoIDSettings.pendingChangeSummary != nil },
@@ -223,27 +245,39 @@ struct ContentView: View {
             // status-bar-plus-nav-bar height above the ring.
             .ignoresSafeArea()
         }
-        // Once per launch: see if the community species-guide JSON on GitHub
-        // has a newer dataVersion than what's bundled/cached. Offline → no-op.
-        .task { await speciesGuide.refreshFromRemote() }
-        // Same once-per-launch check for the committed GBIF range snapshot —
-        // no bundled fallback here, so offline-with-no-cache just leaves
+        // Loads the bundled/cached guide off the main thread (see
+        // `SpeciesGuideStore.init()`'s doc comment for why this can't just
+        // happen in the `@State` initializer), then checks GitHub once per
+        // launch for a newer dataVersion. Offline → the remote check no-ops.
+        .task { await speciesGuide.loadLocal(); await speciesGuide.refreshFromRemote() }
+        // Same pattern for the committed GBIF range snapshot — no bundled
+        // fallback here, so offline-with-no-cache just leaves
         // `speciesRange.ranges` empty and GBIFDistributionCard falls back to
         // its live per-species GBIF fetch.
-        .task { await speciesRange.refreshFromRemote() }
+        .task { await speciesRange.loadLocal(); await speciesRange.refreshFromRemote() }
+        // Classification history: three JSON files, decoded off the main thread.
+        // Same reason as the two above — see `ClassificationStore.load()`.
+        .task { await classStore.load() }
         .onAppear {
+            // First, before anything below reads a persisted setting: the stores
+            // are constructed EMPTY on purpose (see each type's `init()` doc
+            // comment — their `@State` initializer expressions can re-run any
+            // number of times, so nothing with a cost or a side effect may live
+            // there). This is where they actually populate, exactly once.
+            // `activeModelID` and the pass gates read further down depend on it.
+            autoIDSettings.loadPersisted()
+            audio.activate()
+
             RecordingUploader.shared.activate()
             RecordingUploader.shared.classStore = classStore
-            // recordistName/uploadOverWiFiOnly/autoUploadEnabled read fresh from
-            // UserDefaults each call (not captured) — see RecordingUploader's
-            // doc comment on why a captured @AppStorage snapshot goes stale.
-            RecordingUploader.shared.retryContextProvider = { [consent, location] in
-                UploadRetryContext(
-                    consent: consent,
-                    recordistName: UserDefaults.standard.string(forKey: "community.recordistName") ?? "",
-                    locationAuthorization: location.accuracyAuthorization,
-                    wifiOnly: UserDefaults.standard.bool(forKey: "community.uploadOverWiFiOnly"),
-                    autoUploadEnabled: UserDefaults.standard.bool(forKey: "community.autoUploadEnabled"))
+            // Guarded so returning to this view (onAppear re-fires) doesn't
+            // re-present a sheet the user has already dismissed this session.
+            if !hasCheckedReconsent {
+                hasCheckedReconsent = true
+                showReconsentPrompt = consent.needsReconsent
+            }
+            RecordingUploader.shared.retryContextProvider = { [consent] in
+                UploadRetryContext(consent: consent)
             }
             audio.bufferSink = { [processor, recorder] buffer in
                 processor.process(buffer)
@@ -259,7 +293,7 @@ struct ContentView: View {
             pulseDetector.onPulseActiveChanged = { [recorder] active in
                 recorder.setPulseActive(active)
             }
-            recorder.onRecordingSaved = { [classStore, consent, location] report in
+            recorder.onRecordingSaved = { [classStore, consent] report in
                 // Shared between both calls so RecordingUploader's status
                 // updates land on the exact Recording classStore just created.
                 let recordingID = UUID()
@@ -270,7 +304,7 @@ struct ContentView: View {
                                             CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon)
                                         },
                                         relativeWavPath: report.relativeWavPath,
-                                        spectrogramImage: report.spectrogramImage) { [consent, location] in
+                                        spectrogramImage: report.spectrogramImage) { [consent] in
                     // Only runs once the Recording actually exists in classStore.recordings —
                     // see addRecording's doc comment on the race this closes.
                     let docs = CloudStorage.baseDirectory
@@ -280,11 +314,7 @@ struct ContentView: View {
                         date: report.date, durationSeconds: report.durationSeconds,
                         species: report.species, confidence: report.confidence,
                         coordinate: report.coordinate,
-                        consent: consent,
-                        recordistName: UserDefaults.standard.string(forKey: "community.recordistName") ?? "",
-                        locationAuthorization: location.accuracyAuthorization,
-                        wifiOnly: UserDefaults.standard.bool(forKey: "community.uploadOverWiFiOnly"),
-                        autoUploadEnabled: UserDefaults.standard.bool(forKey: "community.autoUploadEnabled"))
+                        consent: consent)
                 }
             }
             processor.sampleRate = audio.diagnostics.actualSampleRate
@@ -356,7 +386,7 @@ struct ContentView: View {
                 // audio stopped (user stop, interruption, listen-mode restart, etc.).
                 pulseDetector.finalizePass()
                 recorder.audioStopped()
-                if recorder.isArmed { recorder.setArmed(false); screenRecorder.stop() }
+                if recorder.isArmed { recorder.setArmed(false) }
                 // Session teardown is intentionally NOT done here. It's done explicitly
                 // by stopDetecting(), which is only called on a deliberate user stop.
                 // This preserves the session across transient audio interruptions
@@ -843,12 +873,16 @@ struct ContentView: View {
     /// `SessionStatusPillView`.
     private var sessionStatusPill: some View {
         SessionStatusPillView(audio: audio, classStore: classStore)
+            .tourTarget(.sessionStatus)
     }
 
     /// Feedback-risk warning for heterodyne/RTE on the speaker. See
     /// `SpeakerFeedbackWarningPill` — same scoping rationale as `sessionStatusPill`.
+    /// Forced visible during the guided tour (it's normally conditional, and the
+    /// tour is usually taken with nothing playing) so its step has a target.
     private var speakerFeedbackWarning: some View {
-        SpeakerFeedbackWarningPill(audio: audio)
+        SpeakerFeedbackWarningPill(audio: audio, tourDemo: tourActive)
+            .tourTarget(.feedbackWarning)
     }
 
     private var resetButton: some View {
@@ -943,7 +977,10 @@ struct ContentView: View {
         HStack(spacing: 8) {
             // Elapsed-time pill for the active listening/session, sitting to the
             // left of the control pills. Renders nothing when not detecting.
-            SessionTimerPill(start: feedSessionStart)
+            // tourDemo forces it on with a stand-in clock during the guided tour,
+            // which is normally taken before detection has ever been started.
+            SessionTimerPill(start: feedSessionStart, tourDemo: tourActive)
+                .tourTarget(.sessionTimer)
             // Full-screen landscape only: transport controls (play/record/listen)
             // morph into a third pill here instead of floating over the
             // spectrogram — same icons and colors as landscapeControlsPanel,
@@ -1291,7 +1328,6 @@ struct ContentView: View {
             location.stopTracking()
             pulseDetector.activeSessionID = nil
             recorder.setActiveSession(id: nil, startDate: nil, label: "Listening only")
-            screenRecorder.activeSessionFolder = nil
         }
     }
 
@@ -1313,15 +1349,12 @@ struct ContentView: View {
             let label = session?.title ?? "Session"
             pulseDetector.activeSessionID = id
             recorder.setActiveSession(id: id, startDate: session?.startDate ?? Date(), label: label)
-            screenRecorder.activeSessionFolder = (session?.startDate).map(AudioRecorder.sessionFolderFormatter.string)
             location.startTracking(geocodeSessionID: id)
             if autoRecordOnSessionStart {
                 recorder.setArmed(true)
-                if screenCaptureEnabled { screenRecorder.start() }
             }
         } else {
             recorder.setActiveSession(id: nil, startDate: nil, label: "Listening only")
-            screenRecorder.activeSessionFolder = nil
         }
         Task { await audio.start() }
     }
@@ -1336,16 +1369,9 @@ struct ContentView: View {
         RecordButtonCompact(recorder: recorder, action: toggleRecording)
     }
 
-    /// Record button arms the triggered WAV recorder and starts/stops the
-    /// whole-session ReplayKit screen capture together.
+    /// Record button arms/disarms the triggered WAV recorder.
     private func toggleRecording() {
-        let willArm = !recorder.isArmed
-        recorder.setArmed(willArm)
-        if willArm {
-            if screenCaptureEnabled { screenRecorder.start() }
-        } else {
-            screenRecorder.stop()
-        }
+        recorder.setArmed(!recorder.isArmed)
     }
 
     /// Cycles off → heterodyne → RTE → off on tap, icon changing with it — replaces

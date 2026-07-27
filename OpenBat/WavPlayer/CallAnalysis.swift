@@ -256,7 +256,22 @@ nonisolated enum CallAnalysis {
         // pulled Fppeak onto a ~29 kHz tone on real, noisy passes. `.greatest-
         // FiniteMagnitude` (the default) means "no ceiling" → whole band, same
         // as before this parameter existed.
-        let maxBinAllowed = min(bins - 1, maxFrequencyHz.isFinite ? Int(maxFrequencyHz / hzPerBin) : bins - 1)
+        // Converted defensively rather than with `isFinite ? Int(…) : …`, which
+        // trapped on the parameter's own default value: `.greatestFiniteMagnitude`
+        // IS finite, so that branch fed ~1.8e308 to `Int(_:)` and hit
+        // "Double value cannot be converted to Int because it is outside the
+        // representable range". Every caller that omitted `maxFrequencyHz`
+        // crashed — which in practice meant the tests only, since WavPlayerView
+        // always passes the selection box's top edge.
+        //
+        // Comparing in Double space before converting also covers any finite but
+        // oversized ceiling (a nonsense value from a future caller), not just the
+        // one default that happened to expose this.
+        let maxBinAllowed: Int = {
+            let raw = maxFrequencyHz / hzPerBin
+            guard raw.isFinite, raw < Double(bins - 1) else { return bins - 1 }
+            return max(0, Int(raw))
+        }()
         guard maxBinAllowed > minBinAllowed else {
             WavPlayerDebugLog.log("CallAnalysis", "analyze: maxBinAllowed=\(maxBinAllowed) <= minBinAllowed=\(minBinAllowed), aborting")
             return nil
@@ -396,8 +411,16 @@ nonisolated enum CallAnalysis {
         // headroom is ample. Also hard-capped at the box top (`maxFrequencyHz`),
         // so a user-drawn ceiling is respected exactly, not overshot by the
         // headroom.
-        let fineBoxMaxBin = maxFrequencyHz.isFinite
-            ? Int(maxFrequencyHz / fineHzPerBin) : extentFFTLen / 2 - 1
+        // Same defensive conversion as `maxBinAllowed` above, and for the same
+        // reason: `.greatestFiniteMagnitude` (this parameter's default) IS
+        // finite, so an `isFinite` guard alone let ~1.8e308 reach `Int(_:)` and
+        // trap. Compare in Double space, convert only once known in range.
+        let fineTopBin = extentFFTLen / 2 - 1
+        let fineBoxMaxBin: Int = {
+            let raw = maxFrequencyHz / fineHzPerBin
+            guard raw.isFinite, raw < Double(fineTopBin) else { return fineTopBin }
+            return max(0, Int(raw))
+        }()
         let fineMaxBin = min(fineBoxMaxBin, Int((fmaxHz + extentClimbHeadroomHz) / fineHzPerBin))
         if let fineFmax = traceExtent(pcm: pcm, loSample: loSample, hiSample: hiSample,
                                       fineHzPerBin: fineHzPerBin, minBin: fineMinBin, maxBin: fineMaxBin),

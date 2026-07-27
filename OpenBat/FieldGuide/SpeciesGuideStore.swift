@@ -38,7 +38,7 @@ final class SpeciesGuideStore {
         case cached = "downloaded"
     }
 
-    private static let cacheURL: URL = {
+    nonisolated private static let cacheURL: URL = {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory,
                                            in: .userDomainMask)[0]
             .appendingPathComponent("SpeciesGuide", isDirectory: true)
@@ -46,11 +46,46 @@ final class SpeciesGuideStore {
         return dir.appendingPathComponent("SpeciesGuideData.json")
     }()
 
-    init() {
+    /// Cheap on purpose — this runs inline as `ContentView`'s `@State` default
+    /// value, which is constructed inside `OpenBatApp`'s `WindowGroup` content
+    /// closure and therefore re-evaluates every time that closure does, not just
+    /// once. Doing the bundled+cached decode here (as this used to) put a
+    /// synchronous ~328 KB `JSONDecoder` pass — twice — on the main thread as
+    /// part of `ContentView.init()`, gating the very first frame the app could
+    /// draw on it. See `loadLocal()`, called once from `ContentView`'s `.task`.
+    init() {}
+
+    /// Loads bundled + cached JSON off the main thread and adopts whichever has
+    /// the higher `dataVersion`, then hands the result back to the main actor.
+    /// Call once, e.g. from a `.task` alongside `refreshFromRemote()`.
+    func loadLocal() async {
+        guard let result = await Task.detached(priority: .userInitiated, operation: {
+            Self.loadFromDisk()
+        }).value else { return }
+        guide = result.guide
+        source = result.source
+    }
+
+    private struct LoadResult {
+        let guide: SpeciesGuide
+        let source: Source
+    }
+
+    /// Pure disk I/O + decode, `nonisolated` so it can run on `loadLocal()`'s
+    /// detached task instead of blocking the main actor. Mirrors the merge
+    /// logic `init()` used to run inline.
+    nonisolated private static func loadFromDisk() -> LoadResult? {
         let bundledData = Self.bundledData()
         let bundled = bundledData.flatMap(Self.decode(data:))
         let cachedData = try? Data(contentsOf: Self.cacheURL)
         let cached = cachedData.flatMap(Self.decode(data:))
+        // A cached file that fails to decode (corrupt, truncated, or an
+        // unsupported future schema written by a since-reverted app version)
+        // used to sit there forever, silently retried and re-failed on every
+        // launch — self-heal by dropping it so a clean re-download can land.
+        if cachedData != nil, cached == nil {
+            try? FileManager.default.removeItem(at: Self.cacheURL)
+        }
 
         if let cached, let bundled, cached.dataVersion == bundled.dataVersion {
             // Equal declared version — normally means "identical data", but a
@@ -61,23 +96,20 @@ final class SpeciesGuideStore {
             // shadowed them). A raw byte comparison catches that: only trust the
             // cache if it's actually byte-identical to what's bundled now.
             if cachedData == bundledData {
-                guide = cached
-                source = .cached
+                return LoadResult(guide: cached, source: .cached)
             } else {
-                guide = bundled
-                source = .bundled
                 try? FileManager.default.removeItem(at: Self.cacheURL)
+                return LoadResult(guide: bundled, source: .bundled)
             }
         } else if let cached, cached.dataVersion > (bundled?.dataVersion ?? 0) {
-            guide = cached
-            source = .cached
+            return LoadResult(guide: cached, source: .cached)
         } else if let bundled {
-            guide = bundled
-            source = .bundled
             // The bundle overtook the cache (app update) — the stale cache would
             // just lose the version comparison forever, so drop it.
             try? FileManager.default.removeItem(at: Self.cacheURL)
+            return LoadResult(guide: bundled, source: .bundled)
         }
+        return nil
     }
 
     /// Check GitHub for a newer guide; adopt and cache it if `dataVersion`
@@ -114,7 +146,7 @@ final class SpeciesGuideStore {
 
     // MARK: Decoding helpers
 
-    private static func bundledData() -> Data? {
+    nonisolated private static func bundledData() -> Data? {
         guard let url = Bundle.main.url(forResource: "SpeciesGuideData",
                                         withExtension: "json") else {
             assertionFailure("SpeciesGuideData.json missing from bundle")
@@ -123,7 +155,7 @@ final class SpeciesGuideStore {
         return try? Data(contentsOf: url)
     }
 
-    private static func decode(data: Data) -> SpeciesGuide? {
+    nonisolated private static func decode(data: Data) -> SpeciesGuide? {
         guard let guide = try? JSONDecoder().decode(SpeciesGuide.self, from: data),
               guide.schemaVersion <= SpeciesGuide.supportedSchemaVersion else { return nil }
         return guide

@@ -3,16 +3,42 @@
 //  OpenBat
 //
 //  Irreversible privacy filter applied ONLY to the transient upload copy built
-//  by UploadConversionPipeline — never to the on-device original. Speech
-//  intelligibility lives almost entirely below ~8-10kHz; UK bat species call
-//  no lower than ~17kHz even at the extreme low end (noctule FM sweep tail),
-//  so a cutoff in the 12-13kHz target range gives headroom below that floor
-//  without touching real call content.
+//  by UploadConversionPipeline — never to the on-device original, and never to
+//  what the on-device classifier sees. Speech intelligibility lives almost
+//  entirely below ~8-10kHz, so a cutoff around 12.5kHz removes it with margin.
 //
-//  Cutoff and section count are placeholders pending validation against real
-//  noctule recordings (see openbat-onboarding-consent-upload-spec.md §5.2 and
-//  the plan's Phase 7) — UK-species-scoped; revisit for any non-UK species
-//  whose calls run lower.
+//  KNOWN SCOPE LIMIT — the app has global users, and this cutoff does not suit
+//  all of them.
+//
+//  For UK/European species the headroom is comfortable: the lowest callers
+//  (noctule, Leisler's) bottom out around 17kHz, so 12.5kHz sits well clear,
+//  and the worst case is mild attenuation of a sweep tail. That case was
+//  reviewed and accepted — losing a little energy off the bottom of a noctule
+//  call is tolerable.
+//
+//  Elsewhere it is not a question of attenuation but of exclusion. Several
+//  species call at or below this cutoff and would be removed outright rather
+//  than trimmed — the spotted bat (Euderma maculatum, ~9-12kHz) is the clearest
+//  example, and various molossids (Tadarida, Otomops) and the greater noctule
+//  (N. lasiopterus) run low enough to be affected. A contribution from one of
+//  those is scientifically empty even though the file uploads successfully.
+//
+//  This is a genuine tension rather than an oversight: the cutoff cannot drop
+//  much below ~12kHz without speech energy starting to survive, which would
+//  undermine the basis on which contributed recordings are treated as
+//  non-personal data. Privacy wins where they conflict.
+//
+//  What this does NOT affect is worth being clear about — a user recording
+//  low-frequency species still gets full local recording, spectrograms and
+//  species ID at full bandwidth. Only the contributed copy is filtered. So the
+//  limitation costs those users nothing except the ability to usefully
+//  contribute.
+//
+//  If low-frequency species become a priority, the fix is not a lower global
+//  cutoff — it is deciding per species-region whether a recording is eligible
+//  to contribute at all, and saying so in the UI rather than silently uploading
+//  a hollowed-out file. Section count and exact cutoff are otherwise unvalidated
+//  against real recordings.
 //
 
 import Foundation

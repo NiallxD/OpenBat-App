@@ -27,60 +27,42 @@ For local development, `.dev.vars` (gitignored) supplies the secrets:
 
 ```
 DEVICE_TOKEN_SECRET=local-test-secret-do-not-use
-RESEND_API_KEY=unset
 ```
 
 The R2 bucket (`openbat-community-recordings`) already exists and is bound
 in `wrangler.toml`/`src/index.ts`.
 
-**Email (erasure notifications):** sent via [Resend](https://resend.com) —
-Cloudflare's own Email Sending needs the paid Workers plan just to
-authenticate a sender domain, so this uses Resend's free tier (3,000
-emails/month) instead. One-time setup:
+**Erasure is one statement, and there is nothing behind it.**
+`DELETE /consent?device_id=...` removes the device's row from `consent_records`,
+bumps a per-month counter in `erasure_counts`, and returns. The app tells the
+user their data is deleted on the strength of that response, because by then it
+is.
 
-1. Sign up at resend.com (free), add `openbat.app` as a sending domain.
-2. Resend gives you DNS records (SPF/DKIM) to add — since the domain is on
-   Cloudflare DNS already, add them there. Wait for Resend's dashboard to
-   show the domain verified.
-3. Create an API key in Resend, then set it as a Worker secret (never commit
-   it, and don't paste it into a Worker's source or `wrangler.toml`):
-   ```
-   wrangler secret put RESEND_API_KEY
-   ```
-   (paste the key when prompted).
+There used to be considerably more here: an `erasure_requests` table written
+before anything was destroyed, a Resend-delivered notification to
+`privacy@openbat.app`, an hourly cron trigger retrying failed sends, an attempt
+cap, and a retention window purging notified rows. All of it supported a
+deletion that swept R2 objects under a `{device_id}/` prefix — an operation that
+could be interrupted half-done, and that ended with a human going to look for
+copies in archive storage the Worker couldn't reach.
 
-**Erasure notifications are durable.** Every erasure request is written to
-`erasure_requests` *before* anything is deleted, and the notification email is
-retried by the hourly cron trigger until it succeeds. Previously that email was
-the only record an erasure had happened and its failures went to
-`console.error`, so an unset key or an unverified domain meant nobody ever knew
-— and the `device_id` needed to find archive copies was gone with the consent row.
+None of that applies now. Contributed recordings carry no device identifier, so
+there is no set of "this device's recordings" to delete, interrupt, or chase.
+What was left was an email provider processing device identifiers, a cron job,
+and a standing list of the identifiers of people who had asked to be forgotten —
+costs with nothing left on the other side of the ledger. So:
 
-Check for anything needing attention:
-
-```
-wrangler d1 execute openbat-consent --command \
-  "SELECT device_id, requested_at, deleted_objects, attempts, last_error \
-   FROM erasure_requests WHERE notified_at IS NULL ORDER BY requested_at"
-```
-
-Rows there are erasures the privacy team has **not** been told about yet. Rows
-with `attempts >= 24` have stopped being retried and need a human. Rows with a
-NULL `deleted_objects` were interrupted part-way and should be re-run.
-
-Notified rows are purged after `ERASURE_LOG_RETENTION_DAYS` (365). That window is
-a policy choice: the table is proof an erasure was honoured, which justifies
-keeping a `device_id` belonging to someone who asked to be forgotten — but only
-for as long as the proof is needed. Make sure it matches the published privacy
-notice.
-
-`openbat.app` also needs Email Routing enabled (Email → Email Routing on the
-zone) with `privacy@openbat.app` routed to a real inbox, so the notification
-actually reaches someone — that's independent of the Resend send path above.
-
-Until the API key is set, `handleErase`'s notification send will fail; it's
-designed to fail silently (logged via `console.error`, visible in
-`wrangler tail`) rather than blocking the R2/D1 deletion it's a follow-up to.
+- **Resend is gone.** No `RESEND_API_KEY`, no sending domain, no DNS records. If
+  the deployed Worker still has the secret set, remove it with
+  `wrangler secret delete RESEND_API_KEY`.
+- **The cron trigger is gone.** Nothing in this Worker runs on a schedule.
+- **`erasure_requests` is gone**, replaced by `erasure_counts` (month, count).
+  A count answers "are erasures processed, and how many" without retaining
+  anything about anyone. It needs no retention policy and no purge job, which is
+  why neither exists any more.
+- **Email Routing for `privacy@openbat.app` is no longer required** by the
+  Worker. Keep it if you want a contact address on the privacy notice — that's a
+  separate decision.
 
 ## Deploy
 

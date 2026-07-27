@@ -59,7 +59,7 @@ struct SpeciesExplorerView: View {
     /// `withAnimation(duration: 4.0)`, which MapKit silently shortened to
     /// ~1.5s in practice — this is the real, honored duration for the
     /// hand-stepped animation in `animateSwoop`.
-    private static let swoopDuration = 6.0
+    private static let swoopDuration = 2.0
     private static let swoopStepInterval = 1.0 / 60.0
 
     init(store: SpeciesGuideStore, rangeStore: SpeciesRangeStore, userCoordinate: CLLocationCoordinate2D? = nil) {
@@ -110,13 +110,13 @@ struct SpeciesExplorerView: View {
                 SpeciesDetailView(species: species, store: store, rangeStore: rangeStore)
             }
         }
-        // Forces a fully opaque nav bar instead of the default translucent
-        // Liquid Glass material — without this, the globe's bright satellite
-        // imagery (which sits right up against the bar) samples through as a
-        // visible grey/light bar (same root cause ContentView's own
-        // `.toolbarBackground` comment describes).
-        .toolbarBackground(Color(.systemBackground), for: .navigationBar)
-        .hardTopScrollEdge()
+        // Flat black bar. Matters most here: the globe's bright satellite imagery
+        // sits right up against the bar, so any translucency samples through as a
+        // washed-out grey/light band. The colour fills the background; the glass
+        // material itself is removed app-wide in
+        // `OpenBatApp.configureNavigationBarAppearance`.
+        .toolbarBackground(Color.black, for: .navigationBar)
+        .flatTopScrollEdge()
     }
 
     // MARK: Search

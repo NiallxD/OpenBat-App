@@ -137,7 +137,53 @@ final class AudioEngineController {
     /// Idle-time poll for mic plug/unplug — see `prepareInputMonitoring()`.
     private var inputPollTimer: Timer?
 
-    init() {
+    /// Run-loop- and NotificationCenter-retained resources, parked in their own
+    /// object so they get torn down when this controller is released.
+    ///
+    /// `deinit` on a `@MainActor` class is nonisolated and so can't touch this
+    /// controller's own isolated stored properties; a separate reference held as
+    /// a `let` gets released alongside it and can clean up from its own deinit.
+    /// Both resources genuinely outlive their owner otherwise: a scheduled
+    /// `Timer` is retained by the run loop (nulling the property does NOT stop
+    /// it), and a block-based notification observer is retained by the center.
+    private final class Cleanup: @unchecked Sendable {
+        // Named slots rather than an array: `startStatsTimer()` runs on every
+        // start(), so appending would accumulate spent Timer objects for the
+        // life of the controller.
+        var pollTimer: Timer?
+        var statsTimer: Timer?
+        var tokens: [any NSObjectProtocol] = []
+        deinit {
+            // A Timer must be invalidated on the run loop that scheduled it, and
+            // deinit can run on any thread — hand both back to main.
+            let timers = [pollTimer, statsTimer].compactMap { $0 }
+            let tokens = self.tokens
+            DispatchQueue.main.async {
+                timers.forEach { $0.invalidate() }
+                tokens.forEach { NotificationCenter.default.removeObserver($0) }
+            }
+        }
+    }
+    private let cleanup = Cleanup()
+    private var isActivated = false
+
+    /// Deliberately empty — all setup lives in `activate()`.
+    ///
+    /// This type is constructed as a SwiftUI `@State` default value, and that
+    /// expression is re-evaluated every time the enclosing view's initializer
+    /// runs, which SwiftUI may do any number of times per view identity (it
+    /// keeps the first result and discards the rest). Registering observers or
+    /// scheduling a repeating timer here therefore leaked one of each per
+    /// re-evaluation — and because the run loop retains a scheduled Timer, the
+    /// discarded controllers' 2 s poll timers kept firing on the main thread
+    /// forever. That accumulation is what eventually wedged the UI.
+    init() {}
+
+    /// Begins idle mic monitoring. Call once from the owning view's `.task` —
+    /// never from an initializer. Idempotent.
+    func activate() {
+        guard !isActivated else { return }
+        isActivated = true
         registerForNotifications()
         Task { await prepareInputMonitoring() }
     }
@@ -160,7 +206,7 @@ final class AudioEngineController {
         // pulled while idle — without activating the session (permission prompt,
         // interrupts other apps' audio) — poll the available inputs on a slow
         // timer. The running engine's route-change handler covers the active case.
-        inputPollTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+        let poll = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             // `[weak self]` on the Task itself, not just the outer Timer closure —
             // implicitly closing over the outer closure's captured `self` from inside
             // the Task reads as referencing a `var` across a concurrency boundary
@@ -170,6 +216,8 @@ final class AudioEngineController {
                 self.updateInputDiagnostics()
             }
         }
+        inputPollTimer = poll
+        cleanup.pollTimer = poll
     }
 
     // MARK: Lifecycle
@@ -224,9 +272,11 @@ final class AudioEngineController {
 
     private func startStatsTimer() {
         statsTimer?.invalidate()
-        statsTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / statsFlushRate, repeats: true) { [weak self] _ in
+        let timer = Timer.scheduledTimer(withTimeInterval: 1.0 / statsFlushRate, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.flushStats() }
         }
+        statsTimer = timer
+        cleanup.statsTimer = timer
     }
 
     /// Copy accumulated audio-thread stats into the published diagnostics.
@@ -320,6 +370,7 @@ final class AudioEngineController {
         let session = AVAudioSession.sharedInstance()
         let port = session.currentRoute.inputs.first
         diagnostics.inputName = port?.portName ?? "—"
+        diagnostics.inputUID = port?.uid ?? "—"
         diagnostics.isUSBInput = port?.portType == .usbAudio
         diagnostics.usbMicAvailable = diagnostics.isUSBInput
             || session.availableInputs?.contains { $0.portType == .usbAudio } ?? false
@@ -501,7 +552,10 @@ final class AudioEngineController {
         // error, not just a strictness warning. Extracting the needed values here,
         // before the `Task` is created, keeps everything crossing the boundary
         // Sendable.
-        center.addObserver(
+        // Tokens are retained (see `Cleanup`) so these registrations are removed
+        // when the controller goes away — the center holds block-based observers
+        // itself, so they otherwise survive their owner.
+        cleanup.tokens.append(center.addObserver(
             forName: AVAudioSession.routeChangeNotification,
             object: nil, queue: .main
         ) { [weak self] note in
@@ -510,9 +564,9 @@ final class AudioEngineController {
                 let reason = AVAudioSession.RouteChangeReason(rawValue: raw)
             else { return }
             Task { @MainActor in await self?.handleRouteChange(reason) }
-        }
+        })
 
-        center.addObserver(
+        cleanup.tokens.append(center.addObserver(
             forName: AVAudioSession.interruptionNotification,
             object: nil, queue: .main
         ) { [weak self] note in
@@ -522,7 +576,7 @@ final class AudioEngineController {
             else { return }
             let optionsRaw = note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
             Task { @MainActor [weak self] in self?.handleInterruption(type, optionsRaw: optionsRaw) }
-        }
+        })
     }
 
     /// The Griff being plugged/unplugged shows up as a route change; rebind input

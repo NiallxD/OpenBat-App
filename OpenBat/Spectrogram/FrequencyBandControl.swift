@@ -17,6 +17,15 @@ struct FrequencyBandControl: View {
     @Binding var noiseFloor: Float
     @Binding var logFrequency: Bool
 
+    /// Mirrors `noiseFloor` while dragging so the `Slider` only writes back to
+    /// the real (`@Observable`-backed, `UserDefaults`-persisting) binding once
+    /// per gesture instead of on every drag frame — see `PulseDetector.spectrogramNoiseFloor`'s
+    /// `didSet`. Committing per-frame was piling an `UserDefaults.set` and an
+    /// `@Observable` invalidation onto the main thread on top of everything
+    /// else already competing for it while this popover is open (the live
+    /// spectrogram's render loop keeps running behind it — see `ContentView.menuIsOpen`).
+    @State private var localNoiseFloor: Float = 0
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
@@ -75,11 +84,13 @@ struct FrequencyBandControl: View {
                 Text("Noise floor")
                     .font(.subheadline.weight(.semibold))
                 Spacer()
-                Text(String(format: "%.2f", noiseFloor))
+                Text(String(format: "%.2f", localNoiseFloor))
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
             }
-            Slider(value: $noiseFloor, in: 0...0.9, step: 0.05)
+            Slider(value: $localNoiseFloor, in: 0...0.9, step: 0.05, onEditingChanged: { editing in
+                if !editing { noiseFloor = localNoiseFloor }
+            })
                 .controlSize(.small)
             Text("Hides energy below this brightness.")
                 .font(.caption2)
@@ -88,6 +99,7 @@ struct FrequencyBandControl: View {
         .padding(12)
         .frame(width: 270)
         .presentationCompactAdaptation(.popover)
+        .onAppear { localNoiseFloor = noiseFloor }
     }
 
     private func cutoffLabel(_ name: String, _ fraction: Double) -> some View {

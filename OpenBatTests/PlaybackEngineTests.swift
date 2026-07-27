@@ -102,9 +102,29 @@ struct PlaybackEngineTests {
         #expect(engine.currentTimeSeconds > 0,
                 "currentTimeSeconds still 0 after 400ms of playback — PlaybackDriver never fed a buffer")
 
-        let cols = engine.spectrogramProcessor.drain()
-        #expect(!cols.isEmpty,
-                "spectrogramProcessor.drain() returned 0 columns after 400ms of playback — this is why the spectrogram shows nothing")
+        // Asserted via `peakFrequency` rather than by draining columns.
+        //
+        // This used to check `spectrogramProcessor.drain()` was non-empty, which
+        // can no longer work: `PlaybackDriver` drains the processor itself on
+        // every buffer and discards the result (see the comment beside
+        // `_ = spec.drain()` in PlaybackEngine) because WavPlayerView renders a
+        // static whole-file spectrogram and `pending` would otherwise grow ~6
+        // MB/sec for the length of playback. A test draining from another thread
+        // is racing the driver for columns the driver is throwing away, so it
+        // failed nearly always and passed occasionally — the worst kind of test.
+        //
+        // `peakBin`/`peakLevel` are written directly inside `process()`, not
+        // sourced from `pending`, so they survive the driver's drain and are the
+        // honest signal that audio is reaching the processor and being analysed.
+        // The driver itself depends on exactly this for heterodyne auto-tune.
+        //
+        // Checking the VALUE rather than just non-zero also makes this cover more
+        // than the original did: the fixture is a 40 kHz tone, so a correct
+        // reading confirms the samples arrived intact and the bin→Hz conversion
+        // is right, not merely that something was fed.
+        let peak = engine.spectrogramProcessor.peakFrequency
+        #expect(peak > 38_000 && peak < 42_000,
+                "peakFrequency = \(peak) Hz after 400ms of playing a 40 kHz tone — audio isn't reaching spectrogramProcessor, which is why the spectrogram and heterodyne auto-tune show nothing")
 
         engine.stop()
         try? FileManager.default.removeItem(at: url)

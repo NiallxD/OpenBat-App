@@ -2,9 +2,11 @@
 //  UploadConversionPipeline.swift
 //  OpenBat
 //
-//  Builds the transient upload copy of a recording — high-pass filtered,
-//  quality-gated, location-fuzzed-or-accurate per the OS Precise Location
-//  toggle, and re-tagged with upload-specific GUANO fields. Operates entirely
+//  Builds the transient upload copy of a recording: high-pass filtered and
+//  quality-gated here, anonymized by `AnonymizedUploadBuilder` (location,
+//  timestamp, metadata allowlist, object identity). This file owns the
+//  audio/IO half of that job only — every privacy-relevant decision lives in
+//  the builder, so there is exactly one place to audit. Operates entirely
 //  on a NEW file; the on-device original `AudioRecorder` wrote is never
 //  reopened for writing. Classification (species Auto ID) already happened
 //  upstream, live, on unfiltered audio via PulseDetector — independent of
@@ -24,13 +26,14 @@ struct UploadConversionResult {
     let derivedWavURL: URL
     let quality: UploadQualityGateResult
     let cutoffHz: Double
-    /// The coordinate that went into the derived copy's GUANO — fuzzed or
-    /// accurate per `usedFuzzedLocation`. Returned (not just written into the
-    /// file) because the upload request sends location as a header too, and that
-    /// header MUST carry this value rather than the original coordinate:
-    /// sending the raw one there bypassed the fuzzing entirely.
-    let uploadCoordinate: CLLocationCoordinate2D?
-    let usedFuzzedLocation: Bool
+    /// Everything the transmission needs — object key and request headers
+    /// included — already anonymized. Returned whole (rather than just the
+    /// coordinate) so the upload call site has nothing left to decide: it sends
+    /// exactly what `AnonymizedUploadBuilder` produced. The request headers used
+    /// to be assembled separately in `RecordingUploader`, which is how the
+    /// unfuzzed coordinate ended up being sent in one place while the fuzzed one
+    /// went into the file.
+    let anonymized: AnonymizedUpload
 }
 
 enum UploadConversionError: Error {
@@ -48,18 +51,25 @@ enum UploadConversionError: Error {
 /// `Biquad`/`GuanoMetadata`/`WavHeader`.
 nonisolated enum UploadConversionPipeline {
 
-    /// Everything upload-prep needs about the requesting device/user — kept as
-    /// one struct so the call site (wherever Phase 6 triggers a conversion)
-    /// doesn't have to thread five separate parameters through.
+    /// What upload-prep needs about the recording being contributed.
+    ///
+    /// Deliberately carries no device id, no consent version, and no recordist
+    /// name. Those used to be here purely to be written into the uploaded file's
+    /// GUANO; removing the fields removed the reason to thread them through, and
+    /// the type not having a `deviceID` at all is what makes it structurally
+    /// impossible for one to reach `AnonymizedUploadBuilder`. Consent is checked
+    /// before conversion starts (`RecordingUploader.handleRecordingSaved`) and
+    /// again server-side at upload — it is not a property of the file.
     struct Context {
-        let deviceID: String
-        let consentVersion: String
-        let recordistName: String
-        let locationAuthorization: CLAccuracyAuthorization
+        /// The recording's true start time. Bucketed downstream by
+        /// `AnonymizedUploadBuilder`; never bucketed here.
+        let recordedAt: Date
+        let species: String
+        let confidence: Float?
         /// Used only when the original WAV carries no readable GUANO `Loc
         /// Position` — the `Recording`'s own stored coordinate. Goes through
-        /// exactly the same fuzz decision as a GUANO-sourced one, so there's no
-        /// path by which an unfuzzed coordinate reaches the upload.
+        /// exactly the same grid-snap as a GUANO-sourced one, so there's no
+        /// path by which a precise coordinate reaches the upload.
         var fallbackCoordinate: CLLocationCoordinate2D? = nil
         var cutoffHz: Double = HighPassPrivacyFilter.defaultCutoffHz
     }
@@ -97,24 +107,27 @@ nonisolated enum UploadConversionPipeline {
         let quality = accumulator.result(pulseCount: pulseCount)
         guard quality.passed else { throw UploadConversionError.qualityGateFailed(quality) }
 
-        let shouldFuzz = LocationFuzzing.shouldFuzzForUpload(authorization: context.locationAuthorization)
-        let uploadCoordinate = uploadCoordinate(
-            originalFields: originalFields, fallback: context.fallbackCoordinate, shouldFuzz: shouldFuzz)
-
-        let guano = buildDerivedGuano(
-            originalFields: originalFields, context: context,
-            cutoffHz: context.cutoffHz, quality: quality,
-            uploadCoordinate: uploadCoordinate)
+        // Every anonymizing decision — coordinate, timestamp, which metadata
+        // survives, what object the result is stored as — is made in this one
+        // call. Nothing below re-derives any of it.
+        let anonymized = AnonymizedUploadBuilder.build(
+            originalFields: originalFields,
+            recordedAt: context.recordedAt,
+            fallbackCoordinate: context.fallbackCoordinate,
+            species: context.species,
+            confidence: context.confidence,
+            cutoffHz: context.cutoffHz,
+            quality: quality)
 
         let derivedURL = try writeDerivedWav(
             sourceURL: originalWavURL, totalSamples: totalSamples,
             sampleRate: header.sampleRate,
             filter: HighPassPrivacyFilter(sampleRate: sampleRate, cutoffHz: context.cutoffHz),
-            guano: guano)
+            guano: anonymized.guanoChunk)
 
         return UploadConversionResult(
             derivedWavURL: derivedURL, quality: quality, cutoffHz: context.cutoffHz,
-            uploadCoordinate: uploadCoordinate, usedFuzzedLocation: shouldFuzz)
+            anonymized: anonymized)
     }
 
     /// Feeds `body` consecutive blocks of the source's PCM. Stops early on a
@@ -144,58 +157,9 @@ nonisolated enum UploadConversionPipeline {
         try? FileManager.default.removeItem(at: url)
     }
 
-    // MARK: Location
-
-    /// The single place the uploaded location is decided, for both the GUANO
-    /// field and the request header. An unparseable GUANO position is dropped
-    /// rather than passed through verbatim (the old behaviour): a string this
-    /// can't parse is one it also can't fuzz, so forwarding it would be a way
-    /// for an exact position to reach the server despite the user having turned
-    /// Precise Location off.
-    private static func uploadCoordinate(originalFields: [String: String],
-                                         fallback: CLLocationCoordinate2D?,
-                                         shouldFuzz: Bool) -> CLLocationCoordinate2D? {
-        let parts = (originalFields["Loc Position"] ?? "").split(separator: " ").compactMap { Double($0) }
-        let source: CLLocationCoordinate2D
-        if parts.count == 2 {
-            source = CLLocationCoordinate2D(latitude: parts[0], longitude: parts[1])
-        } else if let fallback {
-            source = fallback
-        } else {
-            return nil
-        }
-        return shouldFuzz ? LocationFuzzing.fuzz(source) : source
-    }
-
-    // MARK: GUANO
-
-    /// Carries every field from the original untouched, then adds/overrides the
-    /// upload-specific ones — device_id, consent_version, recordist name, the
-    /// applied high-pass cutoff, a quality score, and the fuzzed-or-accurate
-    /// location. Hardware/mic-module field stays whatever the original already
-    /// has (best-effort, "unknown" fallback lives in AudioRecorder itself).
-    private static func buildDerivedGuano(
-        originalFields: [String: String], context: Context,
-        cutoffHz: Double, quality: UploadQualityGateResult, uploadCoordinate: CLLocationCoordinate2D?
-    ) -> Data {
-        var fields: [GuanoMetadata.Field] = []
-        for (key, value) in originalFields where key != "Loc Position" {
-            fields.append(.init(key, value))
-        }
-        if let uploadCoordinate {
-            let value = String(format: "%.6f %.6f", uploadCoordinate.latitude, uploadCoordinate.longitude)
-            fields.append(.init("Loc Position", value, tightColon: true))
-        }
-        fields.append(.init("OpenBat|Device ID", context.deviceID))
-        fields.append(.init("OpenBat|Consent Version", context.consentVersion))
-        if !context.recordistName.isEmpty {
-            fields.append(.init("OpenBat|Recordist", context.recordistName))
-        }
-        fields.append(.init("OpenBat|HighPass Cutoff Hz", String(Int(cutoffHz.rounded()))))
-        fields.append(.init("OpenBat|Quality SNR dB", String(format: "%.1f", quality.snrDB)))
-        fields.append(.init("OpenBat|Quality Clipping Fraction", String(format: "%.4f", quality.clippingFraction)))
-        return GuanoMetadata.chunk(fields: fields)
-    }
+    // Location and GUANO construction used to live here. Both moved wholesale to
+    // `AnonymizedUploadBuilder` — see that file's header for why they belong in
+    // one auditable place rather than beside the streaming/filtering code.
 
     // MARK: WAV write
 

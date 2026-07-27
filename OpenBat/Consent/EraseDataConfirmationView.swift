@@ -2,10 +2,18 @@
 //  EraseDataConfirmationView.swift
 //  OpenBat
 //
-//  Type-to-confirm gate in front of ConsentStore.eraseAllData() — a GDPR-style
-//  full erasure (deletes every past R2 recording for this device, not just
-//  future ones) is destructive and irreversible, so it doesn't hang off a
-//  plain confirmation alert the way a normal delete would.
+//  Type-to-confirm gate in front of ConsentStore.eraseConsentRecord(). Deleting
+//  the consent record outright (rather than just revoking it) is irreversible
+//  and resets the device identity, so it doesn't hang off a plain confirmation
+//  alert the way a normal delete would.
+//
+//  The copy below has to be exact about scope. This used to promise deletion of
+//  every contributed recording, which the backend could honour only because
+//  uploads were stored under a device-id prefix. That prefix is gone: uploads
+//  carry no identifier at all, so no recording can be traced to a device and
+//  none can be deleted on request. Saying so plainly here — and in ConsentView,
+//  BEFORE anyone contributes — is the entire basis on which those recordings are
+//  not personal data. Do not soften it into "may not be able to".
 //
 
 import SwiftUI
@@ -26,16 +34,25 @@ struct EraseDataConfirmationView: View {
         NavigationStack {
             Form {
                 Section {
-                    // "recorded" rather than "notified the moment you submit":
-                    // the request is now durably logged server-side before
-                    // anything is deleted, and the privacy team's notification
-                    // retries until it lands (see the Worker's erasure_requests
-                    // table). Promising instant notification would be describing
-                    // a single email send that can fail.
-                    Text("This permanently deletes every recording you've contributed from our servers, along with your consent record, immediately. This cannot be undone, and is separate from just turning off contribution — that only stops future uploads. Your request is recorded the moment you submit it, and any recordings ever moved to long-term archive storage are removed by our privacy team as a follow-up — that part can take up to 7 business days.")
+                    // States plainly that it's already done, because it is.
+                    // Erasure is now a single synchronous statement server-side
+                    // (see the Worker's handleErase) — no queue, no email, no
+                    // human step afterwards. Earlier wording promised the
+                    // request was "recorded" and would be followed up, which
+                    // described machinery that existed to chase archived copies
+                    // of recordings; recordings can no longer be attributed to a
+                    // device at all, so there is nothing to follow up.
+                    Text("This permanently deletes your consent record from our servers and resets this device's identifier. It happens immediately, and it cannot be undone.")
                         .foregroundStyle(.secondary)
                 } header: {
-                    Text("Erase all my data")
+                    Text("Erase my consent record")
+                }
+
+                Section {
+                    Text("Recordings you've already contributed are not deleted, because there is no way for us to find them. They're stored with no device identifier, a location rounded to about 100 metres, and a time rounded to the nearest 5 minutes — nothing connects them to you or to this device, which is why they don't count as your personal data once sent. That's also why we can't pick yours back out.\n\nRecordings you never contributed were never sent to us at all, and stay on your device.")
+                        .foregroundStyle(.secondary)
+                } header: {
+                    Text("What this doesn't cover")
                 }
 
                 Section {
@@ -58,7 +75,7 @@ struct EraseDataConfirmationView: View {
                         if isErasing {
                             ProgressView()
                         } else {
-                            Text("Erase Everything")
+                            Text("Erase Consent Record")
                         }
                     }
                     .disabled(typedText != Self.confirmationPhrase || isErasing)
@@ -79,23 +96,24 @@ struct EraseDataConfirmationView: View {
     private func erase() {
         isErasing = true
         Task {
-            let deletedCount = await consent.eraseAllData()
+            let succeeded = await consent.eraseConsentRecord()
             isErasing = false
-            if let deletedCount {
-                // Server-side data is gone — clear local upload status too, so the
-                // Uploads queue doesn't keep showing recordings as "Uploaded" that no
-                // longer exist anywhere.
-                classStore.clearAllUploadStatus()
-                resultMessage = "Done — \(deletedCount) recording\(deletedCount == 1 ? "" : "s") deleted from our servers immediately, and your request has been logged. If any were ever archived, that copy will be removed within 7 business days."
-                // Give the user a moment to read the confirmation rather than
-                // yanking the sheet away the instant the request completes —
-                // longer than before since this message is now two sentences.
-                try? await Task.sleep(for: .seconds(3))
-                onFinished()
-                dismiss()
-            } else {
+            guard succeeded else {
                 resultMessage = "Couldn't reach the server — nothing was deleted. Check your connection and try again."
+                return
             }
+            // The device identifier has been rotated, so the local "Uploaded"
+            // badges refer to contributions this device can no longer claim any
+            // relationship to. Clearing them isn't cleanup after a server-side
+            // deletion (nothing was deleted) — it's keeping the local view honest
+            // about what this device can still say about itself.
+            classStore.clearAllUploadStatus()
+            resultMessage = "Done — your consent record has been deleted and this device has a new identifier. Recordings you already contributed stay in the research dataset, unlinked from you."
+            // Give the user a moment to read the confirmation rather than
+            // yanking the sheet away the instant the request completes.
+            try? await Task.sleep(for: .seconds(3))
+            onFinished()
+            dismiss()
         }
     }
 }

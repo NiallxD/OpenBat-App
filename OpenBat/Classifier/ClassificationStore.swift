@@ -203,6 +203,8 @@ final class ClassificationStore {
     private let io = DispatchQueue(label: "bat.ClassificationStore.io", qos: .utility)
     /// Throttle full sessions.json rewrites while a track streams in points.
     private var lastSessionPersist: Date = .distantPast
+    /// Guards `load()` against running more than once — see its doc comment.
+    private var hasLoaded = false
 
     // Small in-memory cache so scrolling the list doesn't re-decode JPEGs.
     private var imageCache = NSCache<NSString, UIImage>()
@@ -215,7 +217,11 @@ final class ClassificationStore {
         sessionsURL = dir.appendingPathComponent("sessions.json")
         recordingsURL = dir.appendingPathComponent("recordings.json")
         try? FileManager.default.createDirectory(at: imagesDir, withIntermediateDirectories: true)
-        load()
+        // NOT load() — see `load()`'s doc comment. Path setup only here.
+        //
+        // `CloudStorage.baseDirectory` is a lazy `static let`, so its (possibly
+        // blocking) ubiquity-container resolution is paid once per process by
+        // whichever store is built first, not on every construction.
     }
 
     // MARK: Sessions
@@ -424,10 +430,15 @@ final class ClassificationStore {
         persistRecordings()
     }
 
-    /// Called only after a successful `ConsentStore.eraseAllData()` — every recording
-    /// this device ever uploaded no longer exists server-side, so their local
-    /// "Uploaded" status would otherwise keep showing stale entries in the upload
-    /// queue forever. Resets every recording back to untouched (nil = not contributing).
+    /// Called only after a successful `ConsentStore.eraseConsentRecord()`. The
+    /// device identifier has been rotated, so these badges describe contributions
+    /// made under an identity this device no longer holds — and the recordings
+    /// themselves are anonymous and stay in the dataset, so a per-recording
+    /// "Uploaded" claim is no longer something the app can stand behind. Resets
+    /// every recording back to untouched (nil = not contributing).
+    ///
+    /// Note this deletes nothing server-side and is not cleanup after something
+    /// that did — see `ConsentStore.eraseConsentRecord` for what erasure covers.
     func clearAllUploadStatus() {
         for index in recordings.indices { recordings[index].uploadStatus = nil }
         persistRecordings()
@@ -636,19 +647,39 @@ final class ClassificationStore {
         }
     }
 
-    private func load() {
-        if let data = try? Data(contentsOf: jsonURL),
-           let decoded = try? JSONDecoder().decode([PassRecord].self, from: data) {
-            passes = decoded
-        }
-        if let data = try? Data(contentsOf: sessionsURL),
-           let decoded = try? JSONDecoder().decode([RecordingSession].self, from: data) {
-            sessions = decoded
-        }
-        if let data = try? Data(contentsOf: recordingsURL),
-           let decoded = try? JSONDecoder().decode([Recording].self, from: data) {
-            recordings = decoded
-        }
+    /// Reads the three stores off the main thread. Call once, from the owning
+    /// view's `.task` — never from `init()`.
+    ///
+    /// This used to run synchronously in `init()`, which is where it hurt:
+    /// `ClassificationStore()` is a SwiftUI `@State` default value, an
+    /// expression re-evaluated on every re-run of the enclosing view's
+    /// initializer (SwiftUI keeps the first result and throws the rest away).
+    /// Each redundant construction therefore decoded `passes.json` — up to
+    /// `maxPasses` records, each with a nested `topScores` array — plus
+    /// `sessions.json` and `recordings.json`, all on the main thread, for a
+    /// result that was immediately discarded.
+    func load() async {
+        guard !hasLoaded else { return }
+        let decoded = await Task.detached(priority: .userInitiated) {
+            [jsonURL, sessionsURL, recordingsURL] in
+            (passes: Self.decode([PassRecord].self, from: jsonURL),
+             sessions: Self.decode([RecordingSession].self, from: sessionsURL),
+             recordings: Self.decode([Recording].self, from: recordingsURL))
+        }.value
+
+        // Re-checked after the await: `hasLoaded` gates against a second caller,
+        // and anything already recorded in the meantime (a session started
+        // before the decode landed) must not be clobbered by the disk copy.
+        guard !hasLoaded else { return }
+        hasLoaded = true
+        if let p = decoded.passes,     passes.isEmpty     { passes = p }
+        if let s = decoded.sessions,   sessions.isEmpty   { sessions = s }
+        if let r = decoded.recordings, recordings.isEmpty { recordings = r }
+    }
+
+    nonisolated private static func decode<T: Decodable>(_ type: T.Type, from url: URL) -> T? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(type, from: data)
     }
 }
 

@@ -52,7 +52,6 @@ struct SettingsView: View {
         }
     }
 
-    @AppStorage("recording.screenCaptureEnabled") private var screenCaptureEnabled = false
     @AppStorage("recording.autoRecordOnSessionStart") private var autoRecordOnSessionStart = true
     /// Read directly by RecordingSpectrogramRenderer (off-main, no live settings
     /// reference) the same way it already reads `pulse.displayPalette`. 0.5 is a
@@ -66,9 +65,7 @@ struct SettingsView: View {
     /// surfaced here (same treatment as the noise floor above) so it can be
     /// tuned against real recordings without a code change.
     @AppStorage("display.cfTailFraction") private var cfTailFraction = CallAnalysis.defaultCFTailFraction
-    @AppStorage("community.recordistName") private var recordistName = ""
-    @AppStorage("community.uploadOverWiFiOnly") private var uploadOverWiFiOnly = true
-    @AppStorage("community.autoUploadEnabled") private var autoUploadEnabled = false
+    @State private var showConsentSheet = false
     @State private var showEraseWarning = false
     @State private var showEraseConfirmation = false
     @State private var showCopiedDeviceID = false
@@ -183,9 +180,29 @@ struct SettingsView: View {
         }
     }
 
+    /// Turning contribution ON opens the full consent screen rather than
+    /// granting directly; turning it OFF revokes immediately.
+    ///
+    /// The asymmetry is the point. Granting is the act that needs informed
+    /// consent, and the two purposes — research use and commercial licensing —
+    /// have to be named and separately switched on for that consent to be valid.
+    /// This binding used to call `consent.grant()` straight from the toggle,
+    /// which meant anyone who declined during onboarding could enable
+    /// contribution here without ever being shown what they were agreeing to.
+    /// Withdrawing needs no disclosure, so it stays a plain toggle.
+    ///
+    /// The toggle springs back if the sheet is dismissed without deciding: it
+    /// reads `consent.isGranted`, which only changes once ConsentView actually
+    /// grants.
     private var participationBinding: Binding<Bool> {
         Binding(get: { consent.isGranted },
-                set: { newValue in newValue ? consent.grant() : consent.revoke() })
+                set: { newValue in
+                    if newValue {
+                        showConsentSheet = true
+                    } else {
+                        consent.revoke()
+                    }
+                })
     }
 
     // MARK: Privacy tab
@@ -193,6 +210,22 @@ struct SettingsView: View {
     private var privacyTab: some View {
         Form {
             Section {
+                // Shown ABOVE the toggle, which reads as off while consent is
+                // stale — without this the user sees their participation
+                // switched off with no explanation for why.
+                if consent.needsReconsent {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label("The terms have changed since you agreed", systemImage: "exclamationmark.circle.fill")
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(.orange)
+                        Text("You agreed to version \(consent.agreedConsentVersion ?? "an earlier version"), and OpenBat now uses version \(ConsentStore.currentConsentVersion). Contributions are paused until you've read the current terms — nothing has been sent under the new ones.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                        Button("Review the terms") { showConsentSheet = true }
+                            .font(.footnote.weight(.medium))
+                    }
+                    .padding(.vertical, 4)
+                }
                 Toggle("Contribute recordings to the community science project", isOn: participationBinding)
                 if consent.isAwaitingServerConfirmation {
                     // Honest about the gap between "saved on this device" and
@@ -205,32 +238,7 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
             } footer: {
-                Text("On-device detection and species ID work either way — this only gives OpenBat permission to collect recordings you choose to send. Nothing uploads on its own: pick which recordings to contribute, one at a time, by tapping the cloud icon on an eligible recording in Playback. You can turn this off at any time; it stops future uploads immediately.")
-            }
-
-            if consent.isGranted {
-                Section {
-                    Toggle("Upload automatically", isOn: $autoUploadEnabled)
-                } footer: {
-                    Text("Off by default, and not the normal way to contribute — recordings are meant to be sent one at a time from Playback. When on, every eligible recording uploads as soon as it's saved instead, subject to the Wi-Fi setting below.")
-                }
-
-                Section {
-                    Toggle("Upload over Wi-Fi only", isOn: $uploadOverWiFiOnly)
-                        .disabled(!autoUploadEnabled)
-                } footer: {
-                    Text("Uploads use mobile or Wi-Fi data. When on, automatic uploads wait for a Wi-Fi connection instead of using cellular data. Only applies to automatic uploads — tapping a recording's own upload badge always goes ahead regardless.")
-                }
-            }
-
-            Section {
-                TextField("Display name", text: $recordistName)
-                    .textInputAutocapitalization(.words)
-                    .disableAutocorrection(true)
-            } header: {
-                Text("Recordist name")
-            } footer: {
-                Text("Optional. If set, credited alongside any recordings shared for research or community-science purposes. If left blank, recordings are credited to your device ID instead. This is visible alongside shared recordings, so treat it as a public-facing field even though it's optional.")
+                Text("On-device detection and species ID work either way — this only gives OpenBat permission to collect recordings you choose to send. Turning it on shows you the terms first. Nothing uploads on its own: pick which recordings to contribute, one at a time, by tapping the cloud icon on an eligible recording in Playback. Contributing uses mobile or Wi-Fi data. You can turn this off at any time; it stops future uploads immediately.")
             }
 
             Section {
@@ -252,21 +260,32 @@ struct SettingsView: View {
             }
 
             Section {
-                Button("Erase All My Data", role: .destructive) {
+                Button("Erase My Consent Record", role: .destructive) {
                     showEraseWarning = true
                 }
             } footer: {
-                Text("Permanently deletes every recording you've contributed, on our servers — not just future uploads. Separate from the toggle above, and cannot be undone.")
+                Text("Permanently deletes the consent record we hold for this device and resets its identifier. Recordings you've already contributed aren't affected — they carry nothing that links them to you, so we can't find them. Cannot be undone.")
             }
         }
-        .alert("Erase All My Data", isPresented: $showEraseWarning) {
+        .alert("Erase My Consent Record", isPresented: $showEraseWarning) {
             Button("Cancel", role: .cancel) { }
             Button("Continue", role: .destructive) { showEraseConfirmation = true }
         } message: {
-            Text("If you just want to stop uploading new recordings, revoke access to this with the toggle. Deleting all data will clear all your historic recordings from our database, removing them from any use in community science. This action cannot be undone.")
+            Text("If you just want to stop contributing new recordings, use the toggle above instead. This deletes the consent record we hold for this device and gives it a new identifier. Recordings you already contributed stay in the research dataset — they were sent with no identifier and a rounded location, so there's no way to pick yours out. This cannot be undone.")
         }
         .alert("Copied", isPresented: $showCopiedDeviceID) { } message: {
             Text("Device ID copied to the clipboard.")
+        }
+        .sheet(isPresented: $showConsentSheet) {
+            // The same screen onboarding shows, deliberately — one place where
+            // the terms are presented, so the two can't drift apart. Its own
+            // buttons grant or revoke and then dismiss.
+            NavigationStack {
+                ConsentView(consent: consent) { showConsentSheet = false }
+                    .padding(.horizontal)
+                    .navigationTitle("Community Science")
+                    .navigationBarTitleDisplayMode(.inline)
+            }
         }
         .sheet(isPresented: $showEraseConfirmation) {
             EraseDataConfirmationView(consent: consent, classStore: classStore) { }
@@ -478,11 +497,10 @@ struct SettingsView: View {
         Group {
             Section {
                 Toggle("Auto-record on session start", isOn: $autoRecordOnSessionStart)
-                Toggle("Screen recording", isOn: $screenCaptureEnabled)
             } header: {
                 Text("Recording")
             } footer: {
-                Text("When on, starting a New Session automatically arms the triggered WAV recorder. Just Listening always starts unarmed regardless of this setting. Screen recording captures a video (ReplayKit) alongside the triggered WAV passes whenever recording is armed.")
+                Text("When on, starting a New Session automatically arms the triggered WAV recorder. Just Listening always starts unarmed regardless of this setting.")
             }
 
             Section {

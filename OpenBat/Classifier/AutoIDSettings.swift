@@ -223,7 +223,22 @@ final class AutoIDSettings {
         self.mapPinMinPulseCount = defaults.object(forKey: Self.keyMapPulses) != nil
             ? defaults.integer(forKey: Self.keyMapPulses) : 3
 
-        load()   // applies saved v2 state, or migrates legacy v1
+        // NOT load() — see `loadPersisted()`. The two UserDefaults scalar reads
+        // above are cheap enough to leave here; the JSON decode is not.
+    }
+
+    /// Applies saved v2 state (or migrates a legacy v1 blob). Call once from the
+    /// owning view's `.task`, never from `init()`.
+    ///
+    /// `AutoIDSettings()` is a SwiftUI `@State` default value, so its initializer
+    /// expression re-runs every time the enclosing view's initializer does —
+    /// SwiftUI keeps the first result and discards the rest. Decoding the stored
+    /// per-model species blob there meant paying that decode on every redundant
+    /// construction, on the main thread, for a value thrown straight away.
+    func loadPersisted() {
+        guard !hasLoaded else { return }
+        hasLoaded = true
+        load()
     }
 
     // MARK: Active-model accessors (read by the classifier / pulse detector)
@@ -279,6 +294,9 @@ final class AutoIDSettings {
     }
 
     // MARK: Persistence
+
+    /// Guards `loadPersisted()` against running more than once.
+    private var hasLoaded = false
 
     private static let keyV2 = "AutoIDSettings_v2"
     private static let keyV1 = "AutoIDSettings_v1"   // legacy single-model blob

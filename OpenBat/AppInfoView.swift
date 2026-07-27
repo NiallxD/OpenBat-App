@@ -28,6 +28,8 @@ enum TourID: Hashable {
     // Individual buttons. Tagged on the shared button properties, so the portrait
     // and landscape placements both resolve to whichever one is in the tree.
     case micStatus, resetStats                 // stats header (micStatus: portrait only)
+    case sessionStatus, feedbackWarning        // stats header
+    case sessionTimer                          // spectrogram header
     case pulseSpeciesToggle, pulseSettings     // pulse-view header
     case spectrogramSpeciesToggle, compressTimeline, batRange, palette, bandSettings
     case start, record, listen                 // transport bar
@@ -82,6 +84,12 @@ enum TourScript {
         TourStep(target: .stats, symbol: "chart.bar",
                  title: "Live stats",
                  detail: "Peak frequency, bandwidth, duration, pulse rate and count for the most recent pulse, plus the current species ID and input level. They clear when activity goes stale."),
+        TourStep(target: .feedbackWarning, symbol: "exclamationmark.triangle.fill",
+                 title: "Feedback warning",
+                 detail: "Appears only while heterodyne or time-expansion audio is playing out the phone's speaker — the mic hears that playback and shows it as a spurious second call. Wear headphones to clear it. (Shown here for the tour.)"),
+        TourStep(target: .sessionStatus, symbol: "location.fill",
+                 title: "What's running",
+                 detail: "Off when nothing is detecting, Listening for an unlogged run, or Session when IDs are being logged with a GPS track."),
         TourStep(target: .micStatus, symbol: "cable.connector",
                  title: "Mic status",
                  detail: "Shows whether the ultrasonic mic is attached and the sample rate it's running at."),
@@ -102,6 +110,9 @@ enum TourScript {
         TourStep(target: .spectrogram, symbol: "waveform.badge.magnifyingglass",
                  title: "Spectrogram",
                  detail: "The scrolling frequency-vs-time view. Drag to scroll back through history."),
+        TourStep(target: .sessionTimer, symbol: "timer",
+                 title: "Elapsed time",
+                 detail: "How long the current run has been detecting, counting from when you started. It appears once detection is running and disappears when you stop. (Shown here for the tour.)"),
         TourStep(target: .spectrogramSpeciesToggle, symbol: "sparkle.magnifyingglass",
                  title: "Species ID here too",
                  detail: "Swaps this pane to the Species ID feed, same as in the pulse view — handy in landscape when the spectrogram is full screen."),

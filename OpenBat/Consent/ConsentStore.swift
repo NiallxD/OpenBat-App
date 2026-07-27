@@ -106,7 +106,14 @@ final class ConsentStore {
 
     /// Bump whenever the consent copy (PrivacyNoticeView / ConsentView) changes materially,
     /// so a stored record always says which text a device actually agreed to.
-    static let currentConsentVersion = "1.0"
+    ///
+    /// 2.0: contributions became fully anonymous — no device identifier, no
+    /// display name, ~100 m location and 5-minute time rounding applied
+    /// unconditionally — and the consequence (contributed recordings can no
+    /// longer be identified or deleted on request) is now disclosed before the
+    /// grant button. A device that agreed to 1.0 agreed to materially different
+    /// terms, including a deletion promise that no longer applies.
+    static let currentConsentVersion = "2.0"
 
     private(set) var record: ConsentRecord?
 
@@ -130,7 +137,46 @@ final class ConsentStore {
         if let syncObserver { NotificationCenter.default.removeObserver(syncObserver) }
     }
 
-    var isGranted: Bool { record?.status == .granted }
+    /// Whether this device has an active grant **for the terms currently in the
+    /// app**. Gates every upload path.
+    ///
+    /// Version-aware, not just status-aware. `currentConsentVersion` is bumped
+    /// whenever the consent wording changes materially — so a record saying
+    /// "granted, version 1.0" while the app presents 2.0 describes agreement to
+    /// text this build no longer shows. Treating that as live consent would mean
+    /// contributing recordings under terms the user never saw, which is exactly
+    /// the failure the version field exists to prevent. Recording the version and
+    /// then ignoring it is worse than not recording it, because it looks like a
+    /// safeguard.
+    ///
+    /// Exact match rather than an ordering comparison: any bump is by definition
+    /// a material change, and a stored version that isn't the current one — older
+    /// or, through a downgrade, newer — is one this build cannot claim the user
+    /// agreed to.
+    ///
+    /// Fails closed. A stale record stops uploads immediately and silently; it is
+    /// `needsReconsent` that makes the situation visible and recoverable.
+    var isGranted: Bool {
+        guard let record, record.status == .granted else { return false }
+        return record.consentVersion == Self.currentConsentVersion
+    }
+
+    /// True when the user *did* agree, under wording that has since changed, and
+    /// hasn't been asked about the new wording yet.
+    ///
+    /// Distinct from simply never having consented: this person opted in and
+    /// their contributions have now quietly stopped, so the UI owes them an
+    /// explanation and a way to opt back in — see `SettingsView`'s review banner
+    /// and the launch-time prompt in `ContentView`. Someone who declined, or who
+    /// never decided, is not nagged.
+    var needsReconsent: Bool {
+        guard let record, record.status == .granted else { return false }
+        return record.consentVersion != Self.currentConsentVersion
+    }
+
+    /// The wording this device actually agreed to, if any — shown alongside the
+    /// review prompt so the change isn't asserted without saying what changed.
+    var agreedConsentVersion: String? { record?.consentVersion }
 
     /// True when the user's current choice hasn't been confirmed by the server
     /// yet. Surfaced in Settings so a withdrawal that hasn't propagated isn't
@@ -169,36 +215,40 @@ final class ConsentStore {
         ConsentSync.syncIfNeeded()
     }
 
-    /// GDPR-style full erasure — distinct from `revoke()`, which only stops
-    /// future uploads. Deletes the D1 row and every past R2 recording for this
-    /// device (see the Worker's `handleErase`), then wipes the local consent
-    /// record and rotates the device ID, so no future activity can be
-    /// correlated back to what was just erased. The app's UI gates this
-    /// behind an explicit type-to-confirm step before ever calling it.
+    /// Erases the consent record held for this device — distinct from
+    /// `revoke()`, which only flips status. Deletes the server-side D1 row, the
+    /// local Keychain copy, and rotates the device ID so no future activity can
+    /// be correlated back to the identity just erased. The UI gates this behind
+    /// an explicit type-to-confirm step before ever calling it.
     ///
-    /// Returns the number of recordings deleted on success, nil if the
-    /// request failed (network error, Worker unreachable) — callers must NOT
-    /// clear any of their own local state on nil, since nothing was actually erased.
-    func eraseAllData() async -> Int? {
-        // Fence first. Any upload still in flight was authorised under the
-        // device_id about to be erased, and a transfer that lands AFTER the
-        // Worker's list-and-delete sweep re-creates an object under the very
-        // prefix just cleared — leaving data behind that the user was told was
-        // gone, and (since the D1 row goes too) that the app can no longer see.
-        // Cancelling before the request closes that window rather than relying
-        // on the Worker's consent check to 403 the straggler.
+    /// Scope: the consent record only. Already-contributed recordings are not
+    /// deleted and cannot be — see `ConsentAPIClient.eraseConsentRecord`. Callers
+    /// must not tell the user otherwise.
+    ///
+    /// Returns false if the request failed (network error, Worker unreachable) —
+    /// callers must NOT clear any of their own local state on false, since
+    /// nothing was actually erased.
+    func eraseConsentRecord() async -> Bool {
+        // Fence first. Any upload still in flight was authorised against the
+        // consent row about to be deleted; letting it land afterwards would mean
+        // accepting a contribution for a device that, as far as the server is
+        // then concerned, never consented. Cancelling closes that window rather
+        // than relying on the Worker's consent check to 403 the straggler.
+        //
+        // Note this is about consent hygiene, not about clawing anything back:
+        // an upload that already completed is anonymous and stays where it is.
         await RecordingUploader.shared.cancelAllUploads()
         // Same fence for the consent mirror: an unconfirmed push still in flight
         // would otherwise re-create the D1 row straight after the erase removed it.
         await ConsentSync.suspend()
         defer { ConsentSync.resume() }
 
-        guard let deletedObjects = await ConsentAPIClient.eraseAllData(deviceID: DeviceIdentity.current) else {
-            return nil
+        guard await ConsentAPIClient.eraseConsentRecord(deviceID: DeviceIdentity.current) else {
+            return false
         }
         ConsentRecordStorage.delete()
         record = nil
         DeviceIdentity.regenerate()
-        return deletedObjects
+        return true
     }
 }

@@ -51,13 +51,13 @@ struct SessionsView: View {
         }
         .navigationTitle("Sessions")
         .navigationBarTitleDisplayMode(.inline)
-        // Forces a fully opaque nav bar instead of the default translucent
-        // Liquid Glass material — without this, this section's own grouped-list
-        // background samples through as a visible grey bar (same root cause
-        // ContentView's own `.toolbarBackground` comment describes; that outer
-        // one wasn't enough to keep this section's bar consistent with the rest).
-        .toolbarBackground(Color(.systemBackground), for: .navigationBar)
-        .hardTopScrollEdge()
+        // Flat black bar, matching every other section. This colour only fills the
+        // bar's background — the glass material that used to composite over it
+        // (reading as a grey header) is removed app-wide in
+        // `OpenBatApp.configureNavigationBarAppearance`, and `flatTopScrollEdge`
+        // drops the scroll-edge scrim this section's list would otherwise add.
+        .toolbarBackground(Color.black, for: .navigationBar)
+        .flatTopScrollEdge()
         .toolbar {
             // Only filters `filteredListeningRecordings` (the Recordings tab) —
             // sessionsContent doesn't read `showNoID` at all, so the toggle has

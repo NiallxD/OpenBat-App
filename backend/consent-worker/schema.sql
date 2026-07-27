@@ -17,36 +17,27 @@ CREATE TABLE IF NOT EXISTS consent_records (
     token_issued    INTEGER NOT NULL DEFAULT 0
 );
 
--- Durable record that an erasure was requested.
+-- Aggregate count of consent erasures, by month. No identifiers.
 --
--- Previously the notification email WAS the audit trail: handleErase deleted the
--- R2 objects and the D1 consent row, then fired an email whose failure was only
--- ever logged to console.error. If that send failed — unset API key, unverified
--- sending domain, Resend outage — there was no record anywhere that a user had
--- asked to be erased, and no way to recover the device_id needed to find copies
--- in long-term archive storage. The least reliable component was carrying the
--- one fact that had to survive.
+-- This replaces an `erasure_requests` table that held a device_id, timestamps,
+-- retry counters and error strings for every request. Nearly all of that existed
+-- to support a deletion process that no longer exists: erasure used to delete R2
+-- objects under a device-id prefix, could be interrupted part-way, and ended with
+-- an email asking a human to find copies in archive storage. Erasure is now a
+-- single DELETE against one row — atomic, synchronous, nothing to resume.
 --
--- Written BEFORE anything is deleted, so an erasure interrupted part-way (a
--- Worker can be terminated mid-request) still leaves evidence it was asked for.
+-- What was left once that fell away was a permanent list of the identifiers of
+-- people who had asked to be forgotten. That is retained personal data about
+-- data subjects who explicitly asked for none, it needs its own lawful basis to
+-- hold, and it needs a retention policy and a purge job to stop it becoming a
+-- shadow profile. A count gives the same accountability answer — erasures are
+-- processed, here is the volume — while being incapable of identifying anyone,
+-- so none of that machinery is needed.
 --
--- Deliberately minimal: an identifier and timestamps. No location, no species,
--- no recording data. Note that a device_id IS pseudonymous personal data — this
--- table retains information about someone who asked to be forgotten, which is
--- lawful as a record of compliance but must not become a permanent shadow
--- profile. Hence the retention purge in the Worker's scheduled handler.
-CREATE TABLE IF NOT EXISTS erasure_requests (
-    device_id       TEXT PRIMARY KEY,
-    requested_at    TEXT NOT NULL,
-    -- NULL until the R2 sweep finishes; a NULL here on an old row means the
-    -- request was interrupted and needs looking at.
-    deleted_objects INTEGER,
-    -- NULL until the privacy team has actually been notified. The scheduled
-    -- handler retries every row where this is still NULL.
-    notified_at     TEXT,
-    attempts        INTEGER NOT NULL DEFAULT 0,
-    last_error      TEXT
+-- Deliberately not per-device and deliberately not per-day: month granularity
+-- means this cannot be correlated against anything, including object creation
+-- times in R2.
+CREATE TABLE IF NOT EXISTS erasure_counts (
+    month TEXT PRIMARY KEY,          -- 'YYYY-MM'
+    count INTEGER NOT NULL DEFAULT 0
 );
-
-CREATE INDEX IF NOT EXISTS idx_erasure_pending
-    ON erasure_requests (notified_at) WHERE notified_at IS NULL;

@@ -128,9 +128,17 @@ struct SessionStatusPillView: View {
 struct SessionTimerPill: View {
     /// When the current listening/session began; nil when not detecting.
     let start: Date?
+    /// Set while the guided tour is running: forces the pill on with a stand-in
+    /// elapsed time so the tour has something to spotlight even when detection
+    /// isn't running (the tour is usually taken before the user ever starts).
+    var tourDemo: Bool = false
+
+    /// Fake start used only for `tourDemo`, seeded a couple of minutes back so
+    /// the readout shows a plausible running clock rather than 0:00.
+    @State private var demoStart = Date().addingTimeInterval(-125)
 
     var body: some View {
-        if let start {
+        if let start = start ?? (tourDemo ? demoStart : nil) {
             // Anchor the schedule to `start` so ticks land on whole elapsed
             // seconds, and read `context.date` (not Date()) so the label is
             // consistent with the schedule that woke it.
@@ -177,10 +185,14 @@ struct SessionTimerPill: View {
 /// AudioEngineController).
 struct SpeakerFeedbackWarningPill: View {
     let audio: AudioEngineController
+    /// Set while the guided tour is running: forces the warning on so the tour
+    /// can spotlight it without the user actually being in the speaker-feedback
+    /// situation. See `SessionTimerPill.tourDemo`.
+    var tourDemo: Bool = false
     @State private var showExplainer = false
 
     var body: some View {
-        if audio.isListening && audio.isOutputOnSpeaker {
+        if tourDemo || (audio.isListening && audio.isOutputOnSpeaker) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(.yellow)

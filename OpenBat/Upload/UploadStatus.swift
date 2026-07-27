@@ -18,7 +18,8 @@ nonisolated struct UploadStatus: Codable, Equatable {
     enum Phase: String, Codable {
         /// Consent wasn't granted when this recording was saved — no attempt made.
         case notContributing
-        /// Eligible and waiting — auto-upload off, or Wi-Fi-only and not on Wi-Fi.
+        /// Eligible to contribute, waiting for the user to tap. Nothing moves
+        /// this on by itself — there is no automatic upload path.
         case queued
         /// Reading the original WAV, running the quality gate, applying the
         /// irreversible high-pass privacy filter, fuzzing/keeping location.
@@ -30,8 +31,8 @@ nonisolated struct UploadStatus: Codable, Equatable {
         /// Quality gate rejected it, or the file couldn't be read — permanent,
         /// not retried automatically (the input itself is the problem).
         case rejected
-        /// Network/Worker/encoder error — transient, retried on the next
-        /// Wi-Fi-available event or manual retry.
+        /// Network/Worker/encoder error after the user asked to contribute —
+        /// transient, retried when the network returns, or on a manual tap.
         case failed
     }
 
@@ -73,10 +74,16 @@ nonisolated struct UploadStatus: Codable, Equatable {
     static let maxAutomaticRetries = 5
 
     /// Whether this recording should be swept up by `RecordingUploader`'s
-    /// automatic retry when Wi-Fi becomes available.
+    /// automatic retry when the network comes back.
+    ///
+    /// `.failed` only. A `.queued` recording is one that is *eligible* to be
+    /// contributed and is waiting for the user to tap — there is no longer any
+    /// automatic upload path, so sweeping those would upload things nobody asked
+    /// to send. `.failed`, by contrast, means the user did tap and the transfer
+    /// didn't make it, so finishing the job they already asked for is the
+    /// expected behaviour rather than a surprise.
     var isRetryEligible: Bool {
         switch phase {
-        case .queued: return true
         case .failed: return (failureCount ?? 0) < Self.maxAutomaticRetries
         default: return false
         }

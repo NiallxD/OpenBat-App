@@ -1,0 +1,32 @@
+-- Drops the erasure log's R2 object counter, which no longer has anything to
+-- count. Fresh databases get the current shape from schema.sql and don't need
+-- this file.
+--
+-- Apply with:
+--   wrangler d1 execute openbat-consent --file=migrations/003_anonymous_uploads.sql
+--
+-- Context: uploads used to be stored under an R2 key beginning `{device_id}/`,
+-- which meant an erasure request could list and delete "this device's
+-- recordings" and record how many it removed. That prefix was the join between
+-- a person and their contributions, and it has been removed — contributed
+-- recordings now carry no identifier, a ~100m grid coordinate and a 5-minute
+-- timestamp bucket, and cannot be attributed to a device by any means.
+--
+-- So `deleted_objects` is not merely unused: keeping a column shaped like
+-- "recordings we deleted for this person" invites someone to reimplement the
+-- lookup that would fill it in. Removing it is part of the design, not tidying.
+-- See handleErase in src/index.ts.
+--
+-- NOTE ON ORDERING (this one matters): deploy the Worker BEFORE running this.
+-- The old Worker's INSERT names `deleted_objects` explicitly, so it starts
+-- failing the moment the column disappears. The new Worker doesn't reference it
+-- at all and runs fine against either shape, which makes Worker-then-migration
+-- the only order with no broken window.
+--
+-- This is the reverse of the client/server ordering used elsewhere in this
+-- refactor (see the notes' §9 step 3, and the deploy checklist in README.md):
+-- the CLIENT must not ship before the Worker either, since the new upload key
+-- shape is rejected by the old Worker's UPLOAD_KEY_PATTERN. Full order is:
+--   1. Deploy Worker  2. Run this migration  3. Release the app update
+
+ALTER TABLE erasure_requests DROP COLUMN deleted_objects;

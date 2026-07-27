@@ -11,12 +11,10 @@ database_id = "4f370336-efd6-45cb-823e-f33a0953ce4f"
 binding = "RECORDINGS"
 bucket_name = "openbat-community-recordings"
 
-# Hourly sweep: retries erasure notifications that haven't landed yet and purges
-# expired erasure records. Cron triggers are free on Workers. Without this, a
-# notification that failed at erase time would never be retried — and that email
-# is what tells the privacy team to go delete archive copies.
-[triggers]
-crons = ["0 * * * *"]
+# No cron triggers. There was an hourly sweep here to retry erasure notification
+# emails and purge expired erasure records; both jobs, and the email path they
+# served, were removed when erasure became a single synchronous DELETE with
+# nothing to chase afterwards. Nothing in this Worker runs on a schedule.
 
 # Per-device throttle. `src/index.ts` treats this binding as optional and fails
 # open if it's missing, so a deploy without it still works — the device-token
@@ -28,5 +26,52 @@ type = "ratelimit"
 namespace_id = "1001"
 simple = { limit = 60, period = 60 }
 
-# RESEND_API_KEY and DEVICE_TOKEN_SECRET are secrets, not declared here — see
-# README.md ("wrangler secret put ...").
+# Workers Logs retention, set explicitly rather than left to the platform
+# default — which has changed before and is enabled for Workers created through
+# the dashboard.
+#
+# This is a privacy control, not a cost one. Uploads are stored with no
+# identifier precisely so that nothing links a recording to a device; the one
+# place the two are ever in scope together is handleUpload, which receives the
+# device id as a transient header to check consent against. Retained invocation
+# logs are the one mechanism that could capture that pairing and quietly
+# reconstitute the join outside the database, where none of the schema-level
+# guarantees apply.
+#
+# If this is ever turned on, audit handleUpload first: it must not log the
+# device id, the object key, or anything derived from either.
+#
+# Logpush is the other mechanism that could capture that pairing, and as of
+# 2026-07-26 it is unavailable on this account's plan (gated to Enterprise and
+# Workers Paid) — so it's closed by the plan rather than by remembering to leave
+# it off. R2 access logs ride on the same Logpush datasets and are closed with
+# it. UPGRADING TO WORKERS PAID REOPENS BOTH: audit request-header capture
+# before doing so.
+[observability]
+enabled = false
+
+# Verified 2026-07-26 (R2 ▸ openbat-community-recordings ▸ Settings): no custom
+# domain, Public Development URL disabled, no CORS policy, Data Catalog off. The
+# bucket is reachable only through this Worker.
+#
+# The bucket lives in Western North America while the users are UK-based. That
+# is a non-issue ONLY because contributed recordings are not personal data —
+# there is no international transfer to document because there is no data
+# subject. It would have been a real UK GDPR transfer question under the old
+# device-id-prefixed key scheme. Worth remembering before anyone proposes
+# putting anything identifying in this bucket.
+#
+# D1 is the opposite case: it holds device identifiers and consent state, which
+# ARE personal data, so its region is the one that actually matters for transfer
+# purposes. Check it with `wrangler d1 info openbat-consent` (needs a token with
+# d1 read scope) or in the dashboard under Storage & Databases.
+
+# DEVICE_TOKEN_SECRET is a secret, not declared here — see README.md
+# ("wrangler secret put ...").
+#
+# RESEND_API_KEY is gone. Erasure used to send a notification email so a human
+# could go and find recordings in archive storage; recordings can no longer be
+# attributed to a device at all, so there was nothing to notify anyone about.
+# Removing it also removed an email provider as a processor of device
+# identifiers. If a Resend key is still set on the deployed Worker, delete it:
+#   wrangler secret delete RESEND_API_KEY

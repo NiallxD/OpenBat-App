@@ -2,27 +2,26 @@
 //
 //   POST   /consent   { device_id, consent_version, status, granted_at?, revoked_at? }
 //   GET    /consent?device_id=...
-//   DELETE /consent?device_id=...   — GDPR-style erasure: deletes the D1 row
-//                                      AND every R2 object under that device_id
-//   PUT    /upload/{device_id}/{date}/{recording_id}.flac   (body: file bytes)
+//   DELETE /consent?device_id=...   — erases the D1 consent row (NOT recordings;
+//                                      see handleErase for why that is impossible
+//                                      by construction rather than merely refused)
+//   PUT    /upload/{date}/{object_id}.flac   (body: file bytes,
+//                                      x-openbat-device-id header for the
+//                                      consent check, never persisted)
 //
-// Deliberately minimal, matching the spec's "val.town + SQL is sufficient"
-// sizing for consent — just current-state-per-device, no auth beyond the
-// device_id itself (an app-generated UUID, not guessable/enumerable in
-// practice). The upload route binds directly to R2 (no S3 request-signing)
-// since Worker and bucket live in the same Cloudflare account — see
-// wrangler.toml's commented-out r2_buckets block, uncommented once the
-// bucket exists (manual step, see backend/README.md).
+// Deliberately minimal: current-consent-state-per-device in D1, recordings as
+// opaque objects in R2, and no relationship between the two. Every route except
+// the consent bootstrap requires a device token (HMAC of the device_id under
+// DEVICE_TOKEN_SECRET). The upload route binds directly to R2 (no S3
+// request-signing) since Worker and bucket live in the same Cloudflare account.
+//
+// The privacy model in one line: a device_id can reach its consent row and
+// nothing else. See handleUpload and handleErase for the two places that
+// matters, and the "OpenBat App Store Review Notes" §4 for why.
 
 export interface Env {
   DB: D1Database;
   RECORDINGS: R2Bucket;
-  // Set via `wrangler secret put RESEND_API_KEY` — never committed. Using
-  // Resend (not Cloudflare's own send_email binding) because Cloudflare's
-  // Email Sending requires the paid Workers plan just to authenticate a
-  // sender domain; Resend's free tier (3,000 emails/month) covers this
-  // easily with no ongoing cost.
-  RESEND_API_KEY: string;
   // Set via `wrangler secret put DEVICE_TOKEN_SECRET`. Every device token is
   // an HMAC of the device_id under this key, so tokens are verifiable without
   // storing them — rotating this secret invalidates every device at once.
@@ -51,25 +50,18 @@ export interface Env {
 /// rather than the primary limit.
 const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
 
-/// `{device_id}/{YYYY-MM-DD}/{recording_id}.flac` and nothing else. The key
-/// used to be whatever followed `/upload/`, so a request could write an object
-/// at the bucket root or under an arbitrary path shape.
-const UPLOAD_KEY_PATTERN =
-  /^[0-9A-Fa-f-]{36}\/\d{4}-\d{2}-\d{2}\/[0-9A-Fa-f-]{36}\.flac$/;
-
-// Notified on every full erasure — the manual backstop for anything moved to
-// long-term archive storage outside R2 (see handleErase). Not app-configurable;
-// changing where this goes is a backend deploy, not a user-facing setting.
-const PRIVACY_NOTIFICATION_ADDRESS = "privacy@openbat.app";
-const PRIVACY_SENDER_ADDRESS = "noreply@openbat.app";
-
-/// Give up retrying a notification after this many tries — the row stays in the
-/// table for a human rather than being deleted. See `retryPendingNotifications`.
-const MAX_NOTIFICATION_ATTEMPTS = 24;
-
-/// How long a *notified* erasure record is kept as proof of compliance before
-/// being purged. A policy choice — see `purgeExpiredErasureRecords`.
-const ERASURE_LOG_RETENTION_DAYS = 365;
+/// `{YYYY-MM-DD}/{object_id}.flac` and nothing else.
+///
+/// The key used to lead with `{device_id}/`, which made every stored object
+/// permanently attributable to the device that sent it. That prefix is gone:
+/// uploaded recordings carry no identifier of any kind, and the date is the
+/// client's 5-minute-bucketed timestamp truncated to a day (see
+/// AnonymizedUploadBuilder), not a precise capture time.
+///
+/// The object id is a random UUID minted per upload attempt and never stored on
+/// the device, so it is not a covert re-identifier either — see that type's
+/// `objectID` doc comment.
+const UPLOAD_KEY_PATTERN = /^\d{4}-\d{2}-\d{2}\/[0-9A-Fa-f-]{36}\.flac$/;
 
 interface ConsentBody {
   device_id: string;
@@ -167,25 +159,72 @@ async function withinRateLimit(env: Env, key: string): Promise<boolean> {
   }
 }
 
-async function currentStatus(env: Env, deviceID: string): Promise<string | null> {
-  const row = await env.DB.prepare("SELECT status FROM consent_records WHERE device_id = ?")
+/// The consent wording currently in force. MUST match
+/// `ConsentStore.currentConsentVersion` in the app.
+///
+/// Uploads are refused from a device whose stored consent names a different
+/// version, not merely from one that never consented. A device holding a
+/// "granted" row for superseded wording has not agreed to the terms the project
+/// now operates under, and accepting its contributions would mean collecting
+/// under terms that user never saw. The app enforces the same rule and
+/// re-prompts, but a stale or modified client is exactly the case a server-side
+/// check exists for.
+///
+/// Bump this in the same deploy as the app release that bumps its own constant.
+/// Devices on the old version get a clean 403 and the app's re-consent prompt
+/// resolves it — a deliberate pause, not a break.
+const CURRENT_CONSENT_VERSION = "2.0";
+
+async function currentConsent(
+  env: Env,
+  deviceID: string
+): Promise<{ status: string; consent_version: string } | null> {
+  const row = await env.DB.prepare(
+    "SELECT status, consent_version FROM consent_records WHERE device_id = ?"
+  )
     .bind(deviceID)
-    .first<{ status: string }>();
-  return row?.status ?? null;
+    .first<{ status: string; consent_version: string }>();
+  return row ?? null;
 }
 
-/// PUT /upload/{device_id}/{date}/{recording_id}.flac — matches the object key
-/// convention from the spec (§6) exactly, so the R2 key is just the URL path
-/// with the leading "/upload/" stripped. Filterable fields (species, quality
-/// score, location, verified status) come in as headers and are mirrored into
-/// R2 customMetadata (§5.4) rather than needing a separate query database.
+/// PUT /upload/{date}/{object_id}.flac — the R2 key is the URL path with the
+/// leading "/upload/" stripped. Filterable fields (species, quality score,
+/// location, verified status) come in as headers and are mirrored into R2
+/// customMetadata rather than needing a separate query database.
+///
+/// ---------------------------------------------------------------------------
+/// THE ONE PLACE A DEVICE ID AND AN ANONYMOUS RECORDING TOUCH. Read before
+/// editing.
+///
+/// Consent is keyed by device_id, so accepting a contribution requires knowing
+/// which device is asking — but the stored object must carry no identifier at
+/// all. So the device_id arrives in the `x-openbat-device-id` REQUEST HEADER,
+/// is used solely to look up `consent_records.status`, and is then dropped on
+/// the floor. It is never written into the object key, the object body, or
+/// customMetadata. `deviceID` is deliberately not in scope by the time
+/// `bucket.put` is called below.
+///
+/// The bearer token cannot replace this: it is HMAC(secret, device_id), which
+/// isn't reversible, so there's no way to recover an id from it to do the
+/// lookup. The token proves the caller holds a device_id; the header says which.
+/// Both are needed, and neither is retained.
+///
+/// Corollary for operations: do NOT enable Logpush with request-header capture
+/// on this Worker, and do not log `deviceID` alongside `key` anywhere in this
+/// function. Either would re-create in the logs exactly the join this design
+/// removes from the database.
+/// ---------------------------------------------------------------------------
 async function handleUpload(request: Request, env: Env, path: string): Promise<Response> {
   const bucket = env.RECORDINGS;
   const key = path.replace(/^\/upload\//, "");
   if (!UPLOAD_KEY_PATTERN.test(key)) {
     return json({ error: "malformed object key" }, 400);
   }
-  const deviceID = key.split("/")[0];
+
+  const deviceID = request.headers.get("x-openbat-device-id");
+  if (!deviceID) {
+    return json({ error: "x-openbat-device-id required" }, 400);
+  }
 
   if (!(await authorize(request, env, deviceID))) {
     return json({ error: "invalid or missing device token" }, 401);
@@ -208,11 +247,33 @@ async function handleUpload(request: Request, env: Env, path: string): Promise<R
     return json({ error: "recording too large", maxBytes: MAX_UPLOAD_BYTES }, 413);
   }
 
-  const status = await currentStatus(env, deviceID);
-  if (status !== "granted") {
+  const consent = await currentConsent(env, deviceID);
+  if (consent?.status !== "granted") {
     return json({ error: "device has not granted upload consent" }, 403);
   }
+  if (consent.consent_version !== CURRENT_CONSENT_VERSION) {
+    return json(
+      {
+        error: "consent version superseded",
+        agreed: consent.consent_version,
+        required: CURRENT_CONSENT_VERSION,
+      },
+      403
+    );
+  }
 
+  // Keys are random UUIDs the client never retains, so a collision is
+  // vanishingly unlikely and a *deliberate* overwrite is the only realistic way
+  // one happens. Refusing it means a caller holding a valid token still can't
+  // damage an existing contribution, which matters more now that keys are no
+  // longer namespaced per device.
+  if (await bucket.head(key)) {
+    return json({ error: "object already exists" }, 409);
+  }
+
+  // Allowlist, mirroring the client's own. `x-openbat-device-id` is absent from
+  // this list and must stay absent: anything named here is persisted onto the
+  // object and would re-create the join.
   const metadataHeaderNames = ["species", "quality-score", "location", "verified"] as const;
   const customMetadata: Record<string, string> = {};
   for (const name of metadataHeaderNames) {
@@ -221,184 +282,80 @@ async function handleUpload(request: Request, env: Env, path: string): Promise<R
   }
 
   await bucket.put(key, request.body, { customMetadata });
+  // Response carries the key only. Nothing here echoes the device id back.
   return json({ ok: true, key });
 }
 
-/// Still never fails the erasure — the R2/D1 deletion is the part that matters
-/// and has already happened — but the outcome is now RETURNED rather than
-/// swallowed, so `erasure_requests.notified_at` only gets stamped on a real
-/// success and `retryPendingNotifications` can pick up anything that didn't land.
-async function notifyPrivacyTeam(
-  env: Env,
-  deviceID: string,
-  requestedAt: string,
-  deletedObjects: number | null
-): Promise<{ ok: true } | { ok: false; error: string }> {
-  try {
-    const response = await fetch("https://api.resend.com/emails", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${env.RESEND_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        from: PRIVACY_SENDER_ADDRESS,
-        to: PRIVACY_NOTIFICATION_ADDRESS,
-        subject: `Erasure request: device ${deviceID}`,
-        text:
-          `Device ${deviceID} requested full data erasure at ${requestedAt}.\n\n` +
-          `${deletedObjects ?? "an unknown number of"} object(s) deleted from R2 automatically, ` +
-          `and the D1 consent record was removed.\n\n` +
-          `If any recordings from this device were previously moved to long-term archive storage ` +
-          `(outside R2), they still need to be located and deleted manually as a follow-up to this request.`,
-      }),
-    });
-    if (!response.ok) {
-      const body = await response.text();
-      console.error("notifyPrivacyTeam failed", deviceID, response.status, body);
-      return { ok: false, error: `HTTP ${response.status}: ${body}`.slice(0, 500) };
-    }
-    return { ok: true };
-  } catch (error) {
-    console.error("notifyPrivacyTeam failed", deviceID, error);
-    return { ok: false, error: String(error).slice(0, 500) };
-  }
-}
-
-/// Records the notification outcome against the request row.
-async function recordNotificationOutcome(
-  env: Env,
-  deviceID: string,
-  outcome: { ok: true } | { ok: false; error: string }
-): Promise<void> {
-  if (outcome.ok) {
-    await env.DB.prepare(
-      "UPDATE erasure_requests SET notified_at = ?, attempts = attempts + 1, last_error = NULL WHERE device_id = ?"
-    )
-      .bind(new Date().toISOString(), deviceID)
-      .run();
-  } else {
-    await env.DB.prepare(
-      "UPDATE erasure_requests SET attempts = attempts + 1, last_error = ? WHERE device_id = ?"
-    )
-      .bind(outcome.error, deviceID)
-      .run();
-  }
-}
-
-/// DELETE /consent?device_id=... — full erasure, not just a status flip.
-/// Deletes every R2 object under `{device_id}/` (paginated: R2 `list` caps at
-/// 1000 keys per call) then removes the D1 row entirely, so no record of the
-/// device — consent state included — survives the request. This is a
-/// separate, more destructive action than a plain consent revoke (which only
-/// stops future uploads); the app gates it behind an explicit
-/// type-to-confirm step before ever calling this. Also notifies the privacy
-/// team by email — the manual backstop for anything moved to archive storage
-/// this endpoint can't reach on its own (see notifyPrivacyTeam).
-async function handleErase(env: Env, deviceID: string, ctx: ExecutionContext): Promise<Response> {
-  const requestedAt = new Date().toISOString();
-
-  // Logged FIRST, before anything is destroyed. A Worker can be terminated
-  // mid-request, and an erasure that deleted some objects and then vanished
-  // without trace is the worst case — this row is what makes it recoverable.
-  // `deleted_objects` stays NULL until the sweep below completes, so an old row
-  // with a NULL count is itself the signal that a request was interrupted.
-  // ON CONFLICT so a repeated request re-opens the row rather than failing.
-  await env.DB.prepare(
-    `INSERT INTO erasure_requests (device_id, requested_at, deleted_objects, notified_at, attempts, last_error)
-     VALUES (?, ?, NULL, NULL, 0, NULL)
-     ON CONFLICT(device_id) DO UPDATE SET
-       requested_at = excluded.requested_at,
-       deleted_objects = NULL,
-       notified_at = NULL,
-       attempts = 0,
-       last_error = NULL`
-  )
-    .bind(deviceID, requestedAt)
-    .run();
-
-  let deletedObjects = 0;
-  let cursor: string | undefined;
-  do {
-    const listing = await env.RECORDINGS.list({ prefix: `${deviceID}/`, cursor });
-    if (listing.objects.length > 0) {
-      await env.RECORDINGS.delete(listing.objects.map((o) => o.key));
-      deletedObjects += listing.objects.length;
-    }
-    cursor = listing.truncated ? listing.cursor : undefined;
-  } while (cursor);
-
-  await env.DB.prepare("UPDATE erasure_requests SET deleted_objects = ? WHERE device_id = ?")
-    .bind(deletedObjects, deviceID)
-    .run();
+/// DELETE /consent?device_id=... — erases the CONSENT RECORD. Not recordings,
+/// and this function must never be extended to touch R2.
+///
+/// It used to sweep every object under `{device_id}/`. That was possible only
+/// because uploads were stored under a device-id prefix — i.e. only because the
+/// join this design now forbids existed. Removing the prefix removed the
+/// capability along with it, deliberately and permanently:
+///
+///   - Uploaded recordings carry no identifier, a ~100 m grid coordinate and a
+///     5-minute timestamp bucket. There is no query, here or anywhere, that
+///     returns "the recordings belonging to this device". Not restricted —
+///     absent.
+///   - That is what makes contributed recordings non-personal-data rather than
+///     personal data we promise to handle carefully, and it is what the consent
+///     copy tells the user before they contribute anything.
+///   - A right to erasure over data that cannot identify anyone is not a right
+///     being refused; there is no data subject to connect it to.
+///
+/// So: if a future change makes it possible to find a device's recordings, that
+/// change has broken the privacy model, and fixing it by deleting them here is
+/// treating the symptom.
+///
+/// One statement, synchronous, and the user is told it is done on the strength
+/// of this response. There is no queue, no email, no follow-up and nothing a
+/// human has to finish afterwards — all of which used to exist to chase copies
+/// in archive storage that this endpoint could not reach. With nothing to
+/// chase, the honest thing is to do the work and confirm it, rather than to
+/// promise that something will happen later.
+async function handleErase(env: Env, deviceID: string): Promise<Response> {
   await env.DB.prepare("DELETE FROM consent_records WHERE device_id = ?").bind(deviceID).run();
-
-  // `waitUntil` rather than awaited: the deletion is done, and the app's erase
-  // dialog is sitting on this response. If the send fails (or this Worker is
-  // torn down before it finishes) the row stays unnotified and the scheduled
-  // handler retries it — which is the whole point of the table.
-  ctx.waitUntil(
-    notifyPrivacyTeam(env, deviceID, requestedAt, deletedObjects).then((outcome) =>
-      recordNotificationOutcome(env, deviceID, outcome)
-    )
-  );
-
-  return json({ ok: true, deletedObjects });
+  await recordErasure(env);
+  return json({ ok: true });
 }
 
-/// Retries every erasure notification that hasn't landed yet. Run from the cron
-/// trigger (see wrangler.toml), which is what turns "the email silently failed
-/// and nobody will ever know" into "it lands as soon as the send path works".
+/// Bumps a per-month counter, and records nothing else.
 ///
-/// Attempts are capped: past `MAX_NOTIFICATION_ATTEMPTS` the row stops being
-/// retried but is NOT deleted, so it still shows up in the pending query below
-/// as something needing a human. An unbounded retry against a permanently
-/// misconfigured sender would just burn the free-tier email quota.
-async function retryPendingNotifications(env: Env): Promise<void> {
-  const { results } = await env.DB.prepare(
-    `SELECT device_id, requested_at, deleted_objects FROM erasure_requests
-     WHERE notified_at IS NULL AND attempts < ?
-     ORDER BY requested_at ASC LIMIT 25`
-  )
-    .bind(MAX_NOTIFICATION_ATTEMPTS)
-    .all<{ device_id: string; requested_at: string; deleted_objects: number | null }>();
-
-  for (const row of results ?? []) {
-    const outcome = await notifyPrivacyTeam(env, row.device_id, row.requested_at, row.deleted_objects);
-    await recordNotificationOutcome(env, row.device_id, outcome);
+/// There used to be an `erasure_requests` table holding a device_id, timestamps,
+/// retry counts and error strings per request. Most of that existed so an
+/// interrupted multi-step deletion could be resumed and so a device_id could be
+/// recovered to find archive copies — neither of which is now a thing that can
+/// happen.
+///
+/// What remained was a permanent list of the identifiers of people who had
+/// asked to be forgotten, which is an uncomfortable thing to keep and needs its
+/// own justification to hold at all. A count carries the accountability value
+/// (we can show erasures are processed, and at what volume) with none of the
+/// personal data, so it needs no retention policy and no purge job. Failing
+/// here must never fail the erasure: the deletion is what the user asked for
+/// and it has already happened.
+async function recordErasure(env: Env): Promise<void> {
+  try {
+    const month = new Date().toISOString().slice(0, 7); // YYYY-MM
+    await env.DB.prepare(
+      `INSERT INTO erasure_counts (month, count) VALUES (?, 1)
+       ON CONFLICT(month) DO UPDATE SET count = count + 1`
+    )
+      .bind(month)
+      .run();
+  } catch (error) {
+    console.error("recordErasure failed", error);
   }
 }
 
-/// Drops notified erasure records once they've served their purpose.
-///
-/// This table exists to demonstrate that an erasure was honoured, which is a
-/// legitimate reason to retain a device_id belonging to someone who asked to be
-/// forgotten — but only for as long as that proof is plausibly needed. Keeping
-/// it forever would quietly turn "erase everything" into "erase everything
-/// except a permanent list of who asked". Only rows that were actually notified
-/// are purged; anything still pending or over the attempt cap is kept for a human.
-///
-/// The window is a policy choice, not a technical one — adjust to match whatever
-/// the published privacy notice commits to.
-async function purgeExpiredErasureRecords(env: Env): Promise<void> {
-  const cutoff = new Date(Date.now() - ERASURE_LOG_RETENTION_DAYS * 86_400_000).toISOString();
-  await env.DB.prepare(
-    "DELETE FROM erasure_requests WHERE notified_at IS NOT NULL AND requested_at < ?"
-  )
-    .bind(cutoff)
-    .run();
-}
-
+// No `scheduled` handler. There used to be one, running hourly to retry erasure
+// notification emails and purge expired erasure records. Both jobs existed to
+// support a deletion process that was multi-step, failure-prone and finished by
+// a human; erasure is now a single DELETE against one row, so there is nothing
+// to retry and nothing to expire. The cron trigger is removed from wrangler.toml
+// to match.
 export default {
-  async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    ctx.waitUntil(
-      (async () => {
-        await retryPendingNotifications(env);
-        await purgeExpiredErasureRecords(env);
-      })()
-    );
-  },
-
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
@@ -439,7 +396,7 @@ export default {
       if (!(await withinRateLimit(env, `erase:${deviceID}`))) {
         return json({ error: "rate limit exceeded" }, 429);
       }
-      return handleErase(env, deviceID, ctx);
+      return handleErase(env, deviceID);
     }
 
     if (request.method === "POST") {

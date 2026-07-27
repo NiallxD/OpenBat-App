@@ -84,7 +84,11 @@ struct OnboardingView: View {
             OnboardingStepView(
                 systemImage: "location.fill",
                 title: "Location access",
-                message: "OpenBat uses your location to tag where each call was recorded and suggest an AutoID Model. The system permission dialog has its own \"Precise Location\" switch — leave it on for exact coordinates, or off if you'd rather share only an approximate area.")
+                // "your own records" rather than "share": contributed
+                // recordings are rounded to ~100m regardless of this switch
+                // (AnonymizedUploadBuilder), so describing it as controlling
+                // what's shared would be untrue.
+                message: "OpenBat uses your location to tag where each call was recorded and suggest an AutoID Model. The system permission dialog has its own \"Precise Location\" switch — it controls how exact your own records are. Anything you choose to contribute is rounded to roughly 100 metres either way.")
             Button("Read the full privacy notice") { showPrivacyDetail = true }
                 .font(.footnote)
                 .padding(.top, 8)

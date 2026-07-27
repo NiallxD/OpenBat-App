@@ -13,9 +13,9 @@
 //  (see UploadStatus.swift) so `RecordingRow`'s eligibility badge and
 //  `UploadQueueView` can show real pending/uploading/failed state instead of
 //  the pipeline being entirely invisible.
-//  `retryQueuedUploads()` sweeps anything left `.queued` (waiting for Wi-Fi)
-//  or `.failed` (transient error) — called automatically when Wi-Fi becomes
-//  available, and exposed for a manual "Retry Now" button.
+//  `retryFailedUploads()` re-attempts anything left `.failed` after the user
+//  asked to contribute it — called automatically when Wi-Fi becomes available.
+//  Nothing else uploads on its own: contribution is always a deliberate tap.
 //
 //  Uses `URLSessionConfiguration.background` so an upload can complete even
 //  if the app is backgrounded or the system needs to relaunch it — that
@@ -29,17 +29,13 @@ import Network
 import CoreLocation
 import UIKit
 
-/// Everything a retry sweep needs to re-derive, pulled fresh at retry time
-/// (rather than cached, since consent/settings can change between when a
-/// recording was queued and when Wi-Fi actually becomes available) —
-/// mirrors the pull-based provider pattern already used elsewhere in this
-/// app (e.g. `PulseDetector.pcmProvider`).
+/// Pulled fresh at retry time rather than cached, since consent can change
+/// between a failed attempt and the network coming back — mirrors the
+/// pull-based provider pattern used elsewhere in this app (e.g.
+/// `PulseDetector.pcmProvider`). Only consent is left: the settings that used
+/// to live here (auto-upload, Wi-Fi-only) no longer exist.
 struct UploadRetryContext {
     let consent: ConsentStore
-    let recordistName: String
-    let locationAuthorization: CLAccuracyAuthorization
-    let wifiOnly: Bool
-    let autoUploadEnabled: Bool
 }
 
 /// `nonisolated ... @unchecked Sendable`: this genuinely runs on three
@@ -55,9 +51,9 @@ struct UploadRetryContext {
 nonisolated final class RecordingUploader: NSObject, @unchecked Sendable {
     static let shared = RecordingUploader()
 
-    /// Minimum species-ID confidence for a recording to be queued for upload
-    /// automatically — below this it's still kept locally and stays eligible for a
-    /// manual per-row upload, but doesn't get pushed into the queue by default.
+    /// Minimum species-ID confidence for a recording to be *offered* as ready to
+    /// contribute. Below this it's still kept locally and can still be sent by an
+    /// explicit tap — it just isn't surfaced as eligible by default.
     static let minUploadConfidence: Float = 0.75
 
     /// Longest capture eligible to be contributed. A genuine pass is a few
@@ -80,6 +76,12 @@ nonisolated final class RecordingUploader: NSObject, @unchecked Sendable {
     /// How recently a derived copy must have been written to be spared by
     /// `purgeOrphanedDerivedCopies` even though nothing references it yet.
     private let freshDerivedCopyGrace: TimeInterval = 300
+
+    /// Upper bound on the random hold-off applied before a transfer starts — see
+    /// the `earliestBeginDate` note in `upload`. Ten minutes is enough to
+    /// decouple the stored object's creation time from the moment of capture
+    /// without the upload appearing stuck.
+    static let maxUploadJitterSeconds: TimeInterval = 600
 
     // MARK: Main-actor-only state
 
@@ -140,7 +142,7 @@ nonisolated final class RecordingUploader: NSObject, @unchecked Sendable {
             isOnWiFiStorage = nowOnWiFi
             lock.unlock()
             if !wasOnWiFi && nowOnWiFi {
-                DispatchQueue.main.async { self.retryQueuedUploads() }
+                DispatchQueue.main.async { self.retryFailedUploads() }
             }
         }
         pathMonitor.start(queue: DispatchQueue(label: "com.openbat.upload.pathMonitor"))
@@ -263,10 +265,6 @@ nonisolated final class RecordingUploader: NSObject, @unchecked Sendable {
         confidence: Float?,
         coordinate: (lat: Double, lon: Double)?,
         consent: ConsentStore,
-        recordistName: String,
-        locationAuthorization: CLAccuracyAuthorization,
-        wifiOnly: Bool,
-        autoUploadEnabled: Bool,
         forceAttempt: Bool = false
     ) {
         guard consent.isGranted else {
@@ -307,22 +305,26 @@ nonisolated final class RecordingUploader: NSObject, @unchecked Sendable {
             report(recordingID, .failed("Upload service not configured yet"))
             return
         }
-        if !forceAttempt && !autoUploadEnabled {
-            report(recordingID, .queued("Waiting for manual upload"))
-            return
-        }
-        if !forceAttempt && wifiOnly && !isOnWiFi {
-            report(recordingID, .queued("Waiting for Wi-Fi"))
+        // Everything above decided whether this recording is ELIGIBLE to be
+        // contributed. Actually sending it is always a deliberate tap
+        // (`uploadNow`, which passes `forceAttempt`), so a recording that has
+        // just been saved stops here and waits to be chosen.
+        //
+        // There used to be an "upload automatically" setting and a "Wi-Fi only"
+        // setting that qualified it. Both are gone: automatic contribution sat
+        // awkwardly beside a consent model built on per-recording choice, and
+        // the Wi-Fi setting existed only to make automatic uploads less costly —
+        // it never applied to a manual tap, so it had nothing left to qualify.
+        if !forceAttempt {
+            report(recordingID, .queued("Ready to contribute"))
             return
         }
 
         report(recordingID, .converting)
-        let deviceID = DeviceIdentity.current
         let context = UploadConversionPipeline.Context(
-            deviceID: deviceID,
-            consentVersion: consent.record?.consentVersion ?? ConsentStore.currentConsentVersion,
-            recordistName: recordistName,
-            locationAuthorization: locationAuthorization,
+            recordedAt: date,
+            species: species,
+            confidence: confidence,
             fallbackCoordinate: coordinate.map {
                 CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon)
             })
@@ -359,23 +361,21 @@ nonisolated final class RecordingUploader: NSObject, @unchecked Sendable {
                 return
             }
 
-            await self.upload(recordingID: recordingID, flacURL: flacURL, deviceID: deviceID,
-                               date: date, species: species, confidence: confidence,
-                               coordinate: result.uploadCoordinate)
+            await self.upload(recordingID: recordingID, flacURL: flacURL,
+                               anonymized: result.anonymized)
         }
     }
 
-    /// Sweeps every Recording left `.queued` (waiting for Wi-Fi, or for
-    /// auto-upload to be on) or `.failed` (transient error) and retries it.
-    /// Only called automatically today, the moment Wi-Fi becomes available —
-    /// there's no manual bulk-upload button anymore (uploads are triggered one
-    /// at a time via `uploadNow`, from the recording's own row) — so `force`
-    /// always runs as `false` here in practice, still respecting the
-    /// auto-upload toggle: a Wi-Fi change shouldn't silently start uploading
-    /// against a user's standing choice. `force: true` remains available for
-    /// a future bulk action if one gets added back.
+    /// Re-attempts every Recording left `.failed`, when the network comes back.
+    ///
+    /// `.failed` only, and that distinction matters: it means the user already
+    /// tapped to contribute and the transfer didn't make it, so finishing what
+    /// they asked for is expected. A `.queued` recording is merely *eligible* and
+    /// has never been chosen — sweeping those would upload things nobody asked to
+    /// send, which is precisely what removing the auto-upload setting was meant
+    /// to rule out. See `UploadStatus.isRetryEligible`.
     @MainActor
-    func retryQueuedUploads(force: Bool = false) {
+    func retryFailedUploads() {
         guard let classStore, let context = retryContextProvider?() else { return }
         for recording in classStore.recordings where recording.uploadStatus?.isRetryEligible == true {
             let originalURL = CloudStorage.baseDirectory.appendingPathComponent(recording.relativeWavPath)
@@ -384,9 +384,7 @@ nonisolated final class RecordingUploader: NSObject, @unchecked Sendable {
                 durationSeconds: recording.durationSeconds,
                 species: recording.species, confidence: recording.confidence,
                 coordinate: recording.coordinate.map { ($0.latitude, $0.longitude) },
-                consent: context.consent, recordistName: context.recordistName,
-                locationAuthorization: context.locationAuthorization, wifiOnly: context.wifiOnly,
-                autoUploadEnabled: context.autoUploadEnabled, forceAttempt: force)
+                consent: context.consent, forceAttempt: true)
         }
     }
 
@@ -406,9 +404,7 @@ nonisolated final class RecordingUploader: NSObject, @unchecked Sendable {
             durationSeconds: recording.durationSeconds,
             species: recording.species, confidence: recording.confidence,
             coordinate: recording.coordinate.map { ($0.latitude, $0.longitude) },
-            consent: context.consent, recordistName: context.recordistName,
-            locationAuthorization: context.locationAuthorization, wifiOnly: context.wifiOnly,
-            autoUploadEnabled: context.autoUploadEnabled, forceAttempt: true)
+            consent: context.consent, forceAttempt: true)
     }
 
     private func report(_ recordingID: UUID, _ status: UploadStatus) {
@@ -432,42 +428,77 @@ nonisolated final class RecordingUploader: NSObject, @unchecked Sendable {
         }
     }
 
-    private func upload(recordingID: UUID, flacURL: URL, deviceID: String, date: Date,
-                         species: String, confidence: Float?,
-                         coordinate: CLLocationCoordinate2D?) async {
-        // Stable, derived from the Recording's own id — not a fresh UUID per
-        // attempt, so a retry after a failed/interrupted upload overwrites the
-        // same R2 object instead of leaving duplicate partial uploads behind.
-        guard let url = UploadClient.uploadURL(deviceID: deviceID, date: date, recordingID: recordingID.uuidString) else {
+    private func upload(recordingID: UUID, flacURL: URL, anonymized: AnonymizedUpload) async {
+        // The object key comes from the anonymizer, whole. Nothing is appended
+        // to it or derived from it here.
+        guard let url = UploadClient.uploadURL(objectKey: anonymized.objectKey) else {
             UploadConversionPipeline.discardDerivedCopy(at: flacURL)
             report(recordingID, .failed("Upload service not configured yet"))
             return
         }
         var request = URLRequest(url: url)
         request.httpMethod = "PUT"
+
+        // ------------------------------------------------------------------
+        // The one place in this codebase where a personal identifier and an
+        // anonymous record touch. Read this before changing anything here.
+        //
+        // The Worker has to confirm this device currently has consent granted
+        // before accepting a contribution, and consent is keyed by device_id —
+        // so the device_id must travel with the request. It travels as a HEADER,
+        // is used server-side only to look up `consent_records.status`, and is
+        // then discarded: it is never written onto the stored object, its key,
+        // or its customMetadata (see handleUpload in the Worker).
+        //
+        // The bearer token can't substitute for it: the token is
+        // HMAC(secret, device_id), which isn't reversible, so the Worker can't
+        // recover an id from it to do the lookup.
+        //
+        // What would break the model: putting `deviceID` into the URL, into any
+        // `x-openbat-*` header (those get mirrored into R2 customMetadata), or
+        // into the GUANO. `AnonymizedUploadBuilder` is not given the device id
+        // at all, specifically so that a refactor can't route one there by
+        // accident.
+        // ------------------------------------------------------------------
+        request.setValue(DeviceIdentity.current, forHTTPHeaderField: "x-openbat-device-id")
         // Required by the Worker — an upload without a valid device token is
         // rejected 401 regardless of consent state.
         ConsentAPIClient.authorize(&request)
-        request.setValue(species, forHTTPHeaderField: "x-openbat-species")
-        if let confidence {
-            request.setValue(String(format: "%.3f", confidence), forHTTPHeaderField: "x-openbat-quality-score")
+
+        // Already anonymized: the location here is the grid-snapped coordinate,
+        // identical to the one in the file's GUANO. Assembling these headers by
+        // hand at this call site is how the raw coordinate previously came to be
+        // sent alongside a fuzzed one in the file.
+        for (name, value) in anonymized.headers {
+            request.setValue(value, forHTTPHeaderField: name)
         }
-        // The coordinate the conversion pipeline decided on — fuzzed when the
-        // user has Precise Location off. Sending the Recording's own stored
-        // coordinate here instead meant LocationFuzzing had no effect whatsoever
-        // on what the server received.
-        if let coordinate {
-            request.setValue(String(format: "%.6f,%.6f", coordinate.latitude, coordinate.longitude),
-                              forHTTPHeaderField: "x-openbat-location")
-        }
-        request.setValue("false", forHTTPHeaderField: "x-openbat-verified")
 
         report(recordingID, .uploading)
         // background uploadTask(fromFile:) requires the file to persist until the
         // system has read it — deletion happens in the delegate callback below,
         // once the transfer actually finishes, not here.
         registerPendingUpload(PendingUpload(recordingID: recordingID, fileURL: flacURL, requestURL: url))
-        backgroundSession.uploadTask(with: request, fromFile: flacURL).resume()
+        let task = backgroundSession.uploadTask(with: request, fromFile: flacURL)
+        // Random hold-off before the transfer actually goes out.
+        //
+        // The stored object's creation time is recorded by the storage layer and
+        // is not something the app can strip. Sending the instant the user taps
+        // would make that creation time a proxy for "this device did something
+        // right now", which is the last remaining thing correlatable against the
+        // consent database. In normal use the gap is already hours (record on a
+        // walk, upload later), so this mainly protects the auto-upload path,
+        // where a file would otherwise be sent seconds after it was recorded —
+        // making the object's creation time a good estimate of the true capture
+        // time, and quietly undoing the 5-minute bucketing applied to it.
+        //
+        // `earliestBeginDate` rather than a sleep: the system owns the schedule,
+        // it survives the app being suspended or killed, and it costs nothing
+        // while waiting. The window is deliberately short — this is a smearing
+        // measure, not a queue, and a contribution the user expects to have sent
+        // shouldn't sit around long enough to look broken.
+        task.earliestBeginDate = Date().addingTimeInterval(
+            .random(in: 0...Self.maxUploadJitterSeconds))
+        task.resume()
     }
 
     /// `Codable` because it has to outlive the process: iOS can suspend or
@@ -542,7 +573,7 @@ nonisolated extension RecordingUploader: URLSessionDelegate, URLSessionTaskDeleg
         let succeeded = error == nil && (task.response as? HTTPURLResponse).map { 200..<300 ~= $0.statusCode } == true
         // Discarded either way. Keeping it on failure was meant to let a retry
         // re-send without regenerating, but no retry path ever reuses it:
-        // `retryQueuedUploads` goes back through `handleRecordingSaved`, which
+        // `retryFailedUploads` goes back through `handleRecordingSaved`, which
         // re-converts from the untouched original into a NEW uniquely-named
         // file — so the kept copy was unreachable, and leaked once per failure.
         UploadConversionPipeline.discardDerivedCopy(at: pending.fileURL)
@@ -551,15 +582,28 @@ nonisolated extension RecordingUploader: URLSessionDelegate, URLSessionTaskDeleg
             return
         }
 
-        // 403 = the Worker has no `granted` row for this device, almost always
-        // because the consent push never made it (granted while offline).
-        // 401 = no valid device token, which the same push is what obtains.
-        // Either way a sync is the fix, so nudging it turns what would be a
-        // permanent rejection loop into one that resolves itself on retry.
+        // 403 = the Worker won't accept this device's contributions: either it
+        // holds no `granted` row (usually because the consent push never made
+        // it, having been granted while offline) or the row names superseded
+        // consent wording. 401 = no valid device token, which the same push is
+        // what obtains.
+        //
+        // A sync fixes the first and third; only re-consenting fixes the second,
+        // so the two are reported differently rather than both claiming to be
+        // waiting on the network. Which one it is has to be decided on the main
+        // actor, where `ConsentStore` can be read — the response body isn't
+        // available here (`didCompleteWithError` carries no data).
         let statusCode = (task.response as? HTTPURLResponse)?.statusCode
         if statusCode == 401 || statusCode == 403 {
-            ConsentSync.syncIfNeeded()
-            report(pending.recordingID, .failed("Waiting for consent to sync"))
+            let recordingID = pending.recordingID
+            DispatchQueue.main.async { @MainActor [weak self] in
+                if ConsentStore.shared.needsReconsent {
+                    self?.report(recordingID, .failed("Terms updated — review them in Settings"))
+                } else {
+                    ConsentSync.syncIfNeeded()
+                    self?.report(recordingID, .failed("Waiting for consent to sync"))
+                }
+            }
             return
         }
         report(pending.recordingID, .failed(error?.localizedDescription ?? "Upload failed"))
