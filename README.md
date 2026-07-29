@@ -1,5 +1,13 @@
 # OpenBat
 
+This repo is one of three related to this project:
+
+[OpenBat-App](https://github.com/NiallxD/OpenBat-App)
+[OpenBat-FieldGuide](https://github.com/NiallxD/OpenBat-FieldGuide/tree/main)
+[OpenBat-Website](https://github.com/NiallxD/OpenBat-website)
+
+## What is OpenBat?
+
 OpenBat is an iOS app that turns a compatible ultrasonic USB microphone into
 a live bat detector. It captures audio at up to 384 kHz, shows a real-time
 spectrogram, detects individual echolocation pulses, and — where an openly
