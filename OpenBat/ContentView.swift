@@ -35,7 +35,8 @@ struct ContentView: View {
     @State private var pulseDetector = PulseDetector()
     @State private var recorder = AudioRecorder()
     @State private var autoIDSettings = AutoIDSettings()
-    @State private var rteSettings = RTESettings()
+    @State private var micCalSettings = MicCalibrationSettings()
+    @State private var adaptiveTESettings = AdaptiveTimeExpansionSettings()
     @State private var classStore = ClassificationStore()
     @State private var location = LocationProvider()
     // Not `@State`: the store outlives any one screen and is shared with
@@ -177,9 +178,11 @@ struct ContentView: View {
                     recorder.setPassGates(minConfidence: autoIDSettings.minPassConfidence,
                                           minPulseCount: autoIDSettings.minPassPulseCount)
                 }) {
-                    SettingsView(settings: autoIDSettings, rteSettings: rteSettings,
+                    SettingsView(settings: autoIDSettings,
                                  pulseDetector: pulseDetector, recorder: recorder,
-                                 location: location, consent: consent, classStore: classStore)
+                                 location: location, consent: consent, classStore: classStore,
+                                 audio: audio, micCalSettings: micCalSettings,
+                                 adaptiveTESettings: adaptiveTESettings)
                 }
                 // Someone who opted in, then had the terms change under them,
                 // has silently stopped contributing. Settings carries the same
@@ -274,7 +277,12 @@ struct ContentView: View {
             // re-present a sheet the user has already dismissed this session.
             if !hasCheckedReconsent {
                 hasCheckedReconsent = true
-                showReconsentPrompt = consent.needsReconsent
+                // Contribution is paused (ConsentStore.uploadContributionEnabled
+                // == false) — nothing in the current UI can grant consent, so
+                // this is the one remaining live path to the full ConsentView.
+                // Only matters for a device that granted under a pre-pause
+                // build; gate it the same way every other entry point is gated.
+                showReconsentPrompt = ConsentStore.uploadContributionEnabled && consent.needsReconsent
             }
             RecordingUploader.shared.retryContextProvider = { [consent] in
                 UploadRetryContext(consent: consent)
@@ -318,6 +326,8 @@ struct ContentView: View {
                 }
             }
             processor.sampleRate = audio.diagnostics.actualSampleRate
+            micCalSettings.load(forMicName: audio.diagnostics.inputName)
+            processor.calibrationCurve = micCalSettings.currentCurve(forMicName: audio.diagnostics.inputName)
             pulseDetector.pcmProvider = { [processor] count, endAbsolute in
                 processor.pcmSnapshot(count: count, endingAtAbsolute: endAbsolute)
             }
@@ -329,7 +339,7 @@ struct ContentView: View {
             pulseDetector.coordinateProvider = { [location] in location.currentCoordinate }
             location.store = classStore
             applyBand()
-            rteSettings.apply(to: audio.timeExpansion)
+            adaptiveTESettings.apply(to: audio.adaptiveTimeExpansion)
             // Region fix so species priors can be suggested from GBIF occurrence
             // data near the user (see the onChange below) — same lightweight,
             // one-shot fix AutoIDSettingsView already uses, just requested
@@ -360,11 +370,21 @@ struct ContentView: View {
         .onChange(of: audio.activeSampleRate) { _, rate in
             processor.sampleRate = rate
         }
+        .onChange(of: audio.activeInputName) { _, name in
+            micCalSettings.load(forMicName: name)
+            processor.calibrationCurve = micCalSettings.currentCurve(forMicName: name)
+            recorder.setInputName(name)
+        }
         .onChange(of: menuIsOpen) { _, open in
             processor.suspended = open
         }
         .onChange(of: bandLow)  { _, _ in applyBand() }
         .onChange(of: bandHigh) { _, _ in applyBand() }
+        // One modifier for all of the adaptive-TE tunables, not one each — see
+        // `AdaptiveTimeExpansionSettings.Snapshot` for why that matters here.
+        .onChange(of: adaptiveTESettings.snapshot) { _, _ in
+            adaptiveTESettings.apply(to: audio.adaptiveTimeExpansion)
+        }
         .onChange(of: autoIDSettings.activeModelID) { _, id in
             pulseDetector.refreshModel()
             recorder.setActiveModel(id: id)
@@ -373,11 +393,6 @@ struct ContentView: View {
             recorder.setPassGates(minConfidence: autoIDSettings.minPassConfidence,
                                   minPulseCount: autoIDSettings.minPassPulseCount)
         }
-        .onChange(of: rteSettings.minFrequencyKHz) { _, _ in rteSettings.apply(to: audio.timeExpansion) }
-        .onChange(of: rteSettings.marginDB)    { _, _ in rteSettings.apply(to: audio.timeExpansion) }
-        .onChange(of: rteSettings.holdMs)      { _, _ in rteSettings.apply(to: audio.timeExpansion) }
-        .onChange(of: rteSettings.gain)        { _, _ in rteSettings.apply(to: audio.timeExpansion) }
-        .onChange(of: rteSettings.gateBlockMs) { _, _ in rteSettings.apply(to: audio.timeExpansion) }
         .onChange(of: audio.isRunning) { _, running in
             UIApplication.shared.isIdleTimerDisabled = running
             if !running {
@@ -402,9 +417,6 @@ struct ContentView: View {
             if let coordinate = location.currentCoordinate {
                 Task { await autoIDSettings.refreshPriorsFromGBIFIfNeeded(coordinate: coordinate) }
             }
-        }
-        .onChange(of: audio.activeInputName) { _, name in
-            recorder.setInputName(name)
         }
         // ContentView.onAppear only fires once per process lifetime (SwiftUI doesn't
         // recreate the WindowGroup's root view on background→foreground), so without
@@ -496,7 +508,7 @@ struct ContentView: View {
         switch section {
         case .detector:  detectorLayout
         case .sessions:  SessionsView(store: classStore, settings: autoIDSettings, consent: consent)
-        case .playback:  PlaybackListView(store: classStore, rteSettings: rteSettings, consent: consent)
+        case .playback:  PlaybackListView(store: classStore, micCalSettings: micCalSettings, consent: consent)
         case .species:   SpeciesExplorerView(store: speciesGuide, rangeStore: speciesRange, userCoordinate: location.currentCoordinate)
         }
     }
@@ -792,6 +804,7 @@ struct ContentView: View {
                         Spacer()
                         HStack(spacing: 8) {
                             speakerFeedbackWarning
+                            adaptiveTEStatePill
                             sessionStatusPill
                             micStatusPill
                             resetButton
@@ -826,6 +839,7 @@ struct ContentView: View {
                             .foregroundStyle(.secondary)
                         Spacer()
                         speakerFeedbackWarning
+                        adaptiveTEStatePill
                         sessionStatusPill
                         resetButton
                     }
@@ -870,19 +884,30 @@ struct ContentView: View {
 
     /// Session-status pill (Off / Listening / Session) for the portrait stats
     /// header, next to the mic pill. Same scoping rationale — see
-    /// `SessionStatusPillView`.
+    /// `SessionStatusPillView`. Forced to read "Listening" during the guided
+    /// tour for the same reason as `speakerFeedbackWarning`/`adaptiveTEStatePill`
+    /// below — the tour is normally taken with detection off.
     private var sessionStatusPill: some View {
-        SessionStatusPillView(audio: audio, classStore: classStore)
+        SessionStatusPillView(audio: audio, classStore: classStore, tourDemo: tourActive)
             .tourTarget(.sessionStatus)
     }
 
-    /// Feedback-risk warning for heterodyne/RTE on the speaker. See
+    /// Feedback-risk warning for listening audio on the speaker. See
     /// `SpeakerFeedbackWarningPill` — same scoping rationale as `sessionStatusPill`.
     /// Forced visible during the guided tour (it's normally conditional, and the
     /// tour is usually taken with nothing playing) so its step has a target.
     private var speakerFeedbackWarning: some View {
         SpeakerFeedbackWarningPill(audio: audio, tourDemo: tourActive)
             .tourTarget(.feedbackWarning)
+    }
+
+    /// Live capturing/draining indicator for the adaptive time-expansion listen
+    /// mode. Same scoping rationale as `speakerFeedbackWarning` — see
+    /// `AdaptiveTimeExpansionStatePill`. Forced visible during the guided tour for
+    /// the same reason as `speakerFeedbackWarning`.
+    private var adaptiveTEStatePill: some View {
+        AdaptiveTimeExpansionStatePill(audio: audio, tourDemo: tourActive)
+            .tourTarget(.timeExpansionCounter)
     }
 
     private var resetButton: some View {
@@ -933,7 +958,7 @@ struct ContentView: View {
         processor.peakMinFraction = max(bandLow, 0.01)
         processor.peakMaxFraction = bandHigh
         audio.heterodyne.setBand(low: bandLow, high: bandHigh)
-        audio.timeExpansion.setBand(low: bandLow, high: bandHigh)
+        audio.adaptiveTimeExpansion.setBand(low: bandLow, high: bandHigh)
     }
 
     // MARK: Panel headers + per-panel setting buttons
@@ -1374,7 +1399,8 @@ struct ContentView: View {
         recorder.setArmed(!recorder.isArmed)
     }
 
-    /// Cycles off → heterodyne → RTE → off on tap, icon changing with it — replaces
+    /// Cycles off → heterodyne → adaptive time expansion → off on tap, icon
+    /// changing with it — replaces
     /// the old Menu-based picker, which buried listen mode two taps deep and read
     /// as unresponsive (open menu, then tap an item) even once the underlying
     /// engine restart got faster.
@@ -1406,30 +1432,38 @@ struct ContentView: View {
         .tourTarget(.listen)
     }
 
+    // `.timeExpansion` is playback-only (see ListenMode's doc comment) and this
+    // cycle never lands on it — live listening cycles off → heterodyne →
+    // adaptive time expansion → off. Handled explicitly below (rather than via
+    // `default:`) purely so `ListenMode` stays exhaustively checked here.
     private var nextListenMode: ListenMode {
         switch audio.listenMode {
-        case .off:           .heterodyne
-        case .heterodyne:    .timeExpansion
-        case .timeExpansion: .off
+        case .off:                   .heterodyne
+        case .heterodyne:            .adaptiveTimeExpansion
+        case .adaptiveTimeExpansion: .off
+        case .timeExpansion:         .off
         }
     }
 
-    // Spelled out (not "RTE") because this string is the VoiceOver label on the
-    // listen-mode button, whose only visible cue is an icon — "Time expansion" reads
-    // clearly where the acronym doesn't.
+    // Spelled out because this string is the VoiceOver label on the listen-mode
+    // button, whose only visible cue is an icon.
     private var listenModeName: String {
         switch audio.listenMode {
-        case .off:           "Off"
-        case .heterodyne:    "Heterodyne"
-        case .timeExpansion: "Time expansion"
+        case .off:                   "Off"
+        case .heterodyne:            "Heterodyne"
+        case .adaptiveTimeExpansion: "Time expansion"
+        // Disambiguated from the live `.adaptiveTimeExpansion` label above —
+        // this one is the playback-only file mode (see ListenMode's doc comment).
+        case .timeExpansion:         "Time expansion (file)"
         }
     }
 
     private var listenIcon: String {
         switch audio.listenMode {
-        case .off:           "headphones"
-        case .heterodyne:    "antenna.radiowaves.left.and.right"
-        case .timeExpansion: "tortoise"
+        case .off:                   "headphones"
+        case .heterodyne:            "antenna.radiowaves.left.and.right"
+        case .adaptiveTimeExpansion: "tortoise"
+        case .timeExpansion:         "tortoise"
         }
     }
 
@@ -1498,6 +1532,7 @@ private extension View {
             Text("OpenBat can't detect or record without microphone access. Enable it for OpenBat in the Settings app.")
         }
     }
+
 }
 
 #Preview { ContentView() }

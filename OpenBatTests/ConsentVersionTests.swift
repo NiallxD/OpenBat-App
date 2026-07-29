@@ -118,7 +118,7 @@ struct ConsentVersionTests {
     /// wire. This can't read the Worker's source, so it pins the app side and
     /// leaves a marker to grep for.
     @Test func currentVersionIsTheExpectedValue() {
-        #expect(ConsentStore.currentConsentVersion == "2.0",
+        #expect(ConsentStore.currentConsentVersion == "3.0",
                 "Bumped the app's consent version? Bump CURRENT_CONSENT_VERSION in backend/consent-worker/src/index.ts in the same deploy.")
     }
 }

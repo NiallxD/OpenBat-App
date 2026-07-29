@@ -63,7 +63,7 @@ nonisolated struct HighPassPrivacyFilter {
     static let cascadedSections = 4
 
     /// Reuses `Biquad.highpass` (`DSP/Biquad.swift`) — the same coefficient math
-    /// already used by `HeterodyneProcessor`/`TimeExpansionProcessor`.
+    /// already used by `HeterodyneProcessor`.
     private var sections: [Biquad]
 
     init(sampleRate: Double, cutoffHz: Double = defaultCutoffHz) {

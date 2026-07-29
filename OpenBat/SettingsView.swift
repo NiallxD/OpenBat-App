@@ -7,12 +7,15 @@ import SwiftUI
 
 struct SettingsView: View {
     @Bindable var settings: AutoIDSettings
-    @Bindable var rteSettings: RTESettings
     @Bindable var pulseDetector: PulseDetector
     @Bindable var recorder: AudioRecorder
     @Bindable var location: LocationProvider
     var consent: ConsentStore
     let classStore: ClassificationStore
+    let audio: AudioEngineController
+    @Bindable var micCalSettings: MicCalibrationSettings
+    @Bindable var adaptiveTESettings: AdaptiveTimeExpansionSettings
+    @State private var showMicCalibration = false
     @Environment(\.dismiss) private var dismiss
     @State private var selectedTab = "autoID"
 
@@ -32,11 +35,11 @@ struct SettingsView: View {
                 .padding(.bottom, 4)
 
                 switch selectedTab {
-                case "autoID":     AutoIDSettingsView(settings: settings, location: location)
-                case "audio":      audioTab
-                case "location":   locationTab
-                case "recordings": recordingsTab
-                default:           privacyTab
+                case "autoID":      AutoIDSettingsView(settings: settings, location: location)
+                case "audio":       audioTab
+                case "location":    locationTab
+                case "recordings":  recordingsTab
+                default:            privacyTab
                 }
             }
             .navigationTitle("Settings")
@@ -65,10 +68,6 @@ struct SettingsView: View {
     /// surfaced here (same treatment as the noise floor above) so it can be
     /// tuned against real recordings without a code change.
     @AppStorage("display.cfTailFraction") private var cfTailFraction = CallAnalysis.defaultCFTailFraction
-    @State private var showConsentSheet = false
-    @State private var showEraseWarning = false
-    @State private var showEraseConfirmation = false
-    @State private var showCopiedDeviceID = false
 
     // MARK: Recordings tab
 
@@ -100,7 +99,7 @@ struct SettingsView: View {
                 // several GB against the user's iCloud quota — and they'd
                 // otherwise have no way to connect that to OpenBat.
                 Text(keepInICloud
-                     ? "Recordings and session history are stored in your own iCloud, so they survive deleting the app and follow you to a new device. They stay in your iCloud account — this is separate from contributing to the community science project, and isn't visible in the Files app. Audio is large: a busy night can use several GB of your iCloud storage."
+                     ? "Recordings and session history are stored in your own iCloud, so they survive deleting the app and follow you to a new device. They stay in your iCloud account and aren't visible in the Files app. Audio is large: a busy night can use several GB of your iCloud storage."
                      : "Recordings and session history are stored only on this device, and are permanently lost if you delete OpenBat. Nothing is stored in iCloud.")
             }
 
@@ -180,120 +179,29 @@ struct SettingsView: View {
         }
     }
 
-    /// Turning contribution ON opens the full consent screen rather than
-    /// granting directly; turning it OFF revokes immediately.
-    ///
-    /// The asymmetry is the point. Granting is the act that needs informed
-    /// consent, and the two purposes — research use and commercial licensing —
-    /// have to be named and separately switched on for that consent to be valid.
-    /// This binding used to call `consent.grant()` straight from the toggle,
-    /// which meant anyone who declined during onboarding could enable
-    /// contribution here without ever being shown what they were agreeing to.
-    /// Withdrawing needs no disclosure, so it stays a plain toggle.
-    ///
-    /// The toggle springs back if the sheet is dismissed without deciding: it
-    /// reads `consent.isGranted`, which only changes once ConsentView actually
-    /// grants.
-    private var participationBinding: Binding<Bool> {
-        Binding(get: { consent.isGranted },
-                set: { newValue in
-                    if newValue {
-                        showConsentSheet = true
-                    } else {
-                        consent.revoke()
-                    }
-                })
-    }
-
     // MARK: Privacy tab
 
     private var privacyTab: some View {
         Form {
             Section {
-                // Shown ABOVE the toggle, which reads as off while consent is
-                // stale — without this the user sees their participation
-                // switched off with no explanation for why.
-                if consent.needsReconsent {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Label("The terms have changed since you agreed", systemImage: "exclamationmark.circle.fill")
-                            .font(.subheadline.weight(.medium))
-                            .foregroundStyle(.orange)
-                        Text("You agreed to version \(consent.agreedConsentVersion ?? "an earlier version"), and OpenBat now uses version \(ConsentStore.currentConsentVersion). Contributions are paused until you've read the current terms — nothing has been sent under the new ones.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                        Button("Review the terms") { showConsentSheet = true }
-                            .font(.footnote.weight(.medium))
-                    }
-                    .padding(.vertical, 4)
-                }
-                Toggle("Contribute recordings to the community science project", isOn: participationBinding)
-                if consent.isAwaitingServerConfirmation {
-                    // Honest about the gap between "saved on this device" and
-                    // "the server knows" — this retries by itself, but a
-                    // withdrawal in particular shouldn't look complete when the
-                    // server hasn't acknowledged it yet.
-                    Label("Not yet confirmed by our servers — this will retry automatically when you're online.",
-                          systemImage: "arrow.trianglehead.2.clockwise")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
+                Toggle("Contribute recordings to the community science project", isOn: .constant(false))
+                    .disabled(true)
             } footer: {
-                Text("On-device detection and species ID work either way — this only gives OpenBat permission to collect recordings you choose to send. Turning it on shows you the terms first. Nothing uploads on its own: pick which recordings to contribute, one at a time, by tapping the cloud icon on an eligible recording in Playback. Contributing uses mobile or Wi-Fi data. You can turn this off at any time; it stops future uploads immediately.")
+                Text("There are no community science projects currently active. Check back soon!")
             }
 
-            Section {
-                LabeledContent("Device ID") {
-                    Text(DeviceIdentity.current)
-                        .font(.footnote.monospaced())
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-                Button {
-                    UIPasteboard.general.string = DeviceIdentity.current
-                    showCopiedDeviceID = true
-                } label: {
-                    Label("Copy Device ID", systemImage: "doc.on.doc")
-                }
-            } footer: {
-                Text("Identifies your contributions without any personal account. If you'd rather email us to request removal instead of using Erase below, quote this ID.")
-            }
-
-            Section {
-                Button("Erase My Consent Record", role: .destructive) {
-                    showEraseWarning = true
-                }
-            } footer: {
-                Text("Permanently deletes the consent record we hold for this device and resets its identifier. Recordings you've already contributed aren't affected — they carry nothing that links them to you, so we can't find them. Cannot be undone.")
-            }
-        }
-        .alert("Erase My Consent Record", isPresented: $showEraseWarning) {
-            Button("Cancel", role: .cancel) { }
-            Button("Continue", role: .destructive) { showEraseConfirmation = true }
-        } message: {
-            Text("If you just want to stop contributing new recordings, use the toggle above instead. This deletes the consent record we hold for this device and gives it a new identifier. Recordings you already contributed stay in the research dataset — they were sent with no identifier and a rounded location, so there's no way to pick yours out. This cannot be undone.")
-        }
-        .alert("Copied", isPresented: $showCopiedDeviceID) { } message: {
-            Text("Device ID copied to the clipboard.")
-        }
-        .sheet(isPresented: $showConsentSheet) {
-            // The same screen onboarding shows, deliberately — one place where
-            // the terms are presented, so the two can't drift apart. Its own
-            // buttons grant or revoke and then dismiss.
-            NavigationStack {
-                ConsentView(consent: consent) { showConsentSheet = false }
-                    .padding(.horizontal)
-                    .navigationTitle("Community Science")
-                    .navigationBarTitleDisplayMode(.inline)
-            }
-        }
-        .sheet(isPresented: $showEraseConfirmation) {
-            EraseDataConfirmationView(consent: consent, classStore: classStore) { }
+            // Device ID / consent erasure are hidden while contribution is
+            // disabled (ConsentStore.uploadContributionEnabled == false):
+            // consent can never be granted, so no record ever exists to erase,
+            // and with the backend severed (UploadClient/ConsentAPIClient
+            // baseURL == "") the Erase call would always fail with a
+            // connection-style error that misrepresents a deliberate,
+            // permanent severance as a network hiccup.
         }
     }
 
-    // MARK: Audio tab (formerly separate RTE / Pulse / Audio tabs, merged into
-    // one Form — sections keep their original header text from each source tab)
+    // MARK: Audio tab (formerly separate Time Expansion / Pulse / Audio tabs,
+    // merged into one Form — sections keep their original header text from each source tab)
 
     private var pulseMinFreqKHz: Binding<Double> {
         Binding(get: { pulseDetector.minFrequencyHz / 1000 },
@@ -302,9 +210,12 @@ struct SettingsView: View {
 
     private var audioTab: some View {
         Form {
-            rteSections
             pulseSections
+            adaptiveTESection
             recordingSections
+        }
+        .sheet(isPresented: $showMicCalibration) {
+            MicCalibrationView(audio: audio, settings: micCalSettings) { showMicCalibration = false }
         }
     }
 
@@ -387,81 +298,72 @@ struct SettingsView: View {
         }
     }
 
-    @ViewBuilder
-    private var rteSections: some View {
-        Group {
-            Section {
-                LabeledContent("Minimum frequency") {
-                    Text(String(format: "%.0f kHz", rteSettings.minFrequencyKHz))
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                }
-                Slider(value: $rteSettings.minFrequencyKHz, in: 5 ... 60, step: 1)
-                Text("Only sounds above this frequency can trigger expansion. If too many non-bat sounds (footsteps, keys, wind) are triggering RTE, move this up a bit; move it down to catch lower-frequency bats.")
-                    .font(.caption)
+    // MARK: Adaptive time expansion tab
+
+    /// Live event-triggered time expansion — see `AdaptiveTimeExpansionProcessor`
+    /// for what each knob trades off. A separate `Section` (not folded into
+    /// `pulseSections`) since it tunes a listening mode, not pulse detection.
+    private var adaptiveTESection: some View {
+        Section {
+            LabeledContent("Gain") {
+                Text(String(format: "%.1fx", adaptiveTESettings.gain))
+                    .monospacedDigit()
                     .foregroundStyle(.secondary)
-            } header: {
-                Text("Noise rejection")
             }
+            Slider(value: Binding(get: { Double(adaptiveTESettings.gain) },
+                                  set: { adaptiveTESettings.gain = Float($0) }),
+                   in: 1...12, step: 0.5)
+            Text("Output makeup gain — bat calls are weak and pass-through preserves the input's own level, so some makeup is normally wanted.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
 
-            Section {
-                LabeledContent("Tail hold") {
-                    Text(String(format: "%.1f ms", rteSettings.holdMs))
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                }
-                Slider(value: $rteSettings.holdMs, in: 0.5 ... 30, step: 0.5)
-                Text("How long to keep expanding after the signal drops below threshold. Too short fragments a call into clicks; too long pulls in trailing noise. ~15 ms bridges the dips inside an FM sweep.")
-                    .font(.caption)
+            LabeledContent("Hangover") {
+                Text(String(format: "%.0f ms", adaptiveTESettings.hangoverMs))
+                    .monospacedDigit()
                     .foregroundStyle(.secondary)
-            } header: {
-                Text("Tail")
             }
+            Slider(value: $adaptiveTESettings.hangoverMs, in: 5...250, step: 5)
+            Text("How long after the last trigger an event stays open for a further pulse to extend it. Merges bursts and feeding buzzes into one contiguous stretch; too long degenerates toward waiting for silence.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
 
-            Section {
-                LabeledContent("Output gain") {
-                    Text(String(format: "%.1f ×", rteSettings.gain))
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                }
-                Slider(value: $rteSettings.gain, in: 1 ... 16, step: 0.5)
-                Text("Makeup gain applied after expansion. 8× time-stretch halves perceived loudness, so 4–8 × is a good starting point.")
-                    .font(.caption)
+            LabeledContent("Max event length") {
+                Text(String(format: "%.0f ms", adaptiveTESettings.maxBufferMs))
+                    .monospacedDigit()
                     .foregroundStyle(.secondary)
-            } header: {
-                Text("Output")
             }
+            Slider(value: $adaptiveTESettings.maxBufferMs, in: 20...500, step: 10)
+            Text("Hard cap on event length. At 8x expansion this cost is paid back as an equally long deaf drain, so kept deliberately small.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
 
-            Section {
-                LabeledContent("Sensitivity") {
-                    Text(String(format: "%.0f dB", rteSettings.marginDB))
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                }
-                Slider(value: $rteSettings.marginDB, in: 4 ... 24, step: 1)
-                Text("How far a sound must rise above the background noise floor to trigger. Lower catches fainter calls but lets in more noise; higher only takes the loudest. The gate is relative, so this adapts to conditions automatically.")
-                    .font(.caption)
+            LabeledContent("Threshold") {
+                Text(String(format: "%.0f dB", adaptiveTESettings.thresholdDB))
+                    .monospacedDigit()
                     .foregroundStyle(.secondary)
-
-                LabeledContent("Gate window") {
-                    Text(String(format: "%.2f ms", rteSettings.gateBlockMs))
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                }
-                Slider(value: $rteSettings.gateBlockMs, in: 0.1 ... 5.0, step: 0.1)
-                Text("RMS window for the sub-buffer gate. Smaller = more responsive (catches fast call onsets) but noisier. Larger = smoother gate but can clip the very start of short calls.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                HStack {
-                    Spacer()
-                    Button("Reset to defaults") { rteSettings.reset() }
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-            } header: {
-                Text("Advanced")
             }
+            Slider(value: $adaptiveTESettings.thresholdDB, in: 3...30, step: 1)
+            Text("How far above the tracked noise floor a block must sit to open an event.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            LabeledContent("Release") {
+                Text(String(format: "%.0f dB", adaptiveTESettings.releaseDB))
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
+            Slider(value: $adaptiveTESettings.releaseDB, in: 0...30, step: 1)
+            Text("Level needed to keep an open event going. Lower than Threshold, so the decaying tail of a call still counts as signal — turn this down if call endings sound clipped, up if events run on into background noise.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Button("Reset to Defaults", role: .destructive) {
+                adaptiveTESettings.reset()
+            }
+        } header: {
+            Text("Adaptive Time Expansion")
+        } footer: {
+            Text("Live, event-triggered time expansion (the \"tortoise\" listen mode). Capture pauses while a captured event plays back, so sustained activity is deliberately not kept up with — see the mode's own description for why.")
         }
     }
 
@@ -547,6 +449,26 @@ struct SettingsView: View {
                 Text("Call analysis")
             } footer: {
                 Text("Characteristic/knee frequency is estimated as the median frequency over the last this-much of a measured call's duration, where FM sweeps typically flatten into a quasi-constant-frequency tail. No prior calibration exists for this — treat as a starting default until checked against real recordings.")
+            }
+
+            Section {
+                if let curve = micCalSettings.curve {
+                    Toggle("Apply correction", isOn: $micCalSettings.isEnabled)
+                    LabeledContent("Calibrated for", value: curve.micName)
+                    LabeledContent("Last calibrated", value: curve.capturedAt.formatted(date: .abbreviated, time: .shortened))
+                }
+                Button {
+                    showMicCalibration = true
+                } label: {
+                    Text(micCalSettings.curve == nil ? "Calibrate Microphone" : "Recalibrate Microphone")
+                }
+                .disabled(audio.isRunning)
+            } header: {
+                Text("Microphone Calibration")
+            } footer: {
+                Text(audio.isRunning
+                     ? "Stop detecting first to calibrate."
+                     : "Corrects for your microphone's own uneven frequency response, flattening the spectrogram's noise floor and sharpening frequency measurements. Takes about 30 seconds in a quiet spot; doesn't change or upload any recording.")
             }
         }
     }

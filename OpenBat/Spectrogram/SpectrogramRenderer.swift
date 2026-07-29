@@ -201,7 +201,7 @@ final class SpectrogramRenderer: NSObject, MTKViewDelegate {
         // Drain new FFT columns → ring texture (live path) + liveHistory (both paths).
         // In triggered display mode, only columns where a pulse is active are uploaded
         // to the ring — silent gaps are skipped so the spectrogram shows back-to-back
-        // pulses, Wildlife Acoustics style. isInPulse reflects the PREVIOUS column's
+        // pulses. isInPulse reflects the PREVIOUS column's
         // state (updated at the end of feed()) so checking it here gives a 1-column
         // (~1 ms) lag — negligible.
         //

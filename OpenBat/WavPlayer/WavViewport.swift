@@ -57,6 +57,25 @@ enum WavViewportMath {
     static let minSampleSpan = STFTGrid.windowLen + 128 * STFTGrid.hop
     static let minFreqSpanHz = 500.0
 
+    /// `viewport`'s span/frequency window, re-centered on `center` (a
+    /// display-domain sample) — the shared "recenter" math WavPlayerView's
+    /// playback follow loop, WavSpectrogramView's live playback preview, and
+    /// WavMinimapView's position rectangle all need to agree on, so a
+    /// playback session's live preview lands EXACTLY where the eventual
+    /// one-shot commit into `viewport` (on pause) does, instead of visibly
+    /// snapping. Clamps both edges together against `[0, totalSamples)`
+    /// rather than independently — same "balloon outward" reasoning
+    /// `resolvedViewport` documents.
+    static func recentered(_ viewport: WavViewport, on center: Int, totalSamples: Int) -> WavViewport {
+        let span = min(viewport.sampleSpan, totalSamples)
+        var start = center - span / 2
+        var end = start + span
+        if start < 0 { end -= start; start = 0 }
+        if end > totalSamples { start -= (end - totalSamples); end = totalSamples }
+        return WavViewport(startSample: max(0, start), endSample: min(totalSamples, end),
+                           minFreqHz: viewport.minFreqHz, maxFreqHz: viewport.maxFreqHz)
+    }
+
     /// Inverts `screen(v) = 0.5 + (v-0.5)*scale + offset` to recover the
     /// [leftFrac, rightFrac] window of the COMMITTED viewport that's
     /// currently visible on screen, given a scale/offset — same solved form

@@ -25,6 +25,12 @@ struct WavMinimapView: View {
     /// maps the engine's real position forward (same seams as everywhere
     /// else; see SilenceMap).
     let silenceMap: SilenceMap?
+    /// Live playback-follow position — read here (instead of relying on
+    /// `viewport`, which no longer updates during playback — see
+    /// PlaybackFollowState's doc comment) so the position rectangle below
+    /// keeps tracking playback; this leaf's own body re-running at ~30Hz to
+    /// do so is exactly the isolation `followState` exists to provide.
+    let followState: PlaybackFollowState
     let onRecenter: (Int) -> Void   // new center sample (display domain)
     /// Debug-only red/green pan-buffer visualization — see its own doc
     /// comment and `WavSpectrogramView.renderChunkedStep` (the writer).
@@ -38,8 +44,9 @@ struct WavMinimapView: View {
                     .interpolation(.low)
                     .frame(width: geo.size.width, height: geo.size.height)
 
-                let x0 = CGFloat(Double(viewport.startSample) / Double(max(overview.totalSamples, 1))) * geo.size.width
-                let x1 = CGFloat(Double(viewport.endSample) / Double(max(overview.totalSamples, 1))) * geo.size.width
+                let effectiveViewport = engine.isPlaying ? liveViewport(center: followState.displaySample) : viewport
+                let x0 = CGFloat(Double(effectiveViewport.startSample) / Double(max(overview.totalSamples, 1))) * geo.size.width
+                let x1 = CGFloat(Double(effectiveViewport.endSample) / Double(max(overview.totalSamples, 1))) * geo.size.width
                 Rectangle()
                     .stroke(Color.batAccent.opacity(0.7), lineWidth: 1)
                     .background(Color.batAccent.opacity(0.15))
@@ -68,6 +75,14 @@ struct WavMinimapView: View {
     /// shows position within the full time axis.
     private var displayImage: UIImage {
         croppedToFreqRange(overview.image) ?? overview.image
+    }
+
+    /// `viewport` re-centered on `center` (a display-domain sample) — see
+    /// `WavViewportMath.recentered`'s doc comment for why this shares its
+    /// math with WavPlayerView's `recenter(sample:)` and
+    /// WavSpectrogramView's own `liveTargetViewport`.
+    private func liveViewport(center: Int) -> WavViewport {
+        WavViewportMath.recentered(viewport, on: center, totalSamples: overview.totalSamples)
     }
 
     private func croppedToFreqRange(_ image: UIImage) -> UIImage? {

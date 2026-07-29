@@ -10,9 +10,9 @@
 //  existing `classStore.addRecording` call.
 //
 //  Every phase reports back to ClassificationStore via `updateUploadStatus`
-//  (see UploadStatus.swift) so `RecordingRow`'s eligibility badge and
-//  `UploadQueueView` can show real pending/uploading/failed state instead of
-//  the pipeline being entirely invisible.
+//  (see UploadStatus.swift) so `RecordingRow`'s eligibility badge can show
+//  real pending/uploading/failed state instead of the pipeline being
+//  entirely invisible.
 //  `retryFailedUploads()` re-attempts anything left `.failed` after the user
 //  asked to contribute it — called automatically when Wi-Fi becomes available.
 //  Nothing else uploads on its own: contribution is always a deliberate tap.
@@ -253,8 +253,9 @@ nonisolated final class RecordingUploader: NSObject, @unchecked Sendable {
     ///
     /// `forceAttempt` bypasses the auto-upload and Wi-Fi-only gates (but never
     /// the consent gate) — set by the manual "Upload Now" action in
-    /// UploadStatusView, since tapping that button is itself the user opting
-    /// this one recording in right now, regardless of their standing settings.
+    /// RecordingRow's upload badge, since tapping that button is itself the
+    /// user opting this one recording in right now, regardless of their
+    /// standing settings.
     @MainActor
     func handleRecordingSaved(
         recordingID: UUID,
@@ -287,8 +288,8 @@ nonisolated final class RecordingUploader: NSObject, @unchecked Sendable {
         // classify(outcome:)) are mostly noise triggers, not real calls, and
         // flooded the queue with junk needing a manual decision on every one.
         // Treated the same as consent-off: kept locally, excluded from the
-        // queue by default, still uploadable one at a time via UploadStatusView's
-        // per-row action (forceAttempt) if the user really wants to send one anyway.
+        // queue by default, still uploadable one at a time via RecordingRow's
+        // upload badge (forceAttempt) if the user really wants to send one anyway.
         if species == "NOID" && !forceAttempt {
             report(recordingID, .notContributing)
             return
@@ -486,10 +487,11 @@ nonisolated final class RecordingUploader: NSObject, @unchecked Sendable {
         // would make that creation time a proxy for "this device did something
         // right now", which is the last remaining thing correlatable against the
         // consent database. In normal use the gap is already hours (record on a
-        // walk, upload later), so this mainly protects the auto-upload path,
-        // where a file would otherwise be sent seconds after it was recorded —
-        // making the object's creation time a good estimate of the true capture
-        // time, and quietly undoing the 5-minute bucketing applied to it.
+        // walk, upload later), but every upload here is now a manual tap — this
+        // jitter is what protects the case where that tap comes seconds after the
+        // recording finishes, which would otherwise make the object's creation
+        // time a good estimate of the true capture time, quietly undoing the
+        // 5-minute bucketing applied to it.
         //
         // `earliestBeginDate` rather than a sleep: the system owns the schedule,
         // it survives the app being suspended or killed, and it costs nothing

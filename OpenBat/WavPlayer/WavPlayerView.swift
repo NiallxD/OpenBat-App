@@ -8,10 +8,11 @@
 //  two-axis zoomable spectrogram (WavSpectrogramView) flanked by a minimap
 //  (WavMinimapView, which also doubles as the scrub bar — see its own doc
 //  comment), call-parameter analysis on a manual drag-selection
-//  (CallAnalysisPanel), and inline heterodyne/RTE tuning + display options
-//  (WavTuningControl) — composed around the SAME PlaybackEngine (audio
-//  decode + heterodyne + RTE playback, fixed separately for the LO auto-tune
-//  bug) and the SAME transport buttons (PlaybackControlsView) the old player
+//  (CallAnalysisPanel), and inline heterodyne/time-expansion tuning +
+//  display options (WavTuningControl) — composed around the SAME
+//  PlaybackEngine (audio decode + heterodyne + time-expansion playback,
+//  fixed separately for the LO auto-tune bug) and the SAME transport buttons
+//  (PlaybackControlsView) the old player
 //  used; only the spectrogram visualization half (and the scrub bar, now the
 //  minimap) changed.
 //
@@ -33,7 +34,11 @@ import SwiftUI
 struct WavPlayerView: View {
     let recording: Recording
     @Bindable var store: ClassificationStore
-    let rteSettings: RTESettings
+    let micCalSettings: MicCalibrationSettings
+    /// Owned locally, unlike the shared listen-mode settings — playback-only
+    /// (see ListenMode's doc comment), so there's no live-detector counterpart
+    /// to keep in sync with.
+    @State private var timeExpSettings = TimeExpansionSettings()
 
     /// iPhone landscape reports a compact vertical size class — the signal we
     /// use to switch from the stacked portrait layout to the two-column
@@ -70,7 +75,7 @@ struct WavPlayerView: View {
     @State private var annotations: [CallAnnotation] = []
     @State private var analysisGeneration = 0
     @State private var showTuning = false
-    /// Debounces `applyBand()` (a heterodyne/RTE DSP filter recalculation)
+    /// Debounces `applyBand()` (a heterodyne DSP filter recalculation)
     /// after ANY viewport change, regardless of source (Range ticker, a
     /// vertical pan on the spectrogram, the minimap, Zoom) — `viewport`
     /// itself is written immediately for instant visual feedback (its own
@@ -99,21 +104,25 @@ struct WavPlayerView: View {
     @State private var silenceGeneration = 0
 
     /// Live playhead-follow loop — runs only while `engine.isPlaying`, at
-    /// ~20Hz, recentering `viewport` on the playback position so the
-    /// spectrogram scrolls with the audio. Detail renders stay naturally
-    /// suppressed while scrolling (each viewport write resets
-    /// WavSpectrogramView's 150ms render debounce), so the scroll rides the
-    /// cheap overview crop; pausing stops the writes, the debounce fires,
-    /// and the normal tile/buffer logic takes over — exactly the
-    /// "low-res while moving, sharp on pause" behavior wanted. Reads
-    /// `engine.currentTimeSeconds` inside the task (NOT in body), so the
-    /// ~20-25Hz progress updates don't invalidate this view's body — same
-    /// isolation rule WavPlayheadOverlay documents.
+    /// ~30Hz, updating `followState.displaySample` (NOT `viewport` — see
+    /// PlaybackFollowState's doc comment for why) so WavSpectrogramView and
+    /// WavMinimapView can scroll with the audio without this screen's own
+    /// body re-running on every tick. Pausing commits the final position
+    /// into `viewport` ONCE (see the `engine.isPlaying` onChange below), at
+    /// which point the normal debounce/sharp-tile logic takes over — same
+    /// "low-res while moving, sharp on pause" behavior as before, just
+    /// scoped correctly now. Reads `engine.currentTimeSeconds` inside the
+    /// task (NOT in body), so the ~20-25Hz progress updates don't invalidate
+    /// this view's body — same isolation rule WavPlayheadOverlay documents.
     @State private var followTask: Task<Void, Never>?
+    /// Never reassigned, only mutated (`displaySample`) — and never read in
+    /// THIS view's own body (only handed to leaves), so those mutations
+    /// don't invalidate this body. See PlaybackFollowState's doc comment.
+    @State private var followState = PlaybackFollowState()
 
     /// Shared with every other palette/log-scale control in the app.
     @AppStorage("pulse.displayPalette") private var palette: Palette = .inferno
-    /// Same frequency-band crop the live Heterodyne/RTE listening uses —
+    /// Same frequency-band crop the live Heterodyne listening uses —
     /// kept in sync with `viewport.minFreqHz/maxFreqHz` (as fractions of
     /// Nyquist) by `scheduleBandSyncDebounced`/`syncBandFromViewport`.
     @AppStorage("display.bandLow") private var bandLow = 0.0
@@ -256,9 +265,11 @@ struct WavPlayerView: View {
                 } label: {
                     Image(systemName: "slider.horizontal.3")
                 }
-                .accessibilityLabel("Heterodyne / RTE tuning")
+                .accessibilityLabel("Heterodyne / time expansion tuning")
                 .popover(isPresented: $showTuning) {
-                    WavTuningControl(rteSettings: rteSettings, logFrequency: $logFrequency, noiseFloor: $noiseFloor,
+                    WavTuningControl(timeExpSettings: timeExpSettings,
+                                     timeExpansionSlowdownFactor: engine.timeExpansion.slowdownFactor,
+                                     logFrequency: $logFrequency, noiseFloor: $noiseFloor,
                                      hideSilence: $hideSilence, silenceSensitivity: $silenceSensitivity,
                                      silencePadding: $silencePadding)
                 }
@@ -286,6 +297,13 @@ struct WavPlayerView: View {
             } else {
                 followTask?.cancel()
                 followTask = nil
+                // Commit the follow loop's last position into `viewport`
+                // ONCE — the only write to `viewport` playback ever causes
+                // now — so gestures/ticks resume from where playback left
+                // off instead of the stale pre-play position, and so the
+                // hide-silence rebuild right below preserves the right
+                // real-domain center (it reads `viewport` for that).
+                recenter(sample: followState.displaySample)
                 // Restore the compressed timeline if hide-silence is on.
                 rebuildSilenceMap()
             }
@@ -300,17 +318,7 @@ struct WavPlayerView: View {
         .onChange(of: viewport) { _, _ in scheduleBandSyncDebounced() }
         .onChange(of: noiseFloor) { _, _ in scheduleRecolorDebounced() }
         .onChange(of: palette) { _, _ in scheduleRecolorDebounced() }
-        // RTESettings is a reference type edited in-place by WavTuningControl's
-        // sliders (bound via @Bindable) — those mutations don't reach
-        // `engine.timeExpansion` on their own, so without these the RTE
-        // gain/sensitivity sliders in this player's tuning popover had no
-        // audible effect until the player was reloaded. Same 5-property
-        // onChange list ContentView already uses for the live Detector screen.
-        .onChange(of: rteSettings.minFrequencyKHz) { _, _ in rteSettings.apply(to: engine.timeExpansion) }
-        .onChange(of: rteSettings.marginDB)    { _, _ in rteSettings.apply(to: engine.timeExpansion) }
-        .onChange(of: rteSettings.holdMs)      { _, _ in rteSettings.apply(to: engine.timeExpansion) }
-        .onChange(of: rteSettings.gain)        { _, _ in rteSettings.apply(to: engine.timeExpansion) }
-        .onChange(of: rteSettings.gateBlockMs) { _, _ in rteSettings.apply(to: engine.timeExpansion) }
+        .onChange(of: timeExpSettings.gain)     { _, _ in timeExpSettings.apply(to: engine.timeExpansion) }
     }
 
     // MARK: Layouts
@@ -398,7 +406,7 @@ struct WavPlayerView: View {
     @ViewBuilder private var minimapBlock: some View {
         if let displayOverview {
             WavMinimapView(overview: displayOverview, viewport: viewport, engine: engine,
-                          silenceMap: silenceMap, onRecenter: recenter,
+                          silenceMap: silenceMap, followState: followState, onRecenter: recenter,
                           bufferDebugStatus: bufferDebugStatus)
                 .frame(height: 32)
                 .padding(.horizontal, 8)
@@ -440,11 +448,12 @@ struct WavPlayerView: View {
                 ZStack {
                     WavSpectrogramView(wavURL: store.wavURL(for: recording), sampleRate: displayOverview.sampleRate,
                                        overview: displayOverview, silenceMap: silenceMap,
+                                       calibrationCurve: micCalSettings.activeCurve,
                                        viewport: $viewport,
                                        selection: $selection, annotations: annotations, isSelecting: isSelecting,
                                        palette: palette, noiseFloor: effectiveNoiseFloor,
                                        logFrequency: logFrequency,
-                                       isPlaying: engine.isPlaying,
+                                       isPlaying: engine.isPlaying, followState: followState,
                                        onSeek: { displaySeconds in
                                            // The spectrogram hands back a DISPLAY-domain
                                            // time; map through the silence map (if any)
@@ -477,7 +486,7 @@ struct WavPlayerView: View {
         .padding(.horizontal, 8)
     }
 
-    // MARK: Band sync (heterodyne/RTE)
+    // MARK: Band sync (heterodyne)
 
     private static let bandSyncDebounceSeconds = 0.1
 
@@ -571,14 +580,15 @@ struct WavPlayerView: View {
         silenceMap = nil
         compressedOverview = nil
         engine.load(url: url)
-        rteSettings.apply(to: engine.timeExpansion)
+        timeExpSettings.apply(to: engine.timeExpansion)
         applyBand()
 
         let pal = palette, floor = effectiveNoiseFloor
+        let calCurve = micCalSettings.activeCurve
         WavPlayerDebugLog.log("WavPlayer", "load: starting renderOverview for \(url.lastPathComponent)")
         Task.detached(priority: .userInitiated) {
             let result = WavPlayerDebugLog.time("WavPlayer", "renderOverview") {
-                WavSpectrogramEngine.renderOverview(wavURL: url, palette: pal, noiseFloor: floor)
+                WavSpectrogramEngine.renderOverview(wavURL: url, palette: pal, noiseFloor: floor, calibrationCurve: calCurve)
             }
             await MainActor.run {
                 guard let result else {
@@ -682,39 +692,44 @@ struct WavPlayerView: View {
         }
     }
 
-    /// While playing, keep `viewport` centred on the playback position so the
-    /// spectrogram scrolls under a stationary playhead. Each ~20Hz recenter
-    /// resets WavSpectrogramView's detail-render debounce, so the scroll
-    /// rides the cheap overview crop (low-res, as intended); pausing stops
-    /// the writes and the debounce then fires the sharp tile render. When
-    /// hide-silence is on and playback crosses into a hidden gap, skip the
-    /// engine straight to the next active segment. Reads
-    /// `engine.currentTimeSeconds` inside the loop (never in body) so its
-    /// ~20-25Hz updates don't invalidate this view — same isolation rule
-    /// WavPlayheadOverlay documents.
+    /// While playing, keep `followState.displaySample` centred on the
+    /// playback position so the spectrogram scrolls under a stationary
+    /// playhead — see PlaybackFollowState's doc comment for why this writes
+    /// THAT instead of `viewport` directly. When hide-silence is on and
+    /// playback crosses into a hidden gap, skip the engine straight to the
+    /// next active segment. Reads `engine.currentTimeSeconds` inside the
+    /// loop (never in body) so its ~20-25Hz updates don't invalidate this
+    /// view — same isolation rule WavPlayheadOverlay documents.
     private func startFollowingPlayhead() {
         followTask?.cancel()
+        // Seed immediately (not just on the first tick) — without this the
+        // first ~33ms of playback showed `followState.displaySample` at
+        // whatever it was left at by a PREVIOUS playback run (or 0 on the
+        // very first play), which briefly snapped the spectrogram to the
+        // wrong place before the loop's first tick corrected it.
+        updateFollowPosition()
         followTask = Task {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 33_000_000)   // ~30Hz
                 if Task.isCancelled { break }
-                await MainActor.run {
-                    guard engine.isPlaying, let displayOverview else { return }
-                    let sr = displayOverview.sampleRate
-                    let realSample = Int(engine.currentTimeSeconds * sr)
-                    if let map = silenceMap, let skipTo = map.nextActiveRealStart(after: realSample) {
-                        // In a hidden gap — jump to the next real activity.
-                        // seek() sets currentTimeSeconds synchronously into
-                        // that (active) segment, so the next tick sees an
-                        // active position and this fires at most once per gap.
-                        engine.seek(toSeconds: Double(skipTo) / sr)
-                        return
-                    }
-                    let displaySample = silenceMap?.realToVirtual(realSample) ?? realSample
-                    recenter(sample: displaySample)
-                }
+                await MainActor.run { updateFollowPosition() }
             }
         }
+    }
+
+    private func updateFollowPosition() {
+        guard engine.isPlaying, let displayOverview else { return }
+        let sr = displayOverview.sampleRate
+        let realSample = Int(engine.currentTimeSeconds * sr)
+        if let map = silenceMap, let skipTo = map.nextActiveRealStart(after: realSample) {
+            // In a hidden gap — jump to the next real activity. seek() sets
+            // currentTimeSeconds synchronously into that (active) segment,
+            // so the next tick sees an active position and this fires at
+            // most once per gap.
+            engine.seek(toSeconds: Double(skipTo) / sr)
+            return
+        }
+        followState.displaySample = silenceMap?.realToVirtual(realSample) ?? realSample
     }
 
     // MARK: Navigation + analysis
@@ -723,13 +738,7 @@ struct WavPlayerView: View {
     /// — callers doing real-domain work (the playhead follow loop) map first.
     private func recenter(sample: Int) {
         guard let total = displayOverview?.totalSamples else { return }
-        let span = min(viewport.sampleSpan, total)
-        var start = sample - span / 2
-        var end = start + span
-        if start < 0 { end -= start; start = 0 }
-        if end > total { start -= (end - total); end = total }
-        viewport = WavViewport(startSample: max(0, start), endSample: min(total, end),
-                               minFreqHz: viewport.minFreqHz, maxFreqHz: viewport.maxFreqHz)
+        viewport = WavViewportMath.recentered(viewport, on: sample, totalSamples: total)
     }
 
     private func requestAnalysis(startSample: Int, endSample: Int,
@@ -753,13 +762,15 @@ struct WavPlayerView: View {
         let realStart = silenceMap?.virtualToReal(startSample) ?? startSample
         let realEnd = max(realStart + 1, silenceMap?.virtualToReal(endSample) ?? endSample)
         let startSample = realStart, endSample = realEnd
+        let calCurve = micCalSettings.activeCurve
         WavPlayerDebugLog.log("WavPlayer", "requestAnalysis: \(startSample)-\(endSample) (\(String(format: "%.1f", Double(endSample - startSample) / sr * 1000))ms), generation=\(myGeneration)")
         Task.detached(priority: .userInitiated) {
             let result = WavPlayerDebugLog.time("WavPlayer", "CallAnalysis.analyze") {
                 CallAnalysis.analyze(wavURL: url, sampleRate: sr,
                                      startSample: startSample, endSample: endSample,
                                      minFrequencyHz: boxMinHz, maxFrequencyHz: boxMaxHz,
-                                     noiseFloor: floor, cfTailFraction: tail)
+                                     noiseFloor: floor, cfTailFraction: tail,
+                                     calibrationCurve: calCurve)
             }
             await MainActor.run {
                 guard myGeneration == self.analysisGeneration else {

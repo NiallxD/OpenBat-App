@@ -103,7 +103,7 @@ struct PulseSettingsView: View {
                             .foregroundStyle(.secondary)
                     }
                     Slider(value: $detector.holdOffSeconds, in: 0.02...1.0, step: 0.01)
-                    Text("Minimum gap between detections. Default 150 ms blocks room echoes (which arrive within ~50–150 ms of the direct call) while allowing up to ~6 calls/sec. Raise further if echoes still re-trigger.")
+                    Text("Minimum gap between detections. Default 50 ms passes typical call spacing while still rejecting the closest echoes (amplitude does the rest, since echoes return much quieter). Raise further if echoes still re-trigger.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } header: {

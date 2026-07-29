@@ -155,7 +155,45 @@ struct SpeciesMeasurements: Codable, Hashable {
     var forearmMmRange: MeasurementRange?
     var wingspanCmRange: MeasurementRange?
     var weightGRange: MeasurementRange?
-    var color: String?    // free-text fur/pelage description
+    /// Free-text overall appearance description — shown ahead of the
+    /// measurements table on the species page. Renamed from "color" (the
+    /// original field name undersold it — entries describe general
+    /// morphology, not just pelage); `init(from:)` below still accepts the
+    /// old "color" key so already-cached/remote SpeciesGuideData.json keeps
+    /// decoding until the GitHub-hosted copy is migrated to the new key.
+    var morphologyDescription: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case forearmMmRange, wingspanCmRange, weightGRange, morphologyDescription
+        case legacyColor = "color"
+    }
+
+    init(forearmMmRange: MeasurementRange? = nil,
+         wingspanCmRange: MeasurementRange? = nil,
+         weightGRange: MeasurementRange? = nil,
+         morphologyDescription: String? = nil) {
+        self.forearmMmRange = forearmMmRange
+        self.wingspanCmRange = wingspanCmRange
+        self.weightGRange = weightGRange
+        self.morphologyDescription = morphologyDescription
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        forearmMmRange = try c.decodeIfPresent(MeasurementRange.self, forKey: .forearmMmRange)
+        wingspanCmRange = try c.decodeIfPresent(MeasurementRange.self, forKey: .wingspanCmRange)
+        weightGRange = try c.decodeIfPresent(MeasurementRange.self, forKey: .weightGRange)
+        morphologyDescription = try c.decodeIfPresent(String.self, forKey: .morphologyDescription)
+            ?? c.decodeIfPresent(String.self, forKey: .legacyColor)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encodeIfPresent(forearmMmRange, forKey: .forearmMmRange)
+        try c.encodeIfPresent(wingspanCmRange, forKey: .wingspanCmRange)
+        try c.encodeIfPresent(weightGRange, forKey: .weightGRange)
+        try c.encodeIfPresent(morphologyDescription, forKey: .morphologyDescription)
+    }
 }
 
 /// Text descriptors for key identifying features. Illustrations/icons for

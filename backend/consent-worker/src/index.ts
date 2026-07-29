@@ -173,7 +173,7 @@ async function withinRateLimit(env: Env, key: string): Promise<boolean> {
 /// Bump this in the same deploy as the app release that bumps its own constant.
 /// Devices on the old version get a clean 403 and the app's re-consent prompt
 /// resolves it — a deliberate pause, not a break.
-const CURRENT_CONSENT_VERSION = "2.0";
+const CURRENT_CONSENT_VERSION = "3.0";
 
 async function currentConsent(
   env: Env,
@@ -275,10 +275,11 @@ async function handleUpload(request: Request, env: Env, path: string): Promise<R
   // this list and must stay absent: anything named here is persisted onto the
   // object and would re-create the join.
   const metadataHeaderNames = ["species", "quality-score", "location", "verified"] as const;
+  const MAX_METADATA_VALUE_LENGTH = 200;
   const customMetadata: Record<string, string> = {};
   for (const name of metadataHeaderNames) {
     const value = request.headers.get(`x-openbat-${name}`);
-    if (value) customMetadata[name] = value;
+    if (value) customMetadata[name] = value.slice(0, MAX_METADATA_VALUE_LENGTH);
   }
 
   await bucket.put(key, request.body, { customMetadata });
@@ -373,6 +374,9 @@ export default {
       if (!deviceID) return json({ error: "device_id required" }, 400);
       if (!(await authorize(request, env, deviceID))) {
         return json({ error: "invalid or missing device token" }, 401);
+      }
+      if (!(await withinRateLimit(env, `consent-read:${deviceID}`))) {
+        return json({ error: "rate limit exceeded" }, 429);
       }
 
       const row = await env.DB.prepare(

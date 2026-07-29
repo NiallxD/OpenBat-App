@@ -50,6 +50,9 @@ enum GBIFService {
         let cfg = URLSessionConfiguration.default
         cfg.timeoutIntervalForRequest = 20
         cfg.timeoutIntervalForResource = 45
+        // GBIF asks API callers to identify themselves; an unidentified client
+        // is more likely to get throttled under load.
+        cfg.httpAdditionalHeaders = ["User-Agent": "OpenBat-iOS (contact: privacy@openbat.app)"]
         return URLSession(configuration: cfg)
     }()
 

@@ -25,7 +25,7 @@ final class SpeciesGuideStore {
     /// serves an HTML page, not JSON) tracking `main` so new commits are
     /// picked up on the next launch rather than pinning to one frozen SHA.
     static let remoteURL = URL(string:
-        "https://raw.githubusercontent.com/NiallxD/OpenBat/main/SpeciesGuideData.json")!
+        "https://raw.githubusercontent.com/NiallxD/OpenBat-FieldGuide/main/SpeciesGuideData.json")!
 
     private(set) var guide: SpeciesGuide = .empty
     /// Where the current guide came from — surfaced in the explorer footer.

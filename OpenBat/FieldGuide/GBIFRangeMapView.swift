@@ -58,6 +58,7 @@ struct GBIFDistributionCard: View {
     }
 
     @State private var state: LoadState = .loading
+    @State private var showInfoPopover = false
     @State private var camera: MapCameraPosition = .automatic
     @State private var resolution: H3Cell.Resolution = .res2
     @State private var binnedCells: [H3BinnedCell] = []
@@ -122,6 +123,9 @@ struct GBIFDistributionCard: View {
                 case .loading:
                     loadingPlaceholder
                 }
+            }
+            .overlay(alignment: .topTrailing) {
+                infoButton
             }
             attributionFooter
         }
@@ -188,6 +192,44 @@ struct GBIFDistributionCard: View {
         f.dateStyle = .medium
         return f
     }()
+
+    /// Explains what the hexagon shading actually represents — occurrence
+    /// records reported to GBIF, not a modeled range — since a dense-looking
+    /// map otherwise reads as "the species lives here" rather than "the
+    /// species was seen and logged here", and recording effort varies wildly
+    /// by region (well-surveyed countries look artificially "denser").
+    private var infoButton: some View {
+        Button {
+            showInfoPopover = true
+        } label: {
+            Image(systemName: "info.circle.fill")
+                .font(.title3)
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(.white, .black.opacity(0.55))
+        }
+        .buttonStyle(.plain)
+        .padding(8)
+        .accessibilityLabel("About this map")
+        .popover(isPresented: $showInfoPopover) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("About this map")
+                    .font(.headline)
+                Text("This map shows where this species has been seen and reported to biodiversity databases (GBIF) — not a modeled range. Sparse or empty areas may still have the species present; they may simply be under-surveyed.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding()
+            // A popover's content sizes to its ideal (unconstrained) width
+            // unless given one explicitly — `frame(maxWidth:)` alone only caps
+            // an already-wide layout, it doesn't make Text wrap in the first
+            // place. A fixed width here, paired with the Text's `fixedSize`
+            // above (grow vertically, not horizontally), is what actually
+            // forces the wrap.
+            .frame(width: 280)
+            .presentationCompactAdaptation(.popover)
+        }
+    }
 
     /// GBIF credit, plus the range snapshot's version/date when the map is
     /// showing the committed SpeciesRangeStore data rather than a live

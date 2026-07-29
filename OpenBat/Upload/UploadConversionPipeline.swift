@@ -208,7 +208,7 @@ nonisolated enum UploadConversionPipeline {
             var pcm16 = [Int16](repeating: 0, count: block.count)
             for i in block.indices {
                 let clipped = max(-1, min(1, block[i]))
-                pcm16[i] = Int16(clipped * 32767)
+                pcm16[i] = Int16((clipped * 32767).rounded())
             }
             try pcm16.withUnsafeBufferPointer { try handle.write(contentsOf: Data(buffer: $0)) }
             written += block.count

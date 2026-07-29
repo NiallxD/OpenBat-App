@@ -141,7 +141,8 @@ nonisolated enum CallAnalysis {
     /// `fineHzPerBin`/`minBin`/`maxBin` are for the zero-padded
     /// `extentFFTLen/2`-bin grid.
     private static func traceExtent(pcm: [Float], loSample: Int, hiSample: Int,
-                                    fineHzPerBin: Double, minBin: Int, maxBin: Int) -> Double? {
+                                    fineHzPerBin: Double, minBin: Int, maxBin: Int,
+                                    calibrationCurve: MicCalibrationCurve? = nil) -> Double? {
         let W = extentWindowLen, bins = extentFFTLen / 2
         let hiBin = min(maxBin, bins - 1)
         let lo = max(0, loSample), hi = min(pcm.count, hiSample)
@@ -165,6 +166,14 @@ nonisolated enum CallAnalysis {
                                 vDSP_zvabs(&split, 1, &mags, 1, vDSP_Length(bins))
                             }
                         }
+                    }
+                }
+                // Frequency-interpolated (not direct index) since this pass's
+                // 256-bin grid is coarser than the curve's own 1024-bin grid —
+                // see MicCalibrationCurve.gain(atFrequencyHz:).
+                if let calibrationCurve {
+                    for b in minBin...hiBin {
+                        mags[b] *= calibrationCurve.gain(atFrequencyHz: Double(b) * fineHzPerBin)
                     }
                 }
                 var peakBin = minBin
@@ -205,7 +214,8 @@ nonisolated enum CallAnalysis {
                         minFrequencyHz: Double,
                         maxFrequencyHz: Double = .greatestFiniteMagnitude,
                         noiseFloor: Float,
-                        cfTailFraction: Double = defaultCFTailFraction) -> Result? {
+                        cfTailFraction: Double = defaultCFTailFraction,
+                        calibrationCurve: MicCalibrationCurve? = nil) -> Result? {
         let maxSpanSamples = Int(maxAnalysisSpanSeconds * sampleRate)
         let clampedEnd = min(endSample, startSample + maxSpanSamples)
         guard clampedEnd > startSample else {
@@ -222,19 +232,28 @@ nonisolated enum CallAnalysis {
         return WavPlayerDebugLog.time("CallAnalysis", "analyze") {
             analyze(pcm: pcm, sampleRate: sampleRate, minFrequencyHz: minFrequencyHz,
                    maxFrequencyHz: maxFrequencyHz,
-                   noiseFloor: noiseFloor, cfTailFraction: cfTailFraction)
+                   noiseFloor: noiseFloor, cfTailFraction: cfTailFraction,
+                   calibrationCurve: calibrationCurve)
         }
     }
 
     /// Pure-data entry point (no file I/O) — what the file-based `analyze`
     /// above delegates to, and what tests drive directly.
+    ///
+    /// `calibrationCurve`, if given, corrects for the microphone's own uneven
+    /// frequency response (see `MicCalibrationCurve`) in both the main
+    /// STFT grid (direct bin-index application — same 1024-bin/2048-FFT grid
+    /// it was measured at) and the fine extent tracer (frequency-interpolated,
+    /// since that pass uses a different, coarser bin grid).
     static func analyze(pcm: [Float], sampleRate: Double,
                         minFrequencyHz: Double,
                         maxFrequencyHz: Double = .greatestFiniteMagnitude,
                         noiseFloor: Float,
-                        cfTailFraction: Double = defaultCFTailFraction) -> Result? {
+                        cfTailFraction: Double = defaultCFTailFraction,
+                        calibrationCurve: MicCalibrationCurve? = nil) -> Result? {
         var scratch = STFTGrid.Scratch()
-        guard let (norm, nFrames) = STFTGrid.compute(pcm: pcm, scratch: &scratch, dynamicRangeDB: dynamicRangeDB)
+        guard let (norm, nFrames) = STFTGrid.compute(pcm: pcm, scratch: &scratch, dynamicRangeDB: dynamicRangeDB,
+                                                      calibrationCurve: calibrationCurve)
         else {
             WavPlayerDebugLog.log("CallAnalysis", "analyze: STFTGrid.compute FAILED (pcm.count=\(pcm.count), windowLen=\(STFTGrid.windowLen))")
             return nil
@@ -423,7 +442,8 @@ nonisolated enum CallAnalysis {
         }()
         let fineMaxBin = min(fineBoxMaxBin, Int((fmaxHz + extentClimbHeadroomHz) / fineHzPerBin))
         if let fineFmax = traceExtent(pcm: pcm, loSample: loSample, hiSample: hiSample,
-                                      fineHzPerBin: fineHzPerBin, minBin: fineMinBin, maxBin: fineMaxBin),
+                                      fineHzPerBin: fineHzPerBin, minBin: fineMinBin, maxBin: fineMaxBin,
+                                      calibrationCurve: calibrationCurve),
            fineFmax > fmaxHz {
             fmaxHz = fineFmax
         }

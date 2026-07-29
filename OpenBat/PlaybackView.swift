@@ -17,17 +17,20 @@
 //
 
 import SwiftUI
+import UniformTypeIdentifiers
 
 // MARK: - List
 
 struct PlaybackListView: View {
     @Bindable var store: ClassificationStore
-    let rteSettings: RTESettings
+    let micCalSettings: MicCalibrationSettings
     let consent: ConsentStore
 
     /// Shared with SessionsView/RecordingDetailView via the same UserDefaults key.
     @AppStorage("display.showNoID") private var showNoID = false
-    @State private var showUploadQueue = false
+    @State private var showImporter = false
+    @State private var importError: String?
+    @State private var isImporting = false
 
     private var listeningRecordings: [Recording] {
         store.listeningRecordings.filteredByNoID(showNoID: showNoID)
@@ -59,7 +62,7 @@ struct PlaybackListView: View {
                                     // Lazy: WavPlayerView's `@State` engine is
                                     // expensive to construct — see LazyDestination.
                                     LazyDestination {
-                                        WavPlayerView(recording: recording, store: store, rteSettings: rteSettings)
+                                        WavPlayerView(recording: recording, store: store, micCalSettings: micCalSettings)
                                     }
                                 } label: {
                                     RecordingRow(recording: recording, store: store, consent: consent)
@@ -75,7 +78,7 @@ struct PlaybackListView: View {
                                 ForEach(recordings) { recording in
                                     NavigationLink {
                                         LazyDestination {
-                                            WavPlayerView(recording: recording, store: store, rteSettings: rteSettings)
+                                            WavPlayerView(recording: recording, store: store, micCalSettings: micCalSettings)
                                         }
                                     } label: {
                                         RecordingRow(recording: recording, store: store, consent: consent)
@@ -96,26 +99,120 @@ struct PlaybackListView: View {
         .flatTopScrollEdge()
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                // Uploading itself now happens per-recording, by tapping its own
-                // eligible badge in the list (RecordingRow.uploadBadge) — this just
-                // opens the read-only status view.
+                // Import an external WAV — the only way to audition a known bat
+                // call through the listening modes without a live bat, since
+                // WavPlayerView drives the real DSP from the file at its native
+                // rate. See RecordingImporter.
                 Button {
-                    showUploadQueue = true
+                    showImporter = true
                 } label: {
-                    Image(systemName: "tray.full")
+                    if isImporting {
+                        ProgressView()
+                    } else {
+                        Image(systemName: "plus")
+                    }
                 }
-                .accessibilityLabel("Upload Queue")
+                .disabled(isImporting)
+                .accessibilityLabel("Import a recording")
             }
             ToolbarItem(placement: .topBarTrailing) {
-                Toggle(isOn: $showNoID) {
+                Button {
+                    showNoID.toggle()
+                } label: {
                     Image(systemName: showNoID ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
+                        .foregroundStyle(showNoID ? .blue : .primary)
                 }
-                .toggleStyle(.button)
                 .accessibilityLabel(showNoID ? "Hide unclassified recordings" : "Show unclassified recordings")
             }
         }
-        .sheet(isPresented: $showUploadQueue) {
-            UploadQueueView(classStore: store, consent: consent)
+        .fileImporter(isPresented: $showImporter,
+                      allowedContentTypes: [.wav, .aiff, .audio],
+                      allowsMultipleSelection: true) { result in
+            switch result {
+            case .success(let urls): importAll(urls)
+            case .failure(let error): importError = error.localizedDescription
+            }
+        }
+        .alert("Import failed", isPresented: .init(get: { importError != nil },
+                                                  set: { if !$0 { importError = nil } })) {
+            Button("OK") { importError = nil }
+        } message: {
+            Text(importError ?? "")
+        }
+    }
+
+    /// Copies each picked file, then renders thumbnails and registers them.
+    ///
+    /// The copy runs RIGHT HERE, synchronously, still inside the `.fileImporter`
+    /// completion handler — the sandbox extension the picker grants doesn't
+    /// survive a hop onto another task, and doing the copy there instead made
+    /// every import fail with a permissions error. Only the FFT-heavy overview
+    /// render is deferred, and by then the file is in our own container.
+    private func importAll(_ urls: [URL]) {
+        var copied: [RecordingImporter.Copied] = []
+        var failures: [String] = []
+        for url in urls {
+            do {
+                copied.append(try RecordingImporter.copyIntoLibrary(source: url))
+            } catch {
+                failures.append("\(url.lastPathComponent): \(error.localizedDescription)")
+            }
+        }
+
+        // A NOID recording is hidden by the list's own filter, so an import
+        // would otherwise land invisibly with the filter off. Reveal it rather
+        // than leaving the user to wonder where the file went — but only when
+        // something actually came in unclassified, since a file whose GUANO
+        // named a species is visible anyway and silently changing the user's
+        // filter preference for it would be gratuitous. Set before the async
+        // work so the row is visible the moment it is inserted.
+        if copied.contains(where: { $0.species == "NOID" }) { showNoID = true }
+
+        guard !copied.isEmpty else {
+            reportImport(failures: failures)
+            return
+        }
+
+        isImporting = true
+        Task {
+            for file in copied {
+                let image = await Task.detached(priority: .userInitiated) {
+                    RecordingImporter.renderOverview(at: file.url)
+                }.value
+                // Species/confidence/pulses/coordinate come from the file's own
+                // GUANO chunk when it has one, so re-importing an OpenBat export
+                // round-trips rather than arriving as a dateless "NoID".
+                //
+                // `sessionID: nil` regardless: an import always lands in the
+                // Listening bucket. Filing it into whichever survey session's time
+                // window happens to contain its timestamp — which is what
+                // RecordingMigration does, correctly, for WAVs this app recorded —
+                // would silently alter that session's species list and map pins
+                // using a file the user merely opened.
+                store.addRecording(date: file.date,
+                                   durationSeconds: file.durationSeconds,
+                                   species: file.species,
+                                   confidence: file.confidence,
+                                   pulseCount: file.pulseCount,
+                                   sessionID: nil, coordinate: file.coordinate,
+                                   relativeWavPath: file.relativeWavPath,
+                                   spectrogramImage: image)
+            }
+            isImporting = false
+            reportImport(failures: failures)
+        }
+    }
+
+    /// Surfaces import failures after a short delay. Presenting an alert while
+    /// `.fileImporter` is still dismissing gets silently dropped by SwiftUI, so
+    /// a failure reported immediately never reaches the user at all — which is
+    /// how the first version of this managed to fail completely silently.
+    private func reportImport(failures: [String]) {
+        guard !failures.isEmpty else { return }
+        let message = failures.joined(separator: "\n\n")
+        Task {
+            try? await Task.sleep(for: .milliseconds(400))
+            importError = message
         }
     }
 }
@@ -183,8 +280,9 @@ struct PlaybackControlsView: View {
         .accessibilityLabel(engine.isPlaying ? "Pause" : (atEnd ? "Replay" : "Play"))
     }
 
-    /// Cycles Off → Heterodyne → Time expansion → Off, same order and icons as the
-    /// live Detector screen's listen-mode button.
+    /// Cycles Off → Heterodyne → Time expansion → Off. Time expansion is
+    /// playback-only (see ListenMode's doc comment), so it only appears in
+    /// this cycle, not the live Detector's off/heterodyne toggle.
     private var listenModeButton: some View {
         Button {
             engine.listenMode = nextListenMode
@@ -202,29 +300,31 @@ struct PlaybackControlsView: View {
 
     private var nextListenMode: ListenMode {
         switch engine.listenMode {
-        case .off:           .heterodyne
-        case .heterodyne:    .timeExpansion
-        case .timeExpansion: .off
+        case .off:                  .heterodyne
+        case .heterodyne:           .timeExpansion
+        case .timeExpansion:        .off
+        // Live-only mode; never reached from this playback cycle, but handled
+        // explicitly rather than via `default:` so ListenMode stays exhaustively
+        // checked here too.
+        case .adaptiveTimeExpansion: .off
         }
     }
 
     private var listenIcon: String {
         switch engine.listenMode {
-        case .off:           "headphones"
-        case .heterodyne:    "antenna.radiowaves.left.and.right"
-        case .timeExpansion: "tortoise"
+        case .off:                  "headphones"
+        case .heterodyne:           "antenna.radiowaves.left.and.right"
+        case .timeExpansion:        "tortoise"
+        case .adaptiveTimeExpansion: "tortoise"
         }
     }
 
-    // Shown as the visible label under the mode icon (unlike the live
-    // Detector button, which is icon-only), so the compact "RTE" keeps the
-    // row neat and matches the "Heterodyne / RTE" wording in this screen's
-    // tuning popover and Settings.
     private var listenModeName: String {
         switch engine.listenMode {
-        case .off:           "Off"
-        case .heterodyne:    "Heterodyne"
-        case .timeExpansion: "RTE"
+        case .off:                  "Off"
+        case .heterodyne:            "Heterodyne"
+        case .timeExpansion:        "Time exp"
+        case .adaptiveTimeExpansion: "Time exp"
         }
     }
 

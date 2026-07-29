@@ -13,10 +13,14 @@ import Foundation
 /// `nonisolated`: stateless URL construction, called from `RecordingUploader`'s
 /// off-main upload path.
 nonisolated enum UploadClient {
-    /// Deployed Worker, R2-bound (see backend/consent-worker/). Empty would
-    /// mean "not ready yet" — RecordingUploader skips uploads entirely rather
-    /// than failing loudly in that case.
-    static var baseURL: String = "https://openbat-consent.niallbell.workers.dev"
+    /// Deliberately severed for launch (see `ConsentStore.uploadContributionEnabled`):
+    /// contribution can't be offered until reference-quality recordings can be
+    /// verified by non-acoustic means, so the client is cut off from the Worker
+    /// rather than merely gated by UI/consent. Empty makes RecordingUploader
+    /// skip uploads entirely (the same no-op path it already has for "not
+    /// deployed yet"). Restore to re-enable:
+    /// "https://openbat-consent.niallbell.workers.dev"
+    static var baseURL: String = ""
 
     /// `{bucketed_date}/{object_id}.flac`. The key is built by
     /// `AnonymizedUploadBuilder`, not here — this only prefixes the endpoint, so

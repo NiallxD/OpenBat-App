@@ -447,11 +447,24 @@ final class ClassificationStore {
     // MARK: Delete
 
     func delete(_ pass: PassRecord) {
-        passes.removeAll { $0.id == pass.id }
+        delete([pass])
+    }
+
+    /// Bulk delete — the only one that actually touches state, with the
+    /// single-pass form above delegating to it. Mirrors `delete(_
+    /// toDelete: [Recording])`'s fix for the same O(n²) bug class: deleting
+    /// one at a time in a loop did its own `removeAll` scan, `io.async` hop,
+    /// and full `persist()` re-encode of the entire passes array per call.
+    func delete(_ toDelete: [PassRecord]) {
+        guard !toDelete.isEmpty else { return }
+        let doomed = Set(toDelete.map(\.id))
+        passes.removeAll { doomed.contains($0.id) }
+
+        let imageFiles = toDelete.flatMap { $0.pulses.compactMap(\.imageFile) }
         io.async { [weak self] in
             guard let self else { return }
-            for p in pass.pulses where p.imageFile != nil {
-                try? FileManager.default.removeItem(at: self.imagesDir.appendingPathComponent(p.imageFile!))
+            for file in imageFiles {
+                try? FileManager.default.removeItem(at: self.imagesDir.appendingPathComponent(file))
             }
         }
         persist()
@@ -524,7 +537,7 @@ final class ClassificationStore {
 
     /// Clear only the Listening bucket (passes and recordings not owned by a session).
     func clearListening() {
-        for pass in listeningPasses { delete(pass) }
+        delete(listeningPasses)
         delete(listeningRecordings)   // removes WAVs too
     }
 
@@ -618,7 +631,7 @@ final class ClassificationStore {
         io.async { [weak self] in
             guard let self else { return }
             if let data = try? JSONEncoder().encode(snapshot) {
-                try? data.write(to: self.jsonURL)
+                try? data.write(to: self.jsonURL, options: .atomic)
             }
         }
     }
@@ -628,7 +641,7 @@ final class ClassificationStore {
         io.async { [weak self] in
             guard let self else { return }
             if let data = try? JSONEncoder().encode(snapshot) {
-                try? data.write(to: self.recordingsURL)
+                try? data.write(to: self.recordingsURL, options: .atomic)
             }
         }
     }
@@ -642,7 +655,7 @@ final class ClassificationStore {
         io.async { [weak self] in
             guard let self else { return }
             if let data = try? JSONEncoder().encode(snapshot) {
-                try? data.write(to: self.sessionsURL)
+                try? data.write(to: self.sessionsURL, options: .atomic)
             }
         }
     }
@@ -687,6 +700,26 @@ final class ClassificationStore {
 
 enum SpeciesInfo {
     static let commonName: [String: String] = [
+        // BatDetect2 (UK/Europe), 6-letter codes — see
+        // BatDetect2Classifier.classNames/scientificNames.
+        "MYOMYS": "Whiskered Bat",
+        "MYOALC": "Alcathoe Bat",
+        "CNESER": "Serotine",
+        "PIPNAT": "Nathusius' Pipistrelle",
+        "BARBAR": "Barbastelle",
+        "MYONAT": "Natterer's Bat",
+        "MYODAU": "Daubenton's Bat",
+        "MYOBRA": "Brandt's Bat",
+        "PIPPIP": "Common Pipistrelle",
+        "MYOBEC": "Bechstein's Bat",
+        "PIPPYG": "Soprano Pipistrelle",
+        "RHIHIP": "Lesser Horseshoe Bat",
+        "NYCLEI": "Leisler's Bat",
+        "RHIFER": "Greater Horseshoe Bat",
+        "PLEAUR": "Brown Long-eared Bat",
+        "NYCNOC": "Common Noctule",
+        "PLEAUS": "Grey Long-eared Bat",
+        // NABat (US), 4-letter codes.
         "ANPA": "Pallid Bat",
         "COTO": "Townsend's Big-eared Bat",
         "EPFU": "Big Brown Bat",

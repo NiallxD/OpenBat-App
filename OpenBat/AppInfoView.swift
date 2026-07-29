@@ -29,6 +29,7 @@ enum TourID: Hashable {
     // and landscape placements both resolve to whichever one is in the tree.
     case micStatus, resetStats                 // stats header (micStatus: portrait only)
     case sessionStatus, feedbackWarning        // stats header
+    case timeExpansionCounter                  // stats header
     case sessionTimer                          // spectrogram header
     case pulseSpeciesToggle, pulseSettings     // pulse-view header
     case spectrogramSpeciesToggle, compressTimeline, batRange, palette, bandSettings
@@ -86,13 +87,16 @@ enum TourScript {
                  detail: "Peak frequency, bandwidth, duration, pulse rate and count for the most recent pulse, plus the current species ID and input level. They clear when activity goes stale."),
         TourStep(target: .feedbackWarning, symbol: "exclamationmark.triangle.fill",
                  title: "Feedback warning",
-                 detail: "Appears only while heterodyne or time-expansion audio is playing out the phone's speaker — the mic hears that playback and shows it as a spurious second call. Wear headphones to clear it. (Shown here for the tour.)"),
+                 detail: "Appears only while heterodyne or other captured audio is playing out of the phone's speaker — the mic hears that playback and shows it as a spurious second call. Wear headphones to clear it. (Shown here for the tour.)"),
+        TourStep(target: .timeExpansionCounter, symbol: "tortoise",
+                 title: "Time-expansion counter",
+                 detail: "Shown only in the time-expansion listen mode: a running count of stretched calls, and — in red, once it's non-zero — how many more triggered while a previous one was still playing back slowed down. Tap it for why that happens. (Shown here for the tour.)"),
         TourStep(target: .sessionStatus, symbol: "location.fill",
                  title: "What's running",
                  detail: "Off when nothing is detecting, Listening for an unlogged run, or Session when IDs are being logged with a GPS track."),
         TourStep(target: .micStatus, symbol: "cable.connector",
                  title: "Mic status",
-                 detail: "Shows whether the ultrasonic mic is attached and the sample rate it's running at."),
+                 detail: "Shows whether the ultrasonic mic is attached and the sample rate it's running at This should show 384 kHz."),
         TourStep(target: .resetStats, symbol: "arrow.counterclockwise",
                  title: "Reset stats",
                  detail: "Clears the pulse count, pulse rate and the level meter's peak-hold."),
@@ -122,7 +126,7 @@ enum TourScript {
         TourStep(target: .batRange, symbol: "minus.plus.lines.measurement.horizontal.aligned.bottom",
                  symbolRotation: .degrees(-90),
                  title: "Bat frequency band",
-                 detail: "One-tap preset snapping the frequency axis to 15–90 kHz, where most bat calls live. Tap again to restore the full range."),
+                 detail: "One-tap preset snapping the frequency axis to 15–90 kHz, where most bat calls live. Tap again to restore the full range. Custom ranges can be set also."),
         TourStep(target: .palette, symbol: "paintpalette",
                  title: "Colour palette",
                  detail: "Picks the colormap for the spectrogram and pulse view — Inferno, Viridis, Jet and friends."),
@@ -132,13 +136,13 @@ enum TourScript {
 
         TourStep(target: .start, symbol: "ear",
                  title: "Start & stop",
-                 detail: "Starts and stops detecting. A Session logs IDs with a GPS track on a map; Just Listening logs to the Listening bucket."),
+                 detail: "Starts and stops detecting. A Session logs IDs with a GPS track on a map; Just Listening logs to the Listening bucket and carries over all GUANO metadata to the file."),
         TourStep(target: .record, symbol: "record.circle",
                  title: "Record",
                  detail: "Arms WAV recording — each detected pass is saved as its own file, with the species ID in its metadata."),
         TourStep(target: .listen, symbol: "headphones",
                  title: "Listen",
-                 detail: "Cycles the listen mode — heterodyne or time-expansion — so you can hear the bats live. Tap again for off."),
+                 detail: "Cycles the listen mode, currently only heterodyne, so you can hear the bats live. Tap again for off."),
 
         TourStep(target: nil, symbol: "line.3.horizontal.decrease.circle",
                  title: "Menus",
@@ -306,9 +310,27 @@ struct DataModelSourcesView: View {
             attributionRow(name: "GBIF",
                            detail: "Species distribution maps use occurrence data from the Global Biodiversity Information Facility (GBIF), licensed CC BY 4.0.",
                            url: URL(string: "https://www.gbif.org"))
+            // CC BY-SA 4.0 requires attribution (title, author/source,
+            // license). Species description text is written for the field
+            // guide itself, cited to its own references (academic papers,
+            // conservation bodies) rather than Wikipedia — only photos come
+            // from there, so this only credits photos, not text.
             attributionRow(name: "Wikipedia",
-                           detail: "Species photos and summary text in the field guide come from Wikipedia, licensed CC BY-SA 4.0. Individual photo authorship isn't tracked per-image.",
+                           detail: "Species photos in the field guide are sourced from Wikipedia's open media, licensed CC BY-SA 4.0. Individual photo authorship isn't tracked per-image. Description text is written for the field guide and cited to its own references, not Wikipedia.",
                            url: URL(string: "https://www.wikipedia.org"))
+
+            Divider().padding(.vertical, 4)
+            Text("Open Source Software").font(.headline)
+
+            licenseRow(name: "FLAC", detail: "Recording contribution uses libFLAC for lossless audio encoding.",
+                       url: URL(string: "https://github.com/sbooth/flac-binary-xcframework"),
+                       licenseName: "BSD 3-Clause", licenseText: Self.xiphBSD3LicenseText(project: "FLAC", years: "2000-2009 Josh Coalson, 2011-2025", holder: "Xiph.Org Foundation"))
+            licenseRow(name: "libogg", detail: "Ogg container support, bundled alongside FLAC.",
+                       url: URL(string: "https://github.com/sbooth/ogg-binary-xcframework"),
+                       licenseName: "BSD 3-Clause", licenseText: Self.xiphBSD3LicenseText(project: "libogg", years: "2002", holder: "Xiph.org Foundation"))
+            licenseRow(name: "SwiftyH3", detail: "H3 hexagonal geospatial indexing, used to bin GBIF occurrence points for the distribution map.",
+                       url: URL(string: "https://github.com/pawelmajcher/SwiftyH3"),
+                       licenseName: "Apache License 2.0", licenseText: Self.apache2NoticeText)
         }
     }
 
@@ -328,6 +350,89 @@ struct DataModelSourcesView: View {
             Text(detail).font(.caption).foregroundStyle(.secondary)
         }
     }
+
+    /// Same as `attributionRow`, plus the actual license text collapsed behind
+    /// a disclosure — required to ship the notice to users, not just leave it
+    /// in a source comment, without making every OSS credit permanently
+    /// full-length on screen.
+    private func licenseRow(name: String, detail: String, url: URL?, licenseName: String, licenseText: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            if let url {
+                Link(destination: url) {
+                    HStack(spacing: 4) {
+                        Text(name).font(.subheadline.weight(.semibold))
+                        Image(systemName: "arrow.up.right.square")
+                            .font(.caption2)
+                    }
+                }
+            } else {
+                Text(name).font(.subheadline.weight(.semibold))
+            }
+            Text(detail).font(.caption).foregroundStyle(.secondary)
+            DisclosureGroup("\(licenseName) license text") {
+                Text(licenseText)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 4)
+                    .textSelection(.enabled)
+            }
+            .font(.caption)
+        }
+    }
+
+    /// Standard Xiph.Org-style BSD 3-Clause text — used verbatim (modulo
+    /// project name/copyright line) by both FLAC and libogg.
+    private static func xiphBSD3LicenseText(project: String, years: String, holder: String) -> String {
+        """
+        Copyright (c) \(years) \(holder)
+
+        Redistribution and use in source and binary forms, with or without \
+        modification, are permitted provided that the following conditions \
+        are met:
+
+        - Redistributions of source code must retain the above copyright \
+        notice, this list of conditions and the following disclaimer.
+
+        - Redistributions in binary form must reproduce the above copyright \
+        notice, this list of conditions and the following disclaimer in the \
+        documentation and/or other materials provided with the distribution.
+
+        - Neither the name of the \(holder) nor the names of its \
+        contributors may be used to endorse or promote products derived \
+        from this software without specific prior written permission.
+
+        THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS \
+        "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT \
+        LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS \
+        FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE \
+        FOUNDATION OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, \
+        INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES \
+        (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR \
+        SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) \
+        HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, \
+        STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) \
+        ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED \
+        OF THE POSSIBILITY OF SUCH DAMAGE.
+        """
+    }
+
+    /// Apache-2.0 permits satisfying the "provide a copy of the License"
+    /// requirement by reference to its canonical, stable URL rather than
+    /// inlining the full ~11 KB text — the standard form used in most
+    /// iOS acknowledgements screens.
+    private static let apache2NoticeText = """
+        Licensed under the Apache License, Version 2.0 (the "License"); you \
+        may not use this file except in compliance with the License. You \
+        may obtain a copy of the License at
+
+            https://www.apache.org/licenses/LICENSE-2.0
+
+        Unless required by applicable law or agreed to in writing, software \
+        distributed under the License is distributed on an "AS IS" BASIS, \
+        WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or \
+        implied. See the License for the specific language governing \
+        permissions and limitations under the License.
+        """
 }
 
 // MARK: - Guided tour overlay

@@ -72,8 +72,14 @@ nonisolated enum STFTGrid {
     /// Computes a peak-normalized [0,1] dB grid, row-major [bin*nFrames+frame],
     /// from the whole `pcm` slice at native STFT resolution. Returns nil if
     /// `pcm` is shorter than one window or produces fewer than 2 frames.
+    ///
+    /// `calibrationCurve`, if given, corrects for the microphone's own uneven
+    /// frequency response (see `MicCalibrationCurve`) — applied directly by
+    /// bin index, since this grid's 1024 bins/2048 FFT match what the curve
+    /// was measured at.
     static func compute(pcm: [Float], scratch: inout Scratch,
-                        dynamicRangeDB: Float) -> (grid: [Float], nFrames: Int)? {
+                        dynamicRangeDB: Float,
+                        calibrationCurve: MicCalibrationCurve? = nil) -> (grid: [Float], nFrames: Int)? {
         guard pcm.count >= windowLen else {
             WavPlayerDebugLog.log("STFTGrid", "compute: pcm.count=\(pcm.count) < windowLen=\(windowLen), aborting")
             return nil
@@ -120,6 +126,7 @@ nonisolated enum STFTGrid {
                         }
                     }
                 }
+                calibrationCurve?.apply(to: &mags)
                 var s = scale
                 vDSP_vsmul(mags, 1, &s, &mags, 1, vDSP_Length(bins))
                 // Vectorized dB conversion (clamp, log10, ×20) instead of a
@@ -196,7 +203,8 @@ nonisolated enum STFTGrid {
     /// regardless of how coarse the stride gets.
     static func streamPooledGridFromFile(wavURL: URL, startSample: Int, endSample: Int,
                                          targetColumns: Int, scratch: inout Scratch,
-                                         oversample: Int = 8) -> (dBGrid: [Float], nCols: Int)? {
+                                         oversample: Int = 8,
+                                         calibrationCurve: MicCalibrationCurve? = nil) -> (dBGrid: [Float], nCols: Int)? {
         guard endSample > startSample, targetColumns > 0 else {
             WavPlayerDebugLog.log("STFTGrid", "streamPooledGridFromFile: invalid range \(startSample)-\(endSample) targetColumns=\(targetColumns), aborting")
             return nil
@@ -281,6 +289,7 @@ nonisolated enum STFTGrid {
                             }
                         }
                     }
+                    calibrationCurve?.apply(to: &mags)
                     var s = scale
                     vDSP_vsmul(mags, 1, &s, &mags, 1, vDSP_Length(bins))
                     // Vectorized dB conversion — see the matching comment in

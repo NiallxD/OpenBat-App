@@ -106,46 +106,28 @@ enum RecordingMigration {
         // nothing reliable to import; skip rather than guess.
         guard let fields = GuanoMetadata.read(from: url) else { return .noMetadata }
 
-        // A fresh formatter per call, not a shared static — `ISO8601DateFormatter`
-        // isn't Sendable/thread-safe for concurrent use (a real Swift 6 mode error, not
-        // just a strictness warning), and `parseAndRender` runs off the main actor via
-        // `Task.detached`. Construction is cheap and this only runs once per orphaned
-        // WAV during a manual, one-time migration — no need to share the instance.
-        let isoFormatter: ISO8601DateFormatter = {
-            let f = ISO8601DateFormatter()
-            f.formatOptions = [.withInternetDateTime]
-            return f
-        }()
-        let date = fields["Timestamp"].flatMap { isoFormatter.date(from: $0) }
-            ?? (try? url.resourceValues(forKeys: [.creationDateKey]))?.creationDate
-            ?? Date()
-        let durationSeconds = fields["Length"].flatMap(Double.init) ?? 0
-        // "Species Auto ID" is "No ID" (with a space, GUANO-readable text) in the
-        // chunk but "NOID" (filesystem-safe, matches the filename) as Recording.species
-        // everywhere else in the app — see AudioRecorder.AutoIDOutcome.
-        let rawSpecies = fields["Species Auto ID"] ?? speciesFromFilename(url) ?? "No ID"
+        // Shared with RecordingImporter — see GuanoRecordingFields for the
+        // conventions this parsing encodes.
+        let guano = GuanoRecordingFields.parse(
+            fields, wavURL: url,
+            fallbackDate: (try? url.resourceValues(forKeys: [.creationDateKey]))?.creationDate
+                ?? Date())
+
         // Legacy WAVs from before AudioRecorder rejected (deleted) NOISE at save
         // time — don't reintroduce them through the back door; leave the file on
         // disk untouched rather than importing it as a first-class Recording.
-        guard rawSpecies != "NOISE" else { return .rejectedNoise }
-        let species = rawSpecies == "No ID" ? "NOID" : rawSpecies
-        let confidence = fields["OpenBat|Species Confidence"].flatMap { Float($0) }
-        let pulseCount = fields["OpenBat|Species Pulse Count"].flatMap { Int($0) } ?? 0
-        let coordinate = parseLocPosition(fields["Loc Position"])
+        guard !guano.isNoise else { return .rejectedNoise }
+        let (date, durationSeconds, species) = (guano.date, guano.durationSeconds, guano.species)
+        let (confidence, pulseCount, coordinate) = (guano.confidence, guano.pulseCount, guano.coordinate)
 
         // A GUANO "Listening only" tag is authoritative for what the recorder
         // actually intended at the time; otherwise place it in whichever session's
         // [start, end] window contains the WAV's own timestamp — sessions.json
         // already exists independent of the Recording model, so this is reliable
         // even for a file recorded before Recording existed.
-        let sessionID: UUID?
-        if fields["OpenBat|Session"] == "Listening only" {
-            sessionID = nil
-        } else {
-            sessionID = sessions.first {
-                date >= $0.startDate && date <= ($0.endDate ?? .distantFuture)
-            }?.id
-        }
+        let sessionID: UUID? = guano.listeningOnly ? nil : sessions.first {
+            date >= $0.startDate && date <= ($0.endDate ?? .distantFuture)
+        }?.id
 
         // maxWidth 4096 matches AudioRecorder's own save-time render — without
         // this, a migrated/imported recording's cached overview stayed at the
@@ -158,18 +140,4 @@ enum RecordingMigration {
                               coordinate: coordinate, relativeWavPath: relativePath, image: image))
     }
 
-    /// "<yyyy-MM-dd_HH-mm-ss-SSS>_<SPECIES>.wav" → SPECIES — fallback for a WAV
-    /// whose GUANO chunk is present but missing (or predates) the species field.
-    private nonisolated static func speciesFromFilename(_ url: URL) -> String? {
-        let name = url.deletingPathExtension().lastPathComponent
-        guard let lastUnderscore = name.lastIndex(of: "_") else { return nil }
-        return String(name[name.index(after: lastUnderscore)...])
-    }
-
-    private nonisolated static func parseLocPosition(_ value: String?) -> CLLocationCoordinate2D? {
-        guard let value else { return nil }
-        let parts = value.split(separator: " ").compactMap { Double($0) }
-        guard parts.count == 2 else { return nil }
-        return CLLocationCoordinate2D(latitude: parts[0], longitude: parts[1])
-    }
 }

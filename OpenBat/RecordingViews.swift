@@ -54,6 +54,12 @@ struct RecordingRow: View {
     /// "Upload Now" sweep. `.borderless` so tapping the badge doesn't also fire
     /// the row's own NavigationLink.
     @ViewBuilder private var uploadBadge: some View {
+        if ConsentStore.uploadContributionEnabled {
+            uploadBadgeContent
+        }
+    }
+
+    @ViewBuilder private var uploadBadgeContent: some View {
         switch recording.uploadStatus?.phase {
         case .uploaded:
             Image(systemName: "checkmark.icloud.fill")
@@ -178,7 +184,7 @@ struct RecordingDetailView: View {
                 if recordingPasses.isEmpty {
                     Text(store.passes(forRecording: recording).isEmpty
                          ? "No classified pulses in this recording."
-                         : "Every pulse here is unclassified (NoID) — tap the filter icon to show them.")
+                         : "Every pulse here is unclassified (NoID) — enable \"Show unclassified\" in the list to see them.")
                         .foregroundStyle(.secondary)
                 } else {
                     ForEach(recordingPasses) { pass in
@@ -193,15 +199,6 @@ struct RecordingDetailView: View {
         }
         .navigationTitle(recording.commonName)
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Toggle(isOn: $showNoID) {
-                    Image(systemName: showNoID ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
-                }
-                .toggleStyle(.button)
-                .accessibilityLabel(showNoID ? "Hide unclassified pulses" : "Show unclassified pulses")
-            }
-        }
     }
 
     @ViewBuilder private var spectrogramSection: some View {

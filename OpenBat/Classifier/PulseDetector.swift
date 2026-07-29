@@ -10,7 +10,7 @@
 //  isInPulse reflects the previous column's state and drives the renderer's
 //  triggered-display mode: when true, the renderer records to the ring; when
 //  false, it skips, so the scrolling spectrogram shows pulses back-to-back
-//  with no silent gaps — the Wildlife Acoustics-style triggered view.
+//  with no silent gaps — a triggered view in the classic bat-detector style.
 //
 
 import UIKit

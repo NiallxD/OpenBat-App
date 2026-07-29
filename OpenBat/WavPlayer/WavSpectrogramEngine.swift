@@ -100,12 +100,15 @@ nonisolated enum WavSpectrogramEngine {
         let endSample: Int   // exclusive
     }
 
-    static func renderRawTile(wavURL: URL, startSample: Int, endSample: Int, targetColumns: Int) -> RawTile? {
-        guard endSample > startSample, targetColumns > 0 else { return nil }
+    static func renderRawTile(wavURL: URL, startSample: Int, endSample: Int, targetColumns: Int,
+                              calibrationCurve: MicCalibrationCurve? = nil) -> RawTile? {
+        guard endSample > startSample, targetColumns > 0,
+              endSample - startSample >= STFTGrid.windowLen
+        else { return nil }
         var scratch = STFTGrid.Scratch()
         guard let (rawDBGrid, nCols) = STFTGrid.streamPooledGridFromFile(
             wavURL: wavURL, startSample: startSample, endSample: endSample,
-            targetColumns: targetColumns, scratch: &scratch)
+            targetColumns: targetColumns, scratch: &scratch, calibrationCurve: calibrationCurve)
         else { return nil }
         // The pooled columns span the native STFT FRAME grid, whose last
         // frame STARTS `windowLen`-short of `endSample` — so the image
@@ -283,9 +286,10 @@ nonisolated enum WavSpectrogramEngine {
     static func renderDetailTile(wavURL: URL, sampleRate: Double,
                                  startSample: Int, endSample: Int,
                                  minFreqHz: Double, maxFreqHz: Double,
-                                 targetColumns: Int, palette: Palette, noiseFloor: Float) -> DetailTile? {
+                                 targetColumns: Int, palette: Palette, noiseFloor: Float,
+                                 calibrationCurve: MicCalibrationCurve? = nil) -> DetailTile? {
         guard let raw = renderRawTile(wavURL: wavURL, startSample: startSample, endSample: endSample,
-                                      targetColumns: targetColumns)
+                                      targetColumns: targetColumns, calibrationCurve: calibrationCurve)
         else { return nil }
         return colorize(raw, sampleRate: sampleRate, minFreqHz: minFreqHz, maxFreqHz: maxFreqHz,
                         palette: palette, noiseFloor: noiseFloor)
@@ -300,7 +304,8 @@ nonisolated enum WavSpectrogramEngine {
     /// viewport itself) operates purely in virtual samples while hide-
     /// silence is on, so the tile is a drop-in for `renderRawTile`'s output.
     static func renderRawTileStitched(wavURL: URL, virtualStart: Int, virtualEnd: Int,
-                                      map: SilenceMap, targetColumns: Int) -> RawTile? {
+                                      map: SilenceMap, targetColumns: Int,
+                                      calibrationCurve: MicCalibrationCurve? = nil) -> RawTile? {
         guard virtualEnd > virtualStart, targetColumns > 0 else { return nil }
         let slices = map.realSlices(virtualStart: virtualStart, virtualEnd: virtualEnd)
         guard !slices.isEmpty else { return nil }
@@ -314,7 +319,7 @@ nonisolated enum WavSpectrogramEngine {
             if slice.real.count >= STFTGrid.windowLen,
                let (grid, nCols) = STFTGrid.streamPooledGridFromFile(
                     wavURL: wavURL, startSample: slice.real.lowerBound, endSample: slice.real.upperBound,
-                    targetColumns: cols, scratch: &scratch) {
+                    targetColumns: cols, scratch: &scratch, calibrationCurve: calibrationCurve) {
                 parts.append((grid, nCols))
             } else {
                 // A slice clipped at the viewport edge can be shorter than
@@ -401,11 +406,13 @@ nonisolated enum WavSpectrogramEngine {
     /// nothing left to make it worth the two-pipelines-with-different-looks
     /// tradeoff that fast path used to buy.
     static func renderOverview(wavURL: URL, maxWidth: Int = defaultOverviewColumns,
-                               palette: Palette = .inferno, noiseFloor: Float = 0.5) -> Overview? {
+                               palette: Palette = .inferno, noiseFloor: Float = 0.5,
+                               calibrationCurve: MicCalibrationCurve? = nil) -> Overview? {
         guard let header = WavHeader.read(url: wavURL) else { return nil }
         let totalSamples = Int(header.dataBytes) / 2
         guard totalSamples > 0,
-              let raw = renderRawTile(wavURL: wavURL, startSample: 0, endSample: totalSamples, targetColumns: maxWidth)
+              let raw = renderRawTile(wavURL: wavURL, startSample: 0, endSample: totalSamples, targetColumns: maxWidth,
+                                      calibrationCurve: calibrationCurve)
         else { return nil }
         let sampleRate = Double(header.sampleRate)
         guard let tile = colorize(raw, sampleRate: sampleRate, minFreqHz: 0, maxFreqHz: sampleRate / 2,

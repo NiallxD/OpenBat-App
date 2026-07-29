@@ -89,6 +89,22 @@ nonisolated final class SpectrogramProcessor: @unchecked Sendable {
     /// Sample rate of the captured stream, needed to convert bins → Hz. Set from
     /// the audio path once the rate is known.
     var sampleRate: Double = 0
+
+    /// Per-bin microphone response correction (see `MicCalibrationCurve`),
+    /// or `nil` if none is calibrated/enabled. Applied in `makeColumn` right
+    /// after the raw FFT magnitude is computed, before any dB conversion —
+    /// flows through to both the trigger scan and the display column, since
+    /// both derive from the same corrected `magnitudes`. Written rarely (once
+    /// per calibration, from the main thread), read every column on the audio
+    /// thread — unlike the plain scalar tuning knobs elsewhere in this class,
+    /// this holds an array, so it gets its own lock rather than relying on
+    /// unsynchronized access being "benign."
+    private let calibrationLock = NSLock()
+    private var _calibrationCurve: MicCalibrationCurve?
+    var calibrationCurve: MicCalibrationCurve? {
+        get { calibrationLock.lock(); defer { calibrationLock.unlock() }; return _calibrationCurve }
+        set { calibrationLock.lock(); _calibrationCurve = newValue; calibrationLock.unlock() }
+    }
     /// Set (from the main thread) while a sheet covers the live spectrogram and
     /// its Metal render loop is paused (see `SpectrogramView.isPaused`). Skips
     /// FFT column generation entirely — a plain Bool read/write is fine here:
@@ -325,6 +341,11 @@ nonisolated final class SpectrogramProcessor: @unchecked Sendable {
                 vDSP_zvabs(&split, 1, &magnitudes, 1, vDSP_Length(binCount))
             }
         }
+
+        // Microphone response correction, if calibrated — before ANY dB
+        // conversion so the trigger scan and display column below (both
+        // derived from `magnitudes`) are equally corrected.
+        calibrationCurve?.apply(to: &magnitudes)
 
         // Normalise amplitude, convert to dB, scale into 0...1 for the colormap.
         // Fully vectorised (vDSP/vForce) — this runs per hop on the realtime thread.

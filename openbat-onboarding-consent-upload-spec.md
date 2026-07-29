@@ -56,7 +56,7 @@ The consent screen must state plainly, not bury in a linked document:
 
 - Recordings, approximate or precise location (user's choice), device ID, and optional display name are collected.
 - Data is stored privately — not published publicly, not fed live into any public map.
-- Data may be used for: building a reference call library, training classification models, informing conservation research, and **may be licensed to commercial or research users to help fund the project.**
+- Data may be used for: building a reference call library, training classification models, and informing conservation research. **[SUPERSEDED — 2026-07]** commercial/funding licensing was dropped: too much legal grey area around monetizing contributed recordings later. Research use only, free and open, not published publicly, nothing sold or licensed commercially. See `ConsentStore.currentConsentVersion` (3.0) for the code-level record of this change.
 - Data is not sold or shared for purposes unrelated to bat research and conservation.
 - Consent can be withdrawn at any time via Settings.
 
@@ -67,9 +67,9 @@ The consent screen must state plainly, not bury in a linked document:
 ## 3. Privacy & Legal Status (context for the agent, not build tasks)
 
 - Project is currently run by an individual, no registered company. Under UK GDPR, the individual is personally the data controller regardless of business status.
-- UK ICO self-assessment completed: registered status "not currently trading" → no data protection fee currently due. Revisit this assessment immediately if any commercial data licensing begins.
+- UK ICO self-assessment completed: registered status "not currently trading" → no data protection fee currently due.
 - Canada: PIPEDA is triggered by *commercial activity*, not by data processing alone. A non-commercial individual project is likely outside its scope for now. Quebec's Law 25 is stricter and doesn't share the same personal-purposes carve-out — revisit if Quebec-based uptake becomes meaningful.
-- Both of the above should be re-checked the moment the project starts accepting payment for data access.
+- **[SUPERSEDED — 2026-07]** commercial data licensing was dropped entirely (see §2.4) — too much legal grey area to resolve right now. Research-only, non-commercial. Both of the above should be re-checked if that decision is ever revisited.
 - No ads, no unrelated commercial use of user data.
 
 ---

@@ -15,10 +15,14 @@ import Foundation
 /// called from `RecordingUploader`'s off-main upload path, and the pushes below
 /// run on `ConsentSync`'s background retry.
 nonisolated enum ConsentAPIClient {
-    /// Deployed Worker (see backend/consent-worker/). Empty would mean "not
-    /// deployed yet" — calls below no-op rather than failing loudly in that
-    /// case, since consent still works locally without a backend either way.
-    static var baseURL: String = "https://openbat-consent.niallbell.workers.dev"
+    /// Deliberately severed for launch (see `ConsentStore.uploadContributionEnabled`):
+    /// contribution can't be offered until reference-quality recordings can be
+    /// verified by non-acoustic means, so the client is cut off from the Worker
+    /// rather than merely gated by UI/consent. Empty makes every call below
+    /// no-op (the same path they already have for "not deployed yet") —
+    /// consent still works locally, it just never phones home. Restore to
+    /// re-enable: "https://openbat-consent.niallbell.workers.dev"
+    static var baseURL: String = ""
 
     /// Returns whether the Worker actually accepted the record. Callers use this
     /// to decide whether the state is confirmed server-side or still needs

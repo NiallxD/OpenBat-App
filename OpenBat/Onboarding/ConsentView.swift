@@ -35,19 +35,17 @@ struct ConsentView: View {
     @State private var showPrivacyDetail = false
     @State private var showExplainer = false
 
-    /// Both default to `false` and must be switched on deliberately.
+    /// Defaults to `false` and must be switched on deliberately.
     ///
     /// NOT `@AppStorage`, and never pre-enabled. Consent has to be a clear
     /// affirmative action: a pre-ticked box is explicitly invalid consent under
-    /// GDPR (Recital 32; *Planet49*), fails Quebec Law 25's confidentiality-by-
-    /// default rule, and PIPEDA requires express consent for a secondary purpose
-    /// like licensing. These also deliberately don't persist across a re-entry
-    /// to this screen — someone returning to reconsider should start from "off"
-    /// rather than from whatever they last left switched on.
+    /// GDPR (Recital 32; *Planet49*) and fails Quebec Law 25's confidentiality-
+    /// by-default rule. This also deliberately doesn't persist across a
+    /// re-entry to this screen — someone returning to reconsider should start
+    /// from "off" rather than from whatever they last left switched on.
     @State private var agreesToResearchUse = false
-    @State private var agreesToFundingUse = false
 
-    private var canContribute: Bool { agreesToResearchUse && agreesToFundingUse }
+    private var canContribute: Bool { agreesToResearchUse }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -98,16 +96,9 @@ struct ConsentView: View {
         .padding(.horizontal, 8)
     }
 
-    /// Two toggles rather than one, because these are two distinct purposes and
-    /// a user deserves to see the commercial one named rather than folded into a
-    /// sentence about research. Both are required: the dataset funds itself
-    /// through licensing, so it isn't offered on other terms.
-    ///
-    /// That bundling is defensible specifically because nothing is withheld from
-    /// someone who declines — the app is fully functional without contributing,
-    /// so "these terms or don't contribute" isn't a service being held hostage.
-    /// If a feature is ever gated behind contributing, this reasoning stops
-    /// working and the two consents have to become separately refusable.
+    /// A single toggle: there is only one purpose to consent to. OpenBat does
+    /// not license or sell contributed recordings — research use is the whole
+    /// of it, so there's nothing separate left to name or bundle.
     private var consentControls: some View {
         VStack(spacing: 14) {
             Divider()
@@ -115,16 +106,7 @@ struct ConsentView: View {
             Toggle(isOn: $agreesToResearchUse) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Contribute my recordings to bat research")
-                    Text("Used to build a reference library, train species-ID models, and support conservation research.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            Toggle(isOn: $agreesToFundingUse) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Let contributions help fund the project")
-                    Text("Anonymous recordings may be published in open datasets and licensed to ecological consultants and researchers. Never for anything unrelated to bats.")
+                    Text("Used to build a reference library, train species-ID models, and support conservation research. Free and open, never sold or licensed commercially.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

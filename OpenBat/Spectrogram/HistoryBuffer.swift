@@ -68,6 +68,12 @@ final class HistoryBuffer {
         vDSP_vclip(scratch, 1, &lo, &hi, &scratch, 1, len)
         data.withUnsafeMutableBufferPointer { dst in
             vDSP_vfixu8(scratch, 1, dst.baseAddress! + base, 1, len)
+            // A shorter-than-binCount column (shouldn't happen — every caller
+            // passes exactly binCount bins) would otherwise leave this ring
+            // slot's tail holding whatever the previous wrap wrote there.
+            if n < binCount {
+                for bin in n..<binCount { dst[base + bin] = 0 }
+            }
         }
         writeHead = (writeHead + 1) % capacity
         totalWritten += 1

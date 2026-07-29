@@ -113,7 +113,29 @@ final class ConsentStore {
     /// longer be identified or deleted on request) is now disclosed before the
     /// grant button. A device that agreed to 1.0 agreed to materially different
     /// terms, including a deletion promise that no longer applies.
-    static let currentConsentVersion = "2.0"
+    ///
+    /// 3.0: dropped the commercial/funding-licensing purpose entirely — too
+    /// much legal grey area around monetizing contributed recordings later.
+    /// Research use only now; nothing is sold or licensed commercially, and the
+    /// second consent toggle for that purpose was removed along with it. A
+    /// device that agreed to 2.0 agreed to a broader set of uses than the app
+    /// now has any mechanism to act on, so it's re-shown rather than silently
+    /// carried forward.
+    ///
+    /// Bumping this requires bumping `CURRENT_CONSENT_VERSION` in
+    /// `backend/consent-worker/src/index.ts` in the same deploy — see
+    /// `ConsentVersionTests.currentVersionIsTheExpectedValue`.
+    static let currentConsentVersion = "3.0"
+
+    /// Contribution is temporarily disabled for launch: a recording can only be
+    /// verified as "reference" quality via non-acoustic ID (visual/in-hand),
+    /// which this app has no way to provide — every species tag it produces is
+    /// its own acoustic AutoID guess. Onboarding's consent step is removed and
+    /// Settings' toggle is forced off/disabled while this is false; the network
+    /// clients (`UploadClient`, `ConsentAPIClient`) are also severed from the
+    /// Worker as a second, independent safeguard. Flip this back on only once
+    /// that verification gap is addressed, and restore the severed base URLs.
+    static let uploadContributionEnabled = false
 
     private(set) var record: ConsentRecord?
 

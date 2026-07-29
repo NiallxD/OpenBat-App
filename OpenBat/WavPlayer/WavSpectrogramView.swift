@@ -56,6 +56,11 @@ struct WavSpectrogramView: View {
     /// `renderRawTileStitched` (and hand `onSeek` a virtual position, which
     /// WavPlayerView's closure maps back to real time).
     let silenceMap: SilenceMap?
+    /// Microphone response correction (see `MicCalibrationCurve`) applied to
+    /// every detail tile rendered here — the whole-file `overview` passed in
+    /// above is corrected once by whoever built it; each zoomed-in tile is a
+    /// fresh render from PCM, so it needs the same curve applied again here.
+    let calibrationCurve: MicCalibrationCurve?
     @Binding var viewport: WavViewport
     @Binding var selection: AnalysisBox?
     /// Measured call landmarks (Hi f / Peak / Fc / Lo f) for the current
@@ -76,6 +81,11 @@ struct WavSpectrogramView: View {
     /// fires periodically DURING the scroll, so a medium-res margined tile
     /// stays resident and the scroll rides it sharp instead.
     let isPlaying: Bool
+    /// Live playback-follow position (display-domain sample), written by
+    /// WavPlayerView's follow loop at ~30Hz — read here instead of `viewport`
+    /// while playing so this leaf's body is what re-runs at that rate, not
+    /// WavPlayerView's. See PlaybackFollowState's own doc comment.
+    let followState: PlaybackFollowState
     let onSeek: (Double) -> Void
     /// Debug-only red/green buffer visualization surfaced on the minimap —
     /// see `renderChunkedStep` (writer) and `WavMinimapView` (reader).
@@ -312,8 +322,13 @@ struct WavSpectrogramView: View {
                                      logFrequency: logFrequency, geoSize: geo.size)
                 }
 
-                WavAxisOverlay(viewport: viewport, sampleRate: sampleRate, geoSize: geo.size,
-                               logFrequency: logFrequency)
+                // Follows the live playback position too (see
+                // `currentSourceImage`) — without this the axis labels froze
+                // at the pre-play position while the image scrolled
+                // underneath them, since `viewport` itself no longer updates
+                // during playback.
+                WavAxisOverlay(viewport: isPlaying ? liveTargetViewport(center: followState.displaySample) : viewport,
+                               sampleRate: sampleRate, geoSize: geo.size, logFrequency: logFrequency)
 
                 if !annotations.isEmpty {
                     CallAnnotationOverlay(annotations: annotations, viewport: viewport,
@@ -371,6 +386,20 @@ struct WavSpectrogramView: View {
                 scheduleDetailRenderDebounced(for: newValue)
             }
             rebuildWarpedImage()
+        }
+        // Drives the periodic detail-tile render while playing —
+        // `viewport` itself no longer changes on every playback tick (see
+        // WavPlayerView's follow loop), so this is what replaces the
+        // `if isPlaying` branch above during an actual play-through; that
+        // branch is left in place only for the (rare) case `viewport`
+        // changes for some OTHER reason while still playing. Image display
+        // itself doesn't need an explicit `rebuildWarpedImage()` call here —
+        // `isLivePreviewing` already covers `isPlaying`, so `displayedImage`
+        // warps inline from `currentSourceImage()` on every body pass
+        // instead of relying on the (not-kept-current-during-play) cache.
+        .onChange(of: followState.displaySample) { _, _ in
+            guard isPlaying else { return }
+            scheduleDetailRenderThrottled()
         }
         .onChange(of: isPlaying) { _, nowPlaying in
             // Playback just stopped: the last scroll position was rendered
@@ -487,6 +516,14 @@ struct WavSpectrogramView: View {
         if isInteracting {
             (start, end) = liveSampleRange()
             (minHz, maxHz) = liveFreqRangeFromPan()
+        } else if isPlaying {
+            // Follow the playback position live instead of `viewport`
+            // (which now only moves once, when playback stops — see
+            // WavPlayerView's follow loop) — same frequency window as
+            // `viewport`, just a re-centered time range.
+            let live = liveTargetViewport(center: followState.displaySample)
+            start = live.startSample; end = live.endSample
+            minHz = live.minFreqHz; maxHz = live.maxFreqHz
         } else {
             start = viewport.startSample; end = viewport.endSample
             minHz = viewport.minFreqHz; maxHz = viewport.maxFreqHz
@@ -546,11 +583,20 @@ struct WavSpectrogramView: View {
         return (live.minFreqHz, live.maxFreqHz)
     }
 
+    /// `viewport` re-centered on `center` (a display-domain sample) — the
+    /// playback-follow analog of `liveViewport()`'s gesture-preview math.
+    /// See `WavViewportMath.recentered`'s doc comment for why this shares
+    /// its math with WavPlayerView's `recenter(sample:)` and
+    /// WavMinimapView's own copy of this same call.
+    private func liveTargetViewport(center: Int) -> WavViewport {
+        WavViewportMath.recentered(viewport, on: center, totalSamples: overview.totalSamples)
+    }
+
     /// True whenever the source image is changing every frame (a live pan/
-    /// coast) rather than being settled — see `displayedImage`, which uses
-    /// this to decide whether the cached `warpedDisplayImage` is even valid
-    /// to reuse.
-    private var isLivePreviewing: Bool { isInteracting }
+    /// coast, or playback following) rather than being settled — see
+    /// `displayedImage`, which uses this to decide whether the cached
+    /// `warpedDisplayImage` is even valid to reuse.
+    private var isLivePreviewing: Bool { isInteracting || isPlaying }
 
     /// The image actually handed to `Image(uiImage:)` — applies the
     /// log-frequency warp on top of whatever `currentSourceImage()` picked.
@@ -650,8 +696,8 @@ struct WavSpectrogramView: View {
         let now = Date()
         if let last = lastPlaybackRenderTime, now.timeIntervalSince(last) < Self.playbackRenderThrottleSeconds {
             // Too soon — schedule a single trailing render for the position
-            // the scroll has reached by then (reads the current `viewport`,
-            // not a captured stale one).
+            // the scroll has reached by then (reads the current follow
+            // position at fire time, not a captured stale one).
             playbackRenderTask?.cancel()
             let delay = Self.playbackRenderThrottleSeconds - now.timeIntervalSince(last)
             playbackRenderTask = Task {
@@ -659,12 +705,12 @@ struct WavSpectrogramView: View {
                 guard !Task.isCancelled else { return }
                 await MainActor.run {
                     lastPlaybackRenderTime = Date()
-                    scheduleDetailRender(for: viewport)
+                    scheduleDetailRender(for: liveTargetViewport(center: followState.displaySample))
                 }
             }
         } else {
             lastPlaybackRenderTime = now
-            scheduleDetailRender(for: viewport)
+            scheduleDetailRender(for: liveTargetViewport(center: followState.displaySample))
         }
     }
 
@@ -935,14 +981,15 @@ struct WavSpectrogramView: View {
         let url = wavURL, sr = sampleRate, pal = palette, floor = noiseFloor
         let minHz = target.minFreqHz, maxHz = target.maxFreqHz
         let map = silenceMap
+        let curve = calibrationCurve
         bufferDebugStatus.renderingStart = currentStart
         bufferDebugStatus.renderingEnd = currentEnd
         bufferDebugStatus.isRendering = true
 
         Task.detached(priority: .userInitiated) {
             guard let raw = WavPlayerDebugLog.time("WavSpectrogram", "renderRawTile step \(currentStart)-\(currentEnd) (target \(target.startSample)-\(target.endSample), final \(finalStart)-\(finalEnd), stitched=\(map != nil))", {
-                map.map { WavSpectrogramEngine.renderRawTileStitched(wavURL: url, virtualStart: currentStart, virtualEnd: currentEnd, map: $0, targetColumns: cols) }
-                    ?? WavSpectrogramEngine.renderRawTile(wavURL: url, startSample: currentStart, endSample: currentEnd, targetColumns: cols)
+                map.map { WavSpectrogramEngine.renderRawTileStitched(wavURL: url, virtualStart: currentStart, virtualEnd: currentEnd, map: $0, targetColumns: cols, calibrationCurve: curve) }
+                    ?? WavSpectrogramEngine.renderRawTile(wavURL: url, startSample: currentStart, endSample: currentEnd, targetColumns: cols, calibrationCurve: curve)
             })
             else {
                 WavPlayerDebugLog.log("WavSpectrogram", "renderRawTile step FAILED for span \(currentStart)-\(currentEnd)")

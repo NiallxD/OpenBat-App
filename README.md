@@ -13,6 +13,11 @@ a live bat detector. It captures audio at up to 384 kHz, shows a real-time
 spectrogram, detects individual echolocation pulses, and — where an openly
 available model exists for the region — identifies the species on-device.
 
+This repo is source-available for transparency, not open source — see
+[LICENSE](./LICENSE). If you'd like to contribute species or region data to
+the field guide, that lives in a separate repo with its own terms:
+[NiallxD/OpenBat-FieldGuide](https://github.com/NiallxD/OpenBat-FieldGuide).
+
 ## Why
 
 Most tools for identifying bat calls are expensive, proprietary, and hard to
@@ -32,8 +37,8 @@ connection with bats, and a bit more respect for them too.
   onset-aligned close-up.
 - **Species ID** — an on-device classifier names the species, with
   runner-up and confidence.
-- **Heterodyne & time-expansion listening** — hear the ultrasound live,
-  tuned down or slowed 10×.
+- **Heterodyne & time-expansion listening** — hear the ultrasound tuned down
+  live, or play a recording back slowed 8×.
 - **Sessions & map** — log passes with a GPS track and see where each was
   heard.
 - **Community field guide** — a species reference built into the app,
@@ -49,23 +54,29 @@ map where each pass was heard.
 
 ## Species Field Guide
 
-This repo also hosts the **Species Field Guide** data — a single
-community-editable JSON file the app downloads and displays in its Species
-section. The rest of this README covers how to contribute to that guide.
+The app downloads and displays **Species Field Guide** data — a single
+community-editable JSON file — in its Species section. That data, and the
+process for contributing to it, live in a separate repo:
+**[NiallxD/OpenBat-FieldGuide](https://github.com/NiallxD/OpenBat-FieldGuide)**.
+This section is kept here only so the schema the app expects is documented
+alongside the code that reads it; open PRs against the field guide repo, not
+this one.
 
 ## Contributing a species or region
 
-The field guide lives entirely in one file: [`SpeciesGuideData.json`](./SpeciesGuideData.json).
-No app code changes are needed to add a species, edit an existing entry, or
-add a new region — just edit the JSON and open a PR.
+The field guide lives entirely in one file, `SpeciesGuideData.json`, in the
+[field guide repo](https://github.com/NiallxD/OpenBat-FieldGuide). No app code
+changes are needed to add a species, edit an existing entry, or add a new
+region — just edit the JSON there and open a PR.
 
-1. Fork the repo and edit `SpeciesGuideData.json`.
+1. Fork **that** repo and edit `SpeciesGuideData.json`.
 2. Add your species (or region) following the schema below.
 3. **Bump `dataVersion` by 1** and set `updatedAt` to today's date — see
    [Versioning](#versioning). This is required for every content change,
    however small, or the app won't pick it up.
-4. Open a PR. Once merged to `main`, every app install picks up the change
-   automatically the next time it launches (no app update needed).
+4. Open a PR against the field guide repo. Once merged to `main`, every app
+   install picks up the change automatically the next time it launches (no
+   app update needed).
 
 ### Schema
 

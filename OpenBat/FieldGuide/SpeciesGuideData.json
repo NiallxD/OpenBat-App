@@ -20081,7 +20081,7 @@
           "min": 3.5,
           "max": 8.5
         },
-        "color": "Dark brown fur above, paler brown-buff below; blackish face, ears and wing membranes."
+        "morphologyDescription": "Dark brown fur above, paler brown-buff below; blackish face, ears and wing membranes."
       },
       "morphology": {
         "earType": "Short, rounded, with a blunt tragus",

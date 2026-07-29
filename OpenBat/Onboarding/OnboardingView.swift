@@ -20,7 +20,7 @@ struct OnboardingView: View {
     let onComplete: () -> Void
 
     private enum Step: Int, CaseIterable {
-        case welcome, mic, location, consent, autoID, done
+        case welcome, mic, location, calibrate, autoID, done
     }
 
     @State private var step: Step = .welcome
@@ -34,10 +34,14 @@ struct OnboardingView: View {
     // authorization is process-global, so requesting here doesn't cause a second
     // prompt later — by the time ContentView appears the status is already decided.
     @State private var location = LocationProvider()
-    // Shared with ContentView — see ConsentStore.shared. Previously a separate
-    // instance, which meant the consent granted here and the consent ContentView
-    // read were two different objects agreeing only by luck of never coexisting.
-    private let consent = ConsentStore.shared
+    // Same throwaway-instance pattern as `location` above: this is only alive
+    // long enough to drive the optional calibration capture; ContentView
+    // creates its own instance afterwards. Saving through `micCalSettings`
+    // writes the same UserDefaults keys ContentView's own instance later
+    // reads, so no hand-off is needed beyond that.
+    @State private var calibrationAudio = AudioEngineController()
+    @State private var micCalSettings = MicCalibrationSettings()
+    @State private var showMicCalibration = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -49,6 +53,13 @@ struct OnboardingView: View {
         .padding(24)
         .background(Color(.systemBackground))
         .sheet(isPresented: $showPrivacyDetail) { SafariView(url: PrivacyLinks.policyURL) }
+        .sheet(isPresented: $showMicCalibration) {
+            MicCalibrationView(audio: calibrationAudio, settings: micCalSettings) {
+                showMicCalibration = false
+                step = .autoID
+            }
+        }
+        .onAppear { calibrationAudio.activate() }
     }
 
     @ViewBuilder
@@ -60,10 +71,8 @@ struct OnboardingView: View {
                 title: "Welcome to OpenBat",
                 message: """
                         OpenBat brings together bat detection and a field guide to help you get the most out of bat watching! If you don't have an ultrasonic USB microphone, visit the help page in the app settings.
-                        
+
                         Unlike other free bat detector apps, OpenBat uses on-device machine learning to identify species as they pass.
-                        
-                        You can choose to join our community science project and start contributing recordings of the bats you detect.
                         """)
             Button("Read the full privacy notice") { showPrivacyDetail = true }
                 .font(.footnote)
@@ -73,9 +82,9 @@ struct OnboardingView: View {
                 systemImage: "mic.fill",
                 title: "Microphone access",
                 message: """
-                        OpenBat needs access to you your device microphones to record bat calls above human hearing range. 
-                        
-                        If you later choose to contribute a recording to the community project, an irreversible filter removes the low frequencies human speech occupies before anything reaches us. Recordings you don't contribute are never filtered and never sent to us — they stay yours, on this device and in your own iCloud if you leave that on in settings. Full details in the privacy notice.
+                        OpenBat needs access to your device microphones to record bat calls above human hearing range.
+
+                        Recordings stay yours, on this device and in your own iCloud if you leave that on in settings. Full details in the privacy notice.
                         """)
             Button("Read the full privacy notice") { showPrivacyDetail = true }
                 .font(.footnote)
@@ -84,16 +93,25 @@ struct OnboardingView: View {
             OnboardingStepView(
                 systemImage: "location.fill",
                 title: "Location access",
-                // "your own records" rather than "share": contributed
-                // recordings are rounded to ~100m regardless of this switch
-                // (AnonymizedUploadBuilder), so describing it as controlling
-                // what's shared would be untrue.
-                message: "OpenBat uses your location to tag where each call was recorded and suggest an AutoID Model. The system permission dialog has its own \"Precise Location\" switch — it controls how exact your own records are. Anything you choose to contribute is rounded to roughly 100 metres either way.")
+                message: "OpenBat uses your location to tag where each call was recorded and suggest an AutoID Model. The system permission dialog has its own \"Precise Location\" switch — it controls how exact your own records are.")
             Button("Read the full privacy notice") { showPrivacyDetail = true }
                 .font(.footnote)
                 .padding(.top, 8)
-        case .consent:
-            ConsentView(consent: consent) { step = .autoID }
+        case .calibrate:
+            OnboardingStepView(
+                systemImage: "tuningfork",
+                title: "Calibrate your microphone",
+                message: "Cheap ultrasonic microphones have an uneven frequency response, which shows up as noise bands in the spectrogram. Calibrating measures your mic's own response during ~30 seconds of quiet and corrects for it — worth doing now, or any time later from Settings.")
+            VStack(spacing: 12) {
+                Button("Calibrate Now") { showMicCalibration = true }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .frame(maxWidth: .infinity)
+                Button("Skip for now") { step = .autoID }
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.top, 8)
         case .autoID:
             ScrollView {
                 VStack(spacing: 20) {
@@ -109,30 +127,32 @@ struct OnboardingView: View {
             OnboardingStepView(
                 systemImage: "checkmark.circle.fill",
                 title: "You're all set",
-                message: "You can change microphone or location access any time in the Settings app, or review your community-science participation from within OpenBat in settings.")
+                message: "You can change microphone or location access any time in the Settings app.")
         }
     }
 
-    // ConsentView owns its own two buttons (Contribute / Not Now) rather than a
-    // single "continue" action, so it supplies none of these bottom controls.
+    // `.calibrate` owns its own two buttons (Calibrate Now / Skip for now)
+    // rather than a single "continue" action, same reasoning the removed
+    // ConsentView step used to have.
     @ViewBuilder
     private var controls: some View {
-        if step != .consent {
+        if step != .calibrate {
             Button(primaryLabel) { advance() }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
+                .frame(maxWidth: .infinity)
                 .disabled(isAwaitingPermission)
         }
     }
 
     private var primaryLabel: String {
         switch step {
-        case .welcome:  return "Continue"
-        case .mic:      return "Allow Microphone Access"
-        case .location: return "Allow Location Access"
-        case .consent:  return ""
-        case .autoID:   return "Got it!"
-        case .done:     return "Get Started"
+        case .welcome:   return "Continue"
+        case .mic:       return "Allow Microphone Access"
+        case .location:  return "Allow Location Access"
+        case .calibrate: return ""
+        case .autoID:    return "Got it!"
+        case .done:      return "Get Started"
         }
     }
 
@@ -192,10 +212,10 @@ struct OnboardingView: View {
                 _ = await location.requestAuthorizationDecision()
                 location.requestRegionFix()
                 isAwaitingPermission = false
-                step = .consent
+                step = .calibrate
             }
-        case .consent:
-            break // ConsentView's own buttons drive this step.
+        case .calibrate:
+            break // Calibrate Now / Skip for now drive this step directly.
         case .autoID:
             step = .done
         case .done:

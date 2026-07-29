@@ -64,10 +64,12 @@ struct SessionsView: View {
             // no effect on the Sessions tab and stays hidden there.
             if selectedTab == .listening {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Toggle(isOn: $showNoID) {
+                    Button {
+                        showNoID.toggle()
+                    } label: {
                         Image(systemName: showNoID ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
+                            .foregroundStyle(showNoID ? .blue : .primary)
                     }
-                    .toggleStyle(.button)
                     .accessibilityLabel(showNoID ? "Hide unclassified recordings" : "Show unclassified recordings")
                 }
             }
@@ -295,10 +297,12 @@ struct SessionDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                Toggle(isOn: $showNoID) {
+                Button {
+                    showNoID.toggle()
+                } label: {
                     Image(systemName: showNoID ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
+                        .foregroundStyle(showNoID ? .blue : .primary)
                 }
-                .toggleStyle(.button)
                 .accessibilityLabel(showNoID ? "Hide unclassified recordings" : "Show unclassified recordings")
             }
         }

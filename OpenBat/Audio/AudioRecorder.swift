@@ -37,7 +37,7 @@ struct RecordingReport {
     let spectrogramImage: UIImage?
 }
 
-/// `nonisolated`, matching `HeterodyneProcessor`/`TimeExpansionProcessor`'s pattern —
+/// `nonisolated`, matching `HeterodyneProcessor`'s pattern —
 /// this project's `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` would otherwise make
 /// `AudioRecorder` implicitly `@MainActor`, but `append(_:)` is called directly from
 /// the real-time audio-tap closure (see `ContentView`'s `bufferSink`), and all of the

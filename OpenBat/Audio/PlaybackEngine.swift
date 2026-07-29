@@ -3,7 +3,7 @@
 //  OpenBat
 //
 //  Plays back a saved Recording WAV through the SAME listening DSPs the live
-//  detector uses (HeterodyneProcessor / TimeExpansionProcessor) — a raw ultrasonic
+//  detector uses (HeterodyneProcessor) — a raw ultrasonic
 //  WAV played straight through the speaker is inaudible (and gets lowpassed by the
 //  hardware's DAC anyway), same reason live listening needs downconversion. Also
 //  feeds a SpectrogramProcessor so PlaybackView can show the SAME live-style
@@ -51,7 +51,7 @@ nonisolated final class PlaybackDriver: @unchecked Sendable {
     /// followed by `start()` (e.g. dragging the scrub slider, which calls
     /// `seek` → `stop()` then `start()` on every drop) can't leave the OLD
     /// thread's last buffer still calling `process()` on the shared Heterodyne/
-    /// TimeExpansion/SpectrogramProcessor instances concurrently with the NEW
+    /// SpectrogramProcessor instances concurrently with the NEW
     /// thread doing the same — those are single-producer processors, and two
     /// concurrent producers racing on the same ring buffer/filter state is a
     /// real (if narrow, ~1-2ms) data race without this.
@@ -65,7 +65,7 @@ nonisolated final class PlaybackDriver: @unchecked Sendable {
     // (a fixed 40 kHz LO) — the live Detector screen tunes it continuously from
     // PulseDetector triggers, but there's no PulseDetector here. For any recorded
     // call whose frequency isn't within the ~4 kHz IF passband around 40 kHz, that
-    // left heterodyne played back as near-silence: this is the "heterodyne/RTE
+    // left heterodyne played back as near-silence: this is the "listening
     // playback stopped working" bug. Fixed in `start()`'s pacing loop by running
     // the SAME auto-tune math AudioEngineController.updateAutoTune uses, driven by
     // this thread's own SpectrogramProcessor instead of a live pulse trigger —
@@ -73,8 +73,8 @@ nonisolated final class PlaybackDriver: @unchecked Sendable {
     /// Matches AudioEngineController.audibleOffsetHz's default.
     private static let audibleOffsetHz: Double = 1_500
 
-    init(heterodyne: HeterodyneProcessor, timeExpansion: TimeExpansionProcessor,
-        spectrogramProcessor: SpectrogramProcessor) {
+    init(heterodyne: HeterodyneProcessor,
+        timeExpansion: TimeExpansionProcessor, spectrogramProcessor: SpectrogramProcessor) {
         self.heterodyne = heterodyne
         self.timeExpansion = timeExpansion
         self.spectrogramProcessor = spectrogramProcessor
@@ -130,9 +130,12 @@ nonisolated final class PlaybackDriver: @unchecked Sendable {
             guard let data = buffers[0].mData else { return noErr }
             let out = data.assumingMemoryBound(to: Float.self)
             switch self.mode {
-            case .heterodyne:    hetero.render(out, frames: Int(frameCount))
-            case .timeExpansion: timeExp.render(out, frames: Int(frameCount))
-            case .off:            for i in 0..<Int(frameCount) { out[i] = 0 }
+            case .heterodyne:        hetero.render(out, frames: Int(frameCount))
+            case .timeExpansion:     timeExp.render(out, frames: Int(frameCount))
+            // Live-only mode; PlaybackDriver never has this set (see ListenMode's
+            // doc comment) but is handled explicitly to keep the switch exhaustive.
+            case .off, .adaptiveTimeExpansion:
+                for i in 0..<Int(frameCount) { out[i] = 0 }
             }
             return noErr
         }
@@ -159,11 +162,21 @@ nonisolated final class PlaybackDriver: @unchecked Sendable {
 
     /// Reads `url`'s PCM starting at `fromSample`, pacing reads to real elapsed
     /// wall-clock time (catch-up/slow-down each tick rather than a fixed
-    /// per-timer-tick sample count, which drifts) so the processors — and the
-    /// listener — get audio at the file's own sample rate in real time. Feeds
-    /// every buffer to `spectrogramProcessor` (display) and whichever of
-    /// heterodyne/timeExpansion `mode` currently selects (audible output); `.off`
-    /// still advances the spectrogram, just renders silence.
+    /// per-timer-tick sample count, which drifts). Normally paced at the file's
+    /// own sample rate, so the processors — and the listener — get audio in
+    /// real time. In `.timeExpansion` it's paced at `timeExpansion.outputSampleRate`
+    /// (48 kHz) instead of the file's native rate (384 kHz) — i.e. only
+    /// 1/8th as many file-samples are released per real second — which is the
+    /// ENTIRE mechanism behind that mode's 8× slowdown: TimeExpansionProcessor
+    /// itself is a dumb pass-through that has no idea it's being fed slowly (see
+    /// its own doc comment). `mode` is captured once per `start()` call, not
+    /// re-read per tick — PlaybackEngine.listenMode's didSet restarts playback
+    /// from the current position on any mode change specifically so this pacing
+    /// rate can never go stale mid-run. Feeds every buffer to
+    /// `spectrogramProcessor` (display) and to heterodyne/timeExpansion
+    /// regardless of which `mode` currently selects for audible
+    /// output (keeps heterodyne warm so switching into it is instant);
+    /// `.off` still advances the spectrogram, just renders silence.
     func start(url: URL, sampleRate: Double, totalSamples: Int, fromSample: Int) {
         stop()
         let box = StopBox()
@@ -172,6 +185,8 @@ nonisolated final class PlaybackDriver: @unchecked Sendable {
         stopSemaphore = semaphore
         let hetero = heterodyne
         let timeExp = timeExpansion
+        let paceMode = mode
+        let paceRate: Double = (paceMode == .timeExpansion) ? timeExp.outputSampleRate : sampleRate
         let spec = spectrogramProcessor
         let onProgress = onProgress
         let onFinished = onFinished
@@ -205,7 +220,7 @@ nonisolated final class PlaybackDriver: @unchecked Sendable {
 
             while !box.stopped, samplesFed < totalSamples {
                 let elapsed = Date().timeIntervalSince(startWall)
-                let shouldHaveFed = fromSample + Int(elapsed * sampleRate)
+                let shouldHaveFed = fromSample + Int(elapsed * paceRate)
                 guard shouldHaveFed > samplesFed else { usleep(2_000); continue }
                 let want = min(shouldHaveFed - samplesFed, min(maxChunk, totalSamples - samplesFed))
                 guard want > 0 else { continue }
@@ -257,8 +272,14 @@ nonisolated final class PlaybackDriver: @unchecked Sendable {
                     hetero.setGate(false)
                 }
 
-                hetero.process(buffer)       // both kept warm regardless of `mode`, so
-                timeExp.process(buffer)      // switching mid-playback doesn't cold-start
+                hetero.process(buffer)       // kept warm regardless of `mode`, so
+                                              // switching mid-playback doesn't cold-start
+                // timeExp is NOT kept warm the same way: it's only ever fed while
+                // paceMode == .timeExpansion, because its ring assumes samples
+                // arrive at the (slowed) pace this run committed to — feeding it
+                // at the native real-time pace of the other two modes would just
+                // build up a backlog it's never asked to render.
+                if paceMode == .timeExpansion { timeExp.process(buffer) }
 
                 samplesFed += n
                 if !box.stopped { onProgress?(Double(samplesFed) / sampleRate) }
@@ -305,6 +326,21 @@ final class PlaybackEngine {
             // auto-tune (see PlaybackDriver.start()) — it opens/closes from the
             // file's actual detected content, same as the live Detector screen's
             // pulse-triggered gate, so no explicit setGate here.
+            //
+            // Time expansion paces file reads at a different rate than
+            // heterodyne (see PlaybackDriver.start's
+            // `paceRate`), and that rate is fixed for the life of one `start()`
+            // call. Restart the pacing thread from the current position on ANY
+            // mode change so a switch into or out of `.timeExpansion` picks up
+            // the right pace immediately instead of running at whatever rate was
+            // captured when playback began.
+            if isPlaying, let url = loadedURL {
+                if listenMode == .timeExpansion { timeExpansion.reset(inputSampleRate: sampleRate) }
+                // `driver.start` stops the previous pacing thread itself before
+                // starting the new one — no need to call `driver.stop()` here too.
+                driver.start(url: url, sampleRate: sampleRate, totalSamples: totalSamples,
+                            fromSample: Int(currentTimeSeconds * sampleRate))
+            }
         }
     }
 
@@ -321,8 +357,8 @@ final class PlaybackEngine {
     private var totalSamples: Int = 0
 
     init() {
-        driver = PlaybackDriver(heterodyne: heterodyne, timeExpansion: timeExpansion,
-                                spectrogramProcessor: spectrogramProcessor)
+        driver = PlaybackDriver(heterodyne: heterodyne,
+                                timeExpansion: timeExpansion, spectrogramProcessor: spectrogramProcessor)
         driver.mode = listenMode
         driver.onProgress = { [weak self] t in
             DispatchQueue.main.async { self?.currentTimeSeconds = t }

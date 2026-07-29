@@ -2,16 +2,40 @@
 //  TimeExpansionProcessor.swift
 //  OpenBat
 //
-//  Real-time time expansion that keeps the bat's natural tempo. Bats are silent
-//  most of the time, so we only expand the brief *calls*: a detector gates the
-//  stream, and detected (band-limited) samples are pushed into the 48 kHz output
-//  at full 384 kHz resolution. Replaying high-rate samples at 48 kHz is an 8×
-//  expansion (pitch ÷8, duration ×8); since each call is short and the gaps are
-//  long, the stretched calls still land at roughly their real arrival times — so
-//  you hear expanded call detail without losing the rhythm of the pass.
+//  Playback-only classic time expansion: literally play a previously recorded
+//  WAV back slower, preserving EVERY sample — the oldest bat-detector
+//  technique there is (originally done by physically slowing tape playback).
+//  There is no per-sample selection or framing: `process` copies every input
+//  sample straight into the output ring (band-limited + gained, nothing
+//  more). The 8× slowdown comes entirely from PlaybackDriver pacing its file
+//  reads at the 48 kHz OUTPUT rate instead of the file's native 384 kHz rate
+//  when this mode is active (see `start()`'s `paceRate`) — this processor
+//  has no idea it's being fed slowly, it just passes through.
 //
-//  Threading mirrors HeterodyneProcessor: `process` on the capture thread feeds a
-//  lock-free SPSC ring drained by `render` on the output thread.
+//  This is deliberately playback-only. Live capture can't do this: pacing a
+//  live 384 kHz tap at 48 kHz-worth-per-second means falling permanently
+//  behind real time, which a live monitor can't do — that's a fundamentally
+//  different problem from playing back a file that's already fully on disk.
+//  See CLAUDE.md for why an earlier LIVE time-expansion processor — a
+//  different, continuous frame-selection design that tried to solve that
+//  live problem — infringed an active third-party patent (US 8,599,647) and
+//  was removed. This file avoids that trap structurally: there is no content-
+//  based selection anywhere in it, only a fixed pass-through at a slower
+//  clock — exactly the OLD, unpatented technique that patent's own
+//  background section describes as prior art.
+//
+//  The output ring (see its own doc comment) is sized so that losing any
+//  audio at all requires an actual technical failure — a multi-second output
+//  stall — not the ordinary sub-second clock drift the variable playback
+//  rate below already corrects losslessly. `overflowCount` ticks if that
+//  failure threshold is ever crossed, so a real loss is reported rather than
+//  silent, but it is not claimed to be structurally impossible the way
+//  content-based selection is: a ring is finite, and an unbounded stall
+//  would still exhaust it.
+//
+//  Threading: identical contract to HeterodyneProcessor
+//  — `process(_:)` runs on the (paced) producer thread, `render(_:frames:)` on
+//  the realtime output thread, lock-free SPSC ring between them.
 //
 
 import AVFoundation
@@ -21,56 +45,40 @@ nonisolated final class TimeExpansionProcessor: @unchecked Sendable {
 
     let outputSampleRate: Double = 48_000
 
-    // MARK: Control (main ↔ audio)
+    /// The actual slowdown factor for the file this processor was last
+    /// `reset(inputSampleRate:)` for — 8× for a native 384 kHz file, but
+    /// computed rather than assumed, so a differently-rated file (or a future
+    /// change to `outputSampleRate`) can't silently drift out of sync with a
+    /// hardcoded "8×" label elsewhere. Read from the main thread (UI); set
+    /// from `reset(inputSampleRate:)`, same cross-thread contract as `gain`.
+    var slowdownFactor: Double {
+        ctrlLock.lock(); defer { ctrlLock.unlock() }
+        return _slowdownFactor
+    }
+
+    // MARK: Control (main thread ↔ producer/output threads)
 
     private let ctrlLock = NSLock()
     private var _gain: Float = 4
-    private var _bandLowFraction: Double = 0
+    private var _bandLowFraction: Double = 0   // fraction of Nyquist
     private var _bandHighFraction: Double = 1
-    /// How far (dB) a gate block's detection-band RMS must sit ABOVE the rolling
-    /// noise floor to count as a call. Relative rather than absolute (the old fixed
-    /// −38 dBFS) so quiet high-frequency species (e.g. California Myotis, which sit
-    /// ~18–25 dB over the floor but only −32…−39 dBFS absolute) still open the gate,
-    /// while the floor auto-tracks conditions to keep duty bounded. Default kept in
-    /// sync with RTESettings.defaultMarginDB (apply() overwrites it on launch).
-    private var _marginDB: Float = 12
-    /// Detection high-pass cutoff (Hz). Only energy above this drives the gate, so
-    /// low-frequency handling noise (footsteps, clothing, wind — all well below the
-    /// bat band) can't trigger expansion. The enqueued (listened) audio is unchanged;
-    /// this filter feeds the gate DECISION only. Matches PulseDetector.minFrequencyHz.
-    private var _minFrequencyHz: Float = 15_000
-    /// How long to keep the gate open after the signal drops below threshold (ms).
-    private var _holdMs: Float = 15.0
-    /// RMS window size for the sub-buffer gate (ms). Smaller = more responsive; larger = smoother.
-    private var _gateBlockMs: Float = 1.5
+    private var _slowdownFactor: Double = 384_000 / 48_000
 
+    /// Output makeup gain. Straight pass-through preserves the recording's own
+    /// level, and bat calls are weak, so some makeup is normally wanted.
     var gain: Float {
         get { ctrlLock.lock(); defer { ctrlLock.unlock() }; return _gain }
         set { ctrlLock.lock(); _gain = newValue; ctrlLock.unlock() }
     }
 
-    var marginDB: Float {
-        get { ctrlLock.lock(); defer { ctrlLock.unlock() }; return _marginDB }
-        set { ctrlLock.lock(); _marginDB = newValue; ctrlLock.unlock() }
-    }
-
-    var minFrequencyHz: Float {
-        get { ctrlLock.lock(); defer { ctrlLock.unlock() }; return _minFrequencyHz }
-        set { ctrlLock.lock(); _minFrequencyHz = newValue; ctrlLock.unlock() }
-    }
-
-    var holdMs: Float {
-        get { ctrlLock.lock(); defer { ctrlLock.unlock() }; return _holdMs }
-        set { ctrlLock.lock(); _holdMs = newValue; ctrlLock.unlock() }
-    }
-
-    var gateBlockMs: Float {
-        get { ctrlLock.lock(); defer { ctrlLock.unlock() }; return _gateBlockMs }
-        set { ctrlLock.lock(); _gateBlockMs = newValue; ctrlLock.unlock() }
-    }
-
+    /// Restrict playback to a frequency band (fractions of Nyquist): high-pass
+    /// at `low`, low-pass at `high`. Matches the same viewport-derived band the
+    /// other listening modes use.
     func setBand(low: Double, high: Double) {
-        ctrlLock.lock(); _bandLowFraction = low; _bandHighFraction = high; ctrlLock.unlock()
+        ctrlLock.lock()
+        _bandLowFraction = low
+        _bandHighFraction = high
+        ctrlLock.unlock()
     }
 
     private func bandFractions() -> (Double, Double) {
@@ -78,7 +86,7 @@ nonisolated final class TimeExpansionProcessor: @unchecked Sendable {
         return (_bandLowFraction, _bandHighFraction)
     }
 
-    // MARK: DSP state (capture thread only)
+    // MARK: DSP state (producer thread only)
 
     private var inputSampleRate: Double = 384_000
     private var bandHPa = Biquad(), bandHPb = Biquad()
@@ -87,70 +95,69 @@ nonisolated final class TimeExpansionProcessor: @unchecked Sendable {
     private var applyLP = false
     private var appliedLowFraction = -1.0
     private var appliedHighFraction = -1.0
-    /// Detection high-pass (4th-order = two cascaded biquads) at `minFrequencyHz`.
-    /// Runs continuously (like the band filters) so its state stays stable; the
-    /// filtered signal is used only to measure per-block RMS for the gate decision.
-    private var detHPa = Biquad(), detHPb = Biquad()
-    private var appliedMinFreq = -1.0
-    /// Rolling estimate of the detection-band noise floor (dB). Tracks down fast to
-    /// the quiet background and rises slowly, so a short call doesn't inflate it but
-    /// a sustained loud section gradually does (bounding gate duty). The gate opens
-    /// when a block sits `marginDB` above this.
-    private var noiseFloorDB: Float = -60
-    /// Fast envelope follower over the detection-band signal, used only to drive the
-    /// per-sample noise gate below — separate from `noiseFloorDB` (which tracks slowly
-    /// over whole blocks) so the gate can react within a call, not just between them.
-    private var gateEnvDB: Float = -80
-    /// Samples still pushed after the level drops, to catch call tails / bridge dips.
-    /// Sample-based so the gate tracks the real call extent rather than whole IO buffers.
-    private var holdSamplesRemaining = 0
+    /// Reused output scratch so `process` doesn't allocate on the producer thread.
     private var scratch = [Float]()
-    /// Parallel to `scratch`: the detection-high-passed signal, used for gate RMS only.
-    private var detScratch = [Float]()
 
-    // MARK: Lock-free SPSC ring (push expanded call samples; silence between calls)
+    // MARK: Output ring buffer
 
-    // Manually managed memory (not a Swift Array): the producer and consumer
-    // realtime threads touch elements concurrently, which Array's exclusivity/CoW
-    // rules don't permit. Mirrors HeterodyneProcessor.
-    private let ring: UnsafeMutableBufferPointer<Float>  // ~2 s at 48 kHz
+    // Lock-free SPSC ring, same contract as the sibling processors: the
+    // producer only advances `writeIndexA`, the consumer only advances
+    // `readIndexA`. Manually managed memory (not a Swift Array) because both
+    // threads touch elements concurrently, which Array's exclusivity/CoW
+    // rules don't permit.
+    //
+    // Sized for 25 s, not the ~2 s an earlier version used. Ordinary clock
+    // drift between the pacing thread and the audio hardware never needs
+    // this headroom at all — that's what the `softTarget`-seeking variable
+    // playback rate below is for, and it's lossless (resampling, not
+    // dropping). This capacity exists purely so that `enqueue`'s drop path
+    // and `render`'s `hardMax` catch-up are unreachable by anything short of
+    // a genuine multi-second stall (an audio session interruption, a truly
+    // frozen output thread) — the failure this file's header comment means
+    // by "discarding" is supposed to be an actual technical failure, not
+    // routine jitter. 25 s of 48 kHz float32 is ~4.6 MB, cheap enough that
+    // there's no reason to size this any tighter.
+    private let ring: UnsafeMutableBufferPointer<Float>
 
     init() {
-        ring = .allocate(capacity: 96_000)
+        ring = .allocate(capacity: Self.ringCapacity)
         ring.initialize(repeating: 0)
     }
 
     deinit { ring.deallocate() }
 
+    private static let ringCapacity = 1_200_000   // 25 s at 48 kHz
     private let writeIndexA = Atomic<Int>(0)
     private let readIndexA = Atomic<Int>(0)
-    private var hardMax = 24_000 // ~0.5 s of queued expansion before we skip ahead
+    private var readFrac = 0.0 // fractional read position (consumer only)
+    // The pacing thread's wall-clock reads and the audio hardware's output
+    // clock aren't the same clock, so the queue slowly drifts even though
+    // both are nominally paced to match — same reasoning as
+    // HeterodyneProcessor's identical fields.
+    private var softTarget = 4_800  // ~100 ms at 48 kHz
+    private var hardMax = 960_000   // 20 s — see the ring's own doc comment
 
-    // MARK: Output soft-gate envelope (output thread only)
+    /// Bumped once per overflow *event* (not per dropped sample) in either
+    /// `enqueue`'s drop path or `render`'s `hardMax` catch-up — the two
+    /// places this processor can actually lose audio. At the sizing above,
+    /// hitting this at all means a real stall happened, not ordinary drift;
+    /// surfaced so the UI can show an honest "audio was dropped" signal
+    /// instead of the loss being silent, same idea as
+    /// `AdaptiveTimeExpansionProcessor.missedCount`.
+    private let overflowCountA = Atomic<Int>(0)
+    var overflowCount: Int { overflowCountA.load(ordering: .relaxed) }
 
-    // Ramps 0→1 when ring has data, 1→0 when ring is empty. Eliminates gate-open /
-    // gate-close clicks by replacing instantaneous amplitude steps with a short linear
-    // ramp. lastSample is held during the fade-out so the signal decays to zero rather
-    // than cutting to it — important when the instantaneous sample value is non-zero.
-    private var outputEnvelope: Float = 0
-    private var lastSample: Float = 0
-    // 4 ms at 48 kHz = 192 samples → rate = 1/192 per sample. Gentler than the old
-    // 2 ms ramp so gate open/close transitions don't click on short calls.
-    private let envelopeRate: Float = 1.0 / 192.0
-
+    /// Reconfigure for a file's sample rate and reset all DSP/ring state. Call
+    /// before starting playback in this mode.
     func reset(inputSampleRate fs: Double) {
         inputSampleRate = fs
+        ctrlLock.lock(); _slowdownFactor = fs / outputSampleRate; ctrlLock.unlock()
         let (low, high) = bandFractions()
         reconfigureBand(low: low, high: high)
-        reconfigureDetection(minFreq: Double(minFrequencyHz))
-        noiseFloorDB = -60
-        gateEnvDB = -80
-        holdSamplesRemaining = 0
         writeIndexA.store(0, ordering: .relaxed)
         readIndexA.store(0, ordering: .relaxed)
-        hardMax = Int(outputSampleRate * 0.5)
-        outputEnvelope = 0
-        lastSample = 0
+        readFrac = 0
+        overflowCountA.store(0, ordering: .relaxed)
     }
 
     private func reconfigureBand(low: Double, high: Double) {
@@ -171,22 +178,12 @@ nonisolated final class TimeExpansionProcessor: @unchecked Sendable {
         appliedHighFraction = high
     }
 
-    /// (Re)build the detection high-pass at `minFreq`. Two cascaded biquads give a
-    /// 4th-order roll-off (~24 dB/oct), so content an octave or more below the cutoff
-    /// — footsteps, clothing, wind — is knocked well under the floor before the gate
-    /// measures it. A cutoff at/below 100 Hz disables it (pass everything).
-    private func reconfigureDetection(minFreq: Double) {
-        let nyquist = inputSampleRate / 2
-        let cutoff = max(0, min(minFreq, nyquist * 0.98))
-        if cutoff > 100 {
-            detHPa = .highpass(cutoff: cutoff, sampleRate: inputSampleRate)
-            detHPb = .highpass(cutoff: cutoff, sampleRate: inputSampleRate)
-        }
-        appliedMinFreq = minFreq
-    }
+    // MARK: Producer
 
-    // MARK: Producer (capture thread)
-
+    /// Copies every sample through untouched (bar band-limit + gain) — no
+    /// framing, no counting, no discarding. `buffer` arrives at whatever pace
+    /// PlaybackDriver's pacing thread has chosen; this code doesn't know or
+    /// care what that pace is.
     func process(_ buffer: AVAudioPCMBuffer) {
         guard let channel = buffer.floatChannelData?[0] else { return }
         let n = Int(buffer.frameLength)
@@ -196,92 +193,37 @@ nonisolated final class TimeExpansionProcessor: @unchecked Sendable {
         if lowF != appliedLowFraction || highF != appliedHighFraction {
             reconfigureBand(low: lowF, high: highF)
         }
-        let minFreq = Double(minFrequencyHz)
-        if minFreq != appliedMinFreq { reconfigureDetection(minFreq: minFreq) }
-        let applyDetHP = appliedMinFreq > 100
         let g = gain
-        let margin = marginDB
-        // Compute sample counts from the ms settings each buffer — cheap and avoids
-        // a separate "applied" tracking for these two values.
-        let holdSamples = max(1, Int(Double(holdMs) / 1000.0 * inputSampleRate))
-        let gateBlock   = max(1, Int(Double(gateBlockMs) / 1000.0 * inputSampleRate))
 
         scratch.removeAll(keepingCapacity: true)
-        detScratch.removeAll(keepingCapacity: true)
         if scratch.capacity < n { scratch.reserveCapacity(n) }
-        if detScratch.capacity < n { detScratch.reserveCapacity(n) }
 
-        // Band-limit the whole buffer for LISTENING (filters must run continuously for
-        // stability), and separately high-pass it for the gate DECISION. Both filter
-        // chains run every sample so their state stays valid across buffers.
         for i in 0..<n {
             var x = channel[i]
             if applyHP { x = bandHPb.process(bandHPa.process(x)) }
             if applyLP { x = bandLPb.process(bandLPa.process(x)) }
-            let d = applyDetHP ? detHPb.process(detHPa.process(channel[i])) : channel[i]
-            detScratch.append(d)
-
-            // Per-sample noise gate/expander, sidechained off the detection-band
-            // envelope: the block-level gate below decides WHEN to enqueue audio, but
-            // a whole enqueued block still carries its between-call hiss at full level.
-            // This knocks that hiss down (not to full silence, to avoid a choppy
-            // digital-silence texture) while leaving loud call transients untouched,
-            // so 8x time expansion doesn't also stretch the noise floor into an
-            // audible hiss under the call.
-            let mag = abs(d)
-            let instDB = mag > 0 ? 20 * log10(mag) : -120
-            let attack: Float = instDB > gateEnvDB ? 0.35 : 0.02
-            gateEnvDB += attack * (instDB - gateEnvDB)
-            let aboveFloor = gateEnvDB - noiseFloorDB
-            let knee: Float = 6 // dB soft-knee width
-            let floorGain: Float = 0.12 // -18 dB, not full mute — avoids abrupt cutoff
-            let gateGain: Float
-            if aboveFloor >= knee { gateGain = 1 }
-            else if aboveFloor <= 0 { gateGain = floorGain }
-            else { gateGain = floorGain + (1 - floorGain) * (aboveFloor / knee) }
-            x *= gateGain
-
-            scratch.append(x)
+            scratch.append(x * g)
         }
 
-        // Sub-buffer gate: scan short blocks, measure the detection-band RMS, and open
-        // only when it rises `margin` dB above the rolling noise floor. Relative gating
-        // catches quiet calls that a fixed threshold misses; the high-passed detection
-        // signal keeps low-frequency handling noise from ever reaching the decision.
-        // A sample-based hold keeps the queued audio close to the real call extent, so
-        // 8× expansion doesn't fall behind on whole IO buffers.
-        var i = 0
-        while i < n {
-            let end = min(i + gateBlock, n)
-            let len = end - i
-            var ss: Float = 0
-            for j in i..<end { ss += detScratch[j] * detScratch[j] }
-            let rms = sqrt(ss / Float(len))
-            let db = rms > 0 ? 20 * log10(rms) : -120
-
-            // Track the floor: fall fast toward a quieter block, rise slowly toward a
-            // louder one. A brief call barely nudges it; sustained loudness lifts it,
-            // which raises the effective threshold and bounds duty on dense passes.
-            let alpha: Float = db < noiseFloorDB ? 0.2 : 0.002
-            noiseFloorDB += alpha * (db - noiseFloorDB)
-
-            if db >= noiseFloorDB + margin { holdSamplesRemaining = holdSamples }
-            if holdSamplesRemaining > 0 {
-                enqueue(scratch, range: i..<end, gain: g)
-                holdSamplesRemaining = max(0, holdSamplesRemaining - len)
-            }
-            i = end
-        }
+        enqueue(scratch)
     }
 
-    private func enqueue(_ samples: [Float], range: Range<Int>, gain: Float) {
+    private func enqueue(_ samples: [Float]) {
+        guard !samples.isEmpty else { return }
         let cap = ring.count
         var w = writeIndexA.load(ordering: .relaxed)
         let r = readIndexA.load(ordering: .acquiring)
-        for k in range {
+        for s in samples {
             let nextW = (w + 1) % cap
-            if nextW == r { break } // full → drop remainder
-            ring[w] = samples[k] * gain
+            // Ring genuinely full — at 25 s of headroom this means the output
+            // thread has actually stalled, not just drifted. Drop the
+            // remainder and count it as an overflow event rather than doing
+            // it silently.
+            if nextW == r {
+                overflowCountA.wrappingAdd(1, ordering: .relaxed)
+                break
+            }
+            ring[w] = s
             w = nextW
         }
         writeIndexA.store(w, ordering: .releasing)
@@ -295,33 +237,39 @@ nonisolated final class TimeExpansionProcessor: @unchecked Sendable {
         var r = readIndexA.load(ordering: .relaxed)
         var available = (w - r + cap) % cap
 
-        // If expansion has fallen too far behind real time (a sustained buzz),
-        // skip ahead so we don't drift seconds late. We deliberately DON'T reset the
-        // envelope here: the ring still has data, so the output should keep flowing.
-        // Zeroing the envelope forced a full fade-out/fade-in at every skip, and under
-        // a saturated ring (dense activity) skips fire constantly — that repeated
-        // re-ramp WAS the popping. Jumping the read cursor alone leaves a single-sample
-        // discontinuity, far less audible than a 4 ms gate cycle.
         if available > hardMax {
-            r = (r + (available - hardMax)) % cap
-            available = hardMax
+            // Same story as `enqueue`'s drop above: `hardMax` is 20 s, so
+            // getting here means the output thread was genuinely stalled for
+            // seconds, not the ordinary sub-second drift the rate correction
+            // below already absorbs losslessly.
+            overflowCountA.wrappingAdd(1, ordering: .relaxed)
+            r = (r + (available - softTarget)) % cap
+            available = softTarget
         }
 
-        // Per-sample soft gate: envelope ramps to 1 while ring has data, ramps to 0
-        // when silent. lastSample is held during the ramp-down so we decay from the
-        // real signal rather than cutting to 0 from a non-zero instantaneous value.
-        for i in 0..<frames {
-            if available > 0 {
-                lastSample = ring[r]
-                r = (r + 1) % cap
-                available -= 1
-                outputEnvelope = min(1, outputEnvelope + envelopeRate)
-            } else {
-                outputEnvelope = max(0, outputEnvelope - envelopeRate)
+        let error = Double(available) - Double(softTarget)
+        let rate = 1.0 + min(max(error / Double(softTarget) * 0.1, -0.03), 0.03)
+
+        var produced = 0
+        while produced < frames, available >= 2 {
+            let next = (r + 1) % cap
+            let s0 = ring[r]
+            let s1 = ring[next]
+            out[produced] = s0 + Float(readFrac) * (s1 - s0)
+            produced += 1
+
+            readFrac += rate
+            let advance = Int(readFrac)
+            if advance > 0 {
+                r = (r + advance) % cap
+                available -= advance
+                readFrac -= Double(advance)
             }
-            out[i] = lastSample * outputEnvelope
         }
-
         readIndexA.store(r, ordering: .releasing)
+
+        if produced < frames {
+            for i in produced..<frames { out[i] = 0 }
+        }
     }
 }

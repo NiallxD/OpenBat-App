@@ -1,0 +1,19 @@
+Copyright (c) 2026 Niall Bell. All rights reserved.
+
+This repository is source-available for transparency: it exists so anyone can
+read, inspect, and understand how the OpenBat app works. It is not open source
+software.
+
+No permission is granted to copy, modify, merge, publish, distribute,
+sublicense, or otherwise reuse this code, in whole or in part, for any purpose,
+without prior written permission from the copyright holder.
+
+Third-party components bundled with the app (FLAC, libogg, SwiftyH3, and
+others) remain under their own licenses — see the in-app "About" screen for
+attribution and license text for each.
+
+The OpenBat field guide's species and region data is maintained in a separate,
+community-contributed repository (NiallxD/OpenBat-FieldGuide) with its own
+license — this notice does not apply there.
+
+For licensing inquiries, contact privacy@openbat.app.
