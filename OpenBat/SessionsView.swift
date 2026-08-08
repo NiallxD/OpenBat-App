@@ -14,6 +14,17 @@
 import SwiftUI
 import MapKit
 
+/// Cached formatters — `DateFormatter()` init is expensive (locale/calendar setup),
+/// and these are read once per row per list body evaluation.
+private enum SessionDateFormatters {
+    static let timeShort: DateFormatter = { let f = DateFormatter(); f.timeStyle = .short; return f }()
+    static let dateMedium: DateFormatter = { let f = DateFormatter(); f.dateStyle = .medium; return f }()
+    static let timeMedium: DateFormatter = { let f = DateFormatter(); f.timeStyle = .medium; return f }()
+    static let dateTimeMedium: DateFormatter = {
+        let f = DateFormatter(); f.dateStyle = .medium; f.timeStyle = .medium; return f
+    }()
+}
+
 // MARK: - Sessions list
 
 struct SessionsView: View {
@@ -185,7 +196,7 @@ private struct SessionRow: View {
     }
 
     private var timeRange: String {
-        let f = DateFormatter(); f.timeStyle = .short
+        let f = SessionDateFormatters.timeShort
         let start = f.string(from: session.startDate)
         guard let end = session.endDate else { return "\(start) – now" }
         return "\(start) – \(f.string(from: end))"
@@ -377,8 +388,7 @@ private func groupSessionsByDay(_ sessions: [RecordingSession]) -> [SessionDayGr
 private func dayTitle(_ date: Date) -> String {
     if Calendar.current.isDateInToday(date) { return "Today" }
     if Calendar.current.isDateInYesterday(date) { return "Yesterday" }
-    let f = DateFormatter(); f.dateStyle = .medium
-    return f.string(from: date)
+    return SessionDateFormatters.dateMedium.string(from: date)
 }
 
 // MARK: - Pass row
@@ -386,6 +396,7 @@ private func dayTitle(_ date: Date) -> String {
 struct PassRow: View {
     let pass: PassRecord
     let store: ClassificationStore
+    @State private var image: UIImage?
 
     var body: some View {
         HStack(spacing: 12) {
@@ -422,11 +433,14 @@ struct PassRow: View {
             }
         }
         .padding(.vertical, 2)
+        .task(id: representativePulse.id) {
+            image = await store.loadImage(for: representativePulse)
+        }
     }
 
     @ViewBuilder private var thumbnail: some View {
-        if let img = store.image(for: representativePulse) {
-            Image(uiImage: img)
+        if let image {
+            Image(uiImage: image)
                 .resizable()
                 .interpolation(.high)
                 .aspectRatio(contentMode: .fill)
@@ -445,7 +459,7 @@ struct PassRow: View {
     }
 
     private static func time(_ d: Date) -> String {
-        let f = DateFormatter(); f.timeStyle = .medium; return f.string(from: d)
+        SessionDateFormatters.timeMedium.string(from: d)
     }
 }
 
@@ -514,8 +528,7 @@ struct PassDetailView: View {
     }
 
     private static func timestamp(_ d: Date) -> String {
-        let f = DateFormatter(); f.dateStyle = .medium; f.timeStyle = .medium
-        return f.string(from: d)
+        SessionDateFormatters.dateTimeMedium.string(from: d)
     }
 }
 
@@ -524,11 +537,12 @@ struct PassDetailView: View {
 private struct PulseDetailRow: View {
     let pulse: PulseRecord
     let store: ClassificationStore
+    @State private var image: UIImage?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if let img = store.image(for: pulse) {
-                PulseImagePlot(image: img,
+            if let image {
+                PulseImagePlot(image: image,
                                freqMinHz: pulse.imageFreqMinHz,
                                freqMaxHz: pulse.imageFreqMaxHz,
                                spanMs: pulse.imageSpanMs)
@@ -553,6 +567,9 @@ private struct PulseDetailRow: View {
             }
         }
         .padding(.vertical, 4)
+        .task(id: pulse.id) {
+            image = await store.loadImage(for: pulse)
+        }
     }
 
     private func stat(_ label: String, _ value: String) -> some View {

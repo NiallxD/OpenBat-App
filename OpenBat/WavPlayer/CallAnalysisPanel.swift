@@ -24,45 +24,42 @@ import SwiftUI
 
 struct CallAnalysisPanel: View {
     let result: CallAnalysis.Result?
-    @State private var showBetaInfo = false
 
     var body: some View {
         VStack(spacing: 0) {
-            PanelTitle("Call Analysis") {
-                Button { showBetaInfo = true } label: {
-                    Text("BETA")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Color.red, in: Capsule())
-                }
-                .buttonStyle(.plain)
-                .popover(isPresented: $showBetaInfo) {
-                    BetaInfoPopover()
-                }
-            }
+            PanelTitle("Call Analysis")
                 .padding(.horizontal, 8)
                 .padding(.top, 8)
                 .padding(.bottom, 4)
 
             VStack(spacing: 8) {
                 HStack(spacing: 0) {
-                    StatCell(title: "Peak", value: values.peak, unit: "")
-                    StatCell(title: "Char. Freq", value: values.charFreq, unit: "")
-                    StatCell(title: "Bandwidth", value: values.bandwidth, unit: "")
-                    StatCell(title: "Duration", value: values.duration, unit: "ms")
+                    InfoStatCell(title: "Peak", value: values.peak, unit: "",
+                                 info: "The frequency with the most energy anywhere in the call — usually near the loudest point of the sweep.")
+                    InfoStatCell(title: "Char. Freq", value: values.charFreq, unit: "",
+                                 info: "Fc — the frequency of the flattest part of the call body, excluding any terminal toe. Often the most species-diagnostic figure.")
+                    InfoStatCell(title: "Bandwidth", value: values.bandwidth, unit: "",
+                                 info: "The full frequency span of the call, from its highest point to its lowest.")
+                    InfoStatCell(title: "Duration", value: values.duration, unit: "ms",
+                                 info: "How long the call lasts, start to end.")
                 }
                 HStack(spacing: 0) {
-                    StatCell(title: "Start", value: values.start, unit: "")
-                    StatCell(title: "End", value: values.end, unit: "")
-                    StatCell(title: "Sweep", value: values.sweep, unit: "Hz/ms")
-                    StatCell(title: "Quality", value: values.quality, unit: "%")
+                    InfoStatCell(title: "Start", value: values.start, unit: "",
+                                 info: "The highest frequency in the call — where the sweep begins (Fmax).")
+                    InfoStatCell(title: "End", value: values.end, unit: "",
+                                 info: "The lowest frequency in the call — where the sweep ends (Fmin).")
+                    InfoStatCell(title: "Sweep", value: values.sweep, unit: "Hz/ms",
+                                 info: "The whole-call average slope, start to end — steep for a typical downward FM sweep. Distinct from Body Sc, which measures only the flatter body.")
+                    InfoStatCell(title: "Quality", value: values.quality, unit: "%",
+                                 info: "How cleanly the selection was measured — how much the loudest point stands out above the rest of the selected region. Higher is a more trustworthy reading.")
                 }
                 HStack(spacing: 0) {
-                    StatCell(title: "Knee (Fk)", value: values.knee, unit: "")
-                    StatCell(title: "Body Sc", value: values.bodySlope, unit: "Hz/ms")
-                    StatCell(title: "Toe", value: values.toe, unit: "")
+                    InfoStatCell(title: "Knee (Fk)", value: values.knee, unit: "",
+                                 info: "The frequency where the steep initial FM sweep bends into the flatter call body — the elbow of the curve.")
+                    InfoStatCell(title: "Body Sc", value: values.bodySlope, unit: "Hz/ms",
+                                 info: "The slope of the call body only, from the knee to the start of any terminal toe — a more diagnostic slope than the whole-call Sweep figure.")
+                    InfoStatCell(title: "Toe", value: values.toe, unit: "",
+                                 info: "Whether the call curves at its very end: up, down, or stays flat (none) with no distinct terminal hook.")
                     StatCell(title: "", value: "", unit: "")
                 }
             }
@@ -111,31 +108,36 @@ struct CallAnalysisPanel: View {
     }
 }
 
-/// "Work in progress" explainer shown when the BETA pill is tapped.
-private struct BetaInfoPopover: View {
+/// `StatCell` wrapped in a tap target that pops over a short plain-language
+/// explanation of the metric — `StatCell` itself stays untouched since it's
+/// shared with the live Detector screen's pulse stats, which don't need this.
+/// Each instance owns its own `showInfo` so tapping one cell's popover
+/// doesn't affect the others.
+private struct InfoStatCell: View {
+    let title: String
+    let value: String
+    let unit: String
+    let info: String
+    @State private var showInfo = false
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 6) {
-                Text("BETA")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(Color.red, in: Capsule())
-                Text("Call Analysis")
-                    .font(.headline)
-            }
-            Text("These call parameters are a work in progress. The measurements are still being calibrated against reference software, and both the numbers and the way the analysis box works may change.")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            Text("For the most reliable reading, draw the selection box tightly around a single call — snug in both time and frequency.")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+        Button { showInfo = true } label: {
+            StatCell(title: title, value: value, unit: unit)
         }
-        .padding(16)
-        .frame(width: 300)
-        .presentationCompactAdaptation(.popover)
+        .buttonStyle(.plain)
+        .popover(isPresented: $showInfo) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(title.uppercased())
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Text(info)
+                    .font(.subheadline)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(14)
+            .frame(width: 260)
+            .presentationCompactAdaptation(.popover)
+        }
     }
 }
+

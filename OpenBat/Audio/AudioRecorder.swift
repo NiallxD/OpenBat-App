@@ -52,6 +52,12 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
 
     private(set) var isArmed = false
     private(set) var isWriting = false
+    /// Set while demo mode is feeding a file into the pipeline. Recording is
+    /// blocked outright there: a demo pass is not field data, and saving one
+    /// would put a synthetic Recording in Sessions — indistinguishable from a
+    /// real detection, eligible for upload, and re-feedable into the demo
+    /// itself. Drives the record button's disabled state.
+    private(set) var isBlocked = false
     private(set) var segmentCount = 0
     private(set) var lastSavedFilename: String?
     /// Sample rate actually written into the most recent recording file.
@@ -80,6 +86,7 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
     private var sampleRate: Double = 384_000
     private var armedQ = false
     private var activeQ = false
+    private var blockedQ = false
     private var sessionDirQ: String?     // queue-local: active session's date-stamped subfolder (nil = Listening)
     private var sessionIDQ: UUID?        // queue-local: active session's id, for RecordingReport.sessionID
     // Queue-local metadata for the GUANO chunk written at segment close.
@@ -201,6 +208,17 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
         }
     }
 
+    /// Block or unblock recording wholesale (main thread) — see `isBlocked`.
+    /// Blocking disarms and closes any open segment, so switching into demo mode
+    /// mid-recording finalises the real file rather than appending demo audio to
+    /// it. The queue-local flag in `handle` is the actual backstop; disarming
+    /// alone would leave `setPulseActive` able to re-open a segment.
+    func setBlocked(_ on: Bool) {
+        isBlocked = on
+        if on { setArmed(false) }
+        queue.async { [weak self] in self?.blockedQ = on }
+    }
+
     /// Drive the trigger from PulseDetector.isInPulse (main thread).
     func setPulseActive(_ active: Bool) {
         queue.async { [weak self] in
@@ -224,6 +242,12 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
 
     private func handle(_ samples: [Float], sampleRate sr: Double) {
         sampleRate = sr
+
+        // Demo mode: drop the audio entirely rather than just refusing to open a
+        // segment — otherwise the pre-roll below would sit there accumulating
+        // seconds of demo audio, ready to be written into the first real
+        // recording made after the demo ends.
+        guard !blockedQ else { return }
 
         guard handle != nil else {
             // Idle: keep a rolling pre-roll so a segment can start mid-buffer.

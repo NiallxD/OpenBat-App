@@ -193,6 +193,11 @@ struct SpeciesExplorerView: View {
                     }
                 }
             }
+            if let userCoordinate {
+                Annotation("Your Location", coordinate: userCoordinate) {
+                    UserLocationDot()
+                }
+            }
         }
         .mapStyle(.imagery(elevation: .realistic))
         .overlay(alignment: .bottom) { globeFooter }
@@ -306,6 +311,19 @@ struct SpeciesExplorerView: View {
             }
             .presentationDetents([.medium, .large])
         }
+    }
+}
+
+/// Marks `userCoordinate` on the globe — the same small blue dot with a white
+/// outline Maps uses for the current-location marker, just static (no live
+/// heading/accuracy ring) since this is a one-shot fix, not a tracked position.
+private struct UserLocationDot: View {
+    var body: some View {
+        Circle()
+            .fill(Color.blue)
+            .frame(width: 14, height: 14)
+            .overlay(Circle().stroke(.white, lineWidth: 2.5))
+            .shadow(radius: 2)
     }
 }
 

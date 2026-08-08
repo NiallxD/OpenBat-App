@@ -41,13 +41,62 @@ struct StatCell: View {
     }
 }
 
-/// Last-ID readout with a stale-after-30s red tint. `TimelineView` re-evaluates
-/// once a second so the ID turns red as it ages without needing a pulse (or any
-/// other state change) to trigger a redraw — already self-contained (the
-/// `pulseDetector.lastPassResult`/`lastPassDate` reads happen inside the
-/// `TimelineView` content closure, not synchronously during the parent's body).
+/// Last-ID readout, tappable to open the identified species' field-guide page.
+///
+/// The Button and its sheet sit OUTSIDE `SpeciesStatCellContent` on purpose —
+/// same reasoning as `MicStatusPill` in LiveStatusViews: the readout itself
+/// re-evaluates on a 1 Hz `TimelineView` (and on every pass), and a presenter
+/// rebuilding underneath its own sheet can drop the tap that opened it. Nothing
+/// in *this* body reads churning state; the guide lookup happens in the action
+/// closure, at tap time, which is not a body dependency.
+///
+/// A tap with no guide page behind it does nothing, deliberately: guide coverage
+/// is far thinner than what the models can name, and the content view only shows
+/// the tap affordance when a page actually exists, so there's nothing to
+/// contradict. See `SpeciesGuide.species(forCode:)`.
 private struct SpeciesStatCell: View {
     let pulseDetector: PulseDetector
+    let guide: SpeciesGuideStore
+    let rangeStore: SpeciesRangeStore
+    /// Forces a stand-in ID into the cell for the guided tour's species step —
+    /// the tour is normally taken before detection has ever run, so the cell
+    /// would otherwise read "–" while the card talks about tapping it. Same
+    /// treatment as `SessionTimerPill`/`MicStatusPill` et al.
+    var tourDemo: Bool = false
+    @State private var profile: GuideSpecies?
+
+    var body: some View {
+        Button {
+            guard let code = pulseDetector.lastPassResult?.species,
+                  let match = guide.guide.species(forCode: code) else { return }
+            profile = match
+        } label: {
+            SpeciesStatCellContent(pulseDetector: pulseDetector, guide: guide, tourDemo: tourDemo)
+        }
+        .buttonStyle(.plain)
+        .sheet(item: $profile) { species in
+            SpeciesProfileSheet(species: species, store: guide, rangeStore: rangeStore)
+        }
+        .tourTarget(.speciesID)
+    }
+}
+
+/// The readout proper, with a stale-after-30s red tint. `TimelineView`
+/// re-evaluates once a second so the ID turns red as it ages without needing a
+/// pulse (or any other state change) to trigger a redraw — already
+/// self-contained (the `pulseDetector.lastPassResult`/`lastPassDate` reads
+/// happen inside the `TimelineView` content closure, not synchronously during
+/// the parent's body).
+private struct SpeciesStatCellContent: View {
+    let pulseDetector: PulseDetector
+    let guide: SpeciesGuideStore
+    var tourDemo: Bool = false
+
+    /// The tour's stand-in ID. Deliberately a species the bundled guide has a
+    /// page for, so the book affordance the tour card describes is really
+    /// showing — not a mocked-up glyph that wouldn't appear for this code in
+    /// normal use.
+    private static let demoCode = "MYLU"
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
@@ -58,17 +107,12 @@ private struct SpeciesStatCell: View {
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(.secondary)
                 if let pass = pulseDetector.lastPassResult {
-                    HStack(alignment: .center, spacing: 4) {
-                        Text(pass.species)
-                            .font(.system(size: 15, weight: .semibold))
-                            .foregroundStyle(isStale ? .red : .primary)
-                        VStack(alignment: .leading, spacing: 0) {
-                            Text("\(pulseDetector.lastPassPulseCount)p")
-                            Text(String(format: "%.0f%%", pass.confidence * 100))
-                        }
-                        .font(.system(size: 8))
-                        .foregroundStyle(.secondary)
-                    }
+                    idRow(code: pass.species,
+                          pulses: pulseDetector.lastPassPulseCount,
+                          confidence: Double(pass.confidence),
+                          isStale: isStale)
+                } else if tourDemo {
+                    idRow(code: Self.demoCode, pulses: 8, confidence: 0.92, isStale: false)
                 } else {
                     Text("–")
                         .font(.title3.weight(.semibold))
@@ -77,6 +121,39 @@ private struct SpeciesStatCell: View {
             .frame(maxWidth: .infinity)
             .minimumScaleFactor(0.6)
             .lineLimit(1)
+            // The whole cell, including the padding around the text, is the tap
+            // target — a 15 pt species code is too small to hit reliably in the
+            // dark, which is when this app is used.
+            .contentShape(Rectangle())
+            .accessibilityHint(pulseDetector.lastPassResult
+                .flatMap { guide.guide.species(forCode: $0.species) } != nil
+                ? "Tap to open the field guide page" : "")
+        }
+    }
+
+    /// Code + pulse count + confidence, plus the guide affordance when the code
+    /// has a page behind it. Shared by the live readout and the tour stand-in so
+    /// the two can't drift apart visually.
+    private func idRow(code: String, pulses: Int, confidence: Double, isStale: Bool) -> some View {
+        HStack(alignment: .center, spacing: 4) {
+            Text(code)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(isStale ? .red : .primary)
+            VStack(alignment: .leading, spacing: 0) {
+                Text("\(pulses)p")
+                Text(String(format: "%.0f%%", confidence * 100))
+            }
+            .font(.system(size: 8))
+            .foregroundStyle(.secondary)
+            // The only cue that the cell is tappable, shown just for the species
+            // that actually have a guide page. Small and tertiary on purpose:
+            // this is a live readout first, and the numbers next to it are what
+            // the cell is for.
+            if guide.guide.species(forCode: code) != nil {
+                Image(systemName: "book.closed")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+            }
         }
     }
 }
@@ -89,6 +166,13 @@ private struct SpeciesStatCell: View {
 /// the same failure mode the amplitude meter had before it was scoped down.
 struct PulseStatsRow: View {
     let pulseDetector: PulseDetector
+    /// Only used to resolve the identified species code to a guide page for
+    /// `SpeciesStatCell` — held as a reference and never read in this body, so
+    /// it adds no invalidation of its own.
+    let guide: SpeciesGuideStore
+    let rangeStore: SpeciesRangeStore
+    /// Passed straight through to `SpeciesStatCell` — see its own doc comment.
+    var tourDemo: Bool = false
 
     var body: some View {
         // 1 Hz TimelineView so the last-pulse stats age out on their own —
@@ -106,7 +190,8 @@ struct PulseStatsRow: View {
                 statDivider
                 StatCell(title: "Pulses", value: "\(pulseDetector.pulseCount)", unit: "")
                 statDivider
-                SpeciesStatCell(pulseDetector: pulseDetector)
+                SpeciesStatCell(pulseDetector: pulseDetector, guide: guide,
+                                rangeStore: rangeStore, tourDemo: tourDemo)
             }
         }
     }
@@ -120,6 +205,10 @@ struct PulseStatsRow: View {
 /// `PulseStatsRow`.
 struct PulseStatsColumn: View {
     let pulseDetector: PulseDetector
+    /// See `PulseStatsRow`.
+    let guide: SpeciesGuideStore
+    let rangeStore: SpeciesRangeStore
+    var tourDemo: Bool = false
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
@@ -135,7 +224,9 @@ struct PulseStatsColumn: View {
                 Divider()
                 StatCell(title: "Pulses", value: "\(pulseDetector.pulseCount)", unit: "").frame(maxHeight: .infinity)
                 Divider()
-                SpeciesStatCell(pulseDetector: pulseDetector).frame(maxHeight: .infinity)
+                SpeciesStatCell(pulseDetector: pulseDetector, guide: guide,
+                                rangeStore: rangeStore, tourDemo: tourDemo)
+                    .frame(maxHeight: .infinity)
             }
         }
     }

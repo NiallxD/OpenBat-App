@@ -13,12 +13,66 @@
 
 import SwiftUI
 
+/// Cached formatters — `DateFormatter()` init is expensive (locale/calendar setup),
+/// and these are read once per row per list body evaluation.
+private enum RecordingDateFormatters {
+    static let timeMedium: DateFormatter = { let f = DateFormatter(); f.timeStyle = .medium; return f }()
+    static let dateTimeMedium: DateFormatter = {
+        let f = DateFormatter(); f.dateStyle = .medium; f.timeStyle = .medium; return f
+    }()
+}
+
+// MARK: - Thumbnail loading
+
+/// Fills in a Recording's spectrogram image without ever blocking the view it
+/// belongs to.
+///
+/// The awkward part is the reinstall case: the library (recordings.json) syncs
+/// back from iCloud almost immediately, but the spectrogram JPEGs arrive
+/// gradually afterwards, so a first pass over a screenful of rows legitimately
+/// finds nothing to decode. `ClassificationStore.load` reports that as
+/// `awaitingDownload` rather than reading the placeholder (which is what used to
+/// block), and this retries on a backing-off clock so thumbnails trickle in as
+/// their bytes land instead of the list appearing frozen until they all have.
+/// Cancellation is SwiftUI's: `.task(id:)` tears this down when the row goes away,
+/// so an offscreen row stops polling on its own.
+enum RecordingThumbnailLoader {
+    /// Longer edge to decode for a list row's 56 × 40 slot. `.fill` of a 4:1
+    /// spectrogram scales to the slot's HEIGHT, so ~480 px of width is what
+    /// actually gets sampled at @3x — 512 is that, rounded, and ~1/64th the
+    /// pixels of the stored 4096-wide original.
+    static let rowMaxPixelSize: CGFloat = 512
+    /// The detail page shows the overview at 180 pt tall, scrolling horizontally
+    /// at its native aspect — 2048 covers that at @3x without carrying the full
+    /// 4096 × 1024 bitmap around.
+    static let detailMaxPixelSize: CGFloat = 2048
+
+    @MainActor
+    static func load(_ recording: Recording, store: ClassificationStore,
+                     maxPixelSize: CGFloat) async -> UIImage? {
+        var delay = Duration.seconds(1)
+        while !Task.isCancelled {
+            switch await store.loadSpectrogramImage(for: recording, maxPixelSize: maxPixelSize) {
+            case .loaded(let image):
+                return image
+            case .unavailable:
+                return nil
+            case .awaitingDownload:
+                do { try await Task.sleep(for: delay) } catch { return nil }
+                delay = min(delay * 2, .seconds(20))
+            }
+        }
+        return nil
+    }
+}
+
 // MARK: - Row
 
 struct RecordingRow: View {
     let recording: Recording
     let store: ClassificationStore
     let consent: ConsentStore
+    @State private var image: UIImage?
 
     var body: some View {
         HStack(spacing: 12) {
@@ -48,6 +102,11 @@ struct RecordingRow: View {
             }
         }
         .padding(.vertical, 2)
+        .task(id: recording.id) {
+            image = await RecordingThumbnailLoader.load(
+                recording, store: store,
+                maxPixelSize: RecordingThumbnailLoader.rowMaxPixelSize)
+        }
     }
 
     /// Tapping this IS how a recording gets uploaded now — there's no separate
@@ -120,8 +179,8 @@ struct RecordingRow: View {
     }
 
     @ViewBuilder private var thumbnail: some View {
-        if let img = store.spectrogramImage(for: recording) {
-            Image(uiImage: img)
+        if let image {
+            Image(uiImage: image)
                 .resizable()
                 .interpolation(.high)
                 .aspectRatio(contentMode: .fill)
@@ -136,7 +195,7 @@ struct RecordingRow: View {
     }
 
     static func time(_ d: Date) -> String {
-        let f = DateFormatter(); f.timeStyle = .medium; return f.string(from: d)
+        RecordingDateFormatters.timeMedium.string(from: d)
     }
 
     static func durationString(_ seconds: Double) -> String {
@@ -152,6 +211,7 @@ struct RecordingDetailView: View {
     @Bindable var store: ClassificationStore
     /// Shared with SessionsView/PlaybackListView via the same UserDefaults key.
     @AppStorage("display.showNoID") private var showNoID = false
+    @State private var image: UIImage?
 
     /// Every pass whose pulses fall inside this recording's time span — the
     /// per-pulse ID detail, same rows/detail screen the rest of the app uses.
@@ -199,15 +259,20 @@ struct RecordingDetailView: View {
         }
         .navigationTitle(recording.commonName)
         .navigationBarTitleDisplayMode(.inline)
+        .task(id: recording.id) {
+            image = await RecordingThumbnailLoader.load(
+                recording, store: store,
+                maxPixelSize: RecordingThumbnailLoader.detailMaxPixelSize)
+        }
     }
 
     @ViewBuilder private var spectrogramSection: some View {
-        if let img = store.spectrogramImage(for: recording) {
+        if let image {
             // Fixed display height, native aspect ratio — a long bout renders a wide
             // image, so it scrolls horizontally rather than being squashed to fit.
-            let aspect = img.size.width / max(img.size.height, 1)
+            let aspect = image.size.width / max(image.size.height, 1)
             ScrollView(.horizontal, showsIndicators: true) {
-                Image(uiImage: img)
+                Image(uiImage: image)
                     .resizable()
                     .interpolation(.high)
                     .frame(width: 180 * aspect, height: 180)
@@ -227,8 +292,7 @@ struct RecordingDetailView: View {
     static func durationString(_ seconds: Double) -> String { RecordingRow.durationString(seconds) }
 
     private static func fullTimestamp(_ d: Date) -> String {
-        let f = DateFormatter(); f.dateStyle = .medium; f.timeStyle = .medium
-        return f.string(from: d)
+        RecordingDateFormatters.dateTimeMedium.string(from: d)
     }
 }
 

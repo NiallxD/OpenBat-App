@@ -73,9 +73,9 @@ struct MicCalibratorTests {
     @Test func steadyQuietNoiseProducesACurve() {
         let seconds = 0.1
         let samples = (0..<sampleCount(forSeconds: seconds)).map { _ in Float.random(in: -0.001...0.001) }
-        let calibrator = MicCalibrator(sampleRate: sampleRate, micName: "Test Mic", captureSeconds: seconds)
+        let calibrator = MicCalibrator(sampleRate: sampleRate, captureSeconds: seconds)
         calibrator.feed(makeBuffer(samples))
-        guard case .success(let curve) = calibrator.finish() else {
+        guard case .success(let curve) = calibrator.finish(micName: "Test Mic") else {
             Issue.record("Expected steady quiet noise to produce a curve")
             return
         }
@@ -95,9 +95,9 @@ struct MicCalibratorTests {
         for i in burstStart..<min(burstStart + 4000, samples.count) {
             samples[i] = Float.random(in: -0.3...0.3)
         }
-        let calibrator = MicCalibrator(sampleRate: sampleRate, micName: "Test Mic", captureSeconds: seconds)
+        let calibrator = MicCalibrator(sampleRate: sampleRate, captureSeconds: seconds)
         calibrator.feed(makeBuffer(samples))
-        guard case .failure(let reason) = calibrator.finish() else {
+        guard case .failure(let reason) = calibrator.finish(micName: "Test Mic") else {
             Issue.record("Expected a loud transient to fail calibration")
             return
         }
@@ -108,9 +108,9 @@ struct MicCalibratorTests {
         let seconds = 0.1
         var samples = (0..<sampleCount(forSeconds: seconds)).map { _ in Float.random(in: -0.001...0.001) }
         samples[100] = 0.999 // input overload / handling noise
-        let calibrator = MicCalibrator(sampleRate: sampleRate, micName: "Test Mic", captureSeconds: seconds)
+        let calibrator = MicCalibrator(sampleRate: sampleRate, captureSeconds: seconds)
         calibrator.feed(makeBuffer(samples))
-        guard case .failure(let reason) = calibrator.finish() else {
+        guard case .failure(let reason) = calibrator.finish(micName: "Test Mic") else {
             Issue.record("Expected clipping to fail calibration")
             return
         }
@@ -120,9 +120,9 @@ struct MicCalibratorTests {
     @Test func deadInputFails() {
         let seconds = 0.1
         let samples = [Float](repeating: 0, count: sampleCount(forSeconds: seconds))
-        let calibrator = MicCalibrator(sampleRate: sampleRate, micName: "Test Mic", captureSeconds: seconds)
+        let calibrator = MicCalibrator(sampleRate: sampleRate, captureSeconds: seconds)
         calibrator.feed(makeBuffer(samples))
-        guard case .failure(let reason) = calibrator.finish() else {
+        guard case .failure(let reason) = calibrator.finish(micName: "Test Mic") else {
             Issue.record("Expected a dead/silent input to fail calibration")
             return
         }
@@ -133,9 +133,9 @@ struct MicCalibratorTests {
         let targetSeconds = 1.0
         // Only a tenth of the samples the target duration needs.
         let samples = (0..<sampleCount(forSeconds: targetSeconds / 10)).map { _ in Float.random(in: -0.001...0.001) }
-        let calibrator = MicCalibrator(sampleRate: sampleRate, micName: "Test Mic", captureSeconds: targetSeconds)
+        let calibrator = MicCalibrator(sampleRate: sampleRate, captureSeconds: targetSeconds)
         calibrator.feed(makeBuffer(samples))
-        guard case .failure(let reason) = calibrator.finish() else {
+        guard case .failure(let reason) = calibrator.finish(micName: "Test Mic") else {
             Issue.record("Expected a short capture to fail calibration")
             return
         }

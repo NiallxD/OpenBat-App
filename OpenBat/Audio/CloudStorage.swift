@@ -261,4 +261,25 @@ nonisolated enum CloudStorage {
     static func ensureDownloaded(_ url: URL) {
         try? FileManager.default.startDownloadingUbiquitousItem(at: url)
     }
+
+    /// Whether `url`'s contents are actually on this device — as opposed to
+    /// existing only as an iCloud placeholder (e.g. right after a delete/
+    /// reinstall, before the library's files have re-synced). A non-ubiquitous
+    /// file (nil status — plain local storage, or iCloud never provisioned)
+    /// reads as downloaded, since there's nothing to wait for.
+    ///
+    /// Checking this before a read matters for anything called from a `List`
+    /// row's `.task` — `UIImage(contentsOfFile:)`/`Data(contentsOf:)` on a
+    /// not-yet-downloaded ubiquitous file can synchronously wait on the
+    /// on-demand download rather than failing fast, and a screen full of rows
+    /// all doing that at once (every recording after a fresh reinstall, before
+    /// anything has re-synced) is what read as the app "hanging" generating
+    /// thumbnails. Callers should treat `false` as "not ready yet, skip this
+    /// read" and call `ensureDownloaded` to actually request the bytes.
+    static func isDownloaded(_ url: URL) -> Bool {
+        guard let status = try? url.resourceValues(forKeys: [.ubiquitousItemDownloadingStatusKey])
+            .ubiquitousItemDownloadingStatus
+        else { return true }
+        return status != .notDownloaded
+    }
 }

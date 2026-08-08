@@ -123,6 +123,18 @@ final class AudioEngineController {
     /// realtime audio thread — keep work minimal and non-blocking.
     var bufferSink: (@Sendable (AVAudioPCMBuffer) -> Void)?
 
+    // MARK: Demo mode
+
+    /// Display name of the file currently feeding the pipeline in place of the
+    /// microphone, or nil for normal capture. Set by `startDemo`, cleared by
+    /// `endDemo` — there is deliberately no way to leave demo mode by accident,
+    /// since a demo that silently reverted to the mic would be worse than one
+    /// that has to be ended explicitly.
+    private(set) var demoFileName: String?
+    var isDemoMode: Bool { demoURL != nil }
+    private var demoURL: URL?
+    private var demoSource: DemoFileSource?
+
     // Capture stats are accumulated on the realtime audio thread (under a lock)
     // and flushed to the @Observable `diagnostics` at a modest rate. Updating the
     // UI on every callback (~90/s) floods the main thread and starves the
@@ -140,6 +152,14 @@ final class AudioEngineController {
     /// thread and flushed to diagnostics — the only reliable source of the true rate.
     private nonisolated(unsafe) var latestBufferSampleRate: Double = 0
     private nonisolated(unsafe) var latestBufferChannels: Int = 0
+    // Mic-QA running stats — accumulated since the current capture's start(),
+    // reset by `resetSessionStats()`. See `AudioDiagnostics`'s doc comments for
+    // what each one is for.
+    private nonisolated(unsafe) var sessionNoiseFloorDB: Float = 0
+    private nonisolated(unsafe) var sessionPeakDB: Float = AudioLevel.minDB
+    private nonisolated(unsafe) var latestDCOffset: Float = 0
+    private nonisolated(unsafe) var sessionClippedCount = 0
+    private nonisolated(unsafe) var sessionTotalSamples: Int64 = 0
     private var statsTimer: Timer?
     private let statsFlushRate = 15.0 // Hz
     /// Idle-time poll for mic plug/unplug — see `prepareInputMonitoring()`.
@@ -233,12 +253,18 @@ final class AudioEngineController {
     func start() async {
         guard !isRunning else { return }
 
+        if let demoURL {
+            await startDemoCapture(url: demoURL)
+            return
+        }
+
         guard await requestPermission() else {
             status = "Microphone permission denied. Enable it in Settings."
             return
         }
 
         do {
+            resetSessionStats()
             try await configureSession()
             try startEngine()
             startStatsTimer()
@@ -255,7 +281,13 @@ final class AudioEngineController {
     func stop() {
         statsTimer?.invalidate()
         statsTimer = nil
-        engine.inputNode.removeTap(onBus: 0)
+        demoSource?.stop()
+        demoSource = nil
+        // Never touch `inputNode` on the demo path: it was never tapped, and
+        // merely accessing it instantiates the input unit — which under the
+        // `.playback` category demo mode uses (and on a device with no input at
+        // all, e.g. the simulator) is a needless way to fail.
+        if !isDemoMode { engine.inputNode.removeTap(onBus: 0) }
         if engine.isRunning { engine.stop() }
         sourceNode = nil
         // Deactivation is a courtesy to other apps and doesn't need to block the
@@ -271,12 +303,123 @@ final class AudioEngineController {
         // Drop the meter to silence — otherwise it freezes at the last live value.
         statsLock.lock(); latestLevelDB = AudioLevel.minDB; statsLock.unlock()
         diagnostics.currentLevelDB = AudioLevel.minDB
-        if status.hasPrefix("Capturing") || status.hasPrefix("Running") {
+        if status.hasPrefix("Capturing") || status.hasPrefix("Running") || status.hasPrefix("Demo") {
             status = "Stopped"
         }
     }
 
+    // MARK: Demo mode
+
+    /// Point the pipeline at `url` instead of the microphone and start feeding.
+    /// A running capture is stopped first, the same as a listen-mode switch.
+    /// `name` is what the UI shows (the bundled clip's title, or a recording's
+    /// species/date label) — `url.lastPathComponent` is a UUID for app-made
+    /// recordings and means nothing to a viewer.
+    func startDemo(url: URL, name: String) async {
+        if isRunning { stop() }
+        demoURL = url
+        demoFileName = name
+        await start()
+    }
+
+    /// Return to the microphone. Stops the demo feed; does NOT resume live
+    /// capture — the user starts that themselves, so ending a demo can't
+    /// surprise anyone by opening the mic.
+    func endDemo() {
+        if isRunning { stop() }
+        demoURL = nil
+        demoFileName = nil
+        demoSource = nil
+        status = "Demo ended"
+        // Demo mode suppressed these (see `updateInputDiagnostics`); refresh now
+        // rather than waiting up to 2 s for the idle poll to correct the panel.
+        updateInputDiagnostics()
+    }
+
+    /// The demo counterpart to `startEngine()`. Deliberately never touches
+    /// `engine.inputNode`: with no tap and no input unit, this path needs no
+    /// microphone permission and no record-capable session, which is what lets
+    /// the whole pipeline run in the simulator.
+    private func startDemoCapture(url: URL) async {
+        do {
+            resetSessionStats()
+            let source = try DemoFileSource(url: url)
+            let rate = source.sampleRate
+
+            // The engine only exists here to carry the listening source node to
+            // the speaker. With listening off there is no graph to build at all.
+            if isListening {
+                try await configureSession(playbackOnly: true)
+                engine = AVAudioEngine()
+                sourceNode = nil
+                attachListenOutput()
+                engine.prepare()
+                try engine.start()
+            }
+
+            // Same fields `startEngine()`/`updateInputDiagnostics()` fill from
+            // the hardware, sourced from the file instead. Everything downstream
+            // is rate-parametric, so a demo clip at a rate other than 384 kHz
+            // still drives the pipeline correctly — it just has a lower Nyquist.
+            diagnostics.sessionSampleRate = rate
+            diagnostics.actualSampleRate = rate
+            diagnostics.channelCount = source.channelCount
+            diagnostics.inputName = "Demo — \(demoFileName ?? url.lastPathComponent)"
+            diagnostics.inputUID = "demo"
+            diagnostics.isUSBInput = false
+            diagnostics.usbMicAvailable = false
+            syncSlowDiagnostics()
+
+            switch listenMode {
+            case .heterodyne:
+                heterodyne.reset(inputSampleRate: rate)
+            case .adaptiveTimeExpansion:
+                adaptiveTimeExpansion.reset(inputSampleRate: rate)
+            case .off, .timeExpansion:
+                break
+            }
+
+            // Identical fan-out to the live tap closure in `startEngine()`.
+            let sink = bufferSink
+            let hetero: HeterodyneProcessor? = (listenMode == .heterodyne) ? heterodyne : nil
+            let adaptive: AdaptiveTimeExpansionProcessor? = (listenMode == .adaptiveTimeExpansion) ? adaptiveTimeExpansion : nil
+            source.start { [weak self] buffer in
+                sink?(buffer)
+                hetero?.process(buffer)
+                adaptive?.process(buffer)
+                self?.consume(buffer)
+            }
+            demoSource = source
+
+            startStatsTimer()
+            isRunning = true
+            status = "Demo: \(demoFileName ?? url.lastPathComponent) at \(Int(rate)) Hz"
+        } catch {
+            status = "Demo failed to start: \(error.localizedDescription)"
+            stop()
+        }
+    }
+
     // MARK: Stats flushing
+
+    /// Zeroes the mic-QA running stats for a fresh test run. Called at the top
+    /// of `start()` so every capture gives a clean set of numbers to read after
+    /// `stop()` — not reset by `stop()` itself, so those numbers stay on screen
+    /// to be read/copied after the test finishes.
+    private func resetSessionStats() {
+        statsLock.lock()
+        sessionNoiseFloorDB = 0
+        sessionPeakDB = AudioLevel.minDB
+        latestDCOffset = 0
+        sessionClippedCount = 0
+        sessionTotalSamples = 0
+        statsLock.unlock()
+        diagnostics.noiseFloorDB = 0
+        diagnostics.peakLevelDB = AudioLevel.minDB
+        diagnostics.dcOffsetPercent = 0
+        diagnostics.clippedSampleCount = 0
+        diagnostics.totalSampleCount = 0
+    }
 
     private func startStatsTimer() {
         statsTimer?.invalidate()
@@ -294,6 +437,11 @@ final class AudioEngineController {
         let level = latestLevelDB
         let rate = latestBufferSampleRate
         let channels = latestBufferChannels
+        let noiseFloor = sessionNoiseFloorDB
+        let peak = sessionPeakDB
+        let dcOffset = latestDCOffset
+        let clipped = sessionClippedCount
+        let totalSamples = sessionTotalSamples
         statsLock.unlock()
         diagnostics.bufferCount = count
         diagnostics.currentLevelDB = level
@@ -301,6 +449,11 @@ final class AudioEngineController {
         // advertised format set at startEngine can disagree with the real buffers).
         if rate > 0 { diagnostics.actualSampleRate = rate }
         if channels > 0 { diagnostics.channelCount = channels }
+        diagnostics.noiseFloorDB = noiseFloor
+        diagnostics.peakLevelDB = peak
+        diagnostics.dcOffsetPercent = dcOffset * 100
+        diagnostics.clippedSampleCount = clipped
+        diagnostics.totalSampleCount = totalSamples
         syncSlowDiagnostics()
         updateAutoTune()
     }
@@ -340,11 +493,24 @@ final class AudioEngineController {
     /// duration, which is why switching listen mode mid-session felt unresponsive.
     /// The actual session calls are pushed onto a detached task; only the quick
     /// `@Observable` diagnostics update happens back on the main actor.
-    private func configureSession() async throws {
+    /// - Parameter playbackOnly: demo mode with listening on — the engine needs
+    ///   an active session to reach the speaker, but no input. `.playback`
+    ///   keeps demo mode entirely off the record path: no permission prompt, no
+    ///   input route negotiation, nothing to go wrong where there's no mic.
+    private func configureSession(playbackOnly: Bool = false) async throws {
         // Let a just-fired stop() finish deactivating before we reactivate —
         // otherwise setActive(true) here can race setActive(false) still in
         // flight from stop(), which made the session get stuck renegotiating.
         await pendingDeactivation?.value
+        if playbackOnly {
+            try await Task.detached(priority: .userInitiated) {
+                let session = AVAudioSession.sharedInstance()
+                try session.setCategory(.playback, mode: .default, options: [])
+                try session.setActive(true)
+            }.value
+            isConfigured = true
+            return
+        }
         let listening = isListening
         try await Task.detached(priority: .userInitiated) {
             let session = AVAudioSession.sharedInstance()
@@ -375,6 +541,11 @@ final class AudioEngineController {
     }
 
     private func updateInputDiagnostics() {
+        // In demo mode the "input" is a file, and `startDemoCapture` has already
+        // written the right values here. Letting the idle poll or a route change
+        // overwrite them would put the real mic's name back in the diagnostics
+        // panel and the mic pill while a file is actually feeding the pipeline.
+        guard !isDemoMode else { return }
         let session = AVAudioSession.sharedInstance()
         let port = session.currentRoute.inputs.first
         diagnostics.inputName = port?.portName ?? "—"
@@ -433,21 +604,34 @@ final class AudioEngineController {
             sink?(buffer)
             hetero?.process(buffer)
             adaptive?.process(buffer)
-            guard let self else { return }
-            let level = AudioLevel.rmsDB(of: buffer)
-            // Cheap, lock-guarded accumulation only — the UI flush happens on a
-            // timer (see `flushStats`) to keep the main thread free for rendering.
-            self.statsLock.lock()
-            self.pendingBufferCount += 1
-            self.latestLevelDB = level
-            // The buffer's own format is the ground truth for the delivered rate.
-            self.latestBufferSampleRate = buffer.format.sampleRate
-            self.latestBufferChannels = Int(buffer.format.channelCount)
-            self.statsLock.unlock()
+            self?.consume(buffer)
         }
 
         engine.prepare()
         try engine.start()
+    }
+
+    /// Accumulate one buffer's capture stats. Called on the realtime audio
+    /// thread from the tap, and on `DemoFileSource`'s queue in demo mode —
+    /// `nonisolated` because neither is the main actor. Everything it touches is
+    /// either a `let` or guarded by `statsLock`.
+    private nonisolated func consume(_ buffer: AVAudioPCMBuffer) {
+        let level = AudioLevel.rmsDB(of: buffer)
+        let analysis = AudioLevel.analyze(buffer)
+        // Cheap, lock-guarded accumulation only — the UI flush happens on a
+        // timer (see `flushStats`) to keep the main thread free for rendering.
+        statsLock.lock()
+        pendingBufferCount += 1
+        latestLevelDB = level
+        // The buffer's own format is the ground truth for the delivered rate.
+        latestBufferSampleRate = buffer.format.sampleRate
+        latestBufferChannels = Int(buffer.format.channelCount)
+        sessionNoiseFloorDB = min(sessionNoiseFloorDB, level)
+        sessionPeakDB = max(sessionPeakDB, analysis.peakDB)
+        latestDCOffset = analysis.dcOffset
+        sessionClippedCount += analysis.clipped
+        sessionTotalSamples += Int64(analysis.sampleCount)
+        statsLock.unlock()
     }
 
     /// Attach a source node that pulls the active listening processor's 48 kHz
@@ -601,6 +785,11 @@ final class AudioEngineController {
     /// another change, hanging the app.
     private func handleRouteChange(_ reason: AVAudioSession.RouteChangeReason) async {
         updateInputDiagnostics()
+
+        // A demo feed has no input to rebind, and the restart below would tear
+        // down the file source to re-tap a mic it never used. Plugging the Griff
+        // in mid-demo is a route change worth ignoring.
+        guard !isDemoMode else { return }
 
         switch reason {
         case .newDeviceAvailable, .oldDeviceUnavailable:

@@ -45,6 +45,38 @@ struct AudioDiagnostics: Equatable {
     /// Most recent buffer's RMS level in dBFS (~ -80...0), for the level meter.
     var currentLevelDB: Float = -80
 
+    // MARK: Mic QA metrics
+    //
+    // Running stats accumulated since the current capture started (reset in
+    // `AudioEngineController.start()`/`stop()`), meant for comparing microphone
+    // units unit-to-unit rather than for the live meter above. Read these after
+    // running the same short, repeatable test (e.g. N seconds in a quiet box,
+    // then N seconds of a known loud source) so numbers are comparable across
+    // units.
+
+    /// Quietest buffer RMS seen this session, in dBFS — the mic's self-noise
+    /// floor. Capture in a quiet enclosure; lower (more negative) is better.
+    /// Starts at 0 dBFS (loudest possible), so the very first real buffer
+    /// always lowers it to an actual reading.
+    var noiseFloorDB: Float = 0
+    /// Loudest buffer RMS seen this session, in dBFS — headroom/overload check.
+    /// Close to 0 dBFS indicates clipping risk on loud calls.
+    var peakLevelDB: Float = AudioLevel.minDB
+    /// DC offset of the most recent buffer, as a percentage of full scale.
+    /// A healthy capsule/ADC should center near 0%; a persistent nonzero
+    /// offset points at a hardware fault (bad bias, faulty ADC channel).
+    var dcOffsetPercent: Float = 0
+    /// Samples at or above `AudioLevel.clipThreshold` this session — counts
+    /// actual overload events, not just a level reading close to 0 dBFS.
+    var clippedSampleCount: Int = 0
+    /// Total samples processed this session, for turning `clippedSampleCount`
+    /// into a rate.
+    var totalSampleCount: Int64 = 0
+    /// Fraction of samples this session that clipped, 0...1.
+    var clipRate: Double {
+        totalSampleCount > 0 ? Double(clippedSampleCount) / Double(totalSampleCount) : 0
+    }
+
     /// Convenience: native rate is anything meaningfully above the 48 kHz ceiling.
     var isNativeRate: Bool { actualSampleRate > 60_000 }
 }
@@ -57,6 +89,11 @@ struct AudioDiagnostics: Equatable {
 nonisolated enum AudioLevel {
     /// Floor for the dBFS meter so silence maps to a finite value.
     static let minDB: Float = -80
+    /// Samples at or above this magnitude (full scale = 1.0) count as clipped.
+    /// Set just under 0 dBFS rather than exactly 1.0 so a capsule/ADC that's
+    /// pinned at the rail for a few samples below true full scale still gets
+    /// caught, not just mathematically exact clipping.
+    static let clipThreshold: Float = 0.98
 
     /// Root-mean-square level of the first channel of `buffer`, in dBFS.
     ///
@@ -73,6 +110,31 @@ nonisolated enum AudioLevel {
         guard rms > 0 else { return minDB }
         let db = 20 * log10(rms)
         return max(db, minDB)
+    }
+
+    /// Peak level (dBFS), DC offset (fraction of full scale, signed), and
+    /// clipped-sample count for the first channel of `buffer` — the mic-QA
+    /// metrics surfaced in `AudioDiagnostics`. One Accelerate pass for peak
+    /// and mean, plus a scalar pass for the clip count (buffers are at most a
+    /// few thousand frames, so this stays cheap on the realtime tap).
+    static func analyze(_ buffer: AVAudioPCMBuffer) -> (peakDB: Float, dcOffset: Float, clipped: Int, sampleCount: Int) {
+        guard let channel = buffer.floatChannelData?[0] else { return (minDB, 0, 0, 0) }
+        let frameCount = Int(buffer.frameLength)
+        guard frameCount > 0 else { return (minDB, 0, 0, 0) }
+
+        var peakMagnitude: Float = 0
+        vDSP_maxmgv(channel, 1, &peakMagnitude, vDSP_Length(frameCount))
+        let peakDB = peakMagnitude > 0 ? max(20 * log10(peakMagnitude), minDB) : minDB
+
+        var dcOffset: Float = 0
+        vDSP_meanv(channel, 1, &dcOffset, vDSP_Length(frameCount))
+
+        var clipped = 0
+        for i in 0..<frameCount where abs(channel[i]) >= clipThreshold {
+            clipped += 1
+        }
+
+        return (peakDB, dcOffset, clipped, frameCount)
     }
 
     /// Normalised 0...1 position for a dBFS value, for `ProgressView` / bars.

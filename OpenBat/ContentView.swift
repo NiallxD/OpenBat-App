@@ -38,6 +38,8 @@ struct ContentView: View {
     @State private var micCalSettings = MicCalibrationSettings()
     @State private var adaptiveTESettings = AdaptiveTimeExpansionSettings()
     @State private var classStore = ClassificationStore()
+    @State private var liveActivity = LiveActivityController()
+    @State private var detectionPump = BackgroundDetectionPump()
     @State private var location = LocationProvider()
     // Not `@State`: the store outlives any one screen and is shared with
     // onboarding. `@Observable` tracks property reads in `body` regardless of
@@ -66,8 +68,27 @@ struct ContentView: View {
     @State private var tourActive = false
     @State private var tourPending = false
     @State private var tourIndex = 0
+    /// Set when the CURRENT tour run was auto-launched from onboarding's "Take
+    /// the Tour" step (see OnboardingState.shouldAutoStartTour) — on that path
+    /// only, finishing the tour opens ONE follow-up sheet: `SuggestedModelSheet`
+    /// if the user's location suggests a model, otherwise Start Detecting
+    /// directly — so the tour leads straight into something actionable instead
+    /// of dropping the user back on an idle screen. Not set for a tour launched
+    /// from the Info sheet mid-use, where popping either sheet up unsolicited
+    /// would be unwelcome.
+    @State private var tourWillPromptStart = false
+    /// Set from `finish` (below) when the onboarding tour just ended and the
+    /// user's location suggests a model — drives `SuggestedModelSheet`. Standalone:
+    /// dismissing it does NOT also open Start Detecting (see that sheet's own
+    /// modifier below) — the two are deliberately independent.
+    @State private var suggestedModelToOffer: ModelDescriptor?
     @State private var showPulseView = false
     @State private var showBand = false
+    /// Live tuning overlay. Deliberately absent from `menuIsOpen` — see that
+    /// property and `LiveTuningOverlay`'s header comment: adding it there would
+    /// pause the render loop and the processor, which is the one thing the
+    /// overlay exists to avoid.
+    @State private var showTuningOverlay = false
     @State private var landscapePulseVisible = true
     @State private var timeWindowSeconds: Double = 0.5
     @AppStorage("display.bandLow") private var bandLow = 0.0
@@ -164,7 +185,9 @@ struct ContentView: View {
                 .toolbar(tourActive ? .hidden : .visible, for: .navigationBar)
                 .animation(nil, value: tourActive)
                 .sheet(isPresented: $showDiagnostics) {
-                    DiagnosticsView(audio: audio, recorder: recorder)
+                    DiagnosticsView(audio: audio, recorder: recorder, classStore: classStore,
+                                    onStartDemo: startDemo, onEndDemo: endDemo,
+                                    onOpenTuning: { showTuningOverlay = true })
                 }
                 .sheet(isPresented: $showHelp) {
                     SafariView(url: PrivacyLinks.helpURL)
@@ -199,7 +222,18 @@ struct ContentView: View {
                     }
                 }
                 .sheet(isPresented: Binding(
-            get: { autoIDSettings.pendingChangeSummary != nil },
+            // `&& !tourActive`: this fires from AutoIDSettings.refreshPriorsFromGBIFIfNeeded
+            // (ContentView's own onChange(of: location.currentCoordinate)), which can land
+            // squarely in the middle of the guided tour — most obviously right after
+            // onboarding, when the tour auto-starts at the same moment the very first
+            // location fix comes in. A `.sheet` still presents over an active full-screen
+            // overlay, so without this it visibly popped up on top of the dimmed tour.
+            // Suppressing it here doesn't lose the summary — `pendingChangeSummary` stays
+            // set and the binding re-evaluates once `tourActive` goes false, so it still
+            // presents normally after a tour NOT heading into `tourWillPromptStart`'s own
+            // post-tour sheet (which explicitly acknowledges it first — see `finish` below
+            // — since that sheet already surfaces the same recommended-model information).
+            get: { autoIDSettings.pendingChangeSummary != nil && !tourActive },
             set: { if !$0 { autoIDSettings.acknowledgeChangeSummary() } }
         )) {
             if let summary = autoIDSettings.pendingChangeSummary {
@@ -234,6 +268,31 @@ struct ContentView: View {
                                 steps: TourScript.steps,
                                 finish: {
                                     withAnimation(.easeInOut(duration: 0.25)) { tourActive = false }
+                                    if tourWillPromptStart {
+                                        tourWillPromptStart = false
+                                        // Acknowledge any pending GBIF-prior-refresh summary
+                                        // first — it was suppressed while the tour ran (see
+                                        // the sheet above), and would otherwise still be
+                                        // sitting there ready to pop up alongside the two
+                                        // sheets below. SuggestedModelSheet covers the same
+                                        // recommended-model information on its own terms, so
+                                        // there's nothing lost by not showing the old one too.
+                                        autoIDSettings.acknowledgeChangeSummary()
+                                        // Let the dim overlay's own dismiss animation finish
+                                        // before presenting a sheet on top of it. Suggestion
+                                        // first if the location fix landed in time and found
+                                        // one — its own onDismiss chains into Start Detecting;
+                                        // otherwise go straight there.
+                                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                                            if let coordinate = location.currentCoordinate,
+                                               let suggested = ModelRegistry.suggestedModel(for: coordinate),
+                                               suggested.id != autoIDSettings.activeModelID {
+                                                suggestedModelToOffer = suggested
+                                            } else {
+                                                showStartPrompt = true
+                                            }
+                                        }
+                                    }
                                 })
                     // Skip re-diffing the overlay on the constant anchor-preference
                     // churn from the live detector UI — see TourOverlay's ==.
@@ -337,6 +396,17 @@ struct ContentView: View {
             recorder.setPassGates(minConfidence: autoIDSettings.minPassConfidence,
                                   minPulseCount: autoIDSettings.minPassPulseCount)
             pulseDetector.coordinateProvider = { [location] in location.currentCoordinate }
+            // Lock-screen card. `endOrphanedActivities` clears any card left behind by a
+            // crash or force-quit in a previous run — those survive in the system and
+            // would otherwise show a frozen readout from a session that ended days ago.
+            liveActivity.detector = pulseDetector
+            // Reads the controller's own weak detector reference rather than capturing
+            // `pulseDetector` here — the closure is stored *on* the detector, so
+            // capturing it would be a retain cycle.
+            pulseDetector.onPassFinalized = { [liveActivity] in
+                liveActivity.updateFromDetector(force: true)
+            }
+            LiveActivityController.endOrphanedActivities()
             location.store = classStore
             applyBand()
             adaptiveTESettings.apply(to: audio.adaptiveTimeExpansion)
@@ -345,13 +415,36 @@ struct ContentView: View {
             // one-shot fix AutoIDSettingsView already uses, just requested
             // proactively on launch instead of only when that screen is opened.
             location.requestRegionFix()
+
+            // Onboarding's last step sets this right before handing off to
+            // ContentView — consumed once here, immediately, so a later
+            // .onAppear re-fire (e.g. returning from the background) can't
+            // relaunch the tour a second time.
+            if OnboardingState.shared.shouldAutoStartTour {
+                OnboardingState.shared.shouldAutoStartTour = false
+                tourIndex = 0
+                tourWillPromptStart = true
+                // Let this frame land — the tour's `.tourTarget` anchors only exist
+                // once `detectorLayout` has actually mounted — same reasoning as the
+                // Info sheet's tour launch above.
+                DispatchQueue.main.async {
+                    withAnimation(.easeInOut(duration: 0.3)) { tourActive = true }
+                }
+            }
         }
-        .confirmationDialog("Start detecting", isPresented: $showStartPrompt, titleVisibility: .visible) {
-            Button("New Session") { startDetecting(newSession: true) }
-            Button("Just Listening") { startDetecting(newSession: false) }
-            Button("Cancel", role: .cancel) { }
-        } message: {
-            Text("A session logs IDs and a GPS track on a map. Listening just records to the Listening log.")
+        .sheet(isPresented: $showStartPrompt) {
+            StartDetectingSheet(
+                onNewSession: { startDetecting(newSession: true) },
+                onJustListening: { startDetecting(newSession: false) }
+            )
+        }
+        // Shown once, right after an onboarding-triggered tour finishes, if the
+        // user's location suggests a model that isn't already active — see
+        // `finish` below. Standalone: dismissing it (either "Use" or "Not Now")
+        // just closes it — it does NOT chain into Start Detecting, which stays a
+        // separate, deliberate action from the transport bar.
+        .sheet(item: $suggestedModelToOffer) { model in
+            SuggestedModelSheet(model: model, onUse: { autoIDSettings.activeModelID = model.id })
         }
         // AudioEngineController.start() sets this exact status string when
         // AVAudioApplication.requestRecordPermission (or a prior denial) blocks
@@ -402,6 +495,10 @@ struct ContentView: View {
                 pulseDetector.finalizePass()
                 recorder.audioStopped()
                 if recorder.isArmed { recorder.setArmed(false) }
+                // Nothing to drain once the engine is down, and a timer left running in
+                // the background is pure battery cost. Covers the interruption path too,
+                // which deliberately doesn't go through stopDetecting().
+                detectionPump.stop()
                 // Session teardown is intentionally NOT done here. It's done explicitly
                 // by stopDetecting(), which is only called on a deliberate user stop.
                 // This preserves the session across transient audio interruptions
@@ -426,6 +523,16 @@ struct ContentView: View {
         // mean "every time the app opens", not just the very first cold launch.
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { location.requestRegionFix() }
+            // Hand draining between the Metal render loop and the background pump. Exactly
+            // one of them owns it: `draw(in:)` only runs while active, the pump only while
+            // not. Without the pump, backgrounding (or just locking the screen) silently
+            // stops pulse detection even though audio keeps flowing — see
+            // BackgroundDetectionPump for the full reasoning.
+            if phase == .active {
+                detectionPump.stop()
+            } else if audio.isRunning {
+                detectionPump.start(processor: processor, detector: pulseDetector)
+            }
         }
         .onDisappear {
             UIApplication.shared.isIdleTimerDisabled = false
@@ -443,7 +550,28 @@ struct ContentView: View {
 
     // MARK: Adaptive layout
 
+    /// Wraps whichever concrete layout applies so the tuning overlay floats over
+    /// all of them — portrait, landscape and both iPad variants — from one place.
     @ViewBuilder private var detectorLayout: some View {
+        ZStack {
+            detectorLayoutBody
+            if showTuningOverlay {
+                LiveTuningOverlay(
+                    audio: audio,
+                    adaptiveTESettings: adaptiveTESettings,
+                    pulseDetector: pulseDetector,
+                    bandLow: $bandLow, bandHigh: $bandHigh,
+                    timeWindowSeconds: $timeWindowSeconds,
+                    maxFrequency: nyquist,
+                    onBandChange: applyBand,
+                    onClose: { showTuningOverlay = false }
+                )
+                .transition(.opacity)
+            }
+        }
+    }
+
+    @ViewBuilder private var detectorLayoutBody: some View {
         if vSizeClass == .compact {
             landscapeLayout
         } else if UIDevice.current.userInterfaceIdiom == .pad {
@@ -532,6 +660,13 @@ struct ContentView: View {
                 sectionMenuContent { Image(systemName: section.icon) }
             }
         }
+        // Belt-and-braces against the inherited-animation bug documented on
+        // `recordPulseAnimation`: this button has no animated state of its own (the
+        // icon swap on a section change is meant to be instant), so clearing the
+        // transaction's animation here means it can never ride along with an ambient
+        // animation set by an unrelated `withAnimation` elsewhere in the same update
+        // — which is what left it slowly throbbing during detection.
+        .transaction { $0.animation = nil }
         .accessibilityLabel("Switch view")
     }
 
@@ -571,6 +706,8 @@ struct ContentView: View {
                 optionsMenuContent { Image(systemName: "gearshape") }
             }
         }
+        // See sectionMenu — same guard, same reason.
+        .transaction { $0.animation = nil }
         .accessibilityLabel("Menu")
     }
 
@@ -633,7 +770,10 @@ struct ContentView: View {
                 // controls move into the spectrogram's own header as a third pill
                 // (see spectrogramHeaderTrailing) instead of floating here — one
                 // less thing overlaid on the view, same controls.
-                landscapeSpectrogramBlock
+                VStack(spacing: spacing) {
+                    landscapeStatusPillRow
+                    landscapeSpectrogramBlock
+                }
 
                 if landscapePulseVisible {
                     VStack(spacing: spacing) {
@@ -689,7 +829,7 @@ struct ContentView: View {
         panel(spectrogramShowsSpeciesID ? "Species ID" : "Spectrogram", tour: .spectrogram) {
             spectrogramHeaderTrailing(showFullScreen: false)
         } content: {
-            spectrogramPanelContent
+            spectrogramPanelContent()
         }
     }
 
@@ -700,7 +840,7 @@ struct ContentView: View {
         panel(spectrogramShowsSpeciesID ? "Species ID" : "Spectrogram", tour: .spectrogram) {
             spectrogramHeaderTrailing(showFullScreen: true)
         } content: {
-            spectrogramPanelContent
+            spectrogramPanelContent(showTunedOverlay: false)
         }
     }
 
@@ -720,7 +860,11 @@ struct ContentView: View {
     /// an if/else branch here would remove SpectrogramView from the tree entirely,
     /// which froze it (and the Metal draw loop) whenever the sibling panel's toggle
     /// forced this ViewBuilder to re-evaluate.
-    private var spectrogramPanelContent: some View {
+    ///
+    /// `showTunedOverlay` is false in landscape: the heterodyne tuning pill moves
+    /// into `landscapeStatusPillRow` above the panel there instead of floating over
+    /// the spectrogram's own corner — see that row's doc comment.
+    private func spectrogramPanelContent(showTunedOverlay: Bool = true) -> some View {
         ZStack {
             SpectrogramView(processor: processor,
                             maxFrequency: nyquist,
@@ -730,7 +874,7 @@ struct ContentView: View {
                             pulseDetector: pulseDetector,
                             isPaused: menuIsOpen,
                             logFrequency: spectrogramLogFrequency)
-                .overlay(alignment: .topTrailing) { tunedPillOverlay }
+                .overlay(alignment: .topTrailing) { if showTunedOverlay { tunedPillOverlay } }
                 .opacity(spectrogramShowsSpeciesID ? 0 : 1)
                 .allowsHitTesting(!spectrogramShowsSpeciesID)
 
@@ -768,9 +912,19 @@ struct ContentView: View {
                     Spacer()
                     playStopButton
                     Spacer()
+                    // Always present (not conditional on audio.isRunning) — see
+                    // controlBar's matching comment: `setListenMode` stops and
+                    // restarts the engine to switch modes, so isRunning flickers
+                    // false→true on every mode switch, and a conditionally-shown
+                    // button with a slide/fade transition animated that flicker as
+                    // a visible glitch on every single toggle. Disabled instead of
+                    // hidden while detection isn't running — same information,
+                    // no layout churn.
                     recordButton
+                        .disabled(!audio.isRunning)
                     Spacer()
                     listenModeCycleButton
+                        .geometryGroup()
                     Spacer()
                 }
                 .controlSize(.regular)
@@ -789,7 +943,8 @@ struct ContentView: View {
     /// meter's 15 Hz churn did before that was fixed. Scoping it here keeps updates
     /// confined to this small view.
     private var statCellsRow: some View {
-        PulseStatsRow(pulseDetector: pulseDetector)
+        PulseStatsRow(pulseDetector: pulseDetector, guide: speciesGuide,
+                      rangeStore: speciesRange, tourDemo: tourActive)
     }
 
     private var statsStrip: some View {
@@ -821,6 +976,28 @@ struct ContentView: View {
             .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 
+    /// Landscape-only status row above the spectrogram panel: the session-status
+    /// (Off/Listening/Session) pill, the speaker-feedback warning, the
+    /// time-expansion drain/missed-pulse pill, the heterodyne tuning pill, and the
+    /// mic-connection pill — moved out of the narrow stats sidebar header (see
+    /// `landscapeStatsSidePanelBody`), which had no room for them once the mic pill
+    /// needed a landscape home too. Sits in its own row rather than overlaid on the
+    /// spectrogram (the tuning pill's old spot) so nothing crowds the spectrogram's
+    /// own header controls. Same top edge as the sidebar's header row — both start
+    /// at y=0 in `landscapeLayout`'s HStack.
+    private var landscapeStatusPillRow: some View {
+        HStack(spacing: 8) {
+            sessionStatusPill
+            speakerFeedbackWarning
+            adaptiveTEStatePill
+            if audio.listenMode == .heterodyne {
+                TunedPillView(audio: audio, nyquist: nyquist)
+            }
+            Spacer()
+            micStatusPill
+        }
+    }
+
     /// Landscape left sidebar: stat cells stacked vertically with the amplitude
     /// meter running as a vertical bar on the right edge. Header lives inside the card.
     private var landscapeStatsSidePanel: some View {
@@ -838,9 +1015,6 @@ struct ContentView: View {
                             .font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(.secondary)
                         Spacer()
-                        speakerFeedbackWarning
-                        adaptiveTEStatePill
-                        sessionStatusPill
                         resetButton
                     }
                     .padding(.horizontal, 8)
@@ -863,7 +1037,8 @@ struct ContentView: View {
     /// Stat cells arranged in a vertical column for the landscape sidebar. Same
     /// scoping rationale as `statCellsRow`.
     private var statCellsColumn: some View {
-        PulseStatsColumn(pulseDetector: pulseDetector)
+        PulseStatsColumn(pulseDetector: pulseDetector, guide: speciesGuide,
+                         rangeStore: speciesRange, tourDemo: tourActive)
     }
 
     /// Vertical amplitude meter for the landscape sidebar. A standalone View struct
@@ -873,8 +1048,9 @@ struct ContentView: View {
         VerticalAmplitudeMeterView(audio: audio, peakHold: peakHold, detector: pulseDetector)
     }
 
-    /// Mic-connection pill for the portrait stats header (the landscape sidebar is
-    /// too narrow for it). A standalone View struct because it reads
+    /// Mic-connection pill: the portrait stats header, and `landscapeStatusPillRow`
+    /// above the spectrogram in landscape (the stats sidebar itself is still too
+    /// narrow for it). A standalone View struct because it reads
     /// `audio.diagnostics`, which mutates at the 15 Hz stats flush — same scoping
     /// rationale as the amplitude meters.
     private var micStatusPill: some View {
@@ -1011,8 +1187,17 @@ struct ContentView: View {
             // spectrogram — same icons and colors as landscapeControlsPanel,
             // just relocated so everything lives in one row.
             if showFullScreen && !landscapePulseVisible {
-                iconPill { playStopButtonCompact; recordButtonCompact; listenModeCycleButtonCompact }
-                    .transition(.opacity.combined(with: .move(edge: .leading)))
+                iconPill {
+                    playStopButtonCompact
+                    // Always present, disabled rather than hidden while not running —
+                    // see controlBar's matching comment for why (setListenMode's
+                    // stop+restart flickers audio.isRunning on every mode switch).
+                    recordButtonCompact
+                        .disabled(!audio.isRunning)
+                    listenModeCycleButtonCompact
+                        .geometryGroup()
+                }
+                .transition(.opacity.combined(with: .move(edge: .leading)))
             }
             iconPill {
                 spectrogramSpeciesIDButton
@@ -1242,9 +1427,26 @@ struct ContentView: View {
             Spacer()
             playStopButton
             Spacer()
+            // Recording only makes sense once detection is actually running, but the
+            // button is always present (not conditionally shown) — see
+            // landscapeControlsPanel's matching comment: `setListenMode` stops and
+            // restarts the engine to switch modes, so `audio.isRunning` flickers
+            // false→true on every heterodyne/time-expansion/off toggle, and a
+            // conditionally-shown button with a slide/fade transition animated that
+            // flicker as a glitch on every single mode switch. Disabled instead of
+            // hidden — same information, no layout churn, and the tour's Record
+            // step always has something to point at.
             recordButton
+                .disabled(!audio.isRunning)
             Spacer()
             listenModeCycleButton
+                // Without this, the listen button's icon animated its own geometry
+                // independently of its button chrome during the Spacer reflow above —
+                // the glyph visibly lagged/shrank in place while the chrome had
+                // already slid to its new position. `.geometryGroup()` (iOS 17+)
+                // makes the button's whole subtree move as one rigid unit instead of
+                // each descendant computing its own interpolation.
+                .geometryGroup()
             Spacer()
         }
         .controlSize(.regular)
@@ -1313,10 +1515,10 @@ struct ContentView: View {
 
     private var playStopButton: some View {
         Button {
-            if audio.isRunning { stopDetecting() }
-            else { showStartPrompt = true }
+            toggleDetecting()
         } label: {
             Image(systemName: audio.isRunning ? "stop.fill" : "ear")
+                .contentTransition(.symbolEffect(.replace))
                 .controlIcon()
         }
         .buttonStyle(.borderedProminent)
@@ -1330,14 +1532,25 @@ struct ContentView: View {
     /// `.controlIcon()` buttons — used only in the full-screen transport pill.
     private var playStopButtonCompact: some View {
         Button {
-            if audio.isRunning { stopDetecting() }
-            else { showStartPrompt = true }
+            toggleDetecting()
         } label: {
-            Image(systemName: audio.isRunning ? "stop.fill" : "ear").font(.callout)
+            Image(systemName: audio.isRunning ? "stop.fill" : "ear")
+                .contentTransition(.symbolEffect(.replace))
+                .font(.callout)
         }
         .tint(audio.isRunning ? .red : .accentColor)
         .accessibilityLabel(audio.isRunning ? "Stop" : "Start")
         .tourTarget(.start)
+    }
+
+    /// Shared action for both play/stop button variants. A demo skips the
+    /// session/listening chooser — there's nothing to log, and `startDetecting`
+    /// refuses to open a session while demo mode is armed anyway — so Start just
+    /// resumes the file feed.
+    private func toggleDetecting() {
+        if audio.isRunning { stopDetecting() }
+        else if audio.isDemoMode { startDetecting(newSession: false) }
+        else { showStartPrompt = true }
     }
 
     /// Stop detection and tear down the active session. Called only on explicit user
@@ -1345,6 +1558,10 @@ struct ContentView: View {
     /// accidentally end the session.
     private func stopDetecting() {
         pulseDetector.finalizePass()  // save any in-progress pass before session ends
+        // After finalizePass, so the pass that just closed isn't lost, but before
+        // audio.stop() — ending the card is the user's explicit intent here and
+        // shouldn't wait on teardown.
+        liveActivity.end()
         audio.stop()
         recorder.setCoordinate(nil)
         feedSessionStart = nil
@@ -1354,6 +1571,35 @@ struct ContentView: View {
             pulseDetector.activeSessionID = nil
             recorder.setActiveSession(id: nil, startDate: nil, label: "Listening only")
         }
+    }
+
+    /// Switch the pipeline over to `url` and start feeding. Tears down whatever
+    /// was running first — including any GPS session, since a demo is not a
+    /// survey and shouldn't leave a location track behind. The demo itself runs
+    /// in the Listening bucket, which combined with the recorder block (below)
+    /// means it writes nothing to Sessions at all.
+    private func startDemo(url: URL, name: String) {
+        if audio.isRunning || classStore.activeSessionID != nil { stopDetecting() }
+        recorder.setBlocked(true)
+        pulseDetector.resetStats()
+        recorder.setActiveSession(id: nil, startDate: nil, label: "Demo")
+        feedSessionStart = Date()
+        // Demo runs get a card too — flagged as DEMO so a synthetic ID is never mistaken
+        // for field data, the same reasoning that blocks recording and session creation
+        // here. It's also the only way to exercise this on the simulator, where there's
+        // no mic (see CLAUDE.md § Demo mode).
+        liveActivity.start(sessionTitle: "Demo", isDemo: true, startDate: feedSessionStart ?? Date())
+        Task { await audio.startDemo(url: url, name: name) }
+    }
+
+    /// Leave demo mode and hand the pipeline back to the microphone. Detection
+    /// is left stopped — see `AudioEngineController.endDemo`.
+    private func endDemo() {
+        pulseDetector.finalizePass()
+        liveActivity.end()
+        audio.endDemo()
+        recorder.setBlocked(false)
+        feedSessionStart = nil
     }
 
     /// Begin detection, optionally inside a new located session (GPS track + map pins).
@@ -1368,7 +1614,10 @@ struct ContentView: View {
             location.stopTracking()
             pulseDetector.activeSessionID = nil
         }
-        if newSession {
+        // Demo mode never opens a session: no GPS track, no Session row, nothing
+        // in Sessions afterwards. Combined with the recorder block set in
+        // `startDemo`, a demo leaves no trace in the user's data.
+        if newSession && !audio.isDemoMode {
             let id = classStore.startSession()
             let session = classStore.sessions.first(where: { $0.id == id })
             let label = session?.title ?? "Session"
@@ -1381,6 +1630,16 @@ struct ContentView: View {
         } else {
             recorder.setActiveSession(id: nil, startDate: nil, label: "Listening only")
         }
+        // Title matches what the recorder was just handed, so the lock screen names the
+        // run the same way Sessions will.
+        liveActivity.start(
+            sessionTitle: audio.isDemoMode
+                ? "Demo"
+                : (classStore.sessions.first(where: { $0.id == classStore.activeSessionID })?.title
+                   ?? "Listening only"),
+            isDemo: audio.isDemoMode,
+            startDate: feedSessionStart ?? Date()
+        )
         Task { await audio.start() }
     }
 
@@ -1394,8 +1653,11 @@ struct ContentView: View {
         RecordButtonCompact(recorder: recorder, action: toggleRecording)
     }
 
-    /// Record button arms/disarms the triggered WAV recorder.
+    /// Record button arms/disarms the triggered WAV recorder. No-op while demo
+    /// mode blocks recording — the buttons are disabled too, this is the
+    /// backstop for any other path that reaches here.
     private func toggleRecording() {
+        guard !recorder.isBlocked else { return }
         recorder.setArmed(!recorder.isArmed)
     }
 
@@ -1469,6 +1731,63 @@ struct ContentView: View {
 
 }
 
+/// Ring/dot color math shared by `RecordButton`/`RecordButtonCompact`. The two
+/// layers of the `record.circle` glyph (outer ring, inner dot — palette-rendered,
+/// not the single flat tint the plain glyph gets by default) swap which one is
+/// "faded" depending on state: armed-and-waiting pulses the ring between faded
+/// and full red (using the dot's own resting color as the pulse's peak), so the
+/// static dot reads as the reference tone the ring is breathing towards. Once a
+/// detection actually opens a WAV segment, the ring settles solid at that same
+/// full red and the dot flips to faded instead, for contrast against the now-
+/// solid ring. Disarmed uses `.secondary` for both, indistinguishable from the
+/// old flat-tint icon.
+private enum RecordButtonTone {
+    static let faded = Color.red.opacity(0.35)
+
+    static func ring(armed: Bool, writing: Bool, pulseBright: Bool) -> Color {
+        guard armed else { return .secondary }
+        if writing { return .red }
+        return pulseBright ? .red : faded
+    }
+
+    static func dot(armed: Bool, writing: Bool) -> Color {
+        guard armed else { return .secondary }
+        return writing ? faded : .red
+    }
+}
+
+/// Starts/stops the ring's breathing pulse to match armed/writing state — active
+/// only while armed and waiting (not yet writing); frozen (no visible jump, since
+/// `RecordButtonTone.ring` ignores `pulseBright` whenever `writing` is true) once
+/// a segment opens, and restarts when it closes but the recorder is still armed.
+///
+/// Sets the flag with NO animation of its own. The repeating animation is attached
+/// to the glyph itself via `.animation(_:value:)` (see `recordPulseAnimation`) —
+/// it must NOT be started with `withAnimation`, for the reason documented there.
+private func syncRecordPulse(armed: Bool, writing: Bool, pulseBright: Binding<Bool>) {
+    pulseBright.wrappedValue = armed && !writing
+}
+
+/// The pulse's animation, applied to the record glyph's own subtree.
+///
+/// This deliberately isn't a `withAnimation(.repeatForever(autoreverses: true))`
+/// wrapped around the state change. `withAnimation` installs its animation on the
+/// WHOLE current transaction, so every other view that happens to change in that
+/// same update cycle inherits it too — and an inherited `repeatForever` +
+/// `autoreverses` has nothing to end it, so whatever caught it oscillates for the
+/// rest of the run. That's what put the leading/trailing nav-bar Menu buttons into
+/// a permanent slow throb while detecting: `syncRecordPulse` fires on every
+/// `isArmed`/`isWriting` flip, i.e. on every WAV pass opened by a passing bat, and
+/// the toolbar's Liquid Glass chrome re-lays-out constantly, so sooner or later a
+/// toolbar update lands in the same transaction as one of those flips and latches
+/// the repeat. Scoping the animation here means the transaction never carries it,
+/// so there is nothing for the toolbar to inherit.
+private func recordPulseAnimation(armed: Bool, writing: Bool) -> Animation {
+    armed && !writing
+        ? .easeInOut(duration: 0.9).repeatForever(autoreverses: true)
+        : .easeInOut(duration: 0.2)
+}
+
 /// The main record toggle: arms/disarms the triggered WAV recorder. A standalone
 /// `View` struct, not a computed property on `ContentView` — see CLAUDE.md's
 /// `@Observable` churn note. `recorder.isWriting` flips on every WAV pass open/close
@@ -1478,16 +1797,33 @@ struct ContentView: View {
 struct RecordButton: View {
     let recorder: AudioRecorder
     let action: () -> Void
+    @State private var pulseBright = false
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: recorder.isWriting ? "record.circle.fill" : "record.circle")
+            Image(systemName: "record.circle")
+                .symbolRenderingMode(.palette)
+                .foregroundStyle(
+                    RecordButtonTone.ring(armed: recorder.isArmed, writing: recorder.isWriting, pulseBright: pulseBright),
+                    RecordButtonTone.dot(armed: recorder.isArmed, writing: recorder.isWriting)
+                )
                 .controlIcon()
+                .animation(recordPulseAnimation(armed: recorder.isArmed, writing: recorder.isWriting),
+                           value: pulseBright)
         }
         .buttonStyle(.bordered)
         .tint(recorder.isArmed ? .red : .secondary)
+        .disabled(recorder.isBlocked)
         .accessibilityLabel(recorder.isArmed ? "Stop recording" : "Record")
+        .accessibilityHint(recorder.isBlocked ? "Unavailable during a demo" : "")
         .tourTarget(.record)
+        .onAppear { syncRecordPulse(armed: recorder.isArmed, writing: recorder.isWriting, pulseBright: $pulseBright) }
+        .onChange(of: recorder.isArmed) { _, armed in
+            syncRecordPulse(armed: armed, writing: recorder.isWriting, pulseBright: $pulseBright)
+        }
+        .onChange(of: recorder.isWriting) { _, writing in
+            syncRecordPulse(armed: recorder.isArmed, writing: writing, pulseBright: $pulseBright)
+        }
     }
 }
 
@@ -1495,15 +1831,143 @@ struct RecordButton: View {
 struct RecordButtonCompact: View {
     let recorder: AudioRecorder
     let action: () -> Void
+    @State private var pulseBright = false
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: recorder.isWriting ? "record.circle.fill" : "record.circle")
+            Image(systemName: "record.circle")
+                .symbolRenderingMode(.palette)
+                .foregroundStyle(
+                    RecordButtonTone.ring(armed: recorder.isArmed, writing: recorder.isWriting, pulseBright: pulseBright),
+                    RecordButtonTone.dot(armed: recorder.isArmed, writing: recorder.isWriting)
+                )
                 .font(.callout)
+                .animation(recordPulseAnimation(armed: recorder.isArmed, writing: recorder.isWriting),
+                           value: pulseBright)
         }
         .tint(recorder.isArmed ? .red : .secondary)
+        .disabled(recorder.isBlocked)
         .accessibilityLabel(recorder.isArmed ? "Stop recording" : "Record")
+        .accessibilityHint(recorder.isBlocked ? "Unavailable during a demo" : "")
         .tourTarget(.record)
+        .onAppear { syncRecordPulse(armed: recorder.isArmed, writing: recorder.isWriting, pulseBright: $pulseBright) }
+        .onChange(of: recorder.isArmed) { _, armed in
+            syncRecordPulse(armed: armed, writing: recorder.isWriting, pulseBright: $pulseBright)
+        }
+        .onChange(of: recorder.isWriting) { _, writing in
+            syncRecordPulse(armed: recorder.isArmed, writing: writing, pulseBright: $pulseBright)
+        }
+    }
+}
+
+/// Start-detecting chooser, replacing a plain `.confirmationDialog` with a wider
+/// custom sheet — two circular icon buttons side by side read faster than a
+/// stacked list of text rows, and give "New Session" and "Just Listening" equal
+/// visual weight instead of implying one is the default/primary action.
+private struct StartDetectingSheet: View {
+    let onNewSession: () -> Void
+    let onJustListening: () -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(spacing: 24) {
+            VStack(spacing: 6) {
+                Text("Start Detection")
+                    .font(.title2.weight(.semibold))
+                Text("Sessions group your recordings together and plot detections on a map. Just listening still tracks location but doesn't group the data.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+            .frame(maxWidth: .infinity)
+
+            HStack(spacing: 32) {
+                startOption(icon: "point.bottomleft.forward.to.point.topright.scurvepath.fill",
+                            title: "New Session", action: onNewSession)
+                startOption(icon: "person.spatialaudio.stereo.fill",
+                            title: "Just Listening", action: onJustListening)
+            }
+
+            Button("Cancel", role: .cancel) { dismiss() }
+                .padding(.top, 4)
+        }
+        .padding(.horizontal, 24)
+        .padding(.top, 28)
+        .padding(.bottom, 20)
+        .frame(maxWidth: .infinity)
+        .presentationDetents([.height(300)])
+        .presentationDragIndicator(.visible)
+    }
+
+    private func startOption(icon: String, title: String, action: @escaping () -> Void) -> some View {
+        Button {
+            dismiss()
+            action()
+        } label: {
+            VStack(spacing: 10) {
+                Image(systemName: icon)
+                    .font(.system(size: 26, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                    .frame(width: 72, height: 72)
+                    .background(Color.accentColor.opacity(0.15), in: Circle())
+                Text(title)
+                    .font(.footnote.weight(.medium))
+                    .foregroundStyle(.primary)
+            }
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// Shown once, right after an onboarding-triggered tour finishes, when the
+/// user's location suggests a model that isn't already active — see
+/// ContentView's `finish` closure. Same compact-sheet visual language as
+/// StartDetectingSheet (centered title/subtitle, accent circle, drag
+/// indicator) but its own sheet rather than folded into that one, so each can
+/// be dismissed independently and chained via `onDismiss`.
+private struct SuggestedModelSheet: View {
+    let model: ModelDescriptor
+    let onUse: () -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(spacing: 24) {
+            VStack(spacing: 10) {
+                Image(systemName: "sparkle.magnifyingglass")
+                    .font(.system(size: 26, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                    .frame(width: 72, height: 72)
+                    .background(Color.accentColor.opacity(0.15), in: Circle())
+                Text("Suggested Model")
+                    .font(.title2.weight(.semibold))
+                Text("\(model.displayName) covers your area (\(model.region)). Activate it to start identifying species here.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+            .frame(maxWidth: .infinity)
+
+            Button {
+                onUse()
+                dismiss()
+            } label: {
+                Text("Use \(model.displayName)")
+                    .font(.headline)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 6)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.batAccent)
+
+            Button("Not Now", role: .cancel) { dismiss() }
+                .padding(.top, 4)
+        }
+        .padding(.horizontal, 24)
+        .padding(.top, 28)
+        .padding(.bottom, 20)
+        .frame(maxWidth: .infinity)
+        .presentationDetents([.height(320)])
+        .presentationDragIndicator(.visible)
     }
 }
 

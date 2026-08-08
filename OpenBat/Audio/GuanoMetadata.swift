@@ -39,6 +39,12 @@ nonisolated enum GuanoMetadata {
         let text = fields
             .map { "\($0.key)\($0.tightColon ? ":" : ": ")\($0.value)" }
             .joined(separator: "\n")
+        return chunk(text: text)
+    }
+
+    /// Same wire format as `chunk(fields:)`, for callers (`updateManualID`) that
+    /// already have assembled `Key: Value` text rather than a `[Field]` list.
+    private static func chunk(text: String) -> Data {
         let textBytes = Array(text.utf8)
 
         var data = Data()
@@ -80,5 +86,54 @@ nonisolated enum GuanoMetadata {
             }
         }
         return fields
+    }
+
+    /// Rewrites the `Species Manual ID` line in a WAV's existing `guan` chunk —
+    /// used by the playback screen's species-edit sheet. The chunk is always the
+    /// LAST thing in the file (see `AudioRecorder.closeAndKeep`: 44-byte header,
+    /// `dataBytes` of PCM, then this chunk), so rather than patching bytes in
+    /// place — which only works if the new value happens to be the same length as
+    /// the old one — this truncates the file at the chunk's offset and re-appends
+    /// the whole chunk rebuilt with the new value. Also repatches the RIFF size at
+    /// offset 4, which spans the guan chunk's byte count (see
+    /// `AudioRecorder.closeAndKeep`'s own comment on that field). `code == nil`
+    /// clears the field back to empty, same as a fresh, unclassified recording.
+    /// Returns false (no-op) if the file has no `guan` chunk to update — nothing
+    /// this function does is ever safe to call blind on an arbitrary WAV.
+    @discardableResult
+    static func updateManualID(wavURL: URL, code: String?) -> Bool {
+        CloudStorage.ensureDownloaded(wavURL)
+        guard let header = WavHeader.read(url: wavURL) else { return false }
+        let chunkOffset = UInt64(44) + UInt64(header.dataBytes)
+
+        guard let readHandle = try? FileHandle(forReadingFrom: wavURL) else { return false }
+        guard (try? readHandle.seek(toOffset: chunkOffset)) != nil,
+              let chunkHeader = try? readHandle.read(upToCount: 8), chunkHeader.count == 8,
+              String(decoding: chunkHeader.prefix(4), as: UTF8.self) == "guan"
+        else { try? readHandle.close(); return false }
+        let size = chunkHeader.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 4, as: UInt32.self) }
+        guard let textData = try? readHandle.read(upToCount: Int(size)), textData.count == Int(size)
+        else { try? readHandle.close(); return false }
+        try? readHandle.close()
+
+        var lines = String(decoding: textData, as: UTF8.self).split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        let newLine = "Species Manual ID: \(code ?? "")"
+        if let idx = lines.firstIndex(where: { $0.hasPrefix("Species Manual ID") }) {
+            lines[idx] = newLine
+        } else {
+            lines.append(newLine)
+        }
+        let newChunk = chunk(text: lines.joined(separator: "\n"))
+
+        guard let writeHandle = try? FileHandle(forWritingTo: wavURL) else { return false }
+        defer { try? writeHandle.close() }
+        do {
+            try writeHandle.seek(toOffset: 4)
+            try writeHandle.write(contentsOf: le32(UInt32(36 + header.dataBytes + UInt32(newChunk.count))))
+            try writeHandle.truncate(atOffset: chunkOffset)
+            try writeHandle.seek(toOffset: chunkOffset)
+            try writeHandle.write(contentsOf: newChunk)
+        } catch { return false }
+        return true
     }
 }

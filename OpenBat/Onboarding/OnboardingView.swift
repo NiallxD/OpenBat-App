@@ -127,7 +127,7 @@ struct OnboardingView: View {
             OnboardingStepView(
                 systemImage: "checkmark.circle.fill",
                 title: "You're all set",
-                message: "You can change microphone or location access any time in the Settings app.")
+                message: "Let's take a quick guided tour of the screen so you know what you're looking at. You can change microphone or location access any time in the Settings app.")
         }
     }
 
@@ -152,7 +152,7 @@ struct OnboardingView: View {
         case .location:  return "Allow Location Access"
         case .calibrate: return ""
         case .autoID:    return "Got it!"
-        case .done:      return "Get Started"
+        case .done:      return "Take the Tour"
         }
     }
 
@@ -219,6 +219,9 @@ struct OnboardingView: View {
         case .autoID:
             step = .done
         case .done:
+            // Consumed once by ContentView's .onAppear, which clears it right back
+            // to false — see OnboardingState.shouldAutoStartTour's doc comment.
+            OnboardingState.shared.shouldAutoStartTour = true
             onComplete()
         }
     }

@@ -32,14 +32,23 @@ struct PlaybackListView: View {
     @State private var importError: String?
     @State private var isImporting = false
 
-    private var listeningRecordings: [Recording] {
-        store.listeningRecordings.filteredByNoID(showNoID: showNoID)
-    }
-    private func sessionRecordings(_ session: RecordingSession) -> [Recording] {
-        store.recordings(inSession: session.id).filteredByNoID(showNoID: showNoID)
+    /// Every visible recording, bucketed by session (nil = the Listening
+    /// pseudo-session) and sorted newest-first within each bucket.
+    ///
+    /// Grouped in ONE pass rather than per-section: this used to filter the whole
+    /// `store.recordings` array once per session (plus once more for the
+    /// "everything is NoID" check), which is O(sessions × recordings) of main-thread
+    /// work on every single redraw of this screen — and it re-ran for each of the
+    /// dozens of `@Observable` recordings changes an upload sweep or a fresh sync
+    /// produces.
+    private var grouped: [UUID?: [Recording]] {
+        Dictionary(grouping: store.recordings.filteredByNoID(showNoID: showNoID),
+                   by: \.sessionID)
+            .mapValues { $0.sorted { $0.date > $1.date } }
     }
 
     var body: some View {
+        let grouped = grouped
         Group {
             if store.recordings.isEmpty {
                 ContentUnavailableView(
@@ -47,7 +56,11 @@ struct PlaybackListView: View {
                     systemImage: "play.circle",
                     description: Text("Recordings you make (see the record button, or a session's auto-record setting) appear here for playback.")
                 )
-            } else if listeningRecordings.isEmpty && store.sessions.allSatisfy({ sessionRecordings($0).isEmpty }) {
+            // Dictionary lookups, not another filtering pass — and keyed the same
+            // way the sections below are, so a recording orphaned behind a
+            // sessionID with no session still counts as "nothing to show" rather
+            // than suppressing this message for a list that renders empty.
+            } else if grouped[nil] == nil && store.sessions.allSatisfy({ grouped[$0.id] == nil }) {
                 ContentUnavailableView(
                     "No classified recordings",
                     systemImage: "line.3.horizontal.decrease.circle",
@@ -55,9 +68,9 @@ struct PlaybackListView: View {
                 )
             } else {
                 List {
-                    if !listeningRecordings.isEmpty {
+                    if let recordings = grouped[nil], !recordings.isEmpty {
                         Section("Listening") {
-                            ForEach(listeningRecordings.sorted { $0.date > $1.date }) { recording in
+                            ForEach(recordings) { recording in
                                 NavigationLink {
                                     // Lazy: WavPlayerView's `@State` engine is
                                     // expensive to construct — see LazyDestination.
@@ -68,11 +81,12 @@ struct PlaybackListView: View {
                                     RecordingRow(recording: recording, store: store, consent: consent)
                                 }
                             }
+                            .onDelete { offsets in offsets.map { recordings[$0] }.forEach(store.delete) }
                         }
                     }
                     // `store.sessions` is already newest-first.
                     ForEach(store.sessions) { session in
-                        let recordings = sessionRecordings(session).sorted { $0.date > $1.date }
+                        let recordings = grouped[session.id] ?? []
                         if !recordings.isEmpty {
                             Section(session.title) {
                                 ForEach(recordings) { recording in
@@ -84,6 +98,7 @@ struct PlaybackListView: View {
                                         RecordingRow(recording: recording, store: store, consent: consent)
                                     }
                                 }
+                                .onDelete { offsets in offsets.map { recordings[$0] }.forEach(store.delete) }
                             }
                         }
                     }

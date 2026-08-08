@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Must match OpenBat/OpenBat.entitlements and BatActivityShared.appGroupID.
+	     This is the widget's only route to the pulse image: without it
+	     containerURL(forSecurityApplicationGroupIdentifier:) returns nil and
+	     PulseImageWell falls back to the waveform glyph with no other symptom. -->
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.Niall.OpenBat</string>
+	</array>
+</dict>
+</plist>

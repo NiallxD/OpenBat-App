@@ -57,10 +57,10 @@ struct SettingsView: View {
 
     @AppStorage("recording.autoRecordOnSessionStart") private var autoRecordOnSessionStart = true
     /// Read directly by RecordingSpectrogramRenderer (off-main, no live settings
-    /// reference) the same way it already reads `pulse.displayPalette`. 0.5 is a
+    /// reference) the same way it already reads `pulse.displayPalette`. 0.25 is a
     /// starting default, not a settled value — surfaced here so it can be tuned
     /// without a code change until a final number is picked.
-    @AppStorage("display.playbackThumbnailNoiseFloor") private var playbackThumbnailNoiseFloor = 0.5
+    @AppStorage("display.playbackThumbnailNoiseFloor") private var playbackThumbnailNoiseFloor = 0.25
     /// Read directly by WavPlayerView/CallAnalysisPanel — the fraction of a
     /// measured call's active duration averaged (median) to estimate
     /// characteristic/knee frequency. No existing algorithm to calibrate
@@ -305,6 +305,32 @@ struct SettingsView: View {
     /// `pulseSections`) since it tunes a listening mode, not pulse detection.
     private var adaptiveTESection: some View {
         Section {
+            Toggle("Sampler mode", isOn: $adaptiveTESettings.samplerEnabled)
+            Text("Plays one call every few seconds instead of trying to catch every pulse. It waits for a call, keeps listening a moment longer, picks the strongest one it heard and plays the whole of it — start to finish — then lets everything else go by until the next sample is due. Worth turning on when calls are arriving raggedly: one call heard properly tells you more than five heard in pieces.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if adaptiveTESettings.samplerEnabled {
+                LabeledContent("Sample every") {
+                    Text(String(format: "%.1f s", adaptiveTESettings.samplerIntervalSeconds))
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                }
+                Slider(value: $adaptiveTESettings.samplerIntervalSeconds, in: 1...30, step: 0.5)
+
+                LabeledContent("Candidate scan") {
+                    Text(adaptiveTESettings.samplerScanMs <= 0
+                         ? "off"
+                         : String(format: "%.0f ms", adaptiveTESettings.samplerScanMs))
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                }
+                Slider(value: $adaptiveTESettings.samplerScanMs, in: 0...300, step: 10)
+                Text("How long it keeps listening for a better call before committing. Calls in a normal pass arrive 50–150 ms apart, so 150 ms usually gives it two or three to choose between. At zero the first call always wins.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             LabeledContent("Gain") {
                 Text(String(format: "%.1fx", adaptiveTESettings.gain))
                     .monospacedDigit()

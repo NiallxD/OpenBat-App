@@ -13,6 +13,7 @@
 //
 
 import UIKit
+import ImageIO
 import Observation
 import CoreLocation
 
@@ -141,8 +142,8 @@ struct Recording: Codable, Identifiable, NoIDFilterable {
     let id: UUID
     let date: Date                  // segment start (pre-roll included)
     let durationSeconds: Double
-    let species: String             // never "NOISE" — those are rejected before saving
-    let commonName: String
+    var species: String             // never "NOISE" — those are rejected before saving; mutable for a manual correction (see `ClassificationStore.setManualSpecies`)
+    var commonName: String
     let confidence: Float?          // nil for a NoID recording
     let pulseCount: Int
     var sessionID: UUID?            // nil = Listening bucket
@@ -207,7 +208,17 @@ final class ClassificationStore {
     private var hasLoaded = false
 
     // Small in-memory cache so scrolling the list doesn't re-decode JPEGs.
-    private var imageCache = NSCache<NSString, UIImage>()
+    // Cost-limited (bytes of decoded bitmap, see `cacheCost`): a Recording's
+    // whole-file overview is stored at the render's native 4096 × 1024, i.e.
+    // ~16 MB decoded EACH, so an uncapped cache of those alone could carry the
+    // library's worth of them until the app was jettisoned. Row thumbnails are
+    // cached under a size-qualified key (see `cacheKey`) so the 56 × 40 list
+    // entry never pulls the full-size bitmap in.
+    private var imageCache: NSCache<NSString, UIImage> = {
+        let cache = NSCache<NSString, UIImage>()
+        cache.totalCostLimit = 48 * 1024 * 1024
+        return cache
+    }()
 
     init() {
         let docs = CloudStorage.baseDirectory
@@ -444,6 +455,23 @@ final class ClassificationStore {
         persistRecordings()
     }
 
+    // MARK: Manual species correction
+
+    /// Applies a user correction from the WAV player's species-edit sheet —
+    /// updates the persisted `species`/`commonName` that every list, feed and
+    /// map pin reads, so the correction shows up everywhere, not just in the
+    /// WAV's own GUANO tag. `code == nil` resets to "NOID" (matches a fresh
+    /// no-ID recording); the GUANO `Species Manual ID` chunk itself is
+    /// rewritten separately by the caller (`GuanoMetadata.updateManualID`) —
+    /// this only touches the in-app record.
+    func setManualSpecies(recordingID: UUID, code: String?) {
+        guard let index = recordings.firstIndex(where: { $0.id == recordingID }) else { return }
+        let resolved = code ?? "NOID"
+        recordings[index].species = resolved
+        recordings[index].commonName = SpeciesInfo.commonName[resolved] ?? resolved
+        persistRecordings()
+    }
+
     // MARK: Delete
 
     func delete(_ pass: PassRecord) {
@@ -564,22 +592,131 @@ final class ClassificationStore {
 
     // MARK: Image loading
 
+    /// What an off-main image load actually found. `awaitingDownload` is NOT a
+    /// failure: the file exists in the library but its bytes are still in iCloud,
+    /// so the caller should keep its placeholder and ask again later (see
+    /// `RecordingThumbnailLoader` in RecordingViews.swift) rather than treating
+    /// the recording as having no spectrogram.
+    enum ImageLoad {
+        case loaded(UIImage)
+        case awaitingDownload
+        case unavailable
+    }
+
     func image(for record: PulseRecord) -> UIImage? {
         guard let file = record.imageFile else { return nil }
         if let cached = imageCache.object(forKey: file as NSString) { return cached }
         guard let img = UIImage(contentsOfFile: imagesDir.appendingPathComponent(file).path)
         else { return nil }
-        imageCache.setObject(img, forKey: file as NSString)
+        imageCache.setObject(img, forKey: file as NSString, cost: Self.cacheCost(img))
         return img
     }
 
-    func spectrogramImage(for recording: Recording) -> UIImage? {
-        guard let file = recording.spectrogramImageFile else { return nil }
-        if let cached = imageCache.object(forKey: file as NSString) { return cached }
-        guard let img = UIImage(contentsOfFile: imagesDir.appendingPathComponent(file).path)
+    /// Off-main-thread counterpart to `image(for:)` — a cache hit still returns
+    /// immediately (no `Task.detached` hop), but a miss decodes on a background
+    /// thread instead of blocking whichever row's body called it. Use from a
+    /// `.task(id:)` in a row view, not from `body` directly.
+    ///
+    /// Checks `CloudStorage.isDownloaded` before touching the file: right after
+    /// a delete/reinstall the thumbnail JPEGs are still iCloud placeholders (the
+    /// library synced back via `recordings.json`/`passes.json`, which are tiny
+    /// and land almost immediately, well before the images do), and a screen
+    /// full of rows all calling `UIImage(contentsOfFile:)` on files that aren't
+    /// there yet is what read as the app hanging while it "generated" every
+    /// thumbnail. Skipping the read and just requesting the download instead
+    /// means the row shows its placeholder immediately rather than stalling;
+    /// there's no active retry here (see `CloudStorage.ensureDownloaded`'s own
+    /// doc comment — this file gets read again on the next appearance/scroll,
+    /// which is the same best-effort contract every other reader in this app
+    /// already relies on for WAVs).
+    func loadImage(for record: PulseRecord) async -> UIImage? {
+        guard let file = record.imageFile else { return nil }
+        // Pulse thumbnails are already written small (`thumbMaxWidth`), so
+        // there's nothing to gain from decode-time downsampling here.
+        guard case .loaded(let img) = await load(file: file, maxPixelSize: nil,
+                                                priority: .userInitiated)
         else { return nil }
-        imageCache.setObject(img, forKey: file as NSString)
         return img
+    }
+
+    /// Loads a Recording's whole-file spectrogram overview off the main thread.
+    ///
+    /// `maxPixelSize` caps the LONGER decoded edge, and matters far more than it
+    /// looks: these JPEGs are saved at the render's native 4096 × 1024, so a plain
+    /// `UIImage(contentsOfFile:)` inflates ~16 MB of bitmap per row for a 56 × 40
+    /// thumbnail, then hands the render server a 4096-wide image to downscale on
+    /// every frame. Passing a display-sized cap routes the decode through ImageIO's
+    /// scaled thumbnail path (which subsamples during JPEG decode rather than
+    /// decoding full-size first), which is what keeps a screenful of rows from
+    /// stalling the list. Pass nil only when the full resolution is genuinely
+    /// wanted.
+    ///
+    /// Rows should prefer `.utility` priority: a tapped-into WavPlayerView is doing
+    /// a `.userInitiated` whole-file FFT, and thumbnail decodes must not compete
+    /// with it for the same cores.
+    func loadSpectrogramImage(for recording: Recording,
+                              maxPixelSize: CGFloat?,
+                              priority: TaskPriority = .utility) async -> ImageLoad {
+        guard let file = recording.spectrogramImageFile else { return .unavailable }
+        return await load(file: file, maxPixelSize: maxPixelSize, priority: priority)
+    }
+
+    /// Shared body of the two loaders above: cache hit → decode off-thread → cache.
+    ///
+    /// Checks `CloudStorage.isDownloaded` before touching the file: right after
+    /// a delete/reinstall the thumbnail JPEGs are still iCloud placeholders (the
+    /// library synced back via `recordings.json`/`passes.json`, which are tiny
+    /// and land almost immediately, well before the images do), and a screen
+    /// full of rows all calling `UIImage(contentsOfFile:)` on files that aren't
+    /// there yet is what read as the app hanging while it "generated" every
+    /// thumbnail. Skipping the read and reporting `awaitingDownload` instead
+    /// means the row shows its placeholder immediately rather than stalling, and
+    /// the caller retries on its own clock once the bytes have landed.
+    private func load(file: String, maxPixelSize: CGFloat?, priority: TaskPriority) async -> ImageLoad {
+        let key = Self.cacheKey(file: file, maxPixelSize: maxPixelSize)
+        if let cached = imageCache.object(forKey: key) { return .loaded(cached) }
+        let url = imagesDir.appendingPathComponent(file)
+        let result = await Task.detached(priority: priority, operation: { () -> ImageLoad in
+            guard CloudStorage.isDownloaded(url) else {
+                CloudStorage.ensureDownloaded(url)
+                return .awaitingDownload
+            }
+            guard let img = Self.decode(at: url, maxPixelSize: maxPixelSize) else { return .unavailable }
+            return .loaded(img)
+        }).value
+        if case .loaded(let img) = result {
+            imageCache.setObject(img, forKey: key, cost: Self.cacheCost(img))
+        }
+        return result
+    }
+
+    /// Size-qualified so a row's small decode and the detail page's large one
+    /// can't be served to each other.
+    private static func cacheKey(file: String, maxPixelSize: CGFloat?) -> NSString {
+        guard let maxPixelSize else { return file as NSString }
+        return "\(file)@\(Int(maxPixelSize))" as NSString
+    }
+
+    /// Approximate decoded-bitmap bytes, for `imageCache`'s cost limit.
+    private static func cacheCost(_ image: UIImage) -> Int {
+        guard let cg = image.cgImage else { return 0 }
+        return cg.bytesPerRow * cg.height
+    }
+
+    private nonisolated static func decode(at url: URL, maxPixelSize: CGFloat?) -> UIImage? {
+        guard let maxPixelSize else { return UIImage(contentsOfFile: url.path) }
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceThumbnailMaxPixelSize: Int(maxPixelSize.rounded()),
+            // Decode eagerly, here on this background thread — otherwise the
+            // first draw pays for it on the main/render thread, which is the
+            // cost this whole path exists to move off the list.
+            kCGImageSourceShouldCacheImmediately: true,
+        ]
+        guard let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
+        else { return nil }
+        return UIImage(cgImage: cg)
     }
 
     /// Resolves a Recording's WAV to an absolute URL — never persisted as one (see

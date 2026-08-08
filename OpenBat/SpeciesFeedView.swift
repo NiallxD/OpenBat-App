@@ -90,6 +90,7 @@ private struct SpeciesFeedRow: View {
     /// Tapping a row opens the same pass-detail screen the Sessions list uses —
     /// the pulses behind the ID, per-pulse score bars, runner-up, complex notes.
     @State private var showDetail = false
+    @State private var image: UIImage?
 
     var body: some View {
         // Re-evaluates every second so "3s ago" keeps counting up without needing a
@@ -121,6 +122,9 @@ private struct SpeciesFeedRow: View {
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
         .contentShape(RoundedRectangle(cornerRadius: 10))
         .onTapGesture { showDetail = true }
+        .task(id: representativePulse.id) {
+            image = await store.loadImage(for: representativePulse)
+        }
         .sheet(isPresented: $showDetail) {
             NavigationStack {
                 PassDetailView(pass: pass, store: store)
@@ -183,8 +187,8 @@ private struct SpeciesFeedRow: View {
     }
 
     @ViewBuilder private var thumbnail: some View {
-        if let img = store.image(for: representativePulse) {
-            Image(uiImage: img)
+        if let image {
+            Image(uiImage: image)
                 .resizable()
                 .interpolation(.high)
                 .aspectRatio(contentMode: .fill)

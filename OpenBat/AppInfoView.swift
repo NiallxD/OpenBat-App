@@ -28,6 +28,7 @@ enum TourID: Hashable {
     // Individual buttons. Tagged on the shared button properties, so the portrait
     // and landscape placements both resolve to whichever one is in the tree.
     case micStatus, resetStats                 // stats header (micStatus: portrait only)
+    case speciesID                             // stats row — the last-ID cell
     case sessionStatus, feedbackWarning        // stats header
     case timeExpansionCounter                  // stats header
     case sessionTimer                          // spectrogram header
@@ -96,10 +97,13 @@ enum TourScript {
                  detail: "Off when nothing is detecting, Listening for an unlogged run, or Session when IDs are being logged with a GPS track."),
         TourStep(target: .micStatus, symbol: "cable.connector",
                  title: "Mic status",
-                 detail: "Shows whether the ultrasonic mic is attached and the sample rate it's running at This should show 384 kHz."),
+                 detail: "Shows whether the ultrasonic mic is attached and the sample rate it's running at — this should show 384 kHz."),
         TourStep(target: .resetStats, symbol: "arrow.counterclockwise",
                  title: "Reset stats",
                  detail: "Clears the pulse count, pulse rate and the level meter's peak-hold."),
+        TourStep(target: .speciesID, symbol: "book.closed",
+                 title: "Species profile",
+                 detail: "The last ID, with how many pulses it was based on and how confident it is. When that species has a page in the field guide, a small book icon appears beside its code — tap the cell to read the profile without leaving the detector. (Shown here for the tour.)"),
 
         TourStep(target: .pulseView, symbol: "waveform.path.ecg",
                  title: "Pulse view & Species ID",
@@ -136,13 +140,13 @@ enum TourScript {
 
         TourStep(target: .start, symbol: "ear",
                  title: "Start & stop",
-                 detail: "Starts and stops detecting. A Session logs IDs with a GPS track on a map; Just Listening logs to the Listening bucket and carries over all GUANO metadata to the file."),
+                 detail: "Starts and stops detecting. A Session logs IDs and groups them together with a GPS track on a map; Just Listening logs to the Listening bucket and carries over all GUANO metadata to the file."),
         TourStep(target: .record, symbol: "record.circle",
                  title: "Record",
                  detail: "Arms WAV recording — each detected pass is saved as its own file, with the species ID in its metadata."),
         TourStep(target: .listen, symbol: "headphones",
                  title: "Listen",
-                 detail: "Cycles the listen mode, currently only heterodyne, so you can hear the bats live. Tap again for off."),
+                 detail: "Cycles the listen mode — off, heterodyne (tuned-down clicks and chirps), then time expansion (each call slowed 8× so its real shape is audible) — so you can hear the bats live."),
 
         TourStep(target: nil, symbol: "line.3.horizontal.decrease.circle",
                  title: "Menus",
@@ -256,7 +260,7 @@ struct AppInfoView: View {
             feature("sparkle.magnifyingglass", "Species ID",
                     "On-device classifier names the species, with runner-up and confidence.")
             feature("headphones", "Heterodyne & time-expansion",
-                    "Hear the ultrasound live, tuned down or slowed 10×.")
+                    "Hear the ultrasound live, tuned down or slowed 8×.")
             feature("square.stack.3d.up", "Sessions & map",
                     "Log passes with a GPS track and see where each was heard.")
         }
@@ -305,7 +309,8 @@ struct DataModelSourcesView: View {
             Text("Data & Model Sources").font(.headline)
 
             ForEach(ModelRegistry.all) { model in
-                attributionRow(name: model.displayName, detail: model.citation, url: model.sourceURL)
+                licenseRow(name: model.displayName, detail: model.citation, url: model.sourceURL,
+                           licenseName: model.licenseName, licenseText: model.licenseNoticeText)
             }
             attributionRow(name: "GBIF",
                            detail: "Species distribution maps use occurrence data from the Global Biodiversity Information Facility (GBIF), licensed CC BY 4.0.",

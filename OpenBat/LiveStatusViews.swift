@@ -92,19 +92,26 @@ struct SessionStatusPillView: View {
 
     private var isRunning: Bool { tourDemo || audio.isRunning }
     private var isSession: Bool { audio.isRunning && classStore.activeSessionID != nil }
+    /// Shown whenever demo mode is armed, running or not — the whole point is
+    /// that nobody mistakes a file feed for live audio, and a paused demo is
+    /// still not the microphone.
+    private var isDemo: Bool { audio.isDemoMode }
 
     private var icon: String {
+        if isDemo { return "play.rectangle.fill" }
         guard isRunning else { return "pause.circle" }
         return isSession ? "location.fill" : "ear"
     }
 
     private var label: String {
+        if isDemo { return "Demo" }
         guard isRunning else { return "Off" }
         return isSession ? "Session" : "Listening"
     }
 
     private var tint: Color {
-        isRunning ? .toggleOn : .secondary
+        if isDemo { return .orange }
+        return isRunning ? .toggleOn : .secondary
     }
 
     var body: some View {
@@ -318,6 +325,18 @@ struct AdaptiveTimeExpansionStatePill: View {
 
                 Text("What you're hearing is always a moment behind, and it isn't everything that happened. This mode trades hearing every call for hearing some calls properly. That's the same trade the classic tape-based bat detectors made, and there's no way around it — without using advanced signal processing, nothing can play sound back 8 times slower and keep up with real time at once.")
 
+                // Read once, when the popover is built — not in `pillContent`,
+                // which rebuilds at 10 Hz and would be taking the processor's
+                // control lock for a line of prose.
+                if audio.adaptiveTimeExpansion.samplerEnabled {
+                    Divider()
+
+                    Text("You're in sampler mode")
+                        .font(.subheadline.weight(.semibold))
+
+                    Text("Sampler mode gives up on catching everything on purpose. It waits, picks the strongest call it hears, and plays that one in full — then ignores the rest until the next sample is due. The red number counts everything it let past, so in this mode it climbs quickly and there's nothing wrong.")
+                }
+
                 Text("If you'd rather not miss anything, switch to heterodyne. It never stops listening, but it gives you clicks and chirps rather than the shape of a call. Alternatively, make a recording and play it back in full time expansion mode in the playback menu.")
 
                 Text("The counters reset when you change listening mode.")
@@ -353,53 +372,100 @@ struct AdaptiveTimeExpansionStatePill: View {
 /// rate in kHz, flashing red if iOS hands us less than the required 384 kHz.
 /// Tapping opens a popover explaining the current state — the red flash on its
 /// own says "something's wrong" without saying what or what to do about it.
+/// Required feed rate shared by the pill content and its explainer.
+private let micStatusRequiredRate: Double = 384_000
+
 struct MicStatusPill: View {
+    let audio: AudioEngineController
+    @State private var showExplainer = false
+
+    var body: some View {
+        // The Button and its popover sit OUTSIDE MicStatusPillContent on purpose —
+        // same reasoning as AdaptiveTimeExpansionStatePill just above: `audio.diagnostics`
+        // churns at 15 Hz (AudioEngineController.flushStats), and a presenter that
+        // rebuilds that fast can drop its own popover/tap mid-gesture. Only the leaf
+        // content (icon + rate text) reads diagnostics; this body doesn't.
+        Button { showExplainer = true } label: { MicStatusPillContent(audio: audio) }
+            .buttonStyle(.plain)
+            .popover(isPresented: $showExplainer) {
+                MicStatusExplainer(audio: audio)
+                    .presentationCompactAdaptation(.popover)
+            }
+    }
+}
+
+private struct MicStatusPillContent: View {
     let audio: AudioEngineController
     @State private var slowPulse = false   // ~1.4 s breathe for the connected icon
     @State private var fastFlash = false   // ~0.4 s blink for a clamped feed rate
-    @State private var showExplainer = false
-
-    private static let requiredRate: Double = 384_000
 
     var body: some View {
         let d = audio.diagnostics
+        let demo = audio.isDemoMode
         let connected = d.usbMicAvailable
+        // No mic is attached during a demo and none needs to be, so suppress
+        // both alarms: the red "no ultrasonic mic" slash, and the clamped-rate
+        // flash for a demo clip recorded below 384 kHz. Neither is a fault the
+        // user can act on, and the Demo pill beside this one already says why.
         let rateKnown = audio.isRunning && d.actualSampleRate > 0
-        let rateBad = rateKnown && d.actualSampleRate < Self.requiredRate
+        let rateBad = !demo && rateKnown && d.actualSampleRate < micStatusRequiredRate
+        // Both faded states are computed here rather than inline so each can be the
+        // `value:` of its own scoped `.animation` below — see the onAppear comment.
+        let iconFaded = !demo && connected && slowPulse
+        let rateFaded = rateBad && fastFlash
         HStack(spacing: 4) {
-            Image(systemName: connected ? "cable.connector" : "cable.connector.slash")
+            Image(systemName: demo ? "waveform" : (connected ? "cable.connector" : "cable.connector.slash"))
                 .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(connected ? Color.green : .red)
-                .opacity(connected && slowPulse ? 0.35 : 1)
+                .foregroundStyle(demo ? Color.orange : (connected ? .green : .red))
+                .opacity(iconFaded ? 0.35 : 1)
+                .animation(.easeInOut(duration: 1.4).repeatForever(autoreverses: true), value: iconFaded)
             if rateKnown {
                 Text("\(Int((d.actualSampleRate / 1000).rounded())) kHz")
                     .font(.system(size: 9, weight: .semibold).monospacedDigit())
                     .foregroundStyle(rateBad ? Color.red : .secondary)
-                    .opacity(rateBad && fastFlash ? 0.25 : 1)
+                    .opacity(rateFaded ? 0.25 : 1)
+                    .animation(.easeInOut(duration: 0.4).repeatForever(autoreverses: true), value: rateFaded)
             }
         }
         .padding(.horizontal, 7)
         .frame(height: StatusPillMetrics.height)
         .background(.ultraThinMaterial, in: Capsule())
         .contentShape(Capsule())
-        .onTapGesture { showExplainer = true }
-        .popover(isPresented: $showExplainer) {
-            explainer(connected: connected, rateKnown: rateKnown, rateBad: rateBad,
-                      rate: d.actualSampleRate)
-                .presentationCompactAdaptation(.popover)
-        }
+        // Flags flipped with NO animation of their own: the repeating animations are
+        // scoped to the two views above instead. Starting a `repeatForever` here with
+        // `withAnimation` would install it on the entire current transaction, and any
+        // unrelated view updating in that same cycle — this pill sits directly under
+        // the nav bar, whose Liquid Glass buttons re-lay-out constantly — inherits an
+        // autoreversing repeat with nothing to end it, and throbs forever. Same fix as
+        // the record button's pulse; see `recordPulseAnimation` in ContentView.
         .onAppear {
-            withAnimation(.easeInOut(duration: 1.4).repeatForever(autoreverses: true)) { slowPulse = true }
-            withAnimation(.easeInOut(duration: 0.4).repeatForever(autoreverses: true)) { fastFlash = true }
+            slowPulse = true
+            fastFlash = true
         }
-        .accessibilityLabel(connected ? "External microphone connected" : "No external microphone")
+        .accessibilityLabel(demo ? "Demo mode, audio from a file"
+                                 : (connected ? "External microphone connected" : "No external microphone"))
         .accessibilityHint("Tap for details")
     }
+}
 
-    private func explainer(connected: Bool, rateKnown: Bool, rateBad: Bool,
-                           rate: Double) -> some View {
+private struct MicStatusExplainer: View {
+    let audio: AudioEngineController
+
+    var body: some View {
+        let d = audio.diagnostics
+        let connected = d.usbMicAvailable
+        let rateKnown = audio.isRunning && d.actualSampleRate > 0
+        let rateBad = rateKnown && d.actualSampleRate < micStatusRequiredRate
+        let rate = d.actualSampleRate
+
         let (title, message): (String, String)
-        if !connected {
+        if audio.isDemoMode {
+            title = "Demo mode"
+            let name = audio.demoFileName ?? "a recording"
+            message = rateKnown
+                ? "The microphone is not in use. Audio is coming from \(name), played at \(Int((rate / 1000).rounded())) kHz through the same detection pipeline as a live capture. Recording is disabled. End the demo from Diagnostics."
+                : "The microphone is not in use. Audio will come from \(name) instead, through the same detection pipeline as a live capture. Recording is disabled. End the demo from Diagnostics."
+        } else if !connected {
             title = "No ultrasonic microphone"
             message = "Only the built-in mic is available, which hears up to about 24 kHz — most bat calls are far above that. Plug in an ultrasonic USB microphone (such as the Griff) to detect bats."
         } else if rateBad {

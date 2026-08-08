@@ -263,6 +263,15 @@ final class PulseDetector {
     var activeSessionID: UUID?
     var coordinateProvider: (() -> CLLocationCoordinate2D?)?
 
+    /// Called on the main thread after a pass closes, whatever its outcome (species,
+    /// NOISE, or NoID). Set by ContentView to push the lock-screen Live Activity.
+    ///
+    /// Deliberately a callback rather than the Live Activity observing this object: a
+    /// pass ending is a discrete event, and the alternative — polling `@Observable`
+    /// state on a timer — would either miss passes or burn the ActivityKit update
+    /// budget guessing when one happened. Same shape as `coordinateProvider` above.
+    var onPassFinalized: (() -> Void)?
+
     // MARK: Pass accumulator (main thread)
 
     private var passAggPulses: [PassAggregation.Pulse] = []   // raw + adjusted scores, one per pulse
@@ -302,6 +311,11 @@ final class PulseDetector {
             displayWindowQuality = 0
         }
         guard passPulseCount > 0 else { return }
+
+        // Fires on every exit below — the NoID early return as well as the normal end.
+        // Both are real passes: even when the classifier declines to name one, the pulse
+        // count and last-pulse stats have moved, and the Live Activity should say so.
+        defer { onPassFinalized?() }
 
         let descriptor = activeClassifier()?.descriptor
         guard let outcome = PassAggregation.aggregate(

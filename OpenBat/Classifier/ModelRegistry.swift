@@ -107,6 +107,13 @@ struct ModelDescriptor: Identifiable {
     let citation: String
     /// Where the authors provide the model + training code. nil hides the link.
     let sourceURL: URL?
+    /// Short license name shown next to the citation ("CC BY 4.0", "CC BY-NC 4.0").
+    let licenseName: String
+    /// TASL-style notice (title/author/source/license link) shown behind a disclosure
+    /// in the app's Info screen, same treatment as the bundled OSS libraries' license
+    /// text — CC's own guidance treats a link to the canonical legal code as sufficient
+    /// rather than requiring the ~6000-word legalcode be inlined.
+    let licenseNoticeText: String
     let classNames: [String]
     /// Code → scientific name, for every code in `classNames` that names a real
     /// taxon (a model's non-bat "NOISE"-equivalent class, if any, is omitted).
@@ -193,9 +200,23 @@ nonisolated enum ModelRegistry {
                + "Priors are suggested automatically from GBIF occurrence data near "
                + "your location, and refresh as you move.",
         citation: "North American Bat Monitoring Program (NABat) acoustic ML classifier, "
-                + "U.S. Geological Survey. Model files and training code are published by "
-                + "the authors.",
+                + "U.S. Geological Survey, Version 1.0.1. Licensed CC BY 4.0 — model files "
+                + "and training code are published by the authors.",
         sourceURL: URL(string: "https://code.usgs.gov/fort/nabat/nabat-ml"),
+        licenseName: "CC BY 4.0",
+        licenseNoticeText: """
+            Licensed under the Creative Commons Attribution 4.0 International license \
+            (CC BY 4.0). The bundled model is a CoreML conversion of the authors' \
+            published TensorFlow model — a modification under the license's terms; \
+            identification logic and class outputs are unchanged. Full license text:
+
+                https://creativecommons.org/licenses/by/4.0/legalcode
+
+            Suggested citation: Gotthold, B.S., Khalighifar, A., Straw, B.R., \
+            Reichert, B.E., 2022, North American Bat Monitoring Program: NABat \
+            Acoustic ML, Version 1.0.1: U.S. Geological Survey software release, \
+            https://doi.org/10.5066/P9XJRJZX.
+            """,
         classNames: BatClassifier.classNames,
         scientificNames: BatClassifier.scientificNames,
         groups: [
@@ -255,6 +276,16 @@ nonisolated enum ModelRegistry {
         citation: "BatDetect2 (macaodha/batdetect2), CC BY-NC 4.0 — non-commercial use "
                 + "only. Contact the authors for any commercial use.",
         sourceURL: URL(string: "https://github.com/macaodha/batdetect2"),
+        licenseName: "CC BY-NC 4.0",
+        licenseNoticeText: """
+            Licensed under the Creative Commons Attribution-NonCommercial 4.0 \
+            International license (CC BY-NC 4.0) — non-commercial use only; contact \
+            the authors for any commercial use. The bundled model is a CoreML \
+            conversion of the authors' published batdetect2_uk_same.ckpt PyTorch \
+            checkpoint — a modification under the license's terms. Full license text:
+
+                https://creativecommons.org/licenses/by-nc/4.0/legalcode
+            """,
         classNames: BatDetect2Classifier.classNames,
         scientificNames: BatDetect2Classifier.scientificNames,
         groups: [

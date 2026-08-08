@@ -12,8 +12,18 @@ import SwiftUI
 struct DiagnosticsView: View {
     let audio: AudioEngineController
     let recorder: AudioRecorder
+    let classStore: ClassificationStore
+    /// Start a demo feed with the chosen file. Owned by ContentView, which also
+    /// has to stop detection and clear the session — see `startDemo` there.
+    let onStartDemo: (URL, String) -> Void
+    let onEndDemo: () -> Void
+    /// Opens the floating live tuning card over the detector screen. Dismisses
+    /// this sheet on the way — the card is useless behind a sheet, which also
+    /// pauses the render loop it needs running.
+    let onOpenTuning: () -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var logCleared = false
+    @State private var showDemoPicker = false
 
     var body: some View {
         NavigationStack {
@@ -28,6 +38,9 @@ struct DiagnosticsView: View {
                     DiagnosticsStatusLine(audio: audio)
                     DiagnosticsCard(audio: audio, recorder: recorder)
                     DiagnosticsLevelMeter(audio: audio)
+                    DiagnosticsMicQualityCard(audio: audio)
+                    demoSection
+                    tuningSection
                     logSection
                 }
                 .padding()
@@ -39,8 +52,97 @@ struct DiagnosticsView: View {
                     Button("Done") { dismiss() }
                 }
             }
+            .navigationDestination(isPresented: $showDemoPicker) {
+                DemoModeView(classStore: classStore) { url, name in
+                    // Close the whole sheet, not just this pushed page — the
+                    // demo runs on the main screen behind it. `dismiss` here is
+                    // the one from DiagnosticsView (the stack's root), so it
+                    // takes the sheet down rather than popping the picker.
+                    showDemoPicker = false
+                    dismiss()
+                    onStartDemo(url, name)
+                }
+            }
         }
         .presentationDetents([.medium, .large])
+    }
+
+    /// Demo mode entry/exit. A single button that swaps to "End Demo" while a
+    /// demo is running — the only in-app way out (short of quitting), which is
+    /// deliberate: demo mode should never end by itself and leave someone
+    /// believing they're looking at live audio.
+    @ViewBuilder
+    private var demoSection: some View {
+        VStack(spacing: 12) {
+            HStack {
+                Text("Demo Mode")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if let name = audio.demoFileName {
+                    Text(name)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+
+            if audio.isDemoMode {
+                Button(role: .destructive) {
+                    onEndDemo()
+                } label: {
+                    Label("End Demo", systemImage: "stop.circle")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                Text("The microphone is not in use. Ending the demo returns to live capture; it does not restart detection.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                Button {
+                    showDemoPicker = true
+                } label: {
+                    Label("Demo", systemImage: "play.rectangle")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                Text("Feed a recording through the detector instead of the microphone.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .padding()
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    /// Entry point for the live tuning card. Available during a demo and during
+    /// live capture — tuning against real bats matters as much as tuning against
+    /// the demo clip; the demo is just the repeatable case.
+    private var tuningSection: some View {
+        VStack(spacing: 12) {
+            HStack {
+                Text("Live Tuning")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+            Button {
+                dismiss()
+                onOpenTuning()
+            } label: {
+                Label("Open Tuning Panel", systemImage: "slider.horizontal.3")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            Text("A floating panel of live controls over the detector. The spectrogram and audio keep running, so changes are heard and seen as you make them. Drag it out of the way; close it from its own ✕.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding()
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 16))
     }
 
     private var logSection: some View {
@@ -163,6 +265,65 @@ private struct DiagnosticsCard: View {
                     .padding(.vertical, 2)
                     .background(.tint.opacity(0.2), in: Capsule())
             }
+            Text(value)
+                .font(.body.monospacedDigit())
+                .foregroundStyle(emphasis)
+        }
+    }
+}
+
+/// Leaf view isolating the mic-QA fields of `audio.diagnostics` — see the churn
+/// note in `DiagnosticsView.body`. Numbers accumulate since the current
+/// capture started (`AudioEngineController.resetSessionStats()`), so run a
+/// fixed, repeatable test (e.g. N seconds quiet, then N seconds of a known
+/// loud source) per unit to keep readings comparable across microphones.
+private struct DiagnosticsMicQualityCard: View {
+    let audio: AudioEngineController
+
+    var body: some View {
+        let d = audio.diagnostics
+        return VStack(spacing: 12) {
+            HStack {
+                Text("Mic QA (this session)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+            row(
+                "Noise floor",
+                d.totalSampleCount > 0 ? String(format: "%.0f dBFS", d.noiseFloorDB) : "—",
+                emphasis: d.totalSampleCount == 0 ? .secondary : (d.noiseFloorDB <= -50 ? .green : .orange)
+            )
+            Divider()
+            row(
+                "Peak level",
+                d.totalSampleCount > 0 ? String(format: "%.0f dBFS", d.peakLevelDB) : "—",
+                emphasis: d.totalSampleCount == 0 ? .secondary : (d.peakLevelDB < -3 ? .green : .orange)
+            )
+            Divider()
+            row(
+                "DC offset",
+                d.totalSampleCount > 0 ? String(format: "%.2f%%", d.dcOffsetPercent) : "—",
+                emphasis: d.totalSampleCount == 0 ? .secondary : (abs(d.dcOffsetPercent) < 1 ? .green : .red)
+            )
+            Divider()
+            row(
+                "Clipped samples",
+                d.totalSampleCount > 0
+                    ? "\(d.clippedSampleCount) (\(String(format: "%.3f%%", d.clipRate * 100)))"
+                    : "—",
+                emphasis: d.clippedSampleCount == 0 ? .green : .red
+            )
+        }
+        .padding()
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    private func row(_ label: String, _ value: String, emphasis: Color = .primary) -> some View {
+        HStack {
+            Text(label)
+                .foregroundStyle(.secondary)
+            Spacer()
             Text(value)
                 .font(.body.monospacedDigit())
                 .foregroundStyle(emphasis)

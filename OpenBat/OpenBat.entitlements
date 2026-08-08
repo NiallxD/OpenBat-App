@@ -2,6 +2,16 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<!-- Shared container for the Live Activity's pulse image. The widget renders in a
+	     separate process and can't be handed a UIImage, and ContentState is capped at
+	     ~4 KB, so the PNG goes here and only its filename travels in the state. Must
+	     stay identical to the widget's entitlements and to
+	     `BatActivityShared.appGroupID` — a mismatch makes containerURL(…) return nil
+	     and the card silently falls back to the placeholder glyph. -->
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.Niall.OpenBat</string>
+	</array>
 	<key>com.apple.developer.icloud-container-identifiers</key>
 	<array>
 		<string>iCloud.openbat-doc-container</string>

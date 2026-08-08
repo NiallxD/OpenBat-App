@@ -30,13 +30,26 @@ final class OnboardingState {
     static let shared = OnboardingState()
 
     private static let key = "onboarding.hasCompletedWelcome"
+    private static let tourKey = "onboarding.shouldAutoStartTour"
 
     var hasCompletedWelcome: Bool {
         didSet { UserDefaults.standard.set(hasCompletedWelcome, forKey: Self.key) }
     }
 
+    /// Set by onboarding's last step ("Take the Tour") just before it hands off to
+    /// `ContentView`; consumed once, there, to auto-launch the guided tour. A second
+    /// flag rather than folding into `hasCompletedWelcome` so `RootView` — which only
+    /// reads that one property — never re-evaluates when this one changes (see this
+    /// file's header comment on why `@AppStorage` at the root is dangerous; a second
+    /// plain `@Observable` property has the same one-property-at-a-time tracking,
+    /// it just isn't read by the same view).
+    var shouldAutoStartTour: Bool {
+        didSet { UserDefaults.standard.set(shouldAutoStartTour, forKey: Self.tourKey) }
+    }
+
     private init() {
         // Absent key reads as false — a fresh install starts at onboarding.
         hasCompletedWelcome = UserDefaults.standard.bool(forKey: Self.key)
+        shouldAutoStartTour = UserDefaults.standard.bool(forKey: Self.tourKey)
     }
 }

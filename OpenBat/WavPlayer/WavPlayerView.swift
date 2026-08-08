@@ -132,7 +132,7 @@ struct WavPlayerView: View {
     /// also exposed as a live slider directly on this screen (below), not
     /// just buried in Settings, since it's most useful to adjust while
     /// looking at the actual spectrogram.
-    @AppStorage("display.playbackThumbnailNoiseFloor") private var noiseFloor = 0.5
+    @AppStorage("display.playbackThumbnailNoiseFloor") private var noiseFloor = 0.25
     @AppStorage("display.cfTailFraction") private var cfTailFraction = CallAnalysis.defaultCFTailFraction
     /// Independent of the live Detector/pulse-view log toggles (their own
     /// `display.spectrogramLogFrequency`/`display.pulseLogFrequency`) — same
@@ -417,7 +417,7 @@ struct WavPlayerView: View {
 
     @ViewBuilder private var fileInfoBlock: some View {
         if displayOverview != nil {
-            WavFileInfoCard(wavURL: store.wavURL(for: recording))
+            WavFileInfoCard(wavURL: store.wavURL(for: recording), recording: recording, store: store)
                 .padding(.horizontal, 8)
         }
     }

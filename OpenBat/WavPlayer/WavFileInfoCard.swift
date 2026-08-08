@@ -10,17 +10,36 @@
 //  Metadata is read once, off the main actor, on appear (or when the file
 //  changes) — a small seek+read, but file IO nonetheless, kept out of `body`.
 //
+//  The pencil button opens `SpeciesEditSheet` (same bottom-sheet chrome as
+//  ContentView's StartDetectingSheet/SuggestedModelSheet) to correct the
+//  species. A correction writes BOTH the in-app `Recording` (what every
+//  list/feed/map reads) via `ClassificationStore.setManualSpecies` AND the
+//  WAV's own `Species Manual ID` GUANO field via
+//  `GuanoMetadata.updateManualID`, then reloads `rows` so the card reflects
+//  the edit immediately.
+//
 
 import SwiftUI
 
 struct WavFileInfoCard: View {
     let wavURL: URL
+    let recording: Recording
+    @Bindable var store: ClassificationStore
 
     @State private var rows: [(label: String, value: String)] = []
+    @State private var showSpeciesEdit = false
 
     var body: some View {
         VStack(spacing: 0) {
-            PanelTitle("GUANO Metadata")
+            PanelTitle("GUANO Metadata") {
+                Button { showSpeciesEdit = true } label: {
+                    Image(systemName: "pencil.circle")
+                        .font(.system(size: 15))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Edit species")
+            }
                 .padding(.horizontal, 8)
                 .padding(.top, 8)
                 .padding(.bottom, 4)
@@ -52,6 +71,17 @@ struct WavFileInfoCard: View {
         }
         .filledPanelCard()
         .task(id: wavURL) { rows = await Self.loadRows(wavURL: wavURL) }
+        .sheet(isPresented: $showSpeciesEdit) {
+            SpeciesEditSheet(currentCode: recording.species) { code in
+                store.setManualSpecies(recordingID: recording.id, code: code)
+                Task {
+                    await Task.detached(priority: .utility) {
+                        GuanoMetadata.updateManualID(wavURL: wavURL, code: code)
+                    }.value
+                    rows = await Self.loadRows(wavURL: wavURL)
+                }
+            }
+        }
     }
 
     /// Reads GUANO + header/filesystem facts into display rows. `nonisolated`
