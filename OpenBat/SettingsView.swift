@@ -21,7 +21,6 @@ struct SettingsView: View {
     let classStore: ClassificationStore
     let audio: AudioEngineController
     @Bindable var micCalSettings: MicCalibrationSettings
-    @Bindable var adaptiveTESettings: AdaptiveTimeExpansionSettings
     @State private var showMicCalibration = false
     @Environment(\.dismiss) private var dismiss
     @State private var selectedTab = "autoID"
@@ -218,7 +217,6 @@ struct SettingsView: View {
     private var audioTab: some View {
         Form {
             pulseSections
-            adaptiveTESection
             recordingSections
         }
         .sheet(isPresented: $showMicCalibration) {
@@ -305,100 +303,6 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: Adaptive time expansion tab
-
-    /// Live event-triggered time expansion — see `AdaptiveTimeExpansionProcessor`
-    /// for what each knob trades off. A separate `Section` (not folded into
-    /// `pulseSections`) since it tunes a listening mode, not pulse detection.
-    private var adaptiveTESection: some View {
-        Section {
-            Toggle("Sampler mode", isOn: $adaptiveTESettings.samplerEnabled)
-            Text("Plays one call every few seconds instead of trying to catch every pulse. It waits for a call, keeps listening a moment longer, picks the strongest one it heard and plays the whole of it — start to finish — then lets everything else go by until the next sample is due. Worth turning on when calls are arriving raggedly: one call heard properly tells you more than five heard in pieces.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            if adaptiveTESettings.samplerEnabled {
-                LabeledContent("Sample every") {
-                    Text(String(format: "%.1f s", adaptiveTESettings.samplerIntervalSeconds))
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                }
-                Slider(value: $adaptiveTESettings.samplerIntervalSeconds, in: 1...30, step: 0.5)
-
-                LabeledContent("Candidate scan") {
-                    Text(adaptiveTESettings.samplerScanMs <= 0
-                         ? "off"
-                         : String(format: "%.0f ms", adaptiveTESettings.samplerScanMs))
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                }
-                Slider(value: $adaptiveTESettings.samplerScanMs, in: 0...300, step: 10)
-                Text("How long it keeps listening for a better call before committing. Calls in a normal pass arrive 50–150 ms apart, so 150 ms usually gives it two or three to choose between. At zero the first call always wins.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            LabeledContent("Gain") {
-                Text(String(format: "%.1fx", adaptiveTESettings.gain))
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-            }
-            Slider(value: Binding(get: { Double(adaptiveTESettings.gain) },
-                                  set: { adaptiveTESettings.gain = Float($0) }),
-                   in: 1...12, step: 0.5)
-            Text("Output makeup gain — bat calls are weak and pass-through preserves the input's own level, so some makeup is normally wanted.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            LabeledContent("Hangover") {
-                Text(String(format: "%.0f ms", adaptiveTESettings.hangoverMs))
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-            }
-            Slider(value: $adaptiveTESettings.hangoverMs, in: 5...250, step: 5)
-            Text("How long after the last trigger an event stays open for a further pulse to extend it. Merges bursts and feeding buzzes into one contiguous stretch; too long degenerates toward waiting for silence.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            LabeledContent("Max event length") {
-                Text(String(format: "%.0f ms", adaptiveTESettings.maxBufferMs))
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-            }
-            Slider(value: $adaptiveTESettings.maxBufferMs, in: 20...500, step: 10)
-            Text("Hard cap on event length. At 8x expansion this cost is paid back as an equally long deaf drain, so kept deliberately small.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            LabeledContent("Threshold") {
-                Text(String(format: "%.0f dB", adaptiveTESettings.thresholdDB))
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-            }
-            Slider(value: $adaptiveTESettings.thresholdDB, in: 3...30, step: 1)
-            Text("How far above the tracked noise floor a block must sit to open an event.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            LabeledContent("Release") {
-                Text(String(format: "%.0f dB", adaptiveTESettings.releaseDB))
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-            }
-            Slider(value: $adaptiveTESettings.releaseDB, in: 0...30, step: 1)
-            Text("Level needed to keep an open event going. Lower than Threshold, so the decaying tail of a call still counts as signal — turn this down if call endings sound clipped, up if events run on into background noise.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            Button("Reset to Defaults", role: .destructive) {
-                adaptiveTESettings.reset()
-            }
-        } header: {
-            Text("Adaptive Time Expansion")
-        } footer: {
-            Text("Live, event-triggered time expansion (the \"tortoise\" listen mode). Capture pauses while a captured event plays back, so sustained activity is deliberately not kept up with — see the mode's own description for why.")
-        }
-    }
 
     // MARK: Location tab
 

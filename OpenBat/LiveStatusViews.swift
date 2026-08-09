@@ -242,7 +242,7 @@ struct SpeakerFeedbackWarningPill: View {
 /// deaf and misses nothing, and pays in delay instead — so the headline number
 /// here is seconds behind, not calls lost.
 ///
-/// Same containment as `AdaptiveTimeExpansionStatePill`: the counters are
+/// Contained deliberately: the counters are
 /// atomics set on the realtime audio thread, so reading them from a property
 /// `ContentView.body` depends on would hit the churn Context.md §13 warns
 /// about. Polled here in a self-contained leaf view instead.
@@ -348,140 +348,6 @@ struct VariableTimeDistortionLagPill: View {
     }
 }
 
-// MARK: - Adaptive time expansion state pill
-
-/// Live state indicator for the `.adaptiveTimeExpansion` listen mode:
-/// idle/capturing/draining, a running count of captured events, and — in red,
-/// only once non-zero — the number of calls that triggered while the mode was
-/// deaf mid-playback. Tapping opens a plain-language explainer for that red
-/// number, since "the detector stopped listening while it was talking" is not
-/// something a user can reasonably infer. Deliberately
-/// NOT read from ContentView.body — `AdaptiveTimeExpansionProcessor.state` is an
-/// atomic set on the realtime audio thread and can flip at event rate, so
-/// reading it in a computed property that ContentView.body depends on would hit
-/// the exact churn Context.md §13 warns about (rebuilding the toolbar mid-tap and
-/// dropping button actions). Instead this is a standalone leaf `View` that polls
-/// the processor itself via `TimelineView(.periodic)`, same mechanism as
-/// `SessionTimerPill`'s clock — capped at 10 Hz, well under anything that could
-/// compete with the spectrogram's render loop, and fully self-contained so no
-/// other view's body depends on this value.
-struct AdaptiveTimeExpansionStatePill: View {
-    let audio: AudioEngineController
-    /// Set while the guided tour is running: forces the pill on with stand-in
-    /// state/count/missed values, since the tour is normally taken before the
-    /// user has ever switched into this listen mode. See
-    /// `SpeakerFeedbackWarningPill.tourDemo`.
-    var tourDemo: Bool = false
-
-    @State private var showExplainer = false
-
-    var body: some View {
-        if tourDemo || (audio.isRunning && audio.listenMode == .adaptiveTimeExpansion) {
-            // The Button and its popover sit OUTSIDE the TimelineView on
-            // purpose: the popover anchors to the presenting view, and a
-            // presenter that rebuilds 10x/s can drop its own popover. Only the
-            // label content refreshes on the timeline.
-            Button { showExplainer = true } label: { pillContent }
-                .buttonStyle(.plain)
-                .popover(isPresented: $showExplainer) {
-                    explainer
-                        .frame(idealWidth: 320)
-                        .presentationCompactAdaptation(.popover)
-                }
-        }
-    }
-
-    private var pillContent: some View {
-        TimelineView(.periodic(from: .now, by: 0.1)) { _ in
-            let state: AdaptiveTimeExpansionProcessor.State = tourDemo ? .capturing : audio.adaptiveTimeExpansion.state
-            let count = tourDemo ? 7 : audio.adaptiveTimeExpansion.eventCount
-            let missed = tourDemo ? 2 : audio.adaptiveTimeExpansion.missedCount
-            HStack(spacing: 4) {
-                Image(systemName: "tortoise")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(Self.color(for: state))
-                Text("\(count)")
-                    .font(.system(size: 11, weight: .semibold).monospacedDigit())
-                    .foregroundStyle(.secondary)
-                // Only shown once something has actually been missed — a
-                // permanent "-0" would read as a fault rather than a tally.
-                if missed > 0 {
-                    Text("-\(missed)")
-                        .font(.system(size: 11, weight: .semibold).monospacedDigit())
-                        .foregroundStyle(.red)
-                }
-            }
-            .padding(.horizontal, 8)
-            .frame(height: StatusPillMetrics.height)
-            .background(.ultraThinMaterial, in: Capsule())
-            .accessibilityLabel(
-                "Time expansion \(Self.accessibilityName(for: state)), "
-                + "\(count) calls stretched, \(missed) missed. Tap to explain."
-            )
-        }
-    }
-
-    /// Plain-language explanation of the trade. Deliberately no jargon and no
-    /// patent talk — the user-facing question is "why did it miss those?", and
-    /// the honest answer is just arithmetic.
-    private var explainer: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("Why calls get missed")
-                    .font(.headline)
-
-                Text("Bat calls are too high to hear and far too short to make sense of — a typical call lasts about five thousandths of a second. This mode slows each one down 8 times, which drops it into hearing range and stretches it out enough for your ear to follow its shape.")
-
-                Text("The catch is the arithmetic: a call that took 5 ms to happen takes 40 ms to play back. While it's playing, the microphone isn't being recorded — so any call arriving during that window is gone. The red number counts those.")
-
-                Text("A bat cruising along usually leaves enough of a gap between calls that playback finishes before the next one arrives, and you hear nearly everything. When it closes on an insect the calls come in a rapid buzz, and most of them get missed — that's normal, and it's when the red number climbs fastest.")
-
-                Divider()
-
-                Text("So it isn't live")
-                    .font(.subheadline.weight(.semibold))
-
-                Text("What you're hearing is always a moment behind, and it isn't everything that happened. This mode trades hearing every call for hearing some calls properly. That's the same trade the classic tape-based bat detectors made, and there's no way around it — without using advanced signal processing, nothing can play sound back 8 times slower and keep up with real time at once.")
-
-                // Read once, when the popover is built — not in `pillContent`,
-                // which rebuilds at 10 Hz and would be taking the processor's
-                // control lock for a line of prose.
-                if audio.adaptiveTimeExpansion.samplerEnabled {
-                    Divider()
-
-                    Text("You're in sampler mode")
-                        .font(.subheadline.weight(.semibold))
-
-                    Text("Sampler mode gives up on catching everything on purpose. It waits, picks the strongest call it hears, and plays that one in full — then ignores the rest until the next sample is due. The red number counts everything it let past, so in this mode it climbs quickly and there's nothing wrong.")
-                }
-
-                Text("If you'd rather not miss anything, switch to heterodyne. It never stops listening, but it gives you clicks and chirps rather than the shape of a call. Alternatively, make a recording and play it back in full time expansion mode in the playback menu.")
-
-                Text("The counters reset when you change listening mode.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
-            .padding()
-        }
-    }
-
-    private static func color(for state: AdaptiveTimeExpansionProcessor.State) -> Color {
-        switch state {
-        case .idle: .secondary
-        case .capturing: .toggleOn
-        case .draining: .yellow
-        }
-    }
-
-    private static func accessibilityName(for state: AdaptiveTimeExpansionProcessor.State) -> String {
-        switch state {
-        case .idle: "idle"
-        case .capturing: "capturing"
-        case .draining: "draining"
-        }
-    }
-}
-
 // MARK: - Mic status pill
 
 /// External-mic connection indicator: a green connector icon that slowly pulses
@@ -499,7 +365,7 @@ struct MicStatusPill: View {
 
     var body: some View {
         // The Button and its popover sit OUTSIDE MicStatusPillContent on purpose —
-        // same reasoning as AdaptiveTimeExpansionStatePill just above: `audio.diagnostics`
+        // same reasoning as VariableTimeDistortionLagPill above: `audio.diagnostics`
         // churns at 15 Hz (AudioEngineController.flushStats), and a presenter that
         // rebuilds that fast can drop its own popover/tap mid-gesture. Only the leaf
         // content (icon + rate text) reads diagnostics; this body doesn't.

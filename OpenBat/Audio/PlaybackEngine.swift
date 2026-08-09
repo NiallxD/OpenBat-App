@@ -119,7 +119,7 @@ nonisolated final class PlaybackDriver: @unchecked Sendable {
             case .timeExpansion:     timeExp.render(out, frames: Int(frameCount))
             // Live-only mode; PlaybackDriver never has this set (see ListenMode's
             // doc comment) but is handled explicitly to keep the switch exhaustive.
-            case .off, .adaptiveTimeExpansion, .variableTimeDistortion:
+            case .off, .variableTimeDistortion:
                 for i in 0..<Int(frameCount) { out[i] = 0 }
             }
             return noErr

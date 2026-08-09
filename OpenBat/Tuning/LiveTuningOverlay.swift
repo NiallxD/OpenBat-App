@@ -21,7 +21,6 @@ import SwiftUI
 /// objects passed in, not here.
 struct LiveTuningOverlay: View {
     let audio: AudioEngineController
-    let adaptiveTESettings: AdaptiveTimeExpansionSettings
     let pulseDetector: PulseDetector
     @Binding var bandLow: Double
     @Binding var bandHigh: Double
@@ -69,7 +68,7 @@ struct LiveTuningOverlay: View {
         .onAppear {
             guard opening == nil else { return }
             opening = LiveTuningSnapshot.capture(
-                audio: audio, ate: adaptiveTESettings, pulse: pulseDetector,
+                audio: audio, pulse: pulseDetector,
                 bandLow: bandLow, bandHigh: bandHigh, timeWindowSeconds: timeWindowSeconds)
         }
     }
@@ -203,14 +202,10 @@ struct LiveTuningOverlay: View {
     /// Restores everything captured when the overlay opened.
     private func revert() {
         guard let snapshot = opening else { return }
-        snapshot.restore(audio: audio, ate: adaptiveTESettings, pulse: pulseDetector,
+        snapshot.restore(audio: audio, pulse: pulseDetector,
                          bandLow: &bandLow, bandHigh: &bandHigh,
                          timeWindowSeconds: &timeWindowSeconds)
         // The adaptive-TE group reaches the processor via ContentView's
-        // `.onChange(of: adaptiveTESettings.snapshot)`, but that fires on the
-        // next update pass — push it now so a revert is heard immediately
-        // rather than on whatever redraw happens next.
-        adaptiveTESettings.apply(to: audio.adaptiveTimeExpansion)
         onBandChange()
         revertToken += 1
     }

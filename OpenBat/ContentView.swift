@@ -52,7 +52,6 @@ struct ContentView: View {
     @State private var recorder = AudioRecorder()
     @State private var autoIDSettings = AutoIDSettings()
     @State private var micCalSettings = MicCalibrationSettings()
-    @State private var adaptiveTESettings = AdaptiveTimeExpansionSettings()
     @State private var classStore = ClassificationStore()
     @State private var liveActivity = LiveActivityController()
     @State private var detectionPump = BackgroundDetectionPump()
@@ -220,8 +219,7 @@ struct ContentView: View {
                     SettingsView(settings: autoIDSettings,
                                  pulseDetector: pulseDetector, recorder: recorder,
                                  location: location, consent: consent, classStore: classStore,
-                                 audio: audio, micCalSettings: micCalSettings,
-                                 adaptiveTESettings: adaptiveTESettings)
+                                 audio: audio, micCalSettings: micCalSettings)
                 }
                 // Someone who opted in, then had the terms change under them,
                 // has silently stopped contributing. Settings carries the same
@@ -434,7 +432,6 @@ struct ContentView: View {
             LiveActivityController.endOrphanedActivities()
             location.store = classStore
             applyBand()
-            adaptiveTESettings.apply(to: audio.adaptiveTimeExpansion)
             // Region fix so species priors can be suggested from GBIF occurrence
             // data near the user (see the onChange below) — same lightweight,
             // one-shot fix AutoIDSettingsView already uses, just requested
@@ -498,11 +495,6 @@ struct ContentView: View {
         }
         .onChange(of: bandLow)  { _, _ in applyBand() }
         .onChange(of: bandHigh) { _, _ in applyBand() }
-        // One modifier for all of the adaptive-TE tunables, not one each — see
-        // `AdaptiveTimeExpansionSettings.Snapshot` for why that matters here.
-        .onChange(of: adaptiveTESettings.snapshot) { _, _ in
-            adaptiveTESettings.apply(to: audio.adaptiveTimeExpansion)
-        }
         .onChange(of: autoIDSettings.activeModelID) { _, id in
             pulseDetector.refreshModel()
             recorder.setActiveModel(id: id)
@@ -583,7 +575,6 @@ struct ContentView: View {
             if showTuningOverlay {
                 LiveTuningOverlay(
                     audio: audio,
-                    adaptiveTESettings: adaptiveTESettings,
                     pulseDetector: pulseDetector,
                     bandLow: $bandLow, bandHigh: $bandHigh,
                     timeWindowSeconds: $timeWindowSeconds,
@@ -984,7 +975,7 @@ struct ContentView: View {
                         Spacer()
                         HStack(spacing: 8) {
                             speakerFeedbackWarning
-                            adaptiveTEStatePill
+                            distortionLagPill
                             sessionStatusPill
                             micStatusPill
                             resetButton
@@ -1014,7 +1005,7 @@ struct ContentView: View {
         HStack(spacing: 8) {
             sessionStatusPill
             speakerFeedbackWarning
-            adaptiveTEStatePill
+            distortionLagPill
             if audio.listenMode == .heterodyne {
                 TunedPillView(audio: audio, nyquist: nyquist)
             }
@@ -1086,7 +1077,7 @@ struct ContentView: View {
     /// Session-status pill (Off / Listening / Session) for the portrait stats
     /// header, next to the mic pill. Same scoping rationale — see
     /// `SessionStatusPillView`. Forced to read "Listening" during the guided
-    /// tour for the same reason as `speakerFeedbackWarning`/`adaptiveTEStatePill`
+    /// tour for the same reason as `speakerFeedbackWarning`/`distortionLagPill`
     /// below — the tour is normally taken with detection off.
     private var sessionStatusPill: some View {
         SessionStatusPillView(audio: audio, classStore: classStore, tourDemo: tourActive)
@@ -1106,7 +1097,7 @@ struct ContentView: View {
     /// mode. Same scoping rationale as `speakerFeedbackWarning` — see
     /// `VariableTimeDistortionLagPill`. Forced visible during the guided tour for
     /// the same reason as `speakerFeedbackWarning`.
-    private var adaptiveTEStatePill: some View {
+    private var distortionLagPill: some View {
         VariableTimeDistortionLagPill(audio: audio, tourDemo: tourActive)
             .tourTarget(.timeExpansionCounter)
     }
@@ -1159,7 +1150,6 @@ struct ContentView: View {
         processor.peakMinFraction = max(bandLow, 0.01)
         processor.peakMaxFraction = bandHigh
         audio.heterodyne.setBand(low: bandLow, high: bandHigh)
-        audio.adaptiveTimeExpansion.setBand(low: bandLow, high: bandHigh)
     }
 
     // MARK: Panel headers + per-panel setting buttons
@@ -1721,17 +1711,13 @@ struct ContentView: View {
 
     // Live listening cycles off → heterodyne → variable time distortion → off.
     // `.timeExpansion` is playback-only (see ListenMode's doc comment) and
-    // `.adaptiveTimeExpansion` is no longer offered; both are handled explicitly
+    // `.timeExpansion` is playback-only; it is handled explicitly
     // (rather than via `default:`) so `ListenMode` stays exhaustively checked.
     private var nextListenMode: ListenMode {
         switch audio.listenMode {
         case .off:                        .heterodyne
         case .heterodyne:                 .variableTimeDistortion
         case .variableTimeDistortion:     .off
-        // No longer offered. Its processor and settings are still on disk, but
-        // it is unreachable from the UI — see Context.md §5 for why, and do not
-        // re-add it to this cycle without reading that section first.
-        case .adaptiveTimeExpansion:      .off
         case .timeExpansion:              .off
         }
     }
@@ -1742,10 +1728,7 @@ struct ContentView: View {
         switch audio.listenMode {
         case .off:                   "Off"
         case .heterodyne:            "Heterodyne"
-        case .adaptiveTimeExpansion: "Time expansion"
         case .variableTimeDistortion:      "Variable time distortion"
-        // Disambiguated from the live `.adaptiveTimeExpansion` label above —
-        // this one is the playback-only file mode (see ListenMode's doc comment).
         case .timeExpansion:         "Time expansion (file)"
         }
     }
@@ -1754,7 +1737,6 @@ struct ContentView: View {
         switch audio.listenMode {
         case .off:                   "headphones"
         case .heterodyne:            "antenna.radiowaves.left.and.right"
-        case .adaptiveTimeExpansion: "tortoise"
         case .variableTimeDistortion:      "wave.3.forward"
         case .timeExpansion:         "tortoise"
         }

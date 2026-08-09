@@ -26,10 +26,6 @@ enum ListenMode: CaseIterable {
     /// PlaybackEngine, and treated as `.off` by live capture, which can't pace
     /// itself slower than real time without falling permanently behind.
     case timeExpansion
-    /// LIVE event-triggered time expansion (see AdaptiveTimeExpansionProcessor).
-    /// Live-capture only — the counterpart to `.timeExpansion`, which is
-    /// file-playback only.
-    case adaptiveTimeExpansion
     /// LIVE rate-ramped expansion that discards nothing (see
     /// VariableTimeDistortionProcessor). Expands calls 8× and compresses the silence
     /// instead of going deaf, so it runs behind real time rather than losing
@@ -86,12 +82,11 @@ final class AudioEngineController {
     /// `@MainActor` isolation by the project's default and can't be read from there.
     nonisolated static let preferredSampleRate: Double = 384_000
 
-    // MARK: Listening (heterodyne / adaptive time expansion)
+    // MARK: Listening (heterodyne / variable time distortion)
 
     /// The listening DSPs. Fed from the capture tap; the active one is rendered to
     /// the speaker via a source node when `listenMode != .off`.
     let heterodyne = HeterodyneProcessor()
-    let adaptiveTimeExpansion = AdaptiveTimeExpansionProcessor()
     /// Call boundaries are fed in from `PulseDetector.onPulseWindow` — see
     /// ContentView, where the detector lives.
     let variableTimeDistortion = VariableTimeDistortionProcessor()
@@ -379,8 +374,6 @@ final class AudioEngineController {
             switch listenMode {
             case .heterodyne:
                 heterodyne.reset(inputSampleRate: rate)
-            case .adaptiveTimeExpansion:
-                adaptiveTimeExpansion.reset(inputSampleRate: rate)
             case .variableTimeDistortion:
                 variableTimeDistortion.reset(inputSampleRate: rate)
             case .off, .timeExpansion:
@@ -390,7 +383,6 @@ final class AudioEngineController {
             // Identical fan-out to the live tap closure in `startEngine()`.
             let sink = bufferSink
             let hetero: HeterodyneProcessor? = (listenMode == .heterodyne) ? heterodyne : nil
-            let adaptive: AdaptiveTimeExpansionProcessor? = (listenMode == .adaptiveTimeExpansion) ? adaptiveTimeExpansion : nil
             // Fed unconditionally: its write counter is the shared stream clock
             // that PulseDetector's window indices are expressed in, so it must
             // not pause when another listen mode is selected. See
@@ -399,7 +391,6 @@ final class AudioEngineController {
             source.start { [weak self] buffer in
                 sink?(buffer)
                 hetero?.process(buffer)
-                adaptive?.process(buffer)
                 distortion.process(buffer)
                 self?.consume(buffer)
             }
@@ -595,14 +586,11 @@ final class AudioEngineController {
 
         // Feed the active listening processor from the tap, and attach its output.
         let hetero: HeterodyneProcessor? = (listenMode == .heterodyne) ? heterodyne : nil
-        let adaptive: AdaptiveTimeExpansionProcessor? = (listenMode == .adaptiveTimeExpansion) ? adaptiveTimeExpansion : nil
         // Unconditional — see the note in the demo path above.
         let distortion = variableTimeDistortion
         switch listenMode {
         case .heterodyne:
             heterodyne.reset(inputSampleRate: format.sampleRate)
-        case .adaptiveTimeExpansion:
-            adaptiveTimeExpansion.reset(inputSampleRate: format.sampleRate)
         case .variableTimeDistortion:
             variableTimeDistortion.reset(inputSampleRate: format.sampleRate)
         case .off, .timeExpansion:
@@ -619,7 +607,6 @@ final class AudioEngineController {
         input.installTap(onBus: 0, bufferSize: 2048, format: format) { [weak self] buffer, _ in
             sink?(buffer)
             hetero?.process(buffer)
-            adaptive?.process(buffer)
             distortion.process(buffer)
             self?.consume(buffer)
         }
@@ -657,7 +644,6 @@ final class AudioEngineController {
     private func attachListenOutput() {
         guard let outFormat = AVAudioFormat(standardFormatWithSampleRate: heterodyne.outputSampleRate, channels: 1) else { return }
         let hetero = heterodyne
-        let adaptive = adaptiveTimeExpansion
         let distortion = variableTimeDistortion
         let mode = listenMode
         let node = AVAudioSourceNode(format: outFormat) { _, _, frameCount, audioBufferList in
@@ -666,7 +652,6 @@ final class AudioEngineController {
             let out = data.assumingMemoryBound(to: Float.self)
             switch mode {
             case .heterodyne: hetero.render(out, frames: Int(frameCount))
-            case .adaptiveTimeExpansion: adaptive.render(out, frames: Int(frameCount))
             case .variableTimeDistortion: distortion.render(out, frames: Int(frameCount))
             case .off, .timeExpansion: for i in 0..<Int(frameCount) { out[i] = 0 }
             }

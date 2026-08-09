@@ -11,7 +11,7 @@
 //  already reads `buffer.format.sampleRate` off the buffer rather than assuming
 //  384 kHz.
 //
-//  Real-time pacing is not a nicety. AdaptiveTimeExpansionProcessor's
+//  Real-time pacing is not a nicety. VariableTimeDistortionProcessor's
 //  drain-deafness and its `missedCount` are wall-clock behaviours (see the
 //  invariants in that file); feeding the pipeline faster than real time would
 //  make the mode look better than it is, and feeding it slower would hide the
