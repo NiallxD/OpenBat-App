@@ -8,14 +8,9 @@
 //  object identity the upload is stored under.
 //
 //  This exists as one module, with one entry point, because the project's
-//  entire "uploaded recordings are not personal data" position rests on it. It
-//  used to be four separate pieces of logic — a coordinate helper in
-//  UploadConversionPipeline, a GUANO builder beside it, request headers set in
-//  RecordingUploader, and an object key assembled in UploadClient — and each one
-//  independently had a path that leaked something (the header sent the raw
-//  coordinate, the GUANO builder copied every source field forward, the object
-//  key led with the device id). Anonymization spread across four files is
-//  anonymization nobody can audit.
+//  entire "uploaded recordings are not personal data" position rests on it.
+//  It used to be four separate pieces of logic, each with its own leak. See
+//  Context.md §11.
 //
 //  Two rules for anyone editing this file:
 //
@@ -42,24 +37,13 @@ import CoreLocation
 /// no way to obtain one.
 nonisolated struct AnonymizedUpload {
     /// Freshly minted per attempt, unrelated to the device id and unrelated to
-    /// the local `Recording.id`.
+    /// the local `Recording.id`. Deliberately NOT persisted anywhere on the
+    /// device: a persisted key would be a complete join between a device and
+    /// its uploads, sitting on the device, available to anyone holding it.
     ///
-    /// Deliberately NOT persisted anywhere on the device. The object key used to
-    /// be the `Recording`'s own id, which made retries idempotent (a second
-    /// attempt overwrote the first object rather than adding a duplicate) — but
-    /// it also meant the local database held, for every contribution, the exact
-    /// server-side key it was stored under. That is a complete join between a
-    /// person's device and their uploads, sitting on the device, available to
-    /// anyone who has the device. Minting an ID that is used once and forgotten
-    /// is what makes "we cannot tell which recordings are yours" true even to
-    /// someone holding the phone.
-    ///
-    /// The cost is that an upload which lands server-side but whose response is
-    /// lost will be re-sent as a second object. That is rare (R2 `put` is atomic
-    /// on the complete body, so an interrupted transfer leaves nothing) and the
-    /// consequence is a duplicate in the training set, deduplicable server-side
-    /// by content hash. A duplicate recording is a much smaller problem than a
-    /// persistent identifier.
+    /// Cost: a response lost after a successful upload gets re-sent as a
+    /// second object (rare — R2 `put` is atomic), deduplicated server-side by
+    /// content hash. A smaller problem than a persistent identifier.
     let objectID: UUID
     /// `{YYYY-MM-DD}/{objectID}.flac` — the R2 key, and the Worker's URL path
     /// after `/upload/`. The date comes from the *bucketed* timestamp in UTC, so
@@ -234,11 +218,11 @@ nonisolated enum AnonymizedUploadBuilder {
             longitude: (coordinate.longitude / locationGridDegrees).rounded() * locationGridDegrees)
     }
 
-    /// Unconditional — note §6. An earlier version snapped only when the user
-    /// had turned iOS's per-app Precise Location toggle *off*, which meant the
-    /// default configuration uploaded exact six-decimal coordinates. The app's
-    /// own fuzz now applies regardless of that toggle; iOS's reduced-accuracy
-    /// region, when enabled, simply layers a much coarser area on top of it.
+    /// Unconditional, regardless of iOS's own Precise Location toggle — an
+    /// earlier version snapped only when that toggle was off, which meant the
+    /// default configuration uploaded exact coordinates. iOS's reduced-accuracy
+    /// region, when enabled, simply layers a much coarser area on top of this
+    /// fuzz.
     ///
     /// An unparseable `Loc Position` is dropped rather than passed through: a
     /// string this can't parse is one it also can't snap, so forwarding it

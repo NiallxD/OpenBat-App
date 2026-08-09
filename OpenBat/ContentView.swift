@@ -2,11 +2,27 @@
 //  ContentView.swift
 //  OpenBat
 //
-//  Main screen. From bottom to top:
+//  Main screen, and the wiring hub every subsystem is connected through.
+//  Layout, bottom to top:
 //    • Control bar   — play/stop, listen mode (fixed height)
 //    • Live spectrogram — 50 % of the flexible area
 //    • Pulse zoom    — 30 % — last detected pulse at 15 ms x-axis
 //    • Stats strip   — 20 % — placeholder for future species / count data
+//
+//  Wiring lives in the `.onAppear` (around `audio.activate()`): the raw audio
+//  tap fans out from `audio.bufferSink` into `processor` (spectrogram/FFT) and
+//  `recorder` (WAV capture); `pulseDetector`'s callbacks (`onPulseStart`,
+//  `onPulseClassified`, `onPulseActiveChanged`, `onPassFinalized`) push into
+//  the recorder, the Live Activity controller and the audio engine's own
+//  auto-tune; `recorder.onRecordingSaved` hands a finished bout to
+//  `classStore` and then to `RecordingUploader`. Each store is a `@State`
+//  object owned here and passed down by reference — this file is where their
+//  lifetimes and cross-references are established, not where their own logic
+//  lives.
+//
+//  `menuIsOpen` pauses the Metal render loop and suspends `processor` while a
+//  full-screen sheet is up. `showBand`/`showPulseView`/`showTuningOverlay` are
+//  deliberately excluded from it — see their own declarations.
 //
 
 import SwiftUI
@@ -346,6 +362,9 @@ struct ContentView: View {
             RecordingUploader.shared.retryContextProvider = { [consent] in
                 UploadRetryContext(consent: consent)
             }
+            // The fan-out point: every captured buffer goes to the spectrogram/FFT
+            // pipeline and the WAV recorder in the same closure, so both stay in
+            // lock-step with the tap regardless of listen mode.
             audio.bufferSink = { [processor, recorder] buffer in
                 processor.process(buffer)
                 recorder.append(buffer)
@@ -353,6 +372,12 @@ struct ContentView: View {
             audio.autoTunePeakProvider = { [processor] in processor.peakFrequency }
             pulseDetector.onPulseStart = { [audio] freq in
                 audio.notifyPulseDetected(frequency: freq)
+            }
+            // Variable Time Distortion expands exactly the detector's call window —
+            // the one boundary in the app that separates a call from its echo.
+            pulseDetector.onPulseWindow = { [audio] onsetAbs, lengthSamples in
+                audio.variableTimeDistortion.submitPulseWindow(onsetAbs: onsetAbs,
+                                                         lengthSamples: lengthSamples)
             }
             pulseDetector.onPulseClassified = { [recorder] result, date in
                 recorder.addClassifiedPulse(result: result, date: date)
@@ -1079,10 +1104,10 @@ struct ContentView: View {
 
     /// Live capturing/draining indicator for the adaptive time-expansion listen
     /// mode. Same scoping rationale as `speakerFeedbackWarning` — see
-    /// `AdaptiveTimeExpansionStatePill`. Forced visible during the guided tour for
+    /// `VariableTimeDistortionLagPill`. Forced visible during the guided tour for
     /// the same reason as `speakerFeedbackWarning`.
     private var adaptiveTEStatePill: some View {
-        AdaptiveTimeExpansionStatePill(audio: audio, tourDemo: tourActive)
+        VariableTimeDistortionLagPill(audio: audio, tourDemo: tourActive)
             .tourTarget(.timeExpansionCounter)
     }
 
@@ -1587,7 +1612,7 @@ struct ContentView: View {
         // Demo runs get a card too — flagged as DEMO so a synthetic ID is never mistaken
         // for field data, the same reasoning that blocks recording and session creation
         // here. It's also the only way to exercise this on the simulator, where there's
-        // no mic (see CLAUDE.md § Demo mode).
+        // no mic (see Context.md §6).
         liveActivity.start(sessionTitle: "Demo", isDemo: true, startDate: feedSessionStart ?? Date())
         Task { await audio.startDemo(url: url, name: name) }
     }
@@ -1694,16 +1719,20 @@ struct ContentView: View {
         .tourTarget(.listen)
     }
 
-    // `.timeExpansion` is playback-only (see ListenMode's doc comment) and this
-    // cycle never lands on it — live listening cycles off → heterodyne →
-    // adaptive time expansion → off. Handled explicitly below (rather than via
-    // `default:`) purely so `ListenMode` stays exhaustively checked here.
+    // Live listening cycles off → heterodyne → variable time distortion → off.
+    // `.timeExpansion` is playback-only (see ListenMode's doc comment) and
+    // `.adaptiveTimeExpansion` is no longer offered; both are handled explicitly
+    // (rather than via `default:`) so `ListenMode` stays exhaustively checked.
     private var nextListenMode: ListenMode {
         switch audio.listenMode {
-        case .off:                   .heterodyne
-        case .heterodyne:            .adaptiveTimeExpansion
-        case .adaptiveTimeExpansion: .off
-        case .timeExpansion:         .off
+        case .off:                        .heterodyne
+        case .heterodyne:                 .variableTimeDistortion
+        case .variableTimeDistortion:     .off
+        // No longer offered. Its processor and settings are still on disk, but
+        // it is unreachable from the UI — see Context.md §5 for why, and do not
+        // re-add it to this cycle without reading that section first.
+        case .adaptiveTimeExpansion:      .off
+        case .timeExpansion:              .off
         }
     }
 
@@ -1714,6 +1743,7 @@ struct ContentView: View {
         case .off:                   "Off"
         case .heterodyne:            "Heterodyne"
         case .adaptiveTimeExpansion: "Time expansion"
+        case .variableTimeDistortion:      "Variable time distortion"
         // Disambiguated from the live `.adaptiveTimeExpansion` label above —
         // this one is the playback-only file mode (see ListenMode's doc comment).
         case .timeExpansion:         "Time expansion (file)"
@@ -1725,6 +1755,7 @@ struct ContentView: View {
         case .off:                   "headphones"
         case .heterodyne:            "antenna.radiowaves.left.and.right"
         case .adaptiveTimeExpansion: "tortoise"
+        case .variableTimeDistortion:      "wave.3.forward"
         case .timeExpansion:         "tortoise"
         }
     }
@@ -1789,8 +1820,8 @@ private func recordPulseAnimation(armed: Bool, writing: Bool) -> Animation {
 }
 
 /// The main record toggle: arms/disarms the triggered WAV recorder. A standalone
-/// `View` struct, not a computed property on `ContentView` — see CLAUDE.md's
-/// `@Observable` churn note. `recorder.isWriting` flips on every WAV pass open/close
+/// `View` struct, not a computed property on `ContentView` — see Context.md
+/// §13. `recorder.isWriting` flips on every WAV pass open/close
 /// during active detection; reading it directly in a `ContentView.body` computed
 /// property invalidated the whole screen at that rate, dropping taps on the transport
 /// buttons and both toolbar menus mid-tap.

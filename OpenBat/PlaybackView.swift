@@ -321,7 +321,7 @@ struct PlaybackControlsView: View {
         // Live-only mode; never reached from this playback cycle, but handled
         // explicitly rather than via `default:` so ListenMode stays exhaustively
         // checked here too.
-        case .adaptiveTimeExpansion: .off
+        case .adaptiveTimeExpansion, .variableTimeDistortion: .off
         }
     }
 
@@ -331,6 +331,7 @@ struct PlaybackControlsView: View {
         case .heterodyne:           "antenna.radiowaves.left.and.right"
         case .timeExpansion:        "tortoise"
         case .adaptiveTimeExpansion: "tortoise"
+        case .variableTimeDistortion:      "wave.3.forward"
         }
     }
 
@@ -340,6 +341,7 @@ struct PlaybackControlsView: View {
         case .heterodyne:            "Heterodyne"
         case .timeExpansion:        "Time exp"
         case .adaptiveTimeExpansion: "Time exp"
+        case .variableTimeDistortion:      "Distortion"
         }
     }
 

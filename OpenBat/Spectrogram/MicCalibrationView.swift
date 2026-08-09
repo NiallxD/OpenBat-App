@@ -235,7 +235,7 @@ struct MicCalibrationView: View {
 /// `MicCalibrationView.body` itself, and `@Observable`'s whole-property
 /// invalidation would re-render the entire sheet (including the toolbar
 /// Cancel button) on every level update, risking dropped taps during the
-/// 30-second capture. See CLAUDE.md's `@Observable` churn note.
+/// 30-second capture. See Context.md §13.
 private struct BaselineTracker: View {
     let audio: AudioEngineController
     @Binding var baselineDB: Float?

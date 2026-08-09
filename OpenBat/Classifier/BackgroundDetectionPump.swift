@@ -8,27 +8,23 @@
 import Foundation
 
 /// Drains `SpectrogramProcessor` and feeds `PulseDetector` while the Metal render loop
-/// isn't running.
+/// isn't running (app backgrounded or screen locked).
 ///
 /// **Why this exists.** `PulseDetector.feed()` is normally called from inside
-/// `SpectrogramRenderer.draw(in:)` — i.e. off the MTKView's CADisplayLink. The system
-/// pauses that link when the app backgrounds or the screen locks. Audio keeps flowing
-/// (`UIBackgroundModes: audio`) and `SpectrogramProcessor.process()` keeps producing
-/// columns on the audio thread, but with nobody draining them they pile up and get
-/// discarded at `maxPendingColumns`. Result: no pulses, no passes, no classifications,
-/// and a Live Activity accurately reporting a detector that has stopped.
+/// `SpectrogramRenderer.draw(in:)`, off the MTKView's CADisplayLink, which the system
+/// pauses on background/lock. Without something else draining, columns pile up and get
+/// discarded at `maxPendingColumns` — detection silently stops. See Context.md §12.
 ///
-/// **Why it can be this small.** `feed()` reads audio only through `pcmProvider` (the
-/// processor's own raw PCM ring) — it never touches the renderer's `liveHistory`, which
-/// exists for the spectrogram display and scrollback. So keeping detection alive needs
-/// no Metal, no textures and no renderer handle: just the same drain-and-feed loop
-/// `draw(in:)` runs, minus the drawing. The visible consequence is that the spectrogram
-/// has a gap for the backgrounded stretch, which is correct — there was no screen.
+/// **Why it can be this small.** `feed()` reads audio only through `pcmProvider` — it
+/// never touches the renderer's `liveHistory` (display/scrollback only) — so this needs
+/// no Metal, no textures, no renderer handle: the same drain-and-feed loop `draw(in:)`
+/// runs, minus the drawing. The spectrogram has a gap for the backgrounded stretch,
+/// which is correct — there was no screen.
 ///
 /// **Ownership.** Exactly one of the render loop and this pump drains at a time, keyed
 /// off `scenePhase` in ContentView. `drain()` is lock-guarded and hands out disjoint
 /// batches, so the brief overlap on a phase transition can only mean a few columns go to
-/// one instead of the other — a sub-frame gap in the ring, never a double-feed.
+/// one instead of the other — never a double-feed.
 @MainActor
 final class BackgroundDetectionPump {
 

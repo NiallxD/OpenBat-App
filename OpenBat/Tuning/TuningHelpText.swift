@@ -12,6 +12,8 @@
 //  tells the reader nothing they couldn't guess from the label.
 //
 
+/// Popover copy for every tuning knob, keyed by a static let per parameter.
+/// Grouped by tab via `// MARK:` to match `LiveTuningTabs.swift`'s layout.
 enum TuningHelp {
 
     // MARK: Heterodyne
@@ -103,6 +105,15 @@ enum TuningHelp {
         The cost is only latency, and you are already listening to the past.
         """
 
+    static let samplerEdge = """
+        Where each call's edges are cut, as a fraction of the way from the \
+        background up to that call's own loudest point. Because it is measured \
+        against the call itself, a faint distant call and a loud close one get \
+        the same treatment. Lower takes more of the quiet head and tail and \
+        more background with it; raise it if events sound padded with hiss. \
+        Past about 0.35 calls start being cut short outright.
+        """
+
     static let preRoll = """
         How much audio from before the trigger is included, so the call's \
         onset isn't lost. Detection can only report a call once the block \
@@ -163,6 +174,91 @@ enum TuningHelp {
         """
 
     static let ateEvents = "Events played since this listen mode started."
+
+    // MARK: Variable Time Distortion
+
+    static let vtdLag = """
+    How far behind real time the output currently is.
+
+    This mode never goes deaf and never drops a sample, so a dense pass is paid \
+    for in lag rather than in lost calls. Expect a sawtooth: lag builds through \
+    a pass and drains back toward zero in the quiet between passes.
+    """
+    static let vtdRate = """
+    Current playback rate — input samples consumed per output sample.
+
+    1× is full expansion (a call), 8× is true speed (a gap), above 8× is the \
+    gaps being compressed to repay lag.
+    """
+    static let vtdExpanded = "Calls given an expansion window since this mode started."
+    static let vtdDropped = """
+    Call windows that arrived too late to use, so those calls played by \
+    unexpanded.
+
+    The detector reports a window only once the call's run has ended, so the \
+    window always arrives after the audio it describes. If this climbs, raise \
+    Lookahead until it stops — that is the single most likely reason the mode \
+    sounds like it is doing nothing.
+    """
+    static let vtdOverflow = """
+    Input ring overflows — the ONLY path in this mode that discards audio, and \
+    a failure rather than a mode. Should stay at zero.
+
+    Non-zero means lag exceeded the ring (about 10 s) and the read pointer had \
+    to skip. Lower Gap speed or raise Max catch-up rate.
+    """
+    static let vtdGapRate = """
+    How fast the silence between calls plays.
+
+    8× is true speed, which keeps the rhythm between calls literally correct — \
+    the thing event-triggered expansion cannot do, where between-event spacing \
+    comes out 8× too fast. Higher values shorten the gaps and accrue less lag, \
+    at the cost of a more hurried cadence.
+    """
+    static let vtdRateMax = """
+    Ceiling on how fast the gaps may run while catching up after a pass.
+
+    Only reached in sustained quiet. Higher drains lag faster; it also costs \
+    more CPU, since the resampler's filter widens with rate.
+    """
+    static let vtdLookahead = """
+    How far behind the live edge the read pointer starts, and the floor it holds.
+
+    This is the budget for detector latency: a call window can only be used if \
+    it arrives before the read pointer reaches it. Too low and windows are \
+    dropped and calls play unexpanded — watch Dropped windows.
+    """
+    static let vtdCatchupAfter = """
+    How much continuous quiet before the gaps start speeding up to repay lag.
+
+    Long enough that gaps *inside* a pass never trigger it, so the rhythm there \
+    stays at true speed; short enough that the quiet between passes is used.
+    """
+    static let vtdTransition = """
+    How long the glide between gap speed and full expansion takes.
+
+    The step at each boundary is large: expanding admits the whole ultrasonic \
+    band into the audible one, while the gaps are filtered down to a few kHz, \
+    and noise level goes with bandwidth. Crossed quickly that reads as a pop on \
+    the way in and a cut on the way out. Longer turns the same step into a \
+    swell. Braking starts proportionally earlier, so this cannot make calls \
+    arrive before the rate has settled.
+    """
+    static let vtdHighCut = """
+    Highest input frequency admitted while expanding.
+
+    Everything above the loudest call frequency is noise, and at full expansion \
+    all of it becomes audible hiss. Cutting it reduces the hiss without \
+    touching the calls. Lower it until the hiss stops rather than until calls \
+    thin out — raise it again if a high-frequency species sounds dull.
+    """
+    static let vtdDuck = """
+    How hard the output is ducked as playback speeds up.
+
+    Gain follows rate, so expanded calls stay at full level while rushed \
+    background drops away. Also stops anything still sounding from being heard \
+    sweeping upward in pitch as the rate ramps.
+    """
 
     static let ateMissed = """
         Pulses that arrived while a previous event was still playing out. Not \

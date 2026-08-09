@@ -14,6 +14,7 @@
 
 import Accelerate
 
+/// One recording's measured quality against `UploadQualityGate`'s thresholds.
 struct UploadQualityGateResult {
     let passed: Bool
     let snrDB: Double

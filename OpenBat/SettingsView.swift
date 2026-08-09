@@ -2,6 +2,13 @@
 //  SettingsView.swift
 //  OpenBat
 //
+//  The Settings sheet: five tabs (AutoID / Audio / Location / Recordings /
+//  Privacy) picked by a segmented control rather than a `TabView`, so only the
+//  active tab's `Form` exists at a time. Audio further merges what used to be
+//  separate Time Expansion / Pulse / Recording tabs into one `Form` built from
+//  `@ViewBuilder` section groups — section header text is kept from the
+//  original tabs it came from.
+//
 
 import SwiftUI
 

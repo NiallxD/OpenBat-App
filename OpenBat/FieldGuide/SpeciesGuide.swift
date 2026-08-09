@@ -106,7 +106,7 @@ struct GuideSpecies: Codable, Identifiable, Hashable {
     var scientificName: String
     /// Taxonomic order, e.g. "Chiroptera" — always the same for bats, but
     /// included for the breadcrumb. A stopgap until the full taxonomic-tree
-    /// JSON (see CLAUDE.md's Taxonomy browser future work) replaces this and
+    /// JSON (see Context.md §16) replaces this and
     /// `family`/`genus` with a proper lookup.
     var order: String?
     var family: String?
@@ -197,7 +197,7 @@ struct SpeciesMeasurements: Codable, Hashable {
 }
 
 /// Text descriptors for key identifying features. Illustrations/icons for
-/// these are future work (see CLAUDE.md) — plain text for now.
+/// these are future work (see Context.md §16) — plain text for now.
 struct SpeciesMorphology: Codable, Hashable {
     var earType: String?
     var tailType: String?

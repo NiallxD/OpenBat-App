@@ -32,7 +32,7 @@ struct BatDetectorAttributes: ActivityAttributes {
     /// `Text(timerInterval:)`, which ticks in the widget process without consuming
     /// any of the update budget — see `ContentState` on why that matters.
     let sessionStart: Date
-    /// Demo passes aren't field data (see CLAUDE.md § Demo mode). The card says so
+    /// Demo passes aren't field data (see Context.md §6). The card says so
     /// rather than silently presenting a synthetic ID as a real detection.
     let isDemo: Bool
 
@@ -79,19 +79,10 @@ struct BatDetectorAttributes: ActivityAttributes {
 
         // MARK: Derived staleness
         //
-        // These are computed by the APP at update time, not by the widget from `Date()`,
-        // and that is load-bearing rather than a style choice.
-        //
-        // A Live Activity re-renders only when an update lands. A widget that decided
-        // "is this stale?" by comparing `Date()` against `lastDetectionDate` in its body
-        // would never get the chance to notice: once the bats stop, `lastDetectionDate`
-        // stops changing, so every heartbeat state compares equal to the last, so
-        // `LiveActivityController.update` correctly drops it as a no-op, so no re-render
-        // ever happens — and the card sits there with a lit dot and live-looking numbers
-        // indefinitely. Making staleness part of the state means crossing the threshold
-        // *is* a change, which produces exactly one update at the moment it matters.
-        //
-        // Consequence: the transition is only as prompt as `heartbeatInterval`.
+        // Computed by the APP at update time, never by the widget from `Date()` — a
+        // widget-computed staleness check would never get the chance to fire, since the
+        // no-op guard drops every update once nothing is changing. See Context.md §12.
+        // The transition is only as prompt as `heartbeatInterval`.
 
         /// `lastPassDate` is older than `staleIDSeconds` — greys the species out.
         var isIDStale: Bool
@@ -136,6 +127,8 @@ struct BatDetectorAttributes: ActivityAttributes {
 
 // MARK: - Shared constants
 
+/// Constants both the app and the widget need to agree on for staleness/
+/// liveness to read consistently on both sides.
 enum BatActivityShared {
     /// An ID older than this greys out. Same 30 s as the app's `staleIDSeconds`, so every
     /// surface ages IDs out on the same clock.

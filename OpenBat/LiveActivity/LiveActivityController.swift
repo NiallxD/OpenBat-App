@@ -2,7 +2,11 @@
 //  LiveActivityController.swift
 //  OpenBat
 //
-//  App-side owner of the detection Live Activity. Target: OpenBat only.
+//  App-side owner of the detection Live Activity: starts it, feeds it from
+//  the detector, tears it down. Main-actor only; never called from the audio
+//  thread. Target: OpenBat only — the widget target has no need of it and
+//  cannot see it. Do not add a per-pulse or per-frame update path; see the
+//  class doc comment and Context.md §12 for why.
 //
 
 import Foundation
@@ -30,20 +34,13 @@ final class LiveActivityController {
     private static let minUpdateInterval: TimeInterval = 3.0
 
     /// Heartbeat that re-evaluates the state so time-based changes (the dot going out,
-    /// the ID greying) reach the card at all — see `ContentState.isIDStale`.
+    /// the ID greying) reach the card at all — see `ContentState.isIDStale`. This is the
+    /// *granularity* of those transitions, so `BatActivityShared.activeDotSeconds` (20 s)
+    /// is set above it, or the dot could stay lit for the sum of the two.
     ///
-    /// This is the *granularity* of those transitions, so `BatActivityShared`'s
-    /// `activeDotSeconds` (20 s) is set above it — otherwise the dot can stay lit for the
-    /// sum of the two.
-    ///
-    /// **This was 5 s and that was too fast.** The reasoning for a quick heartbeat was
-    /// that the no-op guard makes it free — a tick matching the last send never reaches
-    /// ActivityKit. True on a silent night, and wrong during actual detection:
-    /// `pulseCount` increments with every pulse, so while bats are about, *every*
-    /// heartbeat carries changed state and sends. At 5 s that is 12/min sustained on top
-    /// of the pass-driven updates, which overruns the budget within a few minutes — after
-    /// which iOS drops updates silently and the card freezes with no error anywhere. The
-    /// visible symptom is a card that works for a while and then stops.
+    /// 15 s is a budget decision, not a responsiveness one — shortening it is not free
+    /// just because the no-op guard exists: `pulseCount` changes on every pulse, so while
+    /// bats are about, every heartbeat sends regardless of interval. See Context.md §12.
     private static let heartbeatInterval: TimeInterval = 15.0
 
     private(set) var isRunning = false
@@ -221,6 +218,8 @@ final class LiveActivityController {
         send(state)
     }
 
+    /// Actually calls `Activity.update`. Only reached via `schedule`, never
+    /// directly, so the rate limit can't be bypassed.
     private func send(_ state: BatDetectorAttributes.ContentState) {
         guard let activity else { return }
         lastSentState = state
@@ -236,6 +235,8 @@ final class LiveActivityController {
         }
     }
 
+    /// Starts the repeating `heartbeatInterval` timer that keeps time-based
+    /// state (staleness, the live dot) moving even with no new pulses.
     private func startHeartbeat() {
         heartbeat?.invalidate()
         heartbeat = Timer.scheduledTimer(withTimeInterval: Self.heartbeatInterval,

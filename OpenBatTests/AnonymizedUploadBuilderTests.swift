@@ -164,6 +164,7 @@ struct AnonymizedUploadBuilderTests {
 
     // MARK: Location
 
+    /// Baseline: a coordinate snaps down to the 0.001° grid, not to itself.
     @Test func coordinateSnapsToGrid() {
         let snapped = AnonymizedUploadBuilder.snapToGrid(
             CLLocationCoordinate2D(latitude: 51.5074231, longitude: -0.1277653))
@@ -182,6 +183,7 @@ struct AnonymizedUploadBuilderTests {
         #expect(a.longitude == b.longitude)
     }
 
+    /// Same input, same output — the anonymity set depends on that.
     @Test func snappingIsDeterministic() {
         let source = CLLocationCoordinate2D(latitude: 51.5074231, longitude: -0.1277653)
         let first = AnonymizedUploadBuilder.snapToGrid(source)
@@ -224,6 +226,7 @@ struct AnonymizedUploadBuilderTests {
         #expect(!String(decoding: upload.guanoChunk, as: UTF8.self).contains("51°30"))
     }
 
+    /// No source position must not be papered over with a fabricated one.
     @Test func missingPositionProducesNoLocationAtAll() {
         var fields = sourceFields()
         fields["Loc Position"] = nil
@@ -244,8 +247,8 @@ struct AnonymizedUploadBuilderTests {
 
     // MARK: Timestamp
 
+    /// Bucketed to the 5-minute grid, e.g. 22:37:41Z -> 22:35:00Z.
     @Test func timestampFloorsToFiveMinutes() {
-        // 2026-07-14T22:37:41Z -> 22:35:00Z
         let recorded = Date(timeIntervalSince1970: 1_784_500_661)
         let bucketed = AnonymizedUploadBuilder.bucketedTimestamp(recorded)
 
@@ -267,6 +270,7 @@ struct AnonymizedUploadBuilderTests {
         }
     }
 
+    /// The emitted file carries the bucketed time, never the precise source one.
     @Test func emittedTimestampIsBucketedNotSourceValue() {
         let emitted = emittedFields(build())
         #expect(emitted["Timestamp"] != "2026-07-14T22:37:41+01:00")
@@ -275,10 +279,9 @@ struct AnonymizedUploadBuilderTests {
 
     // MARK: Object identity
 
+    /// Mirrors `UPLOAD_KEY_PATTERN` in `backend/consent-worker/src/index.ts`. A
+    /// change on either side that isn't made on both produces a 400 at upload.
     @Test func objectKeyMatchesTheWorkersPattern() {
-        // Mirrors UPLOAD_KEY_PATTERN in backend/consent-worker/src/index.ts. A
-        // change on either side that isn't made on both produces a 400 at
-        // upload, so it's pinned here.
         let pattern = try! NSRegularExpression(
             pattern: #"^\d{4}-\d{2}-\d{2}/[0-9A-Fa-f-]{36}\.flac$"#)
         let key = build().objectKey
@@ -350,11 +353,15 @@ struct AnonymizedUploadBuilderTests {
         #expect(AnonymizedUploadBuilder.sanitizedHardwareName("UM192K") == "UM192K")
     }
 
+    /// A name that's nothing but serial becomes "unknown", not an empty string
+    /// that would render as a blank field.
     @Test func anEntirelySerialNameBecomesUnknownNotEmpty() {
         #expect(AnonymizedUploadBuilder.sanitizedHardwareName("884213770941") == "unknown")
         #expect(AnonymizedUploadBuilder.sanitizedHardwareName("") == "unknown")
     }
 
+    /// The sanitizer isn't just a unit-tested function sitting unused — its
+    /// output is what actually reaches the emitted GUANO chunk.
     @Test func sanitizingIsAppliedToTheEmittedFile() {
         var fields = sourceFields()
         fields["Make"] = "Griff Ultrasonic Mic S/N 90210447"
@@ -365,6 +372,7 @@ struct AnonymizedUploadBuilderTests {
 
     // MARK: Headers
 
+    /// Headers are an allowlist too, same reasoning as the GUANO key list.
     @Test func headersCarryOnlyAllowedFields() {
         let allowed: Set<String> = [
             "x-openbat-species", "x-openbat-quality-score",

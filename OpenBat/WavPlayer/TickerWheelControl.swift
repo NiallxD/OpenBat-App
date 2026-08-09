@@ -4,9 +4,12 @@
 //
 //  A horizontal "ruler" picker — a pill-shaped strip of tick marks that
 //  scrolls under a fixed center pointer as you drag, snapping to `step`.
-//  Replaces the player's plain `Slider`s (time-zoom) and the two-thumb
-//  `VerticalRangeSlider` (frequency range) with a single reusable control
-//  shared by both, per the "two pills at the bottom" request.
+//  Built for the WAV player's zoom/frequency-range controls; those are now
+//  gesture-driven instead (see WavSpectrogramView), so nothing currently
+//  instantiates this control. Left in place as a working, tested component
+//  rather than deleted — comments-only tidy-ups can't remove code, so this is
+//  flagged here for whoever next touches the player to decide whether it's
+//  worth keeping.
 //
 //  Drag direction is "content follows finger": dragging right slides the
 //  strip right (as if pulling a physical tape measure toward you), which

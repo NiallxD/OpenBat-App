@@ -3,25 +3,22 @@
 //  OpenBat
 //
 //  What's currently visible in WavSpectrogramView, plus the pure geometry
-//  math for turning a live pan drag (both axes — time AND frequency, see
-//  `resolvedViewport`'s `freqOffset`) or the player's Zoom/Range ticker
-//  wheels into a new viewport. Deliberately hoisted out of any View (unlike
-//  PulseZoomView's equivalent private methods) so this is unit-testable in
-//  isolation — see WavViewportTests.swift.
+//  math for turning a live pan/pinch gesture into a new viewport. Deliberately
+//  hoisted out of any View (unlike PulseZoomView's equivalent private
+//  methods) so this is unit-testable in isolation — see WavViewportTests.swift.
 //
 //  Panning reuses PulseZoomView's proven `screen(v) = 0.5 + (v−0.5)·scale +
-//  offset` identity (with `scale` always 1 for a pure translation — see
-//  `resolvedViewport`). An earlier version of this file also drove pinch-to-
-//  zoom through this same machinery (`MagnifyGesture`, an anchor parameter,
-//  live `.scaleEffect`), and frequency WIDTH through a two-thumb absolute
-//  trim slider (`viewportForFreqTrim`) — both pulled in favour of explicit,
-//  deterministic controls: a "Zoom" ticker (time span, `viewportForTimeZoom`)
-//  and a "Range" ticker (frequency span, centered on wherever panning left
-//  the viewport — `viewportForFreqZoom`), see WavPlayerView.
+//  offset` identity (both axes — time and frequency, see `resolvedViewport`'s
+//  `freqOffset`). Zoom is driven the same way, via `TwoAxisPinchView`'s
+//  per-axis scale. Context.md has the history of what this replaced (a
+//  composed MagnifyGesture and a two-thumb frequency-trim slider).
 //
 
 import Foundation
 
+/// The time/frequency window currently on screen — the single source of
+/// truth WavSpectrogramView renders against and every gesture ultimately
+/// updates.
 struct WavViewport: Equatable {
     var startSample: Int
     var endSample: Int          // exclusive
@@ -36,6 +33,9 @@ struct WavViewport: Equatable {
     }
 }
 
+/// Pure functions turning a gesture or a committed viewport into a new
+/// `WavViewport` — see the file doc comment for why this lives outside any
+/// View.
 enum WavViewportMath {
 
     /// Minimum viewport spans — prevents a degenerate zoom (e.g. pinching in
@@ -184,10 +184,8 @@ enum WavViewportMath {
     }
 
     /// New viewport keeping the CURRENT CENTER sample fixed while changing
-    /// just the span — what the WAV player's time-zoom slider drives. Unlike
-    /// the old pinch gesture (anchored at wherever the fingers touched down),
-    /// a slider has no "where you pinched", so centering on whatever's
-    /// currently in view is the natural default.
+    /// just the span. Used by `WavPlayerView.load()` to open on a
+    /// half-zoomed view rather than the whole file.
     static func viewportForTimeZoom(committed: WavViewport, zoomFraction: Double, totalSamples: Int) -> WavViewport {
         let span = sampleSpan(forZoomFraction: zoomFraction, totalSamples: totalSamples)
         let center = (committed.startSample + committed.endSample) / 2
@@ -201,15 +199,12 @@ enum WavViewportMath {
                            minFreqHz: committed.minFreqHz, maxFreqHz: committed.maxFreqHz)
     }
 
-    /// New viewport applying the frequency-range ticker's span (in Hz)
-    /// directly, keeping the CURRENT CENTER frequency fixed — what the
-    /// player's "Range" control drives. Replaces the old two-thumb
-    /// frequency-trim slider (`viewportForFreqTrim`, absolute low/high
-    /// fractions): that model reset to a fixed [0,1] window on every change,
-    /// whereas this one is a pure zoom around wherever the user has already
-    /// panned to (via `WavSpectrogramView`'s vertical drag) — panning first,
-    /// then narrowing the range, narrows around the panned-to center, not
-    /// back to the midpoint between 0 and Nyquist.
+    /// New viewport applying a frequency span (in Hz) directly, keeping the
+    /// CURRENT CENTER frequency fixed — a pure zoom around wherever the user
+    /// has already panned to, rather than resetting to the midpoint between 0
+    /// and Nyquist. Not currently called from anywhere in the WAV player
+    /// (frequency zoom is pinch-driven — see `resolvedViewport`); kept for
+    /// its test coverage and as the one-shot alternative to a gesture.
     static func viewportForFreqZoom(committed: WavViewport, spanHz: Double, nyquistHz: Double) -> WavViewport {
         let span = min(max(spanHz, minFreqSpanHz), nyquistHz)
         let center = (committed.minFreqHz + committed.maxFreqHz) / 2

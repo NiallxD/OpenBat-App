@@ -45,6 +45,8 @@ struct ClassifierSpectrogramEngineTests {
 
     // MARK: Contract
 
+    /// Input too short for one FFT window must fail cleanly, not underflow
+    /// or crash inside the STFT.
     @Test func returnsNilWhenInputShorterThanOneWindow() {
         let short = [Float](repeating: 0, count: NaBatSpectrogramRenderer.nFFT - 1)
         #expect(ClassifierSpectrogramEngine.render(pcm: short, spec: NaBatSpectrogramRenderer.spec) == nil)
@@ -52,6 +54,7 @@ struct ClassifierSpectrogramEngineTests {
 
     // MARK: NABat (dB path)
 
+    /// NABat's dB/magma path produces a 3-channel tensor at its declared size.
     @Test func nabatOutputHasExpectedShapeAndChannels() throws {
         let pcm = burst(hz: 40_000, rate: 384_000, count: 4_096)
         let out = try #require(ClassifierSpectrogramEngine.render(pcm: pcm, spec: NaBatSpectrogramRenderer.spec))
@@ -59,6 +62,8 @@ struct ClassifierSpectrogramEngineTests {
         #expect(out.image.count == NaBatSpectrogramRenderer.outH * NaBatSpectrogramRenderer.outW * 3)
     }
 
+    /// Min-max normalization must bound every value to [0,1] and never emit
+    /// NaN/Inf — the failure mode a broken normalization would produce.
     @Test func nabatMinMaxOutputStaysInUnitRange() throws {
         let pcm = burst(hz: 40_000, rate: 384_000, count: 4_096)
         let out = try #require(ClassifierSpectrogramEngine.render(pcm: pcm, spec: NaBatSpectrogramRenderer.spec))
@@ -66,6 +71,7 @@ struct ClassifierSpectrogramEngineTests {
         #expect(out.image.allSatisfy { $0 >= 0 && $0 <= 1 })
     }
 
+    /// Energy centred mid-buffer should be detected as peaking mid-buffer.
     @Test func nabatPeakTimeTracksACentredBurst() throws {
         let pcm = burst(hz: 40_000, rate: 384_000, count: 8_192, centerFraction: 0.5)
         let out = try #require(ClassifierSpectrogramEngine.render(pcm: pcm, spec: NaBatSpectrogramRenderer.spec))
@@ -76,6 +82,8 @@ struct ClassifierSpectrogramEngineTests {
         #expect(out.peakTimeFraction < 0.7)
     }
 
+    /// Catches an axis flip or an off-by-one in the peak scan: a later burst
+    /// must report a later peak time.
     @Test func nabatPeakTimeShiftsWithTheBurst() throws {
         let early = try #require(ClassifierSpectrogramEngine.render(
             pcm: burst(hz: 40_000, rate: 384_000, count: 8_192, centerFraction: 0.25),
@@ -90,8 +98,9 @@ struct ClassifierSpectrogramEngineTests {
 
     // MARK: BatDetect2 (PCEN path)
 
+    /// BatDetect2's PCEN/grayscale path produces a 1-channel tensor at its
+    /// declared size. (Its spec assumes PCM already at its target rate.)
     @Test func batDetect2OutputHasExpectedShapeAndChannels() throws {
-        // BatDetect2's spec assumes PCM already at its target rate.
         let pcm = burst(hz: 40_000, rate: BatDetect2SpectrogramRenderer.spec.sampleRate, count: 4_096)
         let out = try #require(ClassifierSpectrogramEngine.render(pcm: pcm, spec: BatDetect2SpectrogramRenderer.spec))
         #expect(out.channels == 1)   // grayscale
@@ -99,10 +108,10 @@ struct ClassifierSpectrogramEngineTests {
         #expect(out.image.count == s.outputHeight * s.outputWidth * 1)
     }
 
+    /// The PCEN recursion (log1p/expm1/exp over a leaky-integrator state) is
+    /// the most intricate part of the port; a broken initial condition or
+    /// constant surfaces as NaN/Inf or an all-identical image.
     @Test func pcenPathProducesFiniteNonTrivialOutput() throws {
-        // The PCEN recursion involves log1p/expm1/exp over a leaky-integrator state;
-        // a broken initial condition or constant (the bugs the port fixed) tends to
-        // surface as NaN/Inf or an all-identical image. Assert neither happens.
         let pcm = burst(hz: 45_000, rate: BatDetect2SpectrogramRenderer.spec.sampleRate, count: 4_096)
         let out = try #require(ClassifierSpectrogramEngine.render(pcm: pcm, spec: BatDetect2SpectrogramRenderer.spec))
         #expect(allFinite(out.image))
@@ -111,8 +120,8 @@ struct ClassifierSpectrogramEngineTests {
         #expect(maxV > minV)   // not a flat image
     }
 
+    /// Degenerate all-zero input must not divide-by-zero or log(0) into NaN.
     @Test func silenceThroughPcenStaysFinite() throws {
-        // Degenerate all-zero input must not divide-by-zero or log(0) into NaN.
         let pcm = [Float](repeating: 0, count: 4_096)
         let out = try #require(ClassifierSpectrogramEngine.render(pcm: pcm, spec: BatDetect2SpectrogramRenderer.spec))
         #expect(allFinite(out.image))

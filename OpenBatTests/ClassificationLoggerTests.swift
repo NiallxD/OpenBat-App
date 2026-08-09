@@ -27,15 +27,18 @@ struct ClassificationLoggerTests {
         return seen.sorted()
     }
 
+    /// Pins the exact header shape: fixed metadata columns, then the sorted
+    /// union of every registered model's class codes.
     @Test func headerIsMetadataColumnsThenClassCodeUnion() {
         let expected = "timestamp,type,model,species,confidence_pct,pulse_count,"
             + expectedClassColumns.joined(separator: ",") + "\n"
         #expect(ClassificationLogger.shared.expectedHeader == expected)
     }
 
+    /// Every registered model's codes must be present in the header — the
+    /// essence of the fix this file guards against regressing.
     @Test func headerCoversBothModelsClassCodes() {
         let columns = Set(expectedClassColumns)
-        // Every registered model's codes must be present — the essence of the fix.
         for model in ModelRegistry.all {
             for code in model.classNames {
                 #expect(columns.contains(code), "Header is missing class code \(code) from \(model.displayName)")
@@ -43,6 +46,9 @@ struct ClassificationLoggerTests {
         }
     }
 
+    /// A row's scores land under the right class-code columns regardless of
+    /// which model produced them, and every other model's columns read 0 —
+    /// the actual bug this file exists to catch.
     @Test func rowPopulatesModelColumnAndAlignsScores() throws {
         let columns = expectedClassColumns
         try #require(columns.count >= 2)

@@ -10,8 +10,7 @@
 //  playback, and reading it inline in a parent's `body` would invalidate that
 //  ENTIRE body at that rate — poisoning the zoom/pan gesture state and
 //  CallAnalysisPanel one level up. Only a distinct View struct with its own
-//  independently-tracked body evaluation avoids that (see CLAUDE.md's
-//  "@Observable churn bug class" note).
+//  independently-tracked body evaluation avoids that (see Context.md §13).
 //
 
 import SwiftUI

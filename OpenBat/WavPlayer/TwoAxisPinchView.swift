@@ -12,34 +12,27 @@
 //  UIKit rather than SwiftUI for two reasons:
 //   1. Per-axis separation needs the two raw touch locations, which SwiftUI
 //      gestures don't expose.
-//   2. An earlier version of the player DID drive zoom through a SwiftUI
-//      MagnifyGesture composed with the pan DragGesture, and that
-//      composition was the diagnosed cause of the momentum "stops dead" bug
-//      (two recognizers arbitrating the same touch made the drag spuriously
-//      re-fire onEnded mid-swipe — see WavSpectrogramView.panGesture's doc
-//      comment). This recognizer avoids re-introducing that: it never fires
-//      on fewer than two touches, never cancels touches
+//   2. A composed SwiftUI MagnifyGesture + DragGesture previously caused the
+//      momentum "stops dead" bug — two recognizers arbitrating the same touch
+//      made the drag spuriously re-fire onEnded mid-swipe (see
+//      WavSpectrogramView.panGesture's doc comment). This recognizer avoids
+//      that: it never fires on fewer than two touches, never cancels touches
 //      (`cancelsTouchesInView = false`), and always recognizes
-//      simultaneously, so the existing single-finger pan/tap/momentum path
-//      is untouched — WavSpectrogramView just suppresses its own drag
-//      handling while `isPinching` (see its panGesture guards).
+//      simultaneously, so the single-finger pan/tap/momentum path is
+//      untouched — WavSpectrogramView just suppresses its own drag handling
+//      while `isPinching` (see its panGesture guards).
 //
 //  Each axis's AUTHORITY ramps smoothly with its initial separation (see
 //  `axisScale`): below `axisDeadZonePt` the axis is inert, at
-//  `axisFullWeightPt`+ it responds fully, and in between the scale is
-//  damped via `pow(ratio, weight)`. Two reasons this is a ramp and not the
-//  hard threshold an earlier version used:
-//   1. With two fingertips stacked nearly vertically, the horizontal
-//      separation is a few noisy points — dividing by it makes the time
-//      scale explode. The dead zone kills that (and makes a deliberate
-//      vertical-only pinch leave time alone, and vice versa).
-//   2. A hard threshold made the NATURAL diagonal pinch erratic: one axis
-//      often starts just past the cutoff with a smallish separation, so its
-//      ratio denominator was tiny and that axis zoomed hypersensitively —
-//      while a hair under the cutoff it did nothing at all. The ramp makes
-//      authority proportional to how clearly the gesture expresses intent
-//      along each axis, so a diagonal pinch reads as a balanced sum of a
-//      horizontal and a vertical pinch.
+//  `axisFullWeightPt`+ it responds fully, and in between the scale is damped
+//  via `pow(ratio, weight)`. A hard threshold isn't enough: two fingertips
+//  stacked nearly vertically have only a few noisy points of horizontal
+//  separation (dividing by it explodes the scale — the dead zone kills that,
+//  and lets a deliberate single-axis pinch leave the other axis alone), and a
+//  hard cutoff made a natural diagonal pinch erratic (whichever axis started
+//  just past it had a tiny ratio denominator and zoomed hypersensitively).
+//  The ramp instead makes authority proportional to how clearly the gesture
+//  expresses intent along each axis.
 //
 
 import SwiftUI

@@ -37,6 +37,9 @@ enum TourID: Hashable {
     case start, record, listen                 // transport bar
 }
 
+/// Accumulates one bounds anchor per tagged control (see `tourTarget(_:)`
+/// below). `reduce` merges siblings; it can't reconcile parent/child overlap,
+/// which is why `tourTarget` must use `transformAnchorPreference`.
 struct TourTargetKey: PreferenceKey {
     static let defaultValue: [TourID: Anchor<CGRect>] = [:]
     static func reduce(value: inout [TourID: Anchor<CGRect>],
@@ -63,6 +66,8 @@ extension View {
 
 // MARK: - Tour script
 
+/// One step in `TourScript`: a caption card, optionally spotlighting one
+/// tagged control.
 struct TourStep: Identifiable {
     let id = UUID()
     /// The control to spotlight, or nil for a centred, no-cutout card.
@@ -75,6 +80,7 @@ struct TourStep: Identifiable {
     let detail: String
 }
 
+/// The guided tour's fixed script, driving `AppInfoView`'s `TourOverlay`.
 enum TourScript {
     // Walks the screen top-to-bottom: each pane first, then each button inside it
     // individually, then the transport bar buttons, then the menus.

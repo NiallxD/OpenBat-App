@@ -16,13 +16,17 @@
 //  live 384 kHz tap at 48 kHz-worth-per-second means falling permanently
 //  behind real time, which a live monitor can't do — that's a fundamentally
 //  different problem from playing back a file that's already fully on disk.
-//  See CLAUDE.md for why an earlier LIVE time-expansion processor — a
-//  different, continuous frame-selection design that tried to solve that
-//  live problem — infringed an active third-party patent (US 8,599,647) and
-//  was removed. This file avoids that trap structurally: there is no content-
-//  based selection anywhere in it, only a fixed pass-through at a slower
-//  clock — exactly the OLD, unpatented technique that patent's own
-//  background section describes as prior art.
+//  An earlier LIVE time-expansion processor — a different, continuous
+//  frame-selection design aimed at that live problem — was removed over
+//  exposure to an active third-party patent, US 8,599,647. Note the careful
+//  wording: nobody in this repo has determined that anything infringes, and
+//  no comment here should say otherwise. See Context.md §5.
+//
+//  What IS structurally true of this file: there is no content-based
+//  selection anywhere in it, only a fixed pass-through at a slower clock. Every
+//  sample of the recording is played, so the claim's "selecting a fraction of
+//  the samples" element is not met — which is a real distinction, and the
+//  reason this mode is untroubled where the live ones are not.
 //
 //  The output ring (see its own doc comment) is sized so that losing any
 //  audio at all requires an actual technical failure — a multi-second output

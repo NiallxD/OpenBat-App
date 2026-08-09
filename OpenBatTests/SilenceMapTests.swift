@@ -23,6 +23,7 @@ struct SilenceMapTests {
         ], virtualTotal: 2000, realTotal: 7000)
     }
 
+    /// Basic forward mapping, including the seam between two segments.
     @Test func virtualToRealMapsWithinAndAcrossSegments() {
         let m = twoSegmentMap()
         #expect(m.virtualToReal(0) == 1000)
@@ -31,12 +32,15 @@ struct SilenceMapTests {
         #expect(m.virtualToReal(1999) == 5999)
     }
 
+    /// A virtual position outside the map's range must clamp, not crash or
+    /// extrapolate into an invalid real sample.
     @Test func virtualToRealClampsOutOfRange() {
         let m = twoSegmentMap()
         #expect(m.virtualToReal(-50) == 1000)
         #expect(m.virtualToReal(999_999) == 6000)   // clamped to virtualTotal -> last real
     }
 
+    /// Basic reverse mapping within active segments.
     @Test func realToVirtualMapsWithinSegments() {
         let m = twoSegmentMap()
         #expect(m.realToVirtual(1000) == 0)
@@ -54,6 +58,8 @@ struct SilenceMapTests {
         #expect(m.realToVirtual(0) == 0)
     }
 
+    /// The two directions must be true inverses of each other on active
+    /// positions, or the playhead drifts as it maps back and forth.
     @Test func roundTripVirtualRealVirtualIsIdentity() {
         let m = twoSegmentMap()
         for v in [0, 1, 500, 999, 1000, 1500, 1999] {
@@ -61,6 +67,8 @@ struct SilenceMapTests {
         }
     }
 
+    /// Used by seek-forward-past-a-gap logic, so it must fire only when
+    /// actually inside a hidden gap, never inside an active segment.
     @Test func nextActiveRealStartOnlyFiresInGaps() {
         let m = twoSegmentMap()
         #expect(m.nextActiveRealStart(after: 0) == 1000)      // before first segment
@@ -69,6 +77,8 @@ struct SilenceMapTests {
         #expect(m.nextActiveRealStart(after: 6000) == nil)    // past the last segment
     }
 
+    /// A virtual span crossing a segment boundary must split into the
+    /// correct real-domain pieces, for tile stitching across a hidden gap.
     @Test func realSlicesSplitAVirtualSpanAcrossSegments() {
         let m = twoSegmentMap()
         let slices = m.realSlices(virtualStart: 500, virtualEnd: 1500)
@@ -81,6 +91,8 @@ struct SilenceMapTests {
 
     // MARK: Detection
 
+    /// A single loud region in an otherwise quiet grid becomes one segment
+    /// with the expected padding.
     @Test func computeDetectsLoudRegionAsSingleSegment() {
         let bins = STFTGrid.binCount
         let nCols = 100
@@ -100,6 +112,8 @@ struct SilenceMapTests {
         #expect(map.realTotal == 100_000)
     }
 
+    /// A recording with nothing loud enough to hide-silence against must
+    /// fall back to showing the whole file, not collapse to nothing.
     @Test func computeFallsBackToWholeFileWhenNothingClearsThreshold() {
         let bins = STFTGrid.binCount
         let nCols = 50
@@ -133,6 +147,8 @@ struct SilenceMapTests {
         #expect(virtualTotal(0.8) < virtualTotal(0.2))
     }
 
+    /// Two loud runs close enough together must merge into one segment via
+    /// padding, rather than leaving a flickering sliver of hidden gap.
     @Test func computeMergesNearbyRegionsViaPadding() {
         let bins = STFTGrid.binCount
         let nCols = 100

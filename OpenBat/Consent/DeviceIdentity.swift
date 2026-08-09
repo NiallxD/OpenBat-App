@@ -2,15 +2,21 @@
 //  DeviceIdentity.swift
 //  OpenBat
 //
+//  The app-controlled device identifier and its Worker-issued API token, both
+//  persisted in the Keychain. This is what consent records and uploads key
+//  against — never let anything derived from it reach
+//  `AnonymizedUploadBuilder`'s output.
+//
+//  `nonisolated`: Keychain access (`SecItem*`) is thread-safe; called from the
+//  main actor and from `RecordingUploader`'s off-main upload path.
+//
 
 import Foundation
 import Security
 
-/// App-controlled device identifier, independent of `identifierForVendor` (which resets on
-/// reinstall). Generated once and persisted in the Keychain so it survives reinstalls — this
-/// is the identifier consent records and recording metadata key against.
-/// `nonisolated`: stateless Keychain access (`SecItem*` is thread-safe), read
-/// from `RecordingUploader`'s off-main upload path as well as the main actor.
+/// Independent of `identifierForVendor`, which resets on reinstall; this one
+/// survives because it's generated once and kept in the Keychain rather than
+/// derived from anything the OS resets.
 nonisolated enum DeviceIdentity {
     private static let service = "com.openbat.deviceIdentity"
     private static let account = "deviceID"

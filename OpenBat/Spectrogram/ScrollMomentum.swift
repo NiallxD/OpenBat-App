@@ -10,18 +10,11 @@
 //  residual distance a flick's release velocity implies, so a flick coasts
 //  instead of stopping dead when the finger lifts.
 //
-//  Built on `CADisplayLink` rather than a `Task.sleep` polling loop — an
-//  earlier `Task`-based version reliably ran its FIRST tick (proven by
-//  on-device console logging: the initial `apply` call always fired) but
-//  then silently never resumed from `try await Task.sleep(...)` — no
-//  cancellation, no thrown error, just no second tick, ever. That matches a
-//  known class of issue where a plain `Task { @MainActor in ... }`'s
-//  continuation doesn't get serviced while the main run loop is in
-//  UIKit's gesture-tracking run loop mode right after a touch ends.
-//  `CADisplayLink` added with `.common` run loop modes is the traditional,
-//  guaranteed-safe way to drive a continuous per-frame update through
-//  exactly that situation, and is arguably the more appropriate primitive
-//  for a frame-synced animation in the first place.
+//  Must run on `CADisplayLink`, not `Task.sleep` polling: a `Task`-based
+//  version reliably fired once but then silently never resumed, because a
+//  plain `Task`'s continuation doesn't get serviced while the main run loop
+//  is in UIKit's gesture-tracking mode right after a touch ends.
+//  `CADisplayLink` added with `.common` run loop modes ticks through that.
 //
 
 import QuartzCore

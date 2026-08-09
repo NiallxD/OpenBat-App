@@ -309,13 +309,8 @@ nonisolated final class RecordingUploader: NSObject, @unchecked Sendable {
         // Everything above decided whether this recording is ELIGIBLE to be
         // contributed. Actually sending it is always a deliberate tap
         // (`uploadNow`, which passes `forceAttempt`), so a recording that has
-        // just been saved stops here and waits to be chosen.
-        //
-        // There used to be an "upload automatically" setting and a "Wi-Fi only"
-        // setting that qualified it. Both are gone: automatic contribution sat
-        // awkwardly beside a consent model built on per-recording choice, and
-        // the Wi-Fi setting existed only to make automatic uploads less costly —
-        // it never applied to a manual tap, so it had nothing left to qualify.
+        // just been saved stops here and waits to be chosen. There is no
+        // automatic-upload path — see Context.md §11.
         if !forceAttempt {
             report(recordingID, .queued("Ready to contribute"))
             return
@@ -573,11 +568,9 @@ nonisolated extension RecordingUploader: URLSessionDelegate, URLSessionTaskDeleg
         lock.unlock()
         guard let pending else { return }
         let succeeded = error == nil && (task.response as? HTTPURLResponse).map { 200..<300 ~= $0.statusCode } == true
-        // Discarded either way. Keeping it on failure was meant to let a retry
-        // re-send without regenerating, but no retry path ever reuses it:
-        // `retryFailedUploads` goes back through `handleRecordingSaved`, which
-        // re-converts from the untouched original into a NEW uniquely-named
-        // file — so the kept copy was unreachable, and leaked once per failure.
+        // Discarded either way: `retryFailedUploads` always re-converts from
+        // the untouched original into a new uniquely-named file, so a failed
+        // upload's derived copy is never reused and must not be kept.
         UploadConversionPipeline.discardDerivedCopy(at: pending.fileURL)
         if succeeded {
             report(pending.recordingID, .uploaded)

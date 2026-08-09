@@ -7,7 +7,7 @@
 //  lines. Being leaf views is also load-bearing: `pulseDetector`'s stat
 //  properties update on essentially every detected pulse, and reading them
 //  inline in ContentView.body invalidated (and froze the hit-testing of) the
-//  whole screen — see the @Observable-churn note in CLAUDE.md.
+//  whole screen — see the @Observable-churn note in Context.md §13.
 //
 
 import SwiftUI

@@ -21,12 +21,15 @@ struct STFTGridTests {
         }
     }
 
+    /// Input too short for one window must fail cleanly, not underflow.
     @Test func computeReturnsNilForTooShortInput() {
         var scratch = STFTGrid.Scratch()
         let short = [Float](repeating: 0, count: STFTGrid.windowLen - 1)
         #expect(STFTGrid.compute(pcm: short, scratch: &scratch, dynamicRangeDB: 48) == nil)
     }
 
+    /// A known tone's energy must land at the correct bin, confirming the
+    /// bin→Hz mapping and normalization bounds are both right.
     @Test func computePeakBinMatchesToneFrequency() {
         let sampleRate = 384_000.0
         let toneHz = 40_000.0
@@ -55,13 +58,11 @@ struct STFTGridTests {
         #expect(peakVal <= 1.0 && peakVal >= 0.0, "normalized grid values must stay in [0,1], got \(peakVal)")
     }
 
+    /// The case the streaming path exists for: a span whose native column
+    /// count exceeds the target must pool down to exactly `targetColumns`,
+    /// exercising the same "read far less than the full span" path a
+    /// whole-file-length span would use, without an actual long file.
     @Test func streamPooledGridFromFileBoundsOutputToTargetColumns() {
-        // A span whose native column count is much larger than the requested
-        // target — this is the exact case the streaming path exists for.
-        // Also a WHOLE-FILE-shaped span (the case that used to require a
-        // completely separate, bulk-load-then-sample pipeline) — 1s of audio
-        // is nowhere near a real recording's length, but exercises the same
-        // "read far less than the full span" code path via `oversample`.
         let url = TestWavFactory.make(sampleRate: 384_000, seconds: 1.0, toneFrequency: 30_000)
         defer { try? FileManager.default.removeItem(at: url) }
         var scratch = STFTGrid.Scratch()
@@ -79,10 +80,10 @@ struct STFTGridTests {
         #expect(grid.allSatisfy { $0 > -1000 && $0.isFinite })
     }
 
+    /// When `targetColumns` comfortably exceeds the native frame count, no
+    /// pooling should occur — visiting every native frame via oversample
+    /// must not distort a short span.
     @Test func streamPooledGridFromFileMatchesComputeWhenNativeColumnsFitWithinTarget() {
-        // When targetColumns comfortably exceeds the native frame count, no
-        // pooling (stride > 1) should occur — sanity check that visiting
-        // every native frame via oversample doesn't distort short spans.
         let sampleRate = 384_000.0
         let seconds = 0.01
         let url = TestWavFactory.make(sampleRate: UInt32(sampleRate), seconds: seconds, toneFrequency: 50_000)
@@ -100,12 +101,10 @@ struct STFTGridTests {
         #expect(grid.count == STFTGrid.binCount * nCols)
     }
 
+    /// The load-bearing property this function exists for: a span many
+    /// times longer than the target column count still returns promptly and
+    /// bounded, with no attempt to read/hold the whole span in memory.
     @Test func streamPooledGridFromFileHandlesWholeFileSpanBounded() {
-        // Confirms the actual load-bearing property this function exists
-        // for: a span many times longer than the target column count still
-        // returns promptly and bounded — no attempt to read/hold the whole
-        // span in memory. 5s stands in for "much longer than the screen
-        // could ever show at native resolution" without making the test slow.
         let url = TestWavFactory.make(sampleRate: 384_000, seconds: 5.0, toneFrequency: 45_000)
         defer { try? FileManager.default.removeItem(at: url) }
         var scratch = STFTGrid.Scratch()

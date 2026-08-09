@@ -57,6 +57,8 @@ struct PlaybackEngineTests {
         return url
     }
 
+    /// Sanity check on the fixture itself: the header this test file writes
+    /// parses back to the values it was given.
     @Test func wavHeaderParsesTestFile() {
         let url = makeTestWav()
         let header = WavHeader.read(url: url)
@@ -68,6 +70,7 @@ struct PlaybackEngineTests {
         try? FileManager.default.removeItem(at: url)
     }
 
+    /// `load()` must read the header and populate duration, not fail silently.
     @Test func engineLoadSetsDuration() {
         let url = makeTestWav(seconds: 2.0)
         let engine = PlaybackEngine()
@@ -78,6 +81,7 @@ struct PlaybackEngineTests {
         try? FileManager.default.removeItem(at: url)
     }
 
+    /// A missing file must surface `loadError`, not fail invisibly.
     @Test func loadMissingFileSetsLoadError() {
         let missing = FileManager.default.temporaryDirectory.appendingPathComponent("nope_\(UUID().uuidString).wav")
         let engine = PlaybackEngine()
@@ -86,6 +90,9 @@ struct PlaybackEngineTests {
         #expect(engine.loadError != nil, "load() of a missing file should set loadError instead of failing silently")
     }
 
+    /// `play()` must actually drive audio through the pipeline — checked via
+    /// the spectrogram processor's own peak reading rather than by draining
+    /// columns (see the note below on why that approach was flaky).
     @Test func playActuallyStartsAndProgresses() async {
         let url = makeTestWav(seconds: 2.0)
         let engine = PlaybackEngine()
@@ -102,26 +109,14 @@ struct PlaybackEngineTests {
         #expect(engine.currentTimeSeconds > 0,
                 "currentTimeSeconds still 0 after 400ms of playback — PlaybackDriver never fed a buffer")
 
-        // Asserted via `peakFrequency` rather than by draining columns.
-        //
-        // This used to check `spectrogramProcessor.drain()` was non-empty, which
-        // can no longer work: `PlaybackDriver` drains the processor itself on
-        // every buffer and discards the result (see the comment beside
-        // `_ = spec.drain()` in PlaybackEngine) because WavPlayerView renders a
-        // static whole-file spectrogram and `pending` would otherwise grow ~6
-        // MB/sec for the length of playback. A test draining from another thread
-        // is racing the driver for columns the driver is throwing away, so it
-        // failed nearly always and passed occasionally — the worst kind of test.
-        //
-        // `peakBin`/`peakLevel` are written directly inside `process()`, not
-        // sourced from `pending`, so they survive the driver's drain and are the
-        // honest signal that audio is reaching the processor and being analysed.
-        // The driver itself depends on exactly this for heterodyne auto-tune.
-        //
-        // Checking the VALUE rather than just non-zero also makes this cover more
-        // than the original did: the fixture is a 40 kHz tone, so a correct
-        // reading confirms the samples arrived intact and the bin→Hz conversion
-        // is right, not merely that something was fed.
+        // Asserted via `peakFrequency`, not by draining columns: `PlaybackDriver`
+        // already drains and discards every column itself (see PlaybackEngine's
+        // `_ = spec.drain()`), so a test draining from another thread would be
+        // racing it for columns already thrown away — flaky by construction.
+        // `peakBin`/`peakLevel` are written directly inside `process()` and
+        // survive that drain, so they're the honest signal that audio is
+        // reaching the processor. Checking the VALUE (not just non-zero)
+        // confirms the bin→Hz conversion is right, not merely that something fed.
         let peak = engine.spectrogramProcessor.peakFrequency
         #expect(peak > 38_000 && peak < 42_000,
                 "peakFrequency = \(peak) Hz after 400ms of playing a 40 kHz tone — audio isn't reaching spectrogramProcessor, which is why the spectrogram and heterodyne auto-tune show nothing")

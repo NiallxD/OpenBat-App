@@ -3,15 +3,18 @@
 //  OpenBat
 //
 //  Everything the live tuning overlay can change, captured as one value so
-//  Revert can put it all back. Deliberately one flat struct rather than
-//  per-tab snapshots: the failure mode to design against is a knob being added
-//  to a tab and quietly not being captured, which Revert would then silently
-//  fail to restore. One type, one capture, one restore — the same reasoning
-//  behind `AdaptiveTimeExpansionSettings.Snapshot`.
+//  Revert can put it all back. One flat struct rather than per-tab snapshots
+//  is deliberate — a knob added to a tab and not added here fails silently
+//  under Revert, so there is exactly one place to remember it. See
+//  Context.md §13. Plain value type, not `@Observable`; no threading contract
+//  of its own, since `capture`/`restore` both run on the main actor via the
+//  main-actor-isolated objects they read and write.
 //
 
 import Foundation
 
+/// A point-in-time copy of every tunable the live overlay exposes, taken on
+/// open and put back by Revert.
 struct LiveTuningSnapshot {
 
     // Heterodyne
@@ -34,6 +37,19 @@ struct LiveTuningSnapshot {
     var ateSamplerEnabled: Bool
     var ateSamplerIntervalSeconds: Double
     var ateSamplerScanMs: Double
+    var ateSamplerEdgeFraction: Double
+
+    // Variable Time Distortion. Read straight off the processor: unlike ATE there is
+    // no settings object behind these yet, so the processor IS the source of
+    // truth and Revert has to put them back there.
+    var vtdGain: Float
+    var vtdGapRate: Double
+    var vtdRateMax: Double
+    var vtdLookaheadMs: Double
+    var vtdCatchupAfterMs: Double
+    var vtdDuckAlpha: Double
+    var vtdTransitionMs: Double
+    var vtdHighCutHz: Double
 
     // Pulse detector
     var amplitudeThreshold: Float
@@ -50,6 +66,7 @@ struct LiveTuningSnapshot {
     var bandHigh: Double
     var timeWindowSeconds: Double
 
+    /// Reads the current value of every tunable from its live source of truth.
     static func capture(audio: AudioEngineController,
                         ate: AdaptiveTimeExpansionSettings,
                         pulse: PulseDetector,
@@ -74,6 +91,15 @@ struct LiveTuningSnapshot {
             ateSamplerEnabled: ate.samplerEnabled,
             ateSamplerIntervalSeconds: ate.samplerIntervalSeconds,
             ateSamplerScanMs: ate.samplerScanMs,
+            ateSamplerEdgeFraction: ate.samplerEdgeFraction,
+            vtdGain: audio.variableTimeDistortion.gain,
+            vtdGapRate: audio.variableTimeDistortion.gapRate,
+            vtdRateMax: audio.variableTimeDistortion.rateMax,
+            vtdLookaheadMs: audio.variableTimeDistortion.lookaheadMs,
+            vtdCatchupAfterMs: audio.variableTimeDistortion.catchupAfterMs,
+            vtdDuckAlpha: audio.variableTimeDistortion.duckAlpha,
+            vtdTransitionMs: audio.variableTimeDistortion.transitionMs,
+            vtdHighCutHz: audio.variableTimeDistortion.highCutHz,
             amplitudeThreshold: pulse.amplitudeThreshold,
             minFrequencyHz: pulse.minFrequencyHz,
             minConsecutiveColumns: pulse.minConsecutiveColumns,
@@ -119,6 +145,16 @@ struct LiveTuningSnapshot {
         ate.samplerEnabled = ateSamplerEnabled
         ate.samplerIntervalSeconds = ateSamplerIntervalSeconds
         ate.samplerScanMs = ateSamplerScanMs
+        ate.samplerEdgeFraction = ateSamplerEdgeFraction
+
+        audio.variableTimeDistortion.gain = vtdGain
+        audio.variableTimeDistortion.gapRate = vtdGapRate
+        audio.variableTimeDistortion.rateMax = vtdRateMax
+        audio.variableTimeDistortion.lookaheadMs = vtdLookaheadMs
+        audio.variableTimeDistortion.catchupAfterMs = vtdCatchupAfterMs
+        audio.variableTimeDistortion.duckAlpha = vtdDuckAlpha
+        audio.variableTimeDistortion.transitionMs = vtdTransitionMs
+        audio.variableTimeDistortion.highCutHz = vtdHighCutHz
 
         pulse.amplitudeThreshold = amplitudeThreshold
         pulse.minFrequencyHz = minFrequencyHz

@@ -35,11 +35,15 @@
 //     play, and during that drain this processor is deaf — new calls are not
 //     captured. That is deliberate. It means the mode cannot stay current with
 //     a continuous stream of activity; under sustained calling it falls behind
-//     and misses material, exactly like a 1980s Pettersson D240x. Making it
-//     keep up (e.g. capturing into a second buffer while draining the first)
-//     would turn this into continuous real-time monitoring with selective
-//     retention — which is the subject matter of an active third-party patent,
-//     US 8,599,647 (see CLAUDE.md's patent notes). The deafness is the feature.
+//     and misses material, exactly like a 1980s Pettersson D240x. Do not make
+//     it keep up by capturing into a second buffer while draining the first.
+//     The deafness is the feature; `missedCount` is its honest cost.
+//
+//  ⚠️ These two invariants are DESIGN RULES, not a patent-clearance argument.
+//  US 8,599,647 (Wildlife Acoustics, active to 2032) is live, and on a plain
+//  reading of its claim 1 both live modes here map onto all four elements.
+//  Read Context.md §5 in full before writing any non-infringement claim
+//  anywhere in this repo — the question is open and wants a patent attorney.
 //
 //  === Sampler mode (opt-in) ===
 //
@@ -47,8 +51,9 @@
 //  the quality of any one playback hostage to the trigger firing at the right
 //  instant on the right pulse. Sampler mode inverts that bargain: play ONE call
 //  every `samplerIntervalSeconds` and let everything else go by. See
-//  `samplerEnabled` for the mechanism and why the two-stage scan is what makes
-//  "a clean call" achievable where a single threshold isn't.
+//  `samplerEnabled` for the mechanism, and Context.md §4 for the measurements
+//  behind it — 100% of sampled calls arrive complete, and the three mechanisms
+//  that achieve that are each load-bearing.
 //
 //  Threading: same contract as HeterodyneProcessor — `process(_:)` on the
 //  realtime capture thread, `render(_:frames:)` on the realtime output thread,
@@ -91,6 +96,7 @@ nonisolated final class AdaptiveTimeExpansionProcessor: @unchecked Sendable {
     private var _samplerEnabled: Bool = defaultSamplerEnabled
     private var _samplerIntervalSeconds: Double = defaultSamplerIntervalSeconds
     private var _samplerScanMs: Double = defaultSamplerScanMs
+    private var _samplerEdgeFraction: Double = defaultSamplerEdgeFraction
     private var _bandLowFraction: Double = 0
     private var _bandHighFraction: Double = 1
     private var _slowdownFactor: Double = 384_000 / 48_000
@@ -111,6 +117,7 @@ nonisolated final class AdaptiveTimeExpansionProcessor: @unchecked Sendable {
     static let defaultSamplerEnabled = false
     static let defaultSamplerIntervalSeconds: Double = 5
     static let defaultSamplerScanMs: Double = 150
+    static let defaultSamplerEdgeFraction: Double = 0.18
 
     /// Detection block. 128 samples ≈ 0.33 ms at 384 kHz — fine enough to place
     /// an onset well inside the pre-roll.
@@ -124,15 +131,6 @@ nonisolated final class AdaptiveTimeExpansionProcessor: @unchecked Sendable {
     /// Detection high-pass. Rejects handling noise, wind and speech so they
     /// can't open an event; bat energy is far above this.
     private static let detectHighpassHz: Double = 12_000
-
-    /// How far below the specimen's peak sampler mode still counts as call, as
-    /// a linear ratio — −40 dB. Not exposed as a knob because it doesn't
-    /// behave like one: the tail-truncation measurements in
-    /// `TimeExpansionTuning/FINDINGS.md` were run at −30, −40 and −50 dB and
-    /// returned the same call boundary at all three, so the useful range is
-    /// wide and flat. What actually binds is the background floor and
-    /// `maxBufferMs`, both of which are already tunable.
-    private static let samplerDecayFactor: Float = 0.01
 
     /// Output makeup gain. Bat calls are weak and pass-through preserves the
     /// input's own level, so some makeup is normally wanted.
@@ -364,8 +362,8 @@ nonisolated final class AdaptiveTimeExpansionProcessor: @unchecked Sendable {
     // neither a "within an event" limitation nor a real-time limitation — it
     // asks only whether a *fraction* of the input samples was selected as
     // output and transmitted at a slower rate, which both this mode and the
-    // default trigger above do. See CLAUDE.md's patent notes for the full claim
-    // text and the mapping. The open question there covers the whole of live
+    // default trigger above do. See Context.md §5 for the full claim text and
+    // the mapping. The open question there covers the whole of live
     // event-triggered expansion, not this mode specifically; don't re-derive a
     // clearance argument from the two invariants, because they don't reach it.
     //
@@ -410,6 +408,20 @@ nonisolated final class AdaptiveTimeExpansionProcessor: @unchecked Sendable {
         set { ctrlLock.lock(); _samplerScanMs = min(max(newValue, 0), 300); ctrlLock.unlock() }
     }
 
+    /// Where each call's edges are cut, as a fraction of the way from the
+    /// noise floor up to that call's own peak, in dB. See `samplerBoundary`.
+    ///
+    /// Lower is more generous — it reaches further down each call's decay and
+    /// takes more of its quiet head and tail, at the cost of more background
+    /// either side. Raise it if events sound padded with hiss; lower it if
+    /// calls sound clipped, especially faint ones. Above ~0.35 the corpus
+    /// shows calls being truncated outright, so the top of the range is there
+    /// to hear the failure, not to sit in.
+    var samplerEdgeFraction: Double {
+        get { ctrlLock.lock(); defer { ctrlLock.unlock() }; return _samplerEdgeFraction }
+        set { ctrlLock.lock(); _samplerEdgeFraction = min(max(newValue, 0.05), 0.6); ctrlLock.unlock() }
+    }
+
     /// The actual slowdown factor for the rate this processor was last reset
     /// for — 8× at 384 kHz, computed rather than assumed so a different
     /// negotiated rate can't silently drift out of sync with a hardcoded label.
@@ -429,11 +441,8 @@ nonisolated final class AdaptiveTimeExpansionProcessor: @unchecked Sendable {
 
     /// One snapshot of every control value, read under the lock once per buffer.
     ///
-    /// A struct rather than the tuple this used to be: the tuple was already 14
-    /// labelled elements and adding the sampler's three pushed it into the
-    /// territory CLAUDE.md warns about, where the type-checker starts costing
-    /// real build time for no expressive gain. Field names are unchanged, so
-    /// `c.low` etc. still read the same at the call sites.
+    /// A struct rather than a large labelled tuple: past ~14 elements the
+    /// type-checker starts costing real build time for no expressive gain.
     private struct Controls {
         var gain: Float
         var hangover: Double
@@ -452,6 +461,7 @@ nonisolated final class AdaptiveTimeExpansionProcessor: @unchecked Sendable {
         var sampler: Bool
         var samplerInterval: Double
         var samplerScan: Double
+        var samplerEdge: Double
     }
 
     private func controls() -> Controls {
@@ -463,7 +473,7 @@ nonisolated final class AdaptiveTimeExpansionProcessor: @unchecked Sendable {
                         expand: _expanderEnabled, expandThreshold: _expanderThresholdDB,
                         expandDepth: _expanderDepthDB, expandRelease: _expanderReleaseMs,
                         sampler: _samplerEnabled, samplerInterval: _samplerIntervalSeconds,
-                        samplerScan: _samplerScanMs)
+                        samplerScan: _samplerScanMs, samplerEdge: _samplerEdgeFraction)
     }
 
     // MARK: Observable-ish state (any thread → main)
@@ -626,6 +636,7 @@ nonisolated final class AdaptiveTimeExpansionProcessor: @unchecked Sendable {
     private var samplerOn = defaultSamplerEnabled
     private var samplerIntervalSamples = 0
     private var samplerScanSamples = 0
+    private var samplerEdge: Float = Float(defaultSamplerEdgeFraction)
 
     // Detection accumulator, carried across buffers so a tap buffer that isn't
     // a multiple of `detectBlock` doesn't reset the analysis.
@@ -741,6 +752,7 @@ nonisolated final class AdaptiveTimeExpansionProcessor: @unchecked Sendable {
         samplerOn = c.sampler
         samplerIntervalSamples = Int(c.samplerInterval * inputSampleRate)
         samplerScanSamples = Int(c.samplerScan * perMs)
+        samplerEdge = Float(c.samplerEdge)
         let preRoll = c.preRoll, postRoll = c.postRoll, ramp = c.ramp
         let hangover = c.hangover, maxBuffer = c.maxBuffer
         let threshold = c.threshold, release = c.release
@@ -961,24 +973,40 @@ nonisolated final class AdaptiveTimeExpansionProcessor: @unchecked Sendable {
     /// specimen, find that call's own boundaries in `blockLevels`, and open a
     /// fixed-close event over the whole of it.
     ///
-    /// Level at or below which a block is no longer part of the specimen.
+    /// Level at or below which a block is no longer part of the specimen:
+    /// a fixed fraction of the way from the noise floor up to this call's own
+    /// peak, measured in dB.
     ///
-    /// Two terms, and the walk stops at whichever is HIGHER. `noiseFloor *
-    /// releaseFactor` is the existing hold threshold and does the work almost
-    /// everywhere; the peak-relative term only binds for a call loud enough
-    /// that 40 dB down is still above the background, where it stops a walk
-    /// from running on through loud noise. Sweeping the floor multiplier over
-    /// the corpus, this pairing is what delivers whole calls: at 6 dB over the
-    /// floor (i.e. `releaseFactor`) 100% of sampled calls arrive complete,
-    /// while at 9–15 dB only 57–64% do, because the call's own quiet edges get
-    /// cut. Raising the multiplier does not tighten the capture, it truncates
-    /// it.
+    /// **Why not a fixed level above the floor.** The first version was
+    /// `max(peak − 40 dB, noiseFloor × releaseFactor)`, whose second term is
+    /// ABSOLUTE. On a call peaking 30 dB over the floor that cuts 24 dB below
+    /// its peak — generous. On a quiet or distant call peaking 10 dB over the
+    /// floor, the *same* threshold cuts only 4 dB below its peak, so the walk
+    /// stops almost immediately and the call arrives clipped. Niall heard
+    /// exactly that ("too tight around the quieter calls") before any
+    /// measurement showed it.
     ///
-    /// The peak-relative drop is insensitive by comparison — 20, 30 and 40 dB
-    /// all land within a few percent — which is why `samplerDecayFactor` is a
-    /// constant rather than a knob.
+    /// **And it did not show, which is worth remembering.** The corpus metric
+    /// scored the old rule at 100% complete on the quietest third of calls —
+    /// because the ground truth it was scored against (`extent.py`) thresholds
+    /// at `max(peak − 40 dB, floor × 2)`, i.e. it carries the same absolute
+    /// floor term and is tight on quiet calls in the same way. An instrument
+    /// that shares the algorithm's assumption cannot see the algorithm's
+    /// error. `samplerEdgeFraction` is therefore tuned by ear, and the corpus
+    /// numbers only bound it (0.15 keeps 100% completeness overall; 0.35 and
+    /// above drops it to 76%, so the upper half of the slider is known-bad).
+    ///
+    /// Making it proportional means every call is cut at the same point in its
+    /// own dynamic range, so loud and faint calls are treated alike. The
+    /// `noiseFloor * 1.2` guard stops a call whose peak is barely above the
+    /// background from walking on into the background itself — the latching
+    /// failure a very low absolute threshold produced.
     private func samplerBoundary() -> Float {
-        max(samplerBestRMS * Self.samplerDecayFactor, noiseFloor * releaseFactor, 3e-6)
+        let floor = max(noiseFloor, 3e-6)
+        guard samplerBestRMS > floor else { return max(floor * 1.2, 3e-6) }
+        // Runs once per committed event, not per sample, so `pow` is fine here.
+        let scaled = floor * pow(samplerBestRMS / floor, samplerEdge)
+        return max(scaled, floor * 1.2, 3e-6)
     }
 
     /// Number of consecutive blocks below the boundary needed to end the walk.

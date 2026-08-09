@@ -511,7 +511,7 @@ struct RegionSpeciesView: View {
     private static let repoURL = "https://github.com/NiallxD/OpenBat"
 
     /// Species in this region grouped by family — a lightweight stand-in for
-    /// the full taxonomy browser planned later (see CLAUDE.md future work);
+    /// the full taxonomy browser planned later (see Context.md §16);
     /// this just gives the region list some taxonomic structure today.
     /// Families sort alphabetically; species lacking a `family` land in an
     /// "Other" group pinned last.

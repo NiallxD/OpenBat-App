@@ -34,6 +34,8 @@ nonisolated enum CallAnalysis {
     /// upward turned").
     enum ToeDirection { case none, up, down }
 
+    /// The measured parameters of one call, in the shape Kaleidoscope's
+    /// Viewer Analysis reports them.
     struct Result {
         let peakFreqHz: Double
         /// Characteristic frequency (Fc): the lowest frequency of the call

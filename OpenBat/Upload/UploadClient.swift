@@ -27,11 +27,10 @@ nonisolated enum UploadClient {
     /// there is no second place where an object key gets assembled and could
     /// drift from what the anonymizer decided.
     ///
-    /// The key used to lead with `{device_id}/`, which made every uploaded
-    /// object permanently attributable to the device that sent it (and was what
-    /// let the erase endpoint sweep a device's recordings). That prefix is gone:
-    /// see the notes' §4, and `ConsentAPIClient.eraseAllData` for what erasure
-    /// now covers instead.
+    /// The key used to lead with `{device_id}/`, making every uploaded object
+    /// permanently attributable to the device that sent it, and letting the
+    /// erase endpoint sweep a device's recordings. That prefix is gone — see
+    /// `ConsentAPIClient.eraseConsentRecord` for what erasure covers instead.
     static func uploadURL(objectKey: String) -> URL? {
         guard !baseURL.isEmpty else { return nil }
         return URL(string: "\(baseURL)/upload/\(objectKey)")

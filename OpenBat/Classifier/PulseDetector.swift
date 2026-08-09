@@ -232,6 +232,17 @@ final class PulseDetector {
     /// gate and snap the LO immediately — don't wait for the 67 ms stats timer.
     var onPulseStart: ((Double) -> Void)?
 
+    /// Fires for EVERY valid pulse with the call's absolute sample window
+    /// (onset, length). Unlike the capture path this is not rate-limited, so it
+    /// keeps up with pulses that render+classify drops.
+    ///
+    /// The length is `contentLen` columns — the trailing silence of the run is
+    /// already subtracted — which is why `VariableTimeDistortionProcessor` can use it
+    /// as a call boundary directly. A level gate cannot produce this: the echo
+    /// after a call sits 10–30 dB above the noise floor and decays smoothly out
+    /// of the call, so amplitude thresholds do not separate them.
+    var onPulseWindow: ((Int, Int) -> Void)?
+
     /// Called on the main thread whenever a single pulse finishes classification, with
     /// the full result (raw + prior-adjusted scores) and its capture date. Wire to
     /// `AudioRecorder.addClassifiedPulse` so recorded WAVs can carry a `Species Auto
@@ -526,6 +537,14 @@ final class PulseDetector {
                     registerDetection()
                     columnsSinceLastDetection = 0
 
+                    // Publish the call window on the cheap path, before the
+                    // capture rate-limit below can drop it.
+                    if let onPulseWindow {
+                        let stepsBack = belowRun + contentLen - 1
+                        onPulseWindow(columnEndSample - stepsBack * samplesPerCol,
+                                      contentLen * samplesPerCol)
+                    }
+
                     // Only the EXPENSIVE work (deferred render + classify) is
                     // rate-limited: skip arming while a capture is already in flight,
                     // dropping frames on the thumbnail/classifier without dropping the
@@ -607,14 +626,11 @@ final class PulseDetector {
         pendingClassifications += 1
 
         // This pulse's own wall-clock capture time — NOT `lastDetectionDate`, which is
-        // a display-only property gated by quality/refresh-window logic (see below) and
-        // can go several pulses stale during a burst. `onPulseClassified` hands this date
-        // to `AudioRecorder.addClassifiedPulse`, which attributes pulses to a WAV segment
-        // by `date >= segmentStart` — a stale date silently excludes real classified
-        // pulses from that segment's aggregate, reporting NOID/0 pulses even though
-        // PulseDetector's own pass (unaffected, since it doesn't filter by date) shows a
-        // confident species. Captured once here so every consumer of this pulse's result
-        // agrees on when it actually happened.
+        // display-only (gated by quality/refresh-window logic below) and can go several
+        // pulses stale during a burst. `AudioRecorder.addClassifiedPulse` attributes
+        // pulses to a WAV segment by this date, so a stale one would wrongly exclude
+        // classified pulses from the segment's aggregate. See Context.md §8. Captured
+        // once here so every consumer of this pulse's result agrees on when it happened.
         let captureDate = Date()
 
         let sr  = sampleRate

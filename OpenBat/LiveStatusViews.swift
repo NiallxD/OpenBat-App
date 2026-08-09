@@ -8,7 +8,7 @@
 //  ContentView computed property) because the properties it reads update at
 //  ~15 Hz; scoping the reads to a small leaf body keeps that churn from
 //  invalidating all of ContentView.body — see the @Observable-churn note in
-//  CLAUDE.md.
+//  Context.md §13.
 //
 
 import SwiftUI
@@ -81,7 +81,7 @@ struct TunedPillView: View {
 /// reason as the other status pills — `audio.isRunning`/`classStore.activeSessionID`
 /// are stored properties on churning `@Observable` objects, so scoping the read here
 /// keeps it from invalidating ContentView.body (see the @Observable-churn note in
-/// CLAUDE.md).
+/// Context.md §13).
 struct SessionStatusPillView: View {
     let audio: AudioEngineController
     let classStore: ClassificationStore
@@ -230,6 +230,124 @@ struct SpeakerFeedbackWarningPill: View {
     }
 }
 
+// MARK: - Variable time distortion lag pill
+
+/// Live lag indicator for the `.variableTimeDistortion` listen mode: how far
+/// behind real time the output is, a running count of calls stretched, and — in
+/// orange, only once non-zero — calls that went by unstretched because their
+/// window arrived too late to use.
+///
+/// This replaces the adaptive-TE pill, and it reports the OPPOSITE trade. That
+/// mode's honest cost was calls missed while it was deaf; this mode is never
+/// deaf and misses nothing, and pays in delay instead — so the headline number
+/// here is seconds behind, not calls lost.
+///
+/// Same containment as `AdaptiveTimeExpansionStatePill`: the counters are
+/// atomics set on the realtime audio thread, so reading them from a property
+/// `ContentView.body` depends on would hit the churn Context.md §13 warns
+/// about. Polled here in a self-contained leaf view instead.
+struct VariableTimeDistortionLagPill: View {
+    let audio: AudioEngineController
+    /// Set while the guided tour is running: forces the pill on with stand-in
+    /// values, since the tour is normally taken before the user has switched
+    /// into this listen mode.
+    var tourDemo: Bool = false
+
+    @State private var showExplainer = false
+
+    var body: some View {
+        if tourDemo || (audio.isRunning && audio.listenMode == .variableTimeDistortion) {
+            // Button and popover OUTSIDE the TimelineView, for the same reason
+            // as the pill above: a presenter rebuilding 10x/s drops its popover.
+            Button { showExplainer = true } label: { pillContent }
+                .buttonStyle(.plain)
+                .popover(isPresented: $showExplainer) {
+                    explainer
+                        .frame(idealWidth: 320)
+                        .presentationCompactAdaptation(.popover)
+                }
+        }
+    }
+
+    private var pillContent: some View {
+        TimelineView(.periodic(from: .now, by: 0.1)) { _ in
+            let lag = tourDemo ? 1.3 : audio.variableTimeDistortion.lagSeconds
+            let count = tourDemo ? 24 : audio.variableTimeDistortion.expandedCount
+            let dropped = tourDemo ? 0 : audio.variableTimeDistortion.droppedWindowCount
+            HStack(spacing: 4) {
+                Image(systemName: "wave.3.forward")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Self.color(forLag: lag))
+                Text(Self.lagText(lag))
+                    .font(.system(size: 11, weight: .semibold).monospacedDigit())
+                    .foregroundStyle(.secondary)
+                Text("\(count)")
+                    .font(.system(size: 11, weight: .semibold).monospacedDigit())
+                    .foregroundStyle(.secondary)
+                // Only once something has actually been dropped — a permanent
+                // "-0" would read as a fault rather than a tally.
+                if dropped > 0 {
+                    Text("-\(dropped)")
+                        .font(.system(size: 11, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(.orange)
+                }
+            }
+            .padding(.horizontal, 8)
+            .frame(height: StatusPillMetrics.height)
+            .background(.ultraThinMaterial, in: Capsule())
+            .accessibilityLabel(
+                "Variable time distortion, \(Self.lagText(lag)) behind, "
+                + "\(count) calls stretched, \(dropped) too late. Tap to explain."
+            )
+        }
+    }
+
+    /// Plain-language explanation. Same house style as the pill above: no
+    /// jargon, no patent talk — just what the number means and why.
+    private var explainer: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Why it runs behind")
+                    .font(.headline)
+
+                Text("Bat calls are too high to hear and far too short to follow — a typical call lasts a few thousandths of a second. This mode slows each call down 8 times so you can hear its shape, and then races through the quiet in between to make the time back.")
+
+                Text("Slowing a call down takes longer than the call did, so the sound you're hearing falls behind what the microphone is picking up. This number is how far behind. It grows while bats are calling steadily and shrinks again in the quiet.")
+
+                Divider()
+
+                Text("Nothing is missed")
+                    .font(.subheadline.weight(.semibold))
+
+                Text("Unlike the older time expansion mode, the microphone is never switched off — every sound is kept and played, just not always at the same speed. Falling behind is the price of that, and it catches up on its own once the bats move away.")
+
+                Text("If the orange number appears, some calls were identified too late to be stretched and played by at normal speed. Raising Lookahead in the tuning panel gives the detector more time and should clear it.")
+
+                Text("If being behind matters more than hearing call shape, switch to heterodyne — it is always live, but gives you clicks rather than the shape of a call.")
+
+                Text("The counters reset when you change listening mode.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            .padding()
+        }
+    }
+
+    private static func lagText(_ lag: Double) -> String {
+        lag < 10 ? String(format: "%.1fs", lag) : String(format: "%.0fs", lag)
+    }
+
+    /// Lag is normal, so this greys the small numbers rather than alarming on
+    /// them; it only warms up once the delay is long enough to be disorienting.
+    private static func color(forLag lag: Double) -> Color {
+        switch lag {
+        case ..<2: .toggleOn
+        case ..<6: .yellow
+        default: .orange
+        }
+    }
+}
+
 // MARK: - Adaptive time expansion state pill
 
 /// Live state indicator for the `.adaptiveTimeExpansion` listen mode:
@@ -241,7 +359,7 @@ struct SpeakerFeedbackWarningPill: View {
 /// NOT read from ContentView.body — `AdaptiveTimeExpansionProcessor.state` is an
 /// atomic set on the realtime audio thread and can flip at event rate, so
 /// reading it in a computed property that ContentView.body depends on would hit
-/// the exact churn CLAUDE.md warns about (rebuilding the toolbar mid-tap and
+/// the exact churn Context.md §13 warns about (rebuilding the toolbar mid-tap and
 /// dropping button actions). Instead this is a standalone leaf `View` that polls
 /// the processor itself via `TimelineView(.periodic)`, same mechanism as
 /// `SessionTimerPill`'s clock — capped at 10 Hz, well under anything that could

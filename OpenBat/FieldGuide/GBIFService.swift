@@ -14,25 +14,13 @@
 //  can't adapt to zoom the way a hierarchical hex grid can.
 //
 //  This replaces an earlier `MKTileOverlay`-based approach
-//  (`/v2/map/occurrence/density`) that went through three failed fixes in a
-//  row, each one a different symptom of the same root problem — GBIF's
-//  server-rendered point tiles draw markers at a fixed PIXEL size that never
-//  scales with zoom, so nothing about how the client requests tiles can fix
-//  it: (1) markers were legible zoomed out (many overlapping) but shrank to
-//  near-invisible specks zoomed in (real dot size, just spread apart); (2)
-//  clamping the requested zoom via `MKTileOverlay.maximumZ` to keep the last
-//  legible tile past that point did nothing — that property is documented to
-//  auto-upscale but is unreliable for custom (non-Apple) tile templates, so
-//  tiles just stopped rendering past the cap; (3) clamping the tile path
-//  ourselves (a custom `MKTileOverlay` subclass) "fixed" that by reusing the
-//  coarse tile's URL for every finer sub-tile position — but that stretches
-//  the ENTIRE coarse image into each small sub-tile rect instead of cropping
-//  the relevant slice of it, which repeats the same picture across the
-//  screen instead of showing one coherently scaled view. Aggregating real
-//  occurrence coordinates ourselves and drawing geographic-radius shapes
-//  sidesteps the whole class of bug: a shape with a real metre radius scales
-//  correctly at every zoom level by construction, the same way any other
-//  MapKit overlay does.
+//  (`/v2/map/occurrence/density`), dropped because GBIF's server-rendered
+//  point tiles draw markers at a fixed PIXEL size that never scales with
+//  zoom — no amount of client-side tile-request or zoom-clamping trickery
+//  fixes that, since the problem is baked into the served image. Aggregating
+//  real occurrence coordinates ourselves and drawing shapes with a real
+//  geographic radius sidesteps the whole class of bug: it scales correctly
+//  at every zoom level by construction, same as any other MapKit overlay.
 //
 //  Unlike numbird (thousands of bird species, key never cached), OpenBat's
 //  species list is small and fixed, so resolved taxon keys are persisted to
@@ -262,6 +250,10 @@ enum GBIFService {
     /// Runs all species lookups concurrently — the species lists here are
     /// small (≤31 codes today), and each request is a cheap `limit=0` count
     /// query, not a full occurrence fetch.
+    ///
+    /// Never queries the NOISE pseudo-species: callers build `scientificNames`
+    /// from a model descriptor's code→name table, and NOISE has no scientific
+    /// name there (it isn't a real taxon) — see `BatClassifier.scientificNames`.
     static func suggestPriors(scientificNames: [String: String],
                               near coordinate: CLLocationCoordinate2D,
                               radiusKm: Int = 100) async -> [String: PriorSuggestion] {

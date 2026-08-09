@@ -105,6 +105,14 @@ final class AdaptiveTimeExpansionSettings {
         didSet { UserDefaults.standard.set(samplerScanMs, forKey: Self.keySamplerScan) }
     }
 
+    /// Where each call's edges are cut, as a fraction of the way from the
+    /// noise floor to that call's own peak. Lower is more generous. See the
+    /// processor's `samplerBoundary` — this replaced a fixed level above the
+    /// floor, which cut faint calls far tighter than loud ones.
+    var samplerEdgeFraction: Double {
+        didSet { UserDefaults.standard.set(samplerEdgeFraction, forKey: Self.keySamplerEdge) }
+    }
+
     static let defaultGain: Float = 4.0
 
     private static let keyGain = "AdaptiveTE.gain"
@@ -122,6 +130,7 @@ final class AdaptiveTimeExpansionSettings {
     private static let keySamplerEnabled = "AdaptiveTE.samplerEnabled"
     private static let keySamplerInterval = "AdaptiveTE.samplerIntervalSeconds"
     private static let keySamplerScan = "AdaptiveTE.samplerScanMs"
+    private static let keySamplerEdge = "AdaptiveTE.samplerEdgeFraction"
 
     init() {
         let d = UserDefaults.standard
@@ -155,6 +164,8 @@ final class AdaptiveTimeExpansionSettings {
             ? d.double(forKey: Self.keySamplerInterval) : AdaptiveTimeExpansionProcessor.defaultSamplerIntervalSeconds
         samplerScanMs = d.object(forKey: Self.keySamplerScan) != nil
             ? d.double(forKey: Self.keySamplerScan) : AdaptiveTimeExpansionProcessor.defaultSamplerScanMs
+        samplerEdgeFraction = d.object(forKey: Self.keySamplerEdge) != nil
+            ? d.double(forKey: Self.keySamplerEdge) : AdaptiveTimeExpansionProcessor.defaultSamplerEdgeFraction
     }
 
     /// Every tunable as one Equatable value, so ContentView can watch the whole
@@ -179,6 +190,7 @@ final class AdaptiveTimeExpansionSettings {
         var samplerEnabled: Bool
         var samplerIntervalSeconds: Double
         var samplerScanMs: Double
+        var samplerEdgeFraction: Double
     }
 
     var snapshot: Snapshot {
@@ -191,7 +203,8 @@ final class AdaptiveTimeExpansionSettings {
                  expanderReleaseMs: expanderReleaseMs,
                  samplerEnabled: samplerEnabled,
                  samplerIntervalSeconds: samplerIntervalSeconds,
-                 samplerScanMs: samplerScanMs)
+                 samplerScanMs: samplerScanMs,
+                 samplerEdgeFraction: samplerEdgeFraction)
     }
 
     func apply(to processor: AdaptiveTimeExpansionProcessor) {
@@ -214,6 +227,7 @@ final class AdaptiveTimeExpansionSettings {
         processor.samplerEnabled = samplerEnabled
         processor.samplerIntervalSeconds = samplerIntervalSeconds
         processor.samplerScanMs = samplerScanMs
+        processor.samplerEdgeFraction = samplerEdgeFraction
     }
 
     func reset() {
@@ -232,5 +246,6 @@ final class AdaptiveTimeExpansionSettings {
         samplerEnabled = AdaptiveTimeExpansionProcessor.defaultSamplerEnabled
         samplerIntervalSeconds = AdaptiveTimeExpansionProcessor.defaultSamplerIntervalSeconds
         samplerScanMs = AdaptiveTimeExpansionProcessor.defaultSamplerScanMs
+        samplerEdgeFraction = AdaptiveTimeExpansionProcessor.defaultSamplerEdgeFraction
     }
 }

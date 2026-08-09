@@ -2,24 +2,23 @@
 //  LiveTuningOverlay.swift
 //  OpenBat
 //
-//  A floating, draggable card of live tuning controls that sits OVER the running
-//  detector screen. The point is to change a threshold and hear/see the result
-//  without the pipeline stopping.
+//  Floating, draggable card of live tuning controls over the running detector
+//  screen — changes a threshold and hears/sees the result without the
+//  pipeline stopping. Not a sheet: sheets feed `ContentView.menuIsOpen`, which
+//  pauses the render loop and suspends the processor, defeating the point.
+//  `showTuningOverlay` must stay out of `menuIsOpen`, same exclusion as
+//  `showBand`/`showPulseView`. See Context.md §13.
 //
-//  Why this isn't a sheet: every existing settings surface is presented as one,
-//  and sheets feed `ContentView.menuIsOpen`, which pauses the Metal render loop
-//  and sets `processor.suspended`. Tuning against a frozen spectrogram is
-//  useless, so this is a plain overlay in the detector's ZStack and
-//  `showTuningOverlay` is deliberately NOT part of `menuIsOpen` — the same
-//  deliberate exclusion `showBand`/`showPulseView` already have.
-//
-//  Paired with demo mode this is the actual workflow: loop a known clip, drag a
-//  knob, listen. The clip is identical every lap, so the only variable is the
-//  knob.
+//  Paired with demo mode: loop a known clip, drag a knob, listen — same clip
+//  every lap, so the knob is the only variable.
 //
 
 import SwiftUI
 
+/// The floating tuning card itself: header, tab bar, the active tab's
+/// controls, and a Revert/Defaults footer. Owns its own position and
+/// collapsed state in `@AppStorage`; everything it edits lives on the
+/// objects passed in, not here.
 struct LiveTuningOverlay: View {
     let audio: AudioEngineController
     let adaptiveTESettings: AdaptiveTimeExpansionSettings
@@ -37,7 +36,7 @@ struct LiveTuningOverlay: View {
     @AppStorage("tuning.overlayX") private var posX: Double = 0.5
     @AppStorage("tuning.overlayY") private var posY: Double = 0.62
     @AppStorage("tuning.overlayCollapsed") private var collapsed = false
-    @AppStorage("tuning.overlayTab") private var tabRaw = LiveTuningTab.adaptiveTE.rawValue
+    @AppStorage("tuning.overlayTab") private var tabRaw = LiveTuningTab.distortion.rawValue
 
     @GestureState private var dragOffset: CGSize = .zero
     /// Captured when the overlay appears; restored by Revert.
@@ -53,7 +52,7 @@ struct LiveTuningOverlay: View {
     @State private var revertToken = 0
 
     private var tab: LiveTuningTab {
-        get { LiveTuningTab(rawValue: tabRaw) ?? .adaptiveTE }
+        get { LiveTuningTab(rawValue: tabRaw) ?? .distortion }
         nonmutating set { tabRaw = newValue.rawValue }
     }
 
@@ -161,8 +160,8 @@ struct LiveTuningOverlay: View {
             switch tab {
             case .heterodyne:
                 HeterodyneTuningTab(audio: audio)
-            case .adaptiveTE:
-                AdaptiveTETuningTab(audio: audio, settings: adaptiveTESettings)
+            case .distortion:
+                VTDTuningTab(audio: audio)
             case .pulse:
                 PulseTuningTab(detector: pulseDetector)
             case .display:
@@ -183,15 +182,15 @@ struct LiveTuningOverlay: View {
             Button("Revert") { revert() }
                 .disabled(opening == nil)
             Spacer()
-            // Adaptive-TE only, and labelled inside that tab's scope rather than
-            // as a global reset: there is no equivalent "factory default" for
-            // the pulse detector or the display band, and a button that reset
-            // some tabs but not others would be worse than one that is honest
-            // about what it touches.
-            Button("ATE Defaults") {
-                adaptiveTESettings.reset()
-                adaptiveTESettings.apply(to: audio.adaptiveTimeExpansion)
-                revertToken += 1
+            // Scoped to the visible tab rather than offered as a global reset:
+            // there is no equivalent "factory default" for the pulse detector or
+            // the display band, and a button that reset some tabs but not others
+            // would be worse than one that is honest about what it touches.
+            if tab == .distortion {
+                Button("VTD Defaults") {
+                    audio.variableTimeDistortion.resetToDefaults()
+                    revertToken += 1
+                }
             }
         }
         .font(.system(size: 11, weight: .medium))
@@ -201,6 +200,7 @@ struct LiveTuningOverlay: View {
         .padding(.vertical, 8)
     }
 
+    /// Restores everything captured when the overlay opened.
     private func revert() {
         guard let snapshot = opening else { return }
         snapshot.restore(audio: audio, ate: adaptiveTESettings, pulse: pulseDetector,
@@ -217,6 +217,9 @@ struct LiveTuningOverlay: View {
 
     // MARK: Dragging
 
+    /// Drives the card's position while dragging; commits to `@AppStorage`
+    /// only on release, clamped so the card can't be parked unreachably
+    /// off-screen.
     private func dragGesture(in size: CGSize) -> some Gesture {
         DragGesture(minimumDistance: 4)
             .updating($dragOffset) { value, state, _ in state = value.translation }
@@ -234,6 +237,8 @@ struct LiveTuningOverlay: View {
             }
     }
 
+    /// The stored fractional position resolved to a point in `size`, with any
+    /// in-flight drag offset applied.
     private func clampedPosition(in size: CGSize) -> CGPoint {
         CGPoint(x: posX.clamped(to: 0.08...0.92) * size.width + dragOffset.width,
                 y: posY.clamped(to: 0.06...0.94) * size.height + dragOffset.height)

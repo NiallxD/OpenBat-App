@@ -2,31 +2,20 @@
 //  WavPlayerView.swift
 //  OpenBat
 //
-//  The rebuilt WAV player — replaces PlaybackPlayerView (which reused the
-//  live Detector screen's scrolling Metal SpectrogramView, restarted on
-//  every load). This is a purpose-built player: a static, whole-file,
-//  two-axis zoomable spectrogram (WavSpectrogramView) flanked by a minimap
-//  (WavMinimapView, which also doubles as the scrub bar — see its own doc
-//  comment), call-parameter analysis on a manual drag-selection
-//  (CallAnalysisPanel), and inline heterodyne/time-expansion tuning +
-//  display options (WavTuningControl) — composed around the SAME
-//  PlaybackEngine (audio decode + heterodyne + time-expansion playback,
-//  fixed separately for the LO auto-tune bug) and the SAME transport buttons
-//  (PlaybackControlsView) the old player
-//  used; only the spectrogram visualization half (and the scrub bar, now the
-//  minimap) changed.
+//  A static, whole-file, two-axis zoomable spectrogram (WavSpectrogramView)
+//  flanked by a minimap (WavMinimapView, which also doubles as the scrub bar
+//  — see its own doc comment), call-parameter analysis on a manual
+//  drag-selection (CallAnalysisPanel), and inline heterodyne/time-expansion
+//  tuning + display options (WavTuningControl), composed around
+//  PlaybackEngine (audio decode + heterodyne + time-expansion playback) and
+//  PlaybackControlsView for transport.
 //
-//  Zoom (time) and Range (frequency span) are two `TickerWheelControl` pills
-//  at the bottom of the screen — replaces the old horizontal `Slider` and the
-//  two-thumb `VerticalRangeSlider`. The frequency axis is now POSITION
-//  (panned by dragging directly on the spectrogram — see
-//  WavSpectrogramView's vertical-pan handling) crossed with WIDTH (the Range
-//  ticker, zooming around whatever center the pan left it at, not the
-//  file's fixed midpoint — see `WavViewportMath.viewportForFreqZoom`).
-//  Detected calls were also once tappable marker dots — pulled, same as the
-//  trim slider, in favour of explicit controls: no gesture-recognition
-//  ambiguity to get wrong, no unlabelled marker dots to explain. See
-//  WavViewport.swift's doc comment.
+//  Zoom and pan are gesture-driven directly on the spectrogram (two-axis
+//  pinch for zoom, drag for pan/frequency position) rather than separate
+//  ticker/slider controls — see WavSpectrogramView's and WavViewport.swift's
+//  doc comments, and Context.md for what this replaced. Detected-call marker
+//  dots were tried and dropped for the same reason: explicit gestures over
+//  ambiguous hit-targets.
 //
 
 import SwiftUI
@@ -65,9 +54,8 @@ struct WavPlayerView: View {
     @State private var overviewError: String?
     @State private var viewport = WavViewport(startSample: 0, endSample: 1, minFreqHz: 0, maxFreqHz: 1)
     @State private var selection: AnalysisBox?
-    /// Default (false) is pan/zoom via drag + the ticker pills below; true
-    /// switches the spectrogram's drag gesture to drawing a selection box
-    /// instead.
+    /// Default (false) is pan/zoom via drag on the spectrogram; true switches
+    /// its drag gesture to drawing a selection box instead.
     @State private var isSelecting = false
     @State private var analysisResult: CallAnalysis.Result?
     /// Call landmarks (Hi f / Peak / Fc / Lo f) for the current measurement,
@@ -76,8 +64,8 @@ struct WavPlayerView: View {
     @State private var analysisGeneration = 0
     @State private var showTuning = false
     /// Debounces `applyBand()` (a heterodyne DSP filter recalculation)
-    /// after ANY viewport change, regardless of source (Range ticker, a
-    /// vertical pan on the spectrogram, the minimap, Zoom) — `viewport`
+    /// after ANY viewport change, regardless of source (a pinch/pan on the
+    /// spectrogram, or the minimap) — `viewport`
     /// itself is written immediately for instant visual feedback (its own
     /// consumers are already cheap or separately debounced — see
     /// WavSpectrogramView's `scheduleDetailRenderDebounced`), but recomputing
@@ -158,7 +146,7 @@ struct WavPlayerView: View {
 
     /// The overview all DISPLAY consumers use: the compressed one while
     /// hide-silence is active, the real one otherwise. Everything downstream
-    /// of this (viewport, minimap, tickers, tile renders) works in whichever
+    /// of this (viewport, minimap, tile renders) works in whichever
     /// domain this overview is in; only seeks/playhead/analysis translate.
     private var displayOverview: WavSpectrogramEngine.Overview? {
         silenceMap != nil ? compressedOverview : overview
@@ -602,9 +590,7 @@ struct WavPlayerView: View {
                 // most recordings are long enough that "whole file" shows no
                 // usable call detail at all until the user zooms in manually;
                 // starting already zoomed in (centered on the file's middle)
-                // gives a useful view immediately. `viewportForTimeZoom` at
-                // fraction 0.5 is the same value the Zoom ticker defaults to,
-                // so it reads correctly centered too, not stuck at "0.1".
+                // gives a useful view immediately.
                 let whole = WavViewport.wholeFile(totalSamples: result.totalSamples, maxFreqHz: result.maxFreqHz)
                 viewport = WavViewportMath.viewportForTimeZoom(
                     committed: whole, zoomFraction: 0.5, totalSamples: result.totalSamples)

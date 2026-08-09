@@ -13,8 +13,10 @@ import Testing
 import AVFoundation
 @testable import OpenBat
 
+/// Direct-index gain application and frequency interpolation.
 struct MicCalibrationCurveTests {
 
+    /// Each bin is scaled by its own stored gain, independently of the rest.
     @Test func applyMultipliesEachBinByItsOwnGain() {
         let curve = MicCalibrationCurve(binCount: 4, sampleRate: 384_000, fftSize: 8,
                                         gains: [1, 2, 0.5, 4], micName: "Test Mic", capturedAt: Date())
@@ -23,6 +25,8 @@ struct MicCalibrationCurveTests {
         #expect(mags == [10, 20, 5, 40])
     }
 
+    /// A caller whose bin count doesn't match the stored curve must be left
+    /// untouched rather than scaled with misaligned gains.
     @Test func applyIsNoOpWhenBinCountMismatches() {
         let curve = MicCalibrationCurve(binCount: 4, sampleRate: 384_000, fftSize: 8,
                                         gains: [1, 2, 0.5, 4], micName: "Test Mic", capturedAt: Date())
@@ -31,6 +35,8 @@ struct MicCalibrationCurveTests {
         #expect(mags == [10, 10, 10])
     }
 
+    /// An arbitrary frequency between two bins gets a linearly interpolated
+    /// gain, not a hard snap to the nearest one.
     @Test func gainAtFrequencyInterpolatesBetweenTheTwoNearestBins() {
         // sampleRate=8, fftSize=8 -> hzPerBin = 1, so bin index == Hz here.
         let curve = MicCalibrationCurve(binCount: 4, sampleRate: 8, fftSize: 8,
@@ -39,6 +45,8 @@ struct MicCalibrationCurveTests {
         #expect(abs(midway - 3.0) < 0.001)
     }
 
+    /// Frequencies at or beyond the curve's range clamp to the edge bins
+    /// rather than extrapolating or producing a bogus gain.
     @Test func gainAtFrequencyHandlesOutOfRangeEdges() {
         let curve = MicCalibrationCurve(binCount: 4, sampleRate: 8, fftSize: 8,
                                         gains: [1, 2, 3, 4], micName: "Test Mic", capturedAt: Date())
@@ -47,6 +55,9 @@ struct MicCalibrationCurveTests {
     }
 }
 
+/// `MicCalibrator`'s quality gates — each test below engineers a buffer to
+/// trip exactly one gate, so a regression names the specific gate that broke
+/// rather than just "calibration failed".
 struct MicCalibratorTests {
 
     private let sampleRate = 384_000.0
@@ -70,6 +81,7 @@ struct MicCalibratorTests {
         return Int(windowLen) + columns * Int(hopSize)
     }
 
+    /// The happy path: clean quiet input yields a full-width gain curve.
     @Test func steadyQuietNoiseProducesACurve() {
         let seconds = 0.1
         let samples = (0..<sampleCount(forSeconds: seconds)).map { _ in Float.random(in: -0.001...0.001) }
@@ -83,6 +95,8 @@ struct MicCalibratorTests {
         #expect(curve.gains.count == 1024)
     }
 
+    /// A real sound happening mid-capture (a call, a knock) must fail
+    /// calibration rather than get silently baked into the gain curve.
     @Test func loudTransientDuringCaptureFails() {
         let seconds = 0.1
         var samples = (0..<sampleCount(forSeconds: seconds)).map { _ in Float.random(in: -0.001...0.001) }
@@ -104,6 +118,8 @@ struct MicCalibratorTests {
         #expect(reason.contains("sound during"))
     }
 
+    /// Input-overload/handling-noise clipping must be caught, not calibrated
+    /// against as if it were a real reading.
     @Test func clippedSamplesFail() {
         let seconds = 0.1
         var samples = (0..<sampleCount(forSeconds: seconds)).map { _ in Float.random(in: -0.001...0.001) }
@@ -117,6 +133,8 @@ struct MicCalibratorTests {
         #expect(reason.contains("overloaded"))
     }
 
+    /// Silent/dead input has no signal to derive a curve from and must fail
+    /// rather than produce a meaningless flat one.
     @Test func deadInputFails() {
         let seconds = 0.1
         let samples = [Float](repeating: 0, count: sampleCount(forSeconds: seconds))
@@ -129,6 +147,8 @@ struct MicCalibratorTests {
         #expect(reason.contains("clear reading"))
     }
 
+    /// A capture cut well short of its target duration must fail rather than
+    /// produce a curve from partial, unrepresentative data.
     @Test func interruptedCaptureFails() {
         let targetSeconds = 1.0
         // Only a tenth of the samples the target duration needs.

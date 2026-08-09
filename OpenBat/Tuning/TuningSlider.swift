@@ -4,28 +4,15 @@
 //
 //  The control the live tuning overlay is built from. One compact row: label,
 //  slider, live value readout — sized to fit a floating card over the running
-//  detector rather than a Form.
+//  detector rather than a Form. Not `Slider(value:in:step:)` bound straight to
+//  settings: onLive fires every drag frame and writes the DSP object's
+//  lock-guarded scalar (heard next buffer); onCommit fires once on release and
+//  writes the persisted settings object. Binding straight to settings would do
+//  a `UserDefaults.set` plus an `@Observable` invalidation per drag frame, on
+//  the main thread, behind the live render loop. See Context.md §13.
 //
-//  The reason this isn't just `Slider(value:in:step:)` is the two-closure split.
-//  Most tunables in this app exist twice: once on an `@Observable` settings
-//  object that persists on `didSet`, and once on the DSP object the audio thread
-//  actually reads. Binding a slider straight to the settings object means every
-//  drag frame does a `UserDefaults.set` plus an `@Observable` invalidation, on
-//  the main thread, while the Metal render loop is still running behind the
-//  overlay — the exact cost `FrequencyBandControl.localNoiseFloor` was added to
-//  avoid, and the stall documented in `SpectrogramProcessor.maxPendingColumns`.
-//
-//  But the whole point of a live tuning overlay is hearing the change while your
-//  thumb is still moving, which a commit-on-release-only control cannot do. So:
-//
-//    onLive   — every drag frame, wired to the DSP object's lock-guarded scalar.
-//               Cheap: one lock, one store, picked up on the next buffer.
-//    onCommit — once on release, wired to the settings object. Persists, and
-//               re-applies through the normal path (idempotent — it's writing
-//               the value the processor already has).
-//
-//  A knob with no settings-object counterpart just passes the same closure to
-//  both, or omits `onCommit`.
+//  A knob with no settings-object counterpart passes the same closure to both,
+//  or omits `onCommit`.
 //
 
 import SwiftUI
@@ -88,6 +75,8 @@ private struct TuningExplainer: View {
     }
 }
 
+/// One row of the live tuning overlay: label, slider, live value readout.
+/// See the file header for the onLive/onCommit split this exists to support.
 struct TuningSlider: View {
     let label: String
     /// Shown when the label is tapped. Nil leaves the label plain and inert.
@@ -204,6 +193,8 @@ struct TuningReadout: View {
     }
 }
 
+/// Clamps any `Comparable` value into a range. Used throughout the tuning
+/// overlay to keep a slider's seeded value and drag position inside bounds.
 extension Comparable {
     func clamped(to range: ClosedRange<Self>) -> Self {
         min(max(self, range.lowerBound), range.upperBound)

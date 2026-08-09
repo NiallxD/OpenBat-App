@@ -19,6 +19,8 @@ import SwiftUI
 import WidgetKit
 import ActivityKit
 
+/// The lock-screen card and Dynamic Island presentations for
+/// `BatDetectorAttributes`. Registered in `OpenBatWidgetBundle`.
 struct OpenBatLiveActivity: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: BatDetectorAttributes.self) { context in
@@ -73,12 +75,10 @@ private struct LockScreenCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 16)
         .padding(.vertical, 14)
-        // Width fills, height stays content-driven. An earlier `maxHeight: .infinity`
-        // here let the card grow to the lock screen's full allowance, and combined with a
-        // `.fill` image that wanted to be enormous it pushed every text row out of view —
-        // the card rendered as nothing but a gradient and a grey slab. Let the content
-        // size it; `activityBackgroundTint` is set to the gradient's bottom colour so any
-        // strip the system adds below still matches.
+        // Width fills, height stays content-driven — never `maxHeight: .infinity`, which
+        // let the card grow to the lock screen's full allowance and, combined with a
+        // well that wanted to be enormous, pushed every text row out of view. See
+        // Context.md §12 on why there's no image well here at all any more.
         .frame(maxWidth: .infinity)
         .background(BatActivityPalette.cardBackground)
     }
@@ -113,6 +113,8 @@ private struct LockScreenCard: View {
 
 // MARK: - Identification
 
+/// Species name, code, confidence and pulse count — or a listening/noise/
+/// unidentified placeholder when there's no pass yet.
 private struct IDBlock: View {
     let state: BatDetectorAttributes.ContentState
     let compact: Bool
@@ -183,6 +185,7 @@ private struct IDBlock: View {
 
 // MARK: - Stats
 
+/// The four last-pulse stat chips (FPEAK/DUR/RATE/PULSES) in a row.
 private struct StatStrip: View {
     let state: BatDetectorAttributes.ContentState
 
@@ -210,6 +213,7 @@ private struct StatStrip: View {
     }
 }
 
+/// One labelled value/unit pair, e.g. "FPEAK  42 kHz".
 private struct StatChip: View {
     let label: String
     let value: String

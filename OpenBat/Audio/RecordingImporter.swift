@@ -18,13 +18,11 @@
 //
 //  SPLIT IN TWO ON PURPOSE, and the split matters:
 //
-//    • `copyIntoLibrary` must run SYNCHRONOUSLY inside the `.fileImporter`
-//      completion handler. The sandbox extension the document picker grants is
-//      scoped to that call; an earlier version of this file did the copy inside
-//      a `Task.detached`, by which point the extension was gone,
-//      `startAccessingSecurityScopedResource()` was useless and `copyItem` failed
-//      with a permissions error. A file copy is fast enough to accept on the
-//      main actor — even 23 MB is a few tens of milliseconds.
+//    • `copyIntoLibrary` MUST run synchronously inside the `.fileImporter`
+//      completion handler — the sandbox extension the document picker grants
+//      is scoped to that call, so deferring the copy to a detached task loses
+//      it and `copyItem` fails. A file copy is fast enough to accept on the
+//      main actor.
 //
 //    • `renderOverview` is the genuinely slow part (a full FFT pass over the
 //      file) and takes a URL inside our OWN container, so it needs no sandbox

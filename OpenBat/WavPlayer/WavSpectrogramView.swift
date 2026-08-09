@@ -3,10 +3,8 @@
 //  OpenBat
 //
 //  The whole-file, static, two-axis zoomable spectrogram — the core of the
-//  rebuilt WAV player. Replaces PlaybackPlayerView's live-scrolling Metal
-//  SpectrogramView (fed in real time from PlaybackEngine) with a fully
-//  navigable, tile-rendered view of the WHOLE recording (see
-//  WavSpectrogramEngine/WavViewport doc comments for the two-tier
+//  WAV player: a fully navigable, tile-rendered view of the WHOLE recording
+//  (see WavSpectrogramEngine/WavViewport doc comments for the two-tier
 //  overview+detail rendering strategy and the viewport/gesture model).
 //
 //  Displayed content, in priority order:
@@ -17,25 +15,19 @@
 //       tile (if the zoom level warrants one — see `needsDetailTile`) renders
 //       in the background and swaps in once ready.
 //
-//  Interaction model: ZOOM is both a gesture AND the ticker wheels — a
-//  two-finger PER-AXIS pinch (horizontal spread = time, vertical spread =
-//  frequency width; see TwoAxisPinchView for why it's a UIKit overlay, not
-//  a composed SwiftUI MagnifyGesture) on top of WavPlayerView's "Zoom"/
-//  "Range" ticker wheels, which remain as the precise/deterministic
-//  controls and as readouts. PAN (position) is a gesture on this view too:
-//  a two-axis drag — horizontal shifts time (with momentum/coast), vertical
-//  shifts the frequency window (no momentum on that axis) — or a
-//  drag-to-select box when `isSelecting`, plus tap-to-seek in pan mode. Both
-//  ticker wheels and the pan gesture write `viewport` directly and
-//  immediately (see `commitPan`/WavPlayerView's ticker bindings) rather than
-//  through a separate live-preview parameter — WavSpectrogramView's own
-//  `scheduleDetailRenderDebounced` already protects the one genuinely
-//  expensive consumer of a `viewport` change, so nothing upstream needs its
-//  own debounce just to avoid a redundant render. An earlier version drove
-//  zoom through a pinch gesture (`MagnifyGesture`) composed simultaneously
-//  with the pan drag, and frequency WIDTH through a two-thumb trim slider —
-//  both pulled in favour of the explicit ticker wheels (deterministic, no
-//  gesture-recognition ambiguity) — see WavViewport.swift's doc comment.
+//  Interaction model, entirely gesture-driven (no sliders or ticker
+//  controls — see Context.md for what preceded this): ZOOM is a two-finger
+//  PER-AXIS pinch (horizontal spread = time, vertical spread = frequency
+//  width; see TwoAxisPinchView for why it's a UIKit overlay, not a composed
+//  SwiftUI MagnifyGesture). PAN is a two-axis drag on this view — horizontal
+//  shifts time (with momentum/coast), vertical shifts the frequency window
+//  (no momentum on that axis) — or a drag-to-select box when `isSelecting`,
+//  plus tap-to-seek in pan mode. Both write `viewport` directly and
+//  immediately (see `commitPan`) rather than through a separate live-preview
+//  parameter — WavSpectrogramView's own `scheduleDetailRenderDebounced`
+//  already protects the one genuinely expensive consumer of a `viewport`
+//  change, so nothing upstream needs its own debounce just to avoid a
+//  redundant render.
 //
 
 import SwiftUI
@@ -151,11 +143,10 @@ struct WavSpectrogramView: View {
     @State private var renderGeneration = 0
     @State private var commitTask: Task<Void, Never>?
     /// Debounces `scheduleDetailRender` for ANY trigger — a viewport change
-    /// (pan settling, either ticker wheel) OR a noise-floor/palette change —
-    /// confirmed necessary on-device: e.g. the time-zoom ticker writes
-    /// `viewport` directly on every settled tick with no debounce upstream,
-    /// so a single drag fired `scheduleDetailRender` well over 100 times,
-    /// almost all immediately superseded before even finishing.
+    /// (pan/pinch settling) OR a noise-floor/palette change — confirmed
+    /// necessary on-device: a single drag could fire `scheduleDetailRender`
+    /// well over 100 times, almost all immediately superseded before even
+    /// finishing.
     /// `renderGeneration` already discards a STALE RESULT once computed, but
     /// does nothing to stop the wasted computation from starting in the
     /// first place — this is what actually stops that. Safe to debounce

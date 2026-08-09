@@ -136,7 +136,7 @@ final class AutoIDSettings {
     /// pressure lower than firing every model's every species query at once.
     ///
     /// `AutoIDSettings` isn't actor-isolated (PulseDetector's capture queue reads
-    /// its properties synchronously off the main thread — see CLAUDE.md), so this
+    /// its properties synchronously off the main thread — see Context.md §13), so this
     /// method's own re-entrancy check needs its own lock rather than relying on
     /// isolation: repeated GPS fixes in quick succession (e.g. right after
     /// `LocationProvider.requestRegionFix()`, before a fix stabilizes) can each spawn

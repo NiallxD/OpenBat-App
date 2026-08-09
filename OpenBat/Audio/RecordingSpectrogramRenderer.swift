@@ -3,8 +3,8 @@
 //  OpenBat
 //
 //  Offline "whole file" spectrogram for a saved Recording WAV — rendered once by
-//  AudioRecorder right after a segment closes (see CLAUDE.md's recording-subsystem
-//  notes) and cached as a JPEG alongside the classification thumbnails, so opening a
+//  AudioRecorder right after a segment closes (see Context.md §10) and cached
+//  as a JPEG alongside the classification thumbnails, so opening a
 //  Recording's detail page is instant rather than re-decoding the WAV every time.
 //
 //  Reuses SpectrogramProcessor (the same FFT the live view runs) so the look is
@@ -49,17 +49,11 @@ nonisolated enum RecordingSpectrogramRenderer {
     /// The expensive half of `render` — PCM IO plus the FFT — split out so a
     /// noise-floor/palette-only change can reuse an already-computed grid
     /// (`colorize` below) instead of re-scanning the file. Streams the file in
-    /// bounded chunks (see the loop below) rather than loading it whole, same
-    /// as `render` always has — this is NOT the same cost profile as
-    /// `WavPCMReader.readSamples`, which materializes its entire requested
-    /// range in one `[Float]` array: that's fine for a small, zoomed-in
-    /// detail-tile span, but was the actual cause of a "noise-floor slider
-    /// doesn't work" bug report when `WavSpectrogramView` used it as its
-    /// force-render path for a WHOLE-FILE (zoomed-out) view — a multi-minute
-    /// recording meant reading hundreds of MB into memory, once per slider
-    /// tick, only to use ~1% of the resulting frames. `renderGrid` is the
-    /// bounded, correct tool for that same whole-file case: memory stays
-    /// `O(binCount * width)` regardless of file length.
+    /// bounded chunks rather than loading it whole. Use this, not
+    /// `WavPCMReader.readSamples`, for a whole-file view: that reader
+    /// materialises its entire requested range in one `[Float]` array, fine for
+    /// a small zoomed-in tile but not for a multi-minute recording, where
+    /// `renderGrid`'s `O(binCount * width)` memory is the only viable option.
     static func renderGrid(wavURL: URL, maxWidth: Int = 2400) -> Grid? {
         guard let header = WavHeader.read(url: wavURL) else {
             WavPlayerDebugLog.log("RecordingSpectrogramRenderer", "renderGrid: WavHeader.read FAILED for \(wavURL.lastPathComponent)")
@@ -124,22 +118,13 @@ nonisolated enum RecordingSpectrogramRenderer {
 
                 processor.process(buffer)
                 for col in processor.drain() {
-                    // Proportional mapping (columnsSeen/totalColumns * width),
-                    // NOT `columnsSeen / colsPerBucket` (colsPerBucket rounded
-                    // UP from totalColumns/width to guarantee every column has
-                    // a valid bucket) — that rounding means `colsPerBucket *
-                    // width` generally OVERSHOOTS totalColumns, so the last
-                    // bucket index actually reached via integer division is
-                    // systematically LESS than width-1. Confirmed on-device:
-                    // for a real file (totalColumns=16949, width=4096),
-                    // colsPerBucket rounded up to 5, and the last column
-                    // (columnsSeen=16948) mapped to bucket 3389 — leaving
-                    // buckets 3390...4095 (17% of the image) never written,
-                    // staying at their zero/black initial value forever. That
-                    // was the "minimap has a black box at the end instead of
-                    // stretching to fit" bug — proportional mapping always
-                    // reaches bucket width-1 on the last column, regardless of
-                    // how evenly totalColumns divides into width.
+                    // Proportional mapping (columnsSeen/totalColumns * width), NOT
+                    // `columnsSeen / colsPerBucket` for some rounded-up bucket size
+                    // — that division systematically undershoots bucket width-1 on
+                    // the last column (confirmed on-device: 17% of a real image
+                    // left unwritten, black). Proportional mapping always reaches
+                    // width-1 on the last column regardless of how evenly
+                    // totalColumns divides into width.
                     let bucket = min(width - 1, Int(Double(columnsSeen) * Double(width) / Double(totalColumns)))
                     // Vectorized element-wise max instead of a per-bin scalar Swift
                     // loop — this ran once per FFT column (up to ~900,000 times for

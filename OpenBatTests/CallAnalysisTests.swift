@@ -56,6 +56,8 @@ struct CallAnalysisTests {
         return pcm
     }
 
+    /// A steady tone at a known frequency and duration should be measured as
+    /// exactly that, not smeared across the padding either side of it.
     @Test func toneBurstMeasuresPeakFrequencyAndDuration() {
         let toneHz = 40_000.0
         let pcm = makeBurst(toneHz: toneHz, burstMs: 5, paddingMsEachSide: 10)
@@ -75,6 +77,9 @@ struct CallAnalysisTests {
                 "a constant tone should show near-zero sweep rate, got \(result.sweepRateHzPerMs)")
     }
 
+    /// An FM sweep with a flat knee should recover start/end frequency and
+    /// characteristic frequency close to the encoded values, and a correctly
+    /// signed sweep rate.
     @Test func chirpWithFlatTailMeasuresStartEndAndCharacteristicFrequency() {
         let f0 = 60_000.0
         let fKnee = 25_000.0
@@ -115,6 +120,8 @@ struct CallAnalysisTests {
         #expect(result.bandwidthHz > 0)
     }
 
+    /// Nothing standing out from uniform broadband noise should score low
+    /// quality, not be mistaken for a confident measurement.
     @Test func broadbandNoiseHasLowQuality() {
         var generator = SystemRandomNumberGenerator()
         let n = Int(sampleRate * 0.02)   // 20ms, fully noisy (no quiet padding)
@@ -128,6 +135,8 @@ struct CallAnalysisTests {
         }
     }
 
+    /// A selection shorter than one STFT window can't be analysed and must
+    /// say so rather than crash or return a meaningless result.
     @Test func tooShortSelectionReturnsNil() {
         let pcm = [Float](repeating: 0, count: STFTGrid.windowLen - 1)
         let result = CallAnalysis.analyze(pcm: pcm, sampleRate: sampleRate,

@@ -289,11 +289,9 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
         if !preRoll.isEmpty {
             // segmentStartDate must be the timestamp of the file's actual FIRST
             // sample, not the trigger moment — the pre-roll pushes real audio
-            // earlier than the trigger. Getting this wrong shifted every
-            // Recording's reported start (and its `passes(forRecording:)` time
-            // window in ClassificationStore) later than the file's true content by
-            // ~preRollSeconds, which could both exclude pulses that are audibly IN
-            // the file and bleed into the next recording's window.
+            // earlier than the trigger, and using the trigger time here would
+            // shift the reported start (and ClassificationStore's pulse-matching
+            // window) later than the file's true content.
             segmentStartDate = triggerDate.addingTimeInterval(-Double(preRoll.count) / sr)
             write(preRoll)
             writtenSamples += preRoll.count
@@ -418,15 +416,12 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
     private func makeGuanoChunk(filename: String, outcome: AutoIDOutcome) -> Data {
         let sr = sampleRate
         let durationS = sr > 0 ? Double(dataBytes / 2) / sr : 0
-        // GUANO Make/Model describe the recording HARDWARE, not the app:
-        // `Make` is the ultrasonic input device (the Griff mic's detected
-        // port name — the closest thing to a hardware name we have; falls
-        // back to the host model if no external device was named), `Model`
-        // is the host iPhone. The APP goes in `Firmware Version` (GUANO's
-        // conventional slot for recording software), so downstream tools and
-        // the in-app File Info card read "OpenBat …" as the app rather than
-        // as the device. (An earlier version set `Make: OpenBat`, conflating
-        // the app into the device make.)
+        // GUANO Make/Model describe the recording HARDWARE, not the app: `Make`
+        // is the ultrasonic input device (the Griff's detected port name, or
+        // the host model if none was named), `Model` is the host iPhone. The
+        // app goes in `Firmware Version` (GUANO's conventional slot for
+        // recording software) so downstream tools read "OpenBat …" as the app,
+        // not the device.
         let hardwareName = inputNameQ == "—" ? Self.deviceModel : inputNameQ
         var fields: [GuanoMetadata.Field] = [
             .init("GUANO|Version", "1.0"),

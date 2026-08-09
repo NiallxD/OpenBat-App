@@ -2,7 +2,11 @@
 //  OpenBatApp.swift
 //  OpenBat
 //
-//  Created by Niall Bell on 27/06/2026.
+//  App entry point. Owns the background-URLSession app delegate, the
+//  once-at-launch storage migration gate, and the global nav-bar appearance
+//  override. `RootView` is the onboarding gate in front of `ContentView`; keep
+//  it a separate `View` rather than inlining it in the `WindowGroup` closure
+//  (see its own doc comment for why that matters for re-evaluation cost).
 //
 
 import SwiftUI

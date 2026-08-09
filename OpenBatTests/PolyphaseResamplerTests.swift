@@ -38,19 +38,23 @@ struct PolyphaseResamplerTests {
 
     // MARK: Contract / edge cases
 
+    /// Same rate in and out must be a true no-op, not a lossy round-trip
+    /// through the filter.
     @Test func equalRatesReturnsInputUnchanged() {
         let input = sine(hz: 1_000, rate: 384_000, count: 256)
         let out = PolyphaseResampler.resample(input, from: 384_000, to: 384_000)
         #expect(out == input)
     }
 
+    /// Degenerate empty input must not crash or produce spurious samples.
     @Test func emptyInputReturnsEmpty() {
         let out = PolyphaseResampler.resample([], from: 384_000, to: 256_000)
         #expect(out.isEmpty)
     }
 
+    /// Output length must track the up/down ratio (384k→256k is up=2, down=3),
+    /// or every downstream consumer sized against it misaligns.
     @Test func outputLengthMatchesRatio() {
-        // 384k → 256k reduces to up=2, down=3, so out ≈ ceil(n * 2/3).
         let input = [Float](repeating: 0, count: 300)
         let out = PolyphaseResampler.resample(input, from: 384_000, to: 256_000)
         let expected = Int((Double(input.count) * 2.0 / 3.0).rounded(.up))
@@ -59,9 +63,9 @@ struct PolyphaseResamplerTests {
 
     // MARK: Numeric behaviour
 
+    /// DC must survive resampling (interior, away from filter edges) — the
+    /// zero-stuff-then-low-pass design restores the mean via unity DC gain.
     @Test func constantSignalIsPreserved() {
-        // Zero-stuff-by-up then low-pass with DC gain = up restores the mean, so a
-        // constant should survive resampling (interior, away from filter edges).
         let input = [Float](repeating: 0.5, count: 512)
         let out = PolyphaseResampler.resample(input, from: 384_000, to: 256_000)
         let interior = out[64..<(out.count - 64)]
@@ -70,9 +74,8 @@ struct PolyphaseResamplerTests {
         }
     }
 
+    /// A tone well below the new Nyquist must pass essentially untouched.
     @Test func lowFrequencyToneKeepsItsAmplitude() {
-        // 20 kHz is far below the 128 kHz new-Nyquist, so it must pass essentially
-        // untouched — amplitude preserved to within a few percent in the interior.
         let input = sine(hz: 20_000, rate: 384_000, count: 2_048)
         let out = PolyphaseResampler.resample(input, from: 384_000, to: 256_000)
         let peak = interiorPeak(out, edge: 128)
@@ -80,11 +83,10 @@ struct PolyphaseResamplerTests {
         #expect(peak < 1.1)
     }
 
+    /// The test that would catch a broken/removed low-pass filter: a naive
+    /// resample would alias content above the new Nyquist back down as a loud
+    /// phantom tone, so the anti-alias filter must instead crush it.
     @Test func aboveNewNyquistIsAttenuated() {
-        // 150 kHz sits above the 128 kHz Nyquist of the 256 kHz output. A naive
-        // (linear) resample would alias it back down as a loud phantom tone; the
-        // anti-alias filter must instead crush it. This is the test that would
-        // catch a broken/removed low-pass filter.
         let input = sine(hz: 150_000, rate: 384_000, count: 2_048)
         let out = PolyphaseResampler.resample(input, from: 384_000, to: 256_000)
         let peak = interiorPeak(out, edge: 128)

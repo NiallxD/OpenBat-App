@@ -14,6 +14,9 @@
 
 import Foundation
 
+/// User-selectable display colormaps. `rawValue` is read directly by
+/// `Spectrogram.metal`'s `paletteIndex` uniform, so ordering/values here and
+/// the shader's `if (p == …)` chain must stay in step.
 enum Palette: Int, CaseIterable, Identifiable {
     case inferno
     case viridis

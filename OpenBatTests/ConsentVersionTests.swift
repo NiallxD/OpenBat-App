@@ -43,6 +43,7 @@ struct ConsentVersionTests {
 
     // MARK: Granting
 
+    /// Baseline: agreement to the current wording is live consent.
     @Test func currentVersionGrantIsAccepted() {
         #expect(isGranted(record(.granted, version: current)))
         #expect(!needsReconsent(record(.granted, version: current)))
@@ -67,6 +68,7 @@ struct ConsentVersionTests {
 
     // MARK: Not granting
 
+    /// A revoked record is never live consent, whatever version it names.
     @Test func revokedIsNeverGrantedAtAnyVersion() {
         #expect(!isGranted(record(.revoked, version: current)))
         #expect(!isGranted(record(.revoked, version: "1.0")))
@@ -81,6 +83,7 @@ struct ConsentVersionTests {
         #expect(!needsReconsent(nil))
     }
 
+    /// No record at all must fail closed, the same as an explicit revocation.
     @Test func absentRecordIsNotGranted() {
         #expect(!isGranted(nil))
     }

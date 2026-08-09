@@ -130,7 +130,7 @@ extension Array where Element: NoIDFilterable {
 }
 
 /// One saved WAV file — the unit `AudioRecorder`'s bout-based trigger produces (see
-/// CLAUDE.md's recording-subsystem notes): everything from the pre-roll before the
+/// Context.md §10): everything from the pre-roll before the
 /// first pulse through the silence gap after the last one, in a single file. Distinct
 /// from `PassRecord`, which is PulseDetector's own finer-grained "one run of pulses"
 /// grouping — a single Recording can span several PassRecords (e.g. a bat making
@@ -507,15 +507,12 @@ final class ClassificationStore {
     }
 
     /// Bulk delete — the only one that actually touches state, with the
-    /// single-recording form above delegating to it.
-    ///
-    /// Deleting one at a time in a loop was O(n²): every `delete` did its own
-    /// `removeAll` scan, its own `io.async` hop, and its own `persistRecordings`,
-    /// which snapshots and JSON-encodes the ENTIRE recordings array. "Delete All"
-    /// over a few thousand recordings meant a few thousand full encodes of a
-    /// shrinking array — a multi-second main-thread stall — and, now that
-    /// `recordings.json` lives in the iCloud container, a few thousand
-    /// sync-triggering writes with it.
+    /// single-recording form above delegating to it. Deliberately bulk rather than a
+    /// loop of single deletes: each one does its own O(n) `removeAll` scan plus a full
+    /// JSON re-encode of the whole array via `persistRecordings`, so "Delete All" over
+    /// thousands of recordings would otherwise mean thousands of full encodes and,
+    /// with `recordings.json` in the iCloud container, thousands of sync-triggering
+    /// writes.
     func delete(_ toDelete: [Recording]) {
         guard !toDelete.isEmpty else { return }
         // Stop any transfer already under way — without this, a recording the
@@ -798,16 +795,9 @@ final class ClassificationStore {
     }
 
     /// Reads the three stores off the main thread. Call once, from the owning
-    /// view's `.task` — never from `init()`.
-    ///
-    /// This used to run synchronously in `init()`, which is where it hurt:
-    /// `ClassificationStore()` is a SwiftUI `@State` default value, an
-    /// expression re-evaluated on every re-run of the enclosing view's
-    /// initializer (SwiftUI keeps the first result and throws the rest away).
-    /// Each redundant construction therefore decoded `passes.json` — up to
-    /// `maxPasses` records, each with a nested `topScores` array — plus
-    /// `sessions.json` and `recordings.json`, all on the main thread, for a
-    /// result that was immediately discarded.
+    /// view's `.task` — never from `init()`, whose expression SwiftUI may
+    /// re-evaluate any number of times per `@State` default, discarding all but
+    /// the first result (see Context.md §13's SwiftUI-init pattern).
     func load() async {
         guard !hasLoaded else { return }
         let decoded = await Task.detached(priority: .userInitiated) {

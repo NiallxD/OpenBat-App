@@ -29,10 +29,8 @@ struct UploadConversionResult {
     /// Everything the transmission needs — object key and request headers
     /// included — already anonymized. Returned whole (rather than just the
     /// coordinate) so the upload call site has nothing left to decide: it sends
-    /// exactly what `AnonymizedUploadBuilder` produced. The request headers used
-    /// to be assembled separately in `RecordingUploader`, which is how the
-    /// unfuzzed coordinate ended up being sent in one place while the fuzzed one
-    /// went into the file.
+    /// exactly what `AnonymizedUploadBuilder` produced. See Context.md §11 for
+    /// why headers must never be assembled separately at the call site.
     let anonymized: AnonymizedUpload
 }
 
@@ -54,9 +52,7 @@ nonisolated enum UploadConversionPipeline {
     /// What upload-prep needs about the recording being contributed.
     ///
     /// Deliberately carries no device id, no consent version, and no recordist
-    /// name. Those used to be here purely to be written into the uploaded file's
-    /// GUANO; removing the fields removed the reason to thread them through, and
-    /// the type not having a `deviceID` at all is what makes it structurally
+    /// name — not having a `deviceID` field at all is what makes it structurally
     /// impossible for one to reach `AnonymizedUploadBuilder`. Consent is checked
     /// before conversion starts (`RecordingUploader.handleRecordingSaved`) and
     /// again server-side at upload — it is not a property of the file.

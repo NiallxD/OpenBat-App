@@ -48,28 +48,22 @@ nonisolated final class PlaybackDriver: @unchecked Sendable {
     private var thread: Thread?
     /// Signaled by the pacing thread right before it returns. `stop()` waits on
     /// this (briefly, bounded) before returning, so a `stop()` immediately
-    /// followed by `start()` (e.g. dragging the scrub slider, which calls
-    /// `seek` → `stop()` then `start()` on every drop) can't leave the OLD
-    /// thread's last buffer still calling `process()` on the shared Heterodyne/
-    /// SpectrogramProcessor instances concurrently with the NEW
-    /// thread doing the same — those are single-producer processors, and two
-    /// concurrent producers racing on the same ring buffer/filter state is a
-    /// real (if narrow, ~1-2ms) data race without this.
+    /// followed by `start()` (e.g. dragging the scrub slider) can't leave the
+    /// OLD thread's last buffer racing the NEW thread on the shared, single-
+    /// producer Heterodyne/SpectrogramProcessor instances. See Context.md §15
+    /// (review finding 1.1).
     private var stopSemaphore: DispatchSemaphore?
     private var engine: AVAudioEngine?
     private var sourceNode: AVAudioSourceNode?
 
     // MARK: Heterodyne auto-tune (mirrors AudioEngineController)
     //
-    // Playback's HeterodyneProcessor was never retuned away from its class default
-    // (a fixed 40 kHz LO) — the live Detector screen tunes it continuously from
-    // PulseDetector triggers, but there's no PulseDetector here. For any recorded
-    // call whose frequency isn't within the ~4 kHz IF passband around 40 kHz, that
-    // left heterodyne played back as near-silence: this is the "listening
-    // playback stopped working" bug. Fixed in `start()`'s pacing loop by running
-    // the SAME auto-tune math AudioEngineController.updateAutoTune uses, driven by
-    // this thread's own SpectrogramProcessor instead of a live pulse trigger —
-    // both are just a dominant-frequency-in-Hz reading, so the same math applies.
+    // There's no PulseDetector on the playback path to drive the LO, so
+    // `start()`'s pacing loop runs the same auto-tune math as
+    // AudioEngineController.updateAutoTune, driven by this thread's own
+    // SpectrogramProcessor reading instead of a live pulse trigger. Without it,
+    // heterodyne stays parked at its class-default 40 kHz LO and any recorded
+    // call outside that narrow passband plays back as near-silence.
     /// Matches AudioEngineController.audibleOffsetHz's default.
     private static let audibleOffsetHz: Double = 1_500
 
@@ -92,30 +86,21 @@ nonisolated final class PlaybackDriver: @unchecked Sendable {
     func startEngineIfNeeded() {
         guard engine == nil else { return }
         let session = AVAudioSession.sharedInstance()
-        // AudioEngineController's shared session category is `.record` (no
-        // output route at all) whenever the live Detector screen isn't
-        // actively listening, or `.playAndRecord` + `.measurement` when it
-        // is — this engine previously only switched MODE, never CATEGORY, so
-        // whenever the session was still `.record` this source node had no
-        // audible route whatsoever: that's the real cause of BOTH "can't hear
-        // anything" and the greyed-out system volume slider (iOS disables the
-        // volume HUD when the active category doesn't support output at all
-        // — not, as a previous fix here assumed, something `.measurement`
-        // mode itself disables). Explicitly claim a playback-capable category
-        // for the lifetime of this engine; AudioEngineController fully
-        // reconfigures the session again on its own next `start()` regardless
-        // of whatever this leaves behind, so nothing needs restoring here.
+        // The shared session's category is whatever AudioEngineController last
+        // left it in — `.record` (no output route at all) whenever the live
+        // Detector screen isn't actively listening. This engine must explicitly
+        // claim a playback-capable category itself rather than assume one is
+        // already active, or this source node has no audible route. Nothing
+        // needs restoring afterwards: AudioEngineController fully reconfigures
+        // the session on its own next `start()` regardless of what this leaves.
         //
-        // EXCEPT while the live Detector screen's AudioEngineController is
-        // currently running (checked via its nonisolated static mirror, since
-        // this driver has no reference to that @MainActor instance) — its own
-        // input tap depends on the session staying in `.record`/`.playAndRecord`,
-        // and `.playback` doesn't support input at all. Forcing the category
-        // here would silently kill live capture/recording out from under it.
-        // Skipping the override just means playback audio stays inaudible for
-        // as long as live capture is active — the spectrogram/analysis views
-        // are unaffected, since those read the WAV directly off disk rather
-        // than through this session/engine.
+        // EXCEPT while AudioEngineController is currently running (checked via
+        // its nonisolated static mirror, since this driver has no reference to
+        // that @MainActor instance) — its input tap depends on the session
+        // staying in `.record`/`.playAndRecord`, and `.playback` doesn't support
+        // input at all. Forcing the category here would kill live capture out
+        // from under it, so the override is skipped and playback audio simply
+        // stays inaudible for as long as live capture is active.
         if !AudioEngineController.isAnyInstanceRunning {
             try? session.setCategory(.playback, mode: .default, options: [])
         }
@@ -134,7 +119,7 @@ nonisolated final class PlaybackDriver: @unchecked Sendable {
             case .timeExpansion:     timeExp.render(out, frames: Int(frameCount))
             // Live-only mode; PlaybackDriver never has this set (see ListenMode's
             // doc comment) but is handled explicitly to keep the switch exhaustive.
-            case .off, .adaptiveTimeExpansion:
+            case .off, .adaptiveTimeExpansion, .variableTimeDistortion:
                 for i in 0..<Int(frameCount) { out[i] = 0 }
             }
             return noErr

@@ -17,6 +17,8 @@ struct WavViewportTests {
     private let totalSamples = 384_000 * 10   // 10s file
     private let nyquistHz = 192_000.0
 
+    /// A no-op gesture (scale 1, offset 0) must resolve back to the exact
+    /// committed viewport, not drift by rounding.
     @Test func identityGestureLeavesViewportUnchanged() {
         let committed = WavViewport(startSample: 100_000, endSample: 200_000, minFreqHz: 10_000, maxFreqHz: 90_000)
         let resolved = WavViewportMath.resolvedViewport(
@@ -28,6 +30,8 @@ struct WavViewportTests {
         #expect(abs(resolved.maxFreqHz - committed.maxFreqHz) < 1)
     }
 
+    /// A pinch with no pan offset must zoom around the current midpoint, not
+    /// shift it.
     @Test func centeredZoomInHalvesSpanSymmetrically() {
         let committed = WavViewport(startSample: 100_000, endSample: 200_000, minFreqHz: 0, maxFreqHz: 192_000)
         let resolved = WavViewportMath.resolvedViewport(
@@ -53,6 +57,8 @@ struct WavViewportTests {
         #expect(resolved.startSample > noPanResolved.startSample, "negative offset should pan the window forward in time")
     }
 
+    /// A pan that would push the window's edge outside the file must clamp
+    /// to the file's own bounds.
     @Test func clampsToFileBoundsWhenPanningPastTheEdge() {
         let committed = WavViewport(startSample: 0, endSample: 384_000, minFreqHz: 0, maxFreqHz: 192_000)
         // Large negative offset tries to pan far left, past sample 0.
@@ -93,6 +99,8 @@ struct WavViewportTests {
                 "clamping at the file's end edge must preserve the span, not shrink it")
     }
 
+    /// A pinch far past any sane zoom must still be floored at the minimum
+    /// sample span, not collapse toward zero.
     @Test func extremeZoomInEnforcesMinimumSampleSpan() {
         let committed = WavViewport(startSample: 100_000, endSample: 100_100, minFreqHz: 0, maxFreqHz: 192_000)
         let resolved = WavViewportMath.resolvedViewport(
@@ -101,6 +109,7 @@ struct WavViewportTests {
         #expect(resolved.sampleSpan >= WavViewportMath.minSampleSpan)
     }
 
+    /// Same floor, on the frequency axis.
     @Test func extremeFrequencyZoomEnforcesMinimumFreqSpan() {
         let committed = WavViewport(startSample: 0, endSample: 384_000, minFreqHz: 40_000, maxFreqHz: 40_600)
         let resolved = WavViewportMath.resolvedViewport(
@@ -190,6 +199,8 @@ struct WavViewportTests {
         #expect(resolved.freqSpan >= WavViewportMath.minFreqSpanHz)
     }
 
+    /// The "fit to screen" scale must equal the ratio of file size to the
+    /// current viewport, on both axes.
     @Test func fitScalesMatchWholeFileRatio() {
         let viewport = WavViewport(startSample: 0, endSample: 38_400, minFreqHz: 0, maxFreqHz: 192_000)
         let timeScale = WavViewportMath.timeFitScale(viewport: viewport, totalSamples: 384_000)

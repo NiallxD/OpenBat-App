@@ -4,10 +4,12 @@
 //
 //  Offline, static spectrogram rendering for the whole-file WAV player — no
 //  live/ring-buffer state, no @MainActor UI. ONE pipeline (STFTGrid's
-//  disk-native pooling + `colorize` below) drives both tiers this still
-//  renders at, matching the memory analysis behind this rebuild (a raw,
-//  unpooled STFT grid at native resolution is only feasible for a few
-//  seconds of audio — see STFTGrid.swift's doc comment):
+//  disk-native pooling + `colorize` below) drives both tiers this renders
+//  at. A raw, unpooled STFT grid at native resolution is only feasible for a
+//  few seconds of audio (see STFTGrid.swift), and both tiers must share the
+//  same pipeline and bin count (1024) or they look different and swap
+//  jarringly when one replaces the other — see Context.md for what this
+//  replaced (an older two-pipeline version) and why.
 //
 //    • `renderOverview` — a whole-file grid pooled to `maxWidth` columns,
 //      computed once per file open and kept resident for the zoomed-out
@@ -21,25 +23,6 @@
 //      FM-sweep detail at the current zoom (see `WavSpectrogramView.
 //      needsDetailTile`). Bounded to O(targetColumns) regardless of the
 //      viewport's span — same as the overview.
-//
-//  An earlier version of this used TWO separate pipelines: this one
-//  (STFTGrid, disk-native only for small spans) for detail tiles, and a
-//  completely different one (RecordingSpectrogramRenderer +
-//  SpectrogramProcessor — different FFT hop, different normalization
-//  scheme) for the overview, because STFTGrid's own PCM read used to
-//  bulk-load its whole requested span first — fine for a small, zoomed-in
-//  tile, but hundreds of MB for a whole-file span. That's what made the
-//  overview and a detail tile look visibly different and swap jarringly
-//  when one replaced the other. `STFTGrid.streamPooledGridFromFile` reading
-//  PCM directly off disk per sampled frame (bounded regardless of span) is
-//  what removed the reason for two pipelines to exist at all — see its own
-//  doc comment.
-//
-//  Bin count (1024) is shared by both tiers, so a detail tile is never
-//  coarser on the frequency axis than the overview crop it replaces (an
-//  earlier version used 512 bins specifically for detail tiles, which made
-//  zooming in visibly *lose* frequency resolution — the opposite of what
-//  "zoom in" should do).
 //
 
 import UIKit
@@ -128,6 +111,9 @@ nonisolated enum WavSpectrogramEngine {
 
     // MARK: Colorize (shared by both tiers)
 
+    /// A colorized, ready-to-display render of some span of the file — either
+    /// the whole-file overview or a zoomed-in detail tile; both are this same
+    /// shape, produced by `colorize` below.
     struct DetailTile {
         let image: UIImage
         let startSample: Int
@@ -381,6 +367,9 @@ nonisolated enum WavSpectrogramEngine {
 
     // MARK: Overview (whole file, same pipeline as a detail tile)
 
+    /// The always-resident, whole-file render — the zoomed-out display, the
+    /// minimap, and the crop source a live drag falls back to outside a
+    /// detail tile's own bounds.
     struct Overview {
         /// The whole-file raw dB grid — kept around so a noise-floor/palette
         /// change recolors this directly (cheap) instead of re-reading PCM

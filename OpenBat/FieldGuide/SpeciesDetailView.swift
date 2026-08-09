@@ -330,7 +330,7 @@ struct SpeciesDetailView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Characteristic Features")
                     .font(.subheadline.weight(.semibold))
-                // TODO: illustrated morphology icons — see CLAUDE.md's Pending/future work.
+                // TODO: illustrated morphology icons — see Context.md §16.
                 ForEach(features, id: \.self) { feature in
                     Label(feature, systemImage: "sparkle")
                         .font(.subheadline)

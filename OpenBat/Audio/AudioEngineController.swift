@@ -2,9 +2,16 @@
 //  AudioEngineController.swift
 //  OpenBat
 //
-//  Owns the audio session + engine and pulls the Griff microphone's stream into
-//  the app. v1 goal: confirm we receive buffers at the device's *native* sample
-//  rate (target 384 kHz) — see OpenBat plan / AudioDiagnostics.
+//  Owns the AVAudioSession + AVAudioEngine and pulls the Griff microphone's
+//  stream (or, in demo mode, a paced file) into the app, confirming along the
+//  way that iOS actually delivers the device's native sample rate rather than
+//  silently downsampling — see `AudioDiagnostics`.
+//
+//  @MainActor: all published state lives here. Session/engine setup that can
+//  block for hundreds of ms runs on a detached task, never on the main actor —
+//  see `configureSession`. Capture stats are accumulated on the realtime audio
+//  thread under `statsLock` and flushed to `diagnostics` on a timer; don't touch
+//  `diagnostics` directly from the tap closure. See Context.md §6.
 //
 
 import AVFoundation
@@ -23,6 +30,11 @@ enum ListenMode: CaseIterable {
     /// Live-capture only — the counterpart to `.timeExpansion`, which is
     /// file-playback only.
     case adaptiveTimeExpansion
+    /// LIVE rate-ramped expansion that discards nothing (see
+    /// VariableTimeDistortionProcessor). Expands calls 8× and compresses the silence
+    /// instead of going deaf, so it runs behind real time rather than losing
+    /// input. Live-capture only.
+    case variableTimeDistortion
 }
 
 @MainActor
@@ -34,24 +46,21 @@ final class AudioEngineController {
     private(set) var diagnostics = AudioDiagnostics()
     /// Slow-changing mirrors of `diagnostics` fields, published as their own
     /// observable properties so views that only need these (ContentView.body's
-    /// nyquist / onChange reads) aren't invalidated by the 15 Hz stats flush —
-    /// `flushStats()` mutates the `diagnostics` struct every tick (bufferCount /
-    /// currentLevelDB), and @Observable tracks at whole-property granularity, so
-    /// any body reading `diagnostics.<anything>` re-renders 15×/s while capturing.
-    /// That churn was rebuilding the toolbar Menus mid-tap and dropping their
-    /// actions. Only ever set via `syncSlowDiagnostics()` (equality-guarded,
-    /// since @Observable notifies on every set, changed or not).
+    /// nyquist / onChange reads) aren't invalidated by the 15 Hz stats flush.
+    /// @Observable tracks at whole-property granularity, so any body reading
+    /// `diagnostics.<anything>` would re-render 15×/s while capturing. Only ever
+    /// set via `syncSlowDiagnostics()` (equality-guarded, since @Observable
+    /// notifies on every set, changed or not). See Context.md §13.
     private(set) var activeSampleRate: Double = 0
     private(set) var activeInputName = "—"
     /// True when the current output route is the built-in speaker rather than
     /// headphones/Bluetooth/AirPlay. Same equality-guarded-mirror pattern as
     /// `activeSampleRate` — set only from `updateInputDiagnostics()`. Drives the
-    /// feedback-risk warning: listening audio played out the speaker gets
-    /// picked back up acoustically by the mic and reprocessed as a spurious
-    /// low-pitch "call" layered on the real one. There's no software fix for
-    /// acoustic coupling short of full echo cancellation, which risks degrading
-    /// the ultrasonic capture path — so this only surfaces a warning telling the
-    /// user to wear headphones, which is confirmed to fix it.
+    /// feedback-risk warning: listening audio played out the speaker gets picked
+    /// back up by the mic and reprocessed as a spurious low-pitch "call". No
+    /// software fix short of full echo cancellation, which risks degrading the
+    /// ultrasonic capture path, so this only warns the user to wear headphones.
+    /// See Context.md §6.
     private(set) var isOutputOnSpeaker = false
     private(set) var isRunning = false {
         didSet {
@@ -83,6 +92,9 @@ final class AudioEngineController {
     /// the speaker via a source node when `listenMode != .off`.
     let heterodyne = HeterodyneProcessor()
     let adaptiveTimeExpansion = AdaptiveTimeExpansionProcessor()
+    /// Call boundaries are fed in from `PulseDetector.onPulseWindow` — see
+    /// ContentView, where the detector lives.
+    let variableTimeDistortion = VariableTimeDistortionProcessor()
     private(set) var listenMode: ListenMode = .off
     var isListening: Bool { listenMode != .off }
     /// How far below the detected call frequency to park the LO, so the call lands
@@ -112,10 +124,9 @@ final class AudioEngineController {
     /// while a heterodyne toggle is already reconfiguring).
     private var isReconfiguring = false
     /// `stop()`'s session deactivation, tracked so a following `configureSession()`
-    /// (e.g. `setListenMode`'s stop-then-restart) can wait for it to actually finish
-    /// instead of racing a `setActive(true)` against an in-flight `setActive(false)`
-    /// on the session — that race was making mode switches unpredictably slow/stuck
-    /// even after moving both calls off the main actor.
+    /// (e.g. `setListenMode`'s stop-then-restart) waits for it to finish rather
+    /// than racing `setActive(true)` against an in-flight `setActive(false)`.
+    /// See Context.md §6.
     private var pendingDeactivation: Task<Void, Never>?
 
     /// Optional sink for raw capture buffers, so later phases (FFT/spectrogram,
@@ -171,9 +182,9 @@ final class AudioEngineController {
     /// `deinit` on a `@MainActor` class is nonisolated and so can't touch this
     /// controller's own isolated stored properties; a separate reference held as
     /// a `let` gets released alongside it and can clean up from its own deinit.
-    /// Both resources genuinely outlive their owner otherwise: a scheduled
-    /// `Timer` is retained by the run loop (nulling the property does NOT stop
-    /// it), and a block-based notification observer is retained by the center.
+    /// A scheduled `Timer` is retained by the run loop regardless of what happens
+    /// to this property, and a block-based notification observer is retained by
+    /// the center — both need this explicit teardown or they outlive their owner.
     private final class Cleanup: @unchecked Sendable {
         // Named slots rather than an array: `startStatsTimer()` runs on every
         // start(), so appending would accumulate spent Timer objects for the
@@ -195,16 +206,11 @@ final class AudioEngineController {
     private let cleanup = Cleanup()
     private var isActivated = false
 
-    /// Deliberately empty — all setup lives in `activate()`.
-    ///
-    /// This type is constructed as a SwiftUI `@State` default value, and that
-    /// expression is re-evaluated every time the enclosing view's initializer
-    /// runs, which SwiftUI may do any number of times per view identity (it
-    /// keeps the first result and discards the rest). Registering observers or
-    /// scheduling a repeating timer here therefore leaked one of each per
-    /// re-evaluation — and because the run loop retains a scheduled Timer, the
-    /// discarded controllers' 2 s poll timers kept firing on the main thread
-    /// forever. That accumulation is what eventually wedged the UI.
+    /// Deliberately empty — all setup lives in `activate()`. This type is
+    /// constructed as a SwiftUI `@State` default value, an expression SwiftUI
+    /// may re-evaluate any number of times per view identity, keeping the first
+    /// result and discarding the rest. Registering observers or timers here
+    /// would leak one per discarded evaluation. See Context.md §6.
     init() {}
 
     /// Begins idle mic monitoring. Call once from the owning view's `.task` —
@@ -375,6 +381,8 @@ final class AudioEngineController {
                 heterodyne.reset(inputSampleRate: rate)
             case .adaptiveTimeExpansion:
                 adaptiveTimeExpansion.reset(inputSampleRate: rate)
+            case .variableTimeDistortion:
+                variableTimeDistortion.reset(inputSampleRate: rate)
             case .off, .timeExpansion:
                 break
             }
@@ -383,10 +391,16 @@ final class AudioEngineController {
             let sink = bufferSink
             let hetero: HeterodyneProcessor? = (listenMode == .heterodyne) ? heterodyne : nil
             let adaptive: AdaptiveTimeExpansionProcessor? = (listenMode == .adaptiveTimeExpansion) ? adaptiveTimeExpansion : nil
+            // Fed unconditionally: its write counter is the shared stream clock
+            // that PulseDetector's window indices are expressed in, so it must
+            // not pause when another listen mode is selected. See
+            // VariableTimeDistortionProcessor.reset.
+            let distortion = variableTimeDistortion
             source.start { [weak self] buffer in
                 sink?(buffer)
                 hetero?.process(buffer)
                 adaptive?.process(buffer)
+                distortion.process(buffer)
                 self?.consume(buffer)
             }
             demoSource = source
@@ -486,13 +500,11 @@ final class AudioEngineController {
     // MARK: Session
 
     /// `AVAudioSession.setCategory`/`setActive` are synchronous system calls that
-    /// can block the calling thread for hundreds of milliseconds while iOS
-    /// renegotiates routing — worse under `.playAndRecord` with Bluetooth options,
-    /// which is exactly the category a listen-mode switch engages. Running that on
-    /// the main actor (this class's default isolation) froze the whole UI for the
-    /// duration, which is why switching listen mode mid-session felt unresponsive.
-    /// The actual session calls are pushed onto a detached task; only the quick
-    /// `@Observable` diagnostics update happens back on the main actor.
+    /// can block for hundreds of milliseconds while iOS renegotiates routing —
+    /// worse under `.playAndRecord` with Bluetooth options, which is exactly the
+    /// category a listen-mode switch engages. So the actual session calls run on
+    /// a detached task, never the main actor; only the quick `@Observable`
+    /// diagnostics update happens back on main. See Context.md §6.
     /// - Parameter playbackOnly: demo mode with listening on — the engine needs
     ///   an active session to reach the speaker, but no input. `.playback`
     ///   keeps demo mode entirely off the record path: no permission prompt, no
@@ -584,11 +596,15 @@ final class AudioEngineController {
         // Feed the active listening processor from the tap, and attach its output.
         let hetero: HeterodyneProcessor? = (listenMode == .heterodyne) ? heterodyne : nil
         let adaptive: AdaptiveTimeExpansionProcessor? = (listenMode == .adaptiveTimeExpansion) ? adaptiveTimeExpansion : nil
+        // Unconditional — see the note in the demo path above.
+        let distortion = variableTimeDistortion
         switch listenMode {
         case .heterodyne:
             heterodyne.reset(inputSampleRate: format.sampleRate)
         case .adaptiveTimeExpansion:
             adaptiveTimeExpansion.reset(inputSampleRate: format.sampleRate)
+        case .variableTimeDistortion:
+            variableTimeDistortion.reset(inputSampleRate: format.sampleRate)
         case .off, .timeExpansion:
             // .timeExpansion is playback-only (see ListenMode's doc comment) and
             // never reaches here in practice — ContentView doesn't offer it as a
@@ -604,6 +620,7 @@ final class AudioEngineController {
             sink?(buffer)
             hetero?.process(buffer)
             adaptive?.process(buffer)
+            distortion.process(buffer)
             self?.consume(buffer)
         }
 
@@ -641,6 +658,7 @@ final class AudioEngineController {
         guard let outFormat = AVAudioFormat(standardFormatWithSampleRate: heterodyne.outputSampleRate, channels: 1) else { return }
         let hetero = heterodyne
         let adaptive = adaptiveTimeExpansion
+        let distortion = variableTimeDistortion
         let mode = listenMode
         let node = AVAudioSourceNode(format: outFormat) { _, _, frameCount, audioBufferList in
             let buffers = UnsafeMutableAudioBufferListPointer(audioBufferList)
@@ -649,6 +667,7 @@ final class AudioEngineController {
             switch mode {
             case .heterodyne: hetero.render(out, frames: Int(frameCount))
             case .adaptiveTimeExpansion: adaptive.render(out, frames: Int(frameCount))
+            case .variableTimeDistortion: distortion.render(out, frames: Int(frameCount))
             case .off, .timeExpansion: for i in 0..<Int(frameCount) { out[i] = 0 }
             }
             return noErr
@@ -779,10 +798,8 @@ final class AudioEngineController {
     /// The Griff being plugged/unplugged shows up as a route change; rebind input
     /// and restart capture so the stream survives a reconnect.
     ///
-    /// Only device add/remove warrants a restart. Reacting to *every* route change
-    /// (category change, override, configuration change) caused a restart storm
-    /// once heterodyne enabled the speaker output — the change itself triggered
-    /// another change, hanging the app.
+    /// Only device add/remove warrants a restart — reacting to every route change
+    /// risks a restart storm (a change triggering another change). See Context.md §6.
     private func handleRouteChange(_ reason: AVAudioSession.RouteChangeReason) async {
         updateInputDiagnostics()
 

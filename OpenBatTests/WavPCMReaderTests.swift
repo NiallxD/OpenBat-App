@@ -2,6 +2,12 @@
 //  WavPCMReaderTests.swift
 //  OpenBatTests
 //
+//  `WavPCMReader.readSamples` is the single point every WAV player feature
+//  (call analysis, spectrogram tiles, playback) reads raw PCM through, so its
+//  edge behaviour — short reads at file boundaries rather than nil, and never
+//  handing back more than asked — has to be right once, here, rather than
+//  independently assumed by each caller.
+//
 
 import Testing
 import Foundation
@@ -9,6 +15,8 @@ import Foundation
 
 struct WavPCMReaderTests {
 
+    /// A read within the file must decode to the correct sample count and
+    /// amplitude, not just the correct byte count.
     @Test func readsRequestedCountAndDecodesToneAmplitude() {
         let url = TestWavFactory.make(sampleRate: 384_000, seconds: 0.5, toneFrequency: 40_000, amplitude: 20_000)
         defer { try? FileManager.default.removeItem(at: url) }
@@ -21,6 +29,7 @@ struct WavPCMReaderTests {
         #expect(peak > 0.55 && peak < 0.65, "decoded peak \(peak) should be close to the encoded amplitude ratio")
     }
 
+    /// A read starting well into the file returns exactly the requested count.
     @Test func readMidFileOffsetReturnsRequestedRange() {
         let url = TestWavFactory.make(sampleRate: 384_000, seconds: 1.0, toneFrequency: 40_000)
         defer { try? FileManager.default.removeItem(at: url) }
@@ -72,6 +81,8 @@ struct WavPCMReaderTests {
         #expect(WavPCMReader.readSamples(wavURL: url, startSample: totalSamples + 1_000, count: 100) == nil)
     }
 
+    /// Negative start, zero count, and negative count must all be rejected
+    /// rather than read as if they meant something else.
     @Test func invalidRangeReturnsNil() {
         let url = TestWavFactory.make(sampleRate: 384_000, seconds: 0.1, toneFrequency: 40_000)
         defer { try? FileManager.default.removeItem(at: url) }
@@ -81,6 +92,7 @@ struct WavPCMReaderTests {
         #expect(WavPCMReader.readSamples(wavURL: url, startSample: 0, count: -5) == nil)
     }
 
+    /// A nonexistent file must fail cleanly rather than crash.
     @Test func missingFileReturnsNil() {
         let missing = FileManager.default.temporaryDirectory.appendingPathComponent("nope_\(UUID().uuidString).wav")
         #expect(WavPCMReader.readSamples(wavURL: missing, startSample: 0, count: 100) == nil)

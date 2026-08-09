@@ -22,7 +22,7 @@
 //  A standalone leaf view (extracted from ContentView once it passed 1900
 //  lines), which also scopes the high-rate `pulseDetector.captured*` reads to
 //  this body instead of ContentView's — see the @Observable-churn note in
-//  CLAUDE.md's architecture section.
+//  Context.md §13.
 //
 
 import SwiftUI

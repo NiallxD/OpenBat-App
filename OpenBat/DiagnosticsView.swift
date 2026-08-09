@@ -33,7 +33,7 @@ struct DiagnosticsView: View {
                 // directly here, so that churn doesn't force this whole body (and the
                 // Share/Clear/Done buttons/toolbar it contains) to re-render on every
                 // update. Same @Observable-churn fix as ContentView's RecordButton —
-                // see CLAUDE.md.
+                // see Context.md §13.
                 VStack(spacing: 20) {
                     DiagnosticsStatusLine(audio: audio)
                     DiagnosticsCard(audio: audio, recorder: recorder)

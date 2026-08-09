@@ -3,26 +3,17 @@
 //  OpenBat
 //
 //  Makes the consent record's server-side mirror eventually consistent.
+//  `ConsentAPIClient.push` used to be fire-and-forget with no status check: a
+//  grant made offline never created the D1 row (uploads 403'd forever with no
+//  UI signal), and a revoke made offline could silently leave the server
+//  holding "granted" indefinitely — the direction with compliance teeth. A
+//  record now carries `syncedAt`, set only on a 2xx, and this retries
+//  anything unconfirmed on launch, on network return, and on a
+//  consent-rejected upload.
 //
-//  `ConsentAPIClient.push` used to be fire-and-forget with no status check and
-//  no retry, which broke in both directions:
-//
-//    • Granting while offline never created the D1 row, so every upload was
-//      403'd by the Worker forever, with no way out but toggling consent off
-//      and on again — and nothing in the UI hinting at that.
-//    • Revoking while offline silently left the server holding "granted"
-//      indefinitely. The app still wouldn't upload (the local Keychain record
-//      gates that), but the authoritative record of the withdrawal was lost.
-//      That's the direction with compliance teeth.
-//
-//  So a record now carries `syncedAt`, set only when the Worker returns 2xx,
-//  and this retries anything unconfirmed on launch, whenever the network comes
-//  back, and whenever an upload is rejected for lack of consent.
-//
-//  A standalone enum rather than a method on `ConsentStore` because it has to
-//  run when no store exists (a background relaunch to finish an upload) and
-//  because two `ConsentStore` instances exist in this app — the observable
-//  copies stay in step by refreshing from `recordDidChange`.
+//  A standalone enum rather than a `ConsentStore` method: it must run with no
+//  store alive (a background relaunch finishing an upload), and multiple
+//  `ConsentStore` instances stay in step by refreshing from `recordDidChange`.
 //
 
 import Foundation

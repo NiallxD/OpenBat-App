@@ -3,7 +3,7 @@
 //  OpenBat
 //
 //  UI for `Recording` — the WAV-backed unit AudioRecorder's bout-based trigger
-//  produces (see CLAUDE.md's recording-subsystem notes). Shown two places:
+//  produces (see Context.md §10). Shown two places:
 //    • the Listening tab's list (SessionsView.listeningContent)
 //    • a session's recordings list (SessionsView.SessionDetailView)
 //  Both open the same RecordingDetailView — a whole-file spectrogram plus the

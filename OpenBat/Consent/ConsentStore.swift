@@ -92,35 +92,24 @@ nonisolated enum ConsentRecordStorage {
 final class ConsentStore {
     /// The single instance. Consent state has exactly one source of truth (the
     /// Keychain), so it should have exactly one observable representation too.
-    ///
-    /// There used to be two — one owned by `OnboardingView`, one by
-    /// `ContentView`. That worked only because `OpenBatApp` never shows both at
-    /// once: with two live instances, a `grant()`/`revoke()` on one left the
-    /// other reporting the old value, because the refresh notification only
-    /// fires when a *sync* completes. Offline, the stale one would never catch
-    /// up. `ConsentView`'s own header comment already describes a Settings entry
-    /// point that would create exactly that situation, so this closes it before
-    /// someone adds that screen and inherits a consent toggle showing the wrong
-    /// state.
+    /// Two live instances (there used to be one each for onboarding and
+    /// `ContentView`) can disagree while offline: `grant()`/`revoke()` on one
+    /// leaves the other stale, since the refresh notification only fires when
+    /// a sync completes.
     static let shared = ConsentStore()
 
-    /// Bump whenever the consent copy (PrivacyNoticeView / ConsentView) changes materially,
-    /// so a stored record always says which text a device actually agreed to.
+    /// Bump whenever the consent copy (PrivacyNoticeView / ConsentView) changes
+    /// materially, so a stored record always says which text a device actually
+    /// agreed to. A device that agreed to an older version is re-shown the
+    /// current one rather than being silently carried forward — see
+    /// `needsReconsent`.
     ///
-    /// 2.0: contributions became fully anonymous — no device identifier, no
-    /// display name, ~100 m location and 5-minute time rounding applied
-    /// unconditionally — and the consequence (contributed recordings can no
-    /// longer be identified or deleted on request) is now disclosed before the
-    /// grant button. A device that agreed to 1.0 agreed to materially different
-    /// terms, including a deletion promise that no longer applies.
-    ///
-    /// 3.0: dropped the commercial/funding-licensing purpose entirely — too
-    /// much legal grey area around monetizing contributed recordings later.
-    /// Research use only now; nothing is sold or licensed commercially, and the
-    /// second consent toggle for that purpose was removed along with it. A
-    /// device that agreed to 2.0 agreed to a broader set of uses than the app
-    /// now has any mechanism to act on, so it's re-shown rather than silently
-    /// carried forward.
+    /// 2.0 made contributions fully anonymous (no device identifier or display
+    /// name; unconditional location/time fuzzing) and disclosed that the
+    /// consequence — contributed recordings can no longer be identified or
+    /// deleted on request — up front. 3.0 dropped the commercial/licensing use
+    /// case entirely (research use only) and removed the second consent toggle
+    /// that gated it.
     ///
     /// Bumping this requires bumping `CURRENT_CONSENT_VERSION` in
     /// `backend/consent-worker/src/index.ts` in the same deploy — see
@@ -139,9 +128,9 @@ final class ConsentStore {
 
     private(set) var record: ConsentRecord?
 
-    /// Refreshes this observable copy when `ConsentSync` confirms a push —
-    /// there are two `ConsentStore` instances in this app (onboarding and
-    /// ContentView), and the Keychain is the single source of truth both follow.
+    /// Refreshes this observable copy when `ConsentSync` confirms a push. The
+    /// Keychain is the source of truth; this observable only mirrors it, and a
+    /// push can complete from a background retry with no UI involved.
     @ObservationIgnored private var syncObserver: NSObjectProtocol?
 
     private init() {

@@ -32,13 +32,9 @@ nonisolated enum CloudStorage {
 
     /// Which root a previous launch settled on. `Recording.relativeWavPath` (and
     /// every other stored path) is relative to whichever root was chosen when it
-    /// was written, so this MUST stay stable across launches: resolving
-    /// per-launch meant a launch where iCloud happened to be unavailable
-    /// (signed out, container not yet provisioned, low storage, or simply not
-    /// ready this early) silently relocated the whole library to local
-    /// Documents, and everything recorded under the other root read back as a
-    /// missing file — broken playback, blank spectrograms, deletes that remove
-    /// nothing, and two divergent `recordings.json` stores accumulating.
+    /// was written, so this MUST stay stable across launches — resolving fresh
+    /// each launch risks silently relocating the whole library the moment iCloud
+    /// happens to be unavailable. See Context.md §10.
     private static let rootChoiceKey = "storage.usesUbiquityContainer"
 
     /// True when a previous launch stored its files in the iCloud container but
@@ -155,16 +151,13 @@ nonisolated enum CloudStorage {
         let manager = FileManager.default
 
         // Moving OUT of iCloud, the source may hold files that exist only as
-        // placeholders on this device — recorded on another device, or evicted
-        // under storage pressure, or not yet pulled down after a reinstall.
-        // `setUbiquitous(false, ...)` on a placeholder is not guaranteed to
-        // materialise the contents first, and a "successful" move that yields a
-        // zero-length WAV would destroy the only copy: the iCloud original is
-        // gone and the local file is empty. So refuse, request the downloads,
-        // and let a later launch do it once the bytes are actually here.
-        //
-        // Only reached on the launch after the user changes the setting, so the
-        // cost of walking the tree isn't paid on a normal launch.
+        // placeholders on this device. `setUbiquitous(false, ...)` isn't
+        // guaranteed to materialise a placeholder's contents first, and a
+        // "successful" move that yields a zero-length WAV would destroy the
+        // only copy. So refuse, request the downloads, and let a later launch
+        // retry once the bytes are here — see Context.md §10. Only reached on
+        // the launch after the user changes the setting, so the cost of
+        // walking the tree isn't paid on a normal launch.
         if currentlyICloud && !wantsICloud {
             let pending = undownloadedFiles(under: source)
             if !pending.isEmpty {
