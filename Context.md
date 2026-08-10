@@ -53,6 +53,8 @@ Reconstructed from git history. Dates are commit dates.
 | 2026-07-27 | Full adversarial codebase review (7 areas) — see §15. Frequency division, phase vocoder and the first triggered time expansion all removed the same day; adaptive time expansion added. |
 | 2026-08-05 | ATE listening-mode tuning investigation (`TimeExpansionTuning/`). Parked: none of the candidates was right by ear. |
 | 2026-08-07 | Sampler mode shipped behind a setting; live tuning overlay; demo mode; Live Activity spectrogram built and then dropped. |
+| 2026-08-08 | Variable time distortion (VTD) replaced adaptive time expansion as the live mode: rate ramping instead of gating, so nothing is discarded. Tuned by ear against the demo clip. |
+| 2026-08-09 | **VTD withdrawn from the build** on patent proximity — quarantined to `Quarantine/VariableTimeDistortion/`, outside any target. Live listening is heterodyne only. See §3 and §5. |
 
 ---
 
@@ -107,6 +109,87 @@ All removed 2026-07-27.
 - **Triggered time expansion** (`TriggeredTimeExpansionProcessor`, the first live
   snapshot attempt). Live time expansion returned the same day in its current
   form as `.adaptiveTimeExpansion`.
+
+### Withdrawn 2026-08-09: variable time distortion
+
+The live mode that replaced adaptive time expansion on 2026-08-08 — a continuous
+monotonic read pointer with a varying playback *rate* (1× through a call, ~1.9×
+real through the gaps, faster still to repay accrued lag), so calls are expanded
+8× and nothing is ever gated out or dropped. Measured on the demo clip: 167 of
+171 pulses expanded, zero dropped windows, zero ring overflow, ~1.3 s of lag and
+only during dense sequences.
+
+It was **withdrawn from this version before shipping**, on Niall's call, because
+§5's patent question was still open and unshipped code is the cheap place to
+wait. The code is intact in `Quarantine/VariableTimeDistortion/` — outside the
+synchronized folder group, so in no build target — with its call sites recorded
+verbatim in `CALL-SITES.md` there. Note that VTD's non-infringement argument is
+*stronger* than the mode it replaced (nothing is selected, which goes straight at
+claim element 3) — withdrawing it is caution about an unanswered question, not a
+finding against it.
+
+**Consequence: live listening is heterodyne only.** `.timeExpansion` file
+playback is untouched.
+
+### Heterodyne enhancement: measured 2026-08-09 — retune, don't rebuild
+
+Investigated whether a quadrature (single-sideband) mixer would beat the shipped
+real mixer. **It would not be worth the code.** Harness: `TimeExpansionTuning/
+het_ab.py` (`--selftest`, `--diag`, renders `audio/*__HET_*.wav`).
+
+**The fold is real and total** — `--selftest` pushes a 60→30 kHz downsweep past a
+fixed 45 kHz LO: classic traces `8.6 → 4.4 → 1.2 → 4.4 → 8.6 kHz`, a perfect V
+(fold index 0.99); quadrature falls monotonically (0.02). Sweep direction is
+destroyed by the shipped mixer, objectively and completely.
+
+**And it barely matters, because nothing lasts long enough for it to.** Measured
+audible dwell on the demo clip (104 calls) is **1.45 ms per call**. Heterodyne
+only sounds while the call's instantaneous frequency is inside the LO's window,
+and a steep FM sweep crosses an 8 kHz window in about a millisecond. Whatever the
+mixer does, it does in that millisecond.
+
+So the metric that matters is §3's own one — **cycles**, not bandwidth:
+
+| config | dwell | cycles | pitch |
+|---|---|---|---|
+| classic, offset 1500, LPF 4k (**shipped**) | 1.45 ms | **2.6** | 1.79 kHz |
+| classic, offset 4000, LPF 8k (**two constants**) | 1.79 ms | **7.7** | 4.28 kHz |
+| classic, offset 6000, LPF 12k | 2.19 ms | 13.7 | 6.28 kHz |
+| quadrature, offset 1500, LPF 4k | 1.47 ms | 8.5 | 5.78 kHz |
+| quadrature, offset 1500, LPF 8k | 2.14 ms | 20.9 | 9.78 kHz |
+
+Perception needs ~6–10 cycles to register a pitch at all. **The shipped
+configuration delivers 2.6 — below that floor, so by this repo's own argument it
+is a click, not a tone.** Retuning the *existing* mixer reaches 7.7. Quadrature
+at the same width reaches 8.5: **+0.8 cycles for a new realtime DSP path, a
+settings toggle and a mode to maintain.** Not worth it.
+
+The quadrature win was mostly that it parks content at a higher pitch (`fc`), and
+`audibleOffsetHz` already does that for free. Niall listened to the first A/B set
+and reported the variants as near-indistinguishable apart from the wide ones
+being "a bit higher pitch" — which was exactly right, and is what sent the
+investigation here.
+
+**Latent problem this exposed.** The Het tuning tab offers `audibleOffsetHz` up to
+6000, but the output low-pass is fixed at 4 kHz — so the top third of that slider
+pushes the call *out* of the passband and only makes things quieter. The two
+numbers have to move together.
+
+**Where quadrature would still win: CF species.** A horseshoe-bat call dwells at
+one frequency for tens of ms, so the 1.45 ms argument doesn't apply and the fold
+would genuinely wreck it. Untested — there is no CF material in the corpus.
+
+**Also measured:** widening the low-pass *improves* call-to-gap ratio rather than
+costing it (demo +2.3 dB, MYLU +3.1, MYCA +2.0, LANO +0.6) — a wider keyhole
+admits more of the call's swept energy, and calls are concentrated where hiss is
+spread. And quadrature does **not** buy the ~3 dB SNR the sideband argument
+predicts (9.7 vs 9.6 dB): auto-tune parks the LO mid-sweep, so classic folds
+signal along with noise and gains back what it loses.
+
+Patent-wise all of this is safe ground: output rate equals input rate, continuous,
+nothing selected, so elements 3 and 4 of §5's '647 are not met.
+
+**Open:** the ear test on `classic` vs `retuned`, which is the actual decision.
 
 ### The live/playback split
 
@@ -243,6 +326,12 @@ makes it audible as hiss rather than passing as a click.
 
 ## 5. Patent notes
 
+> **Status as of 2026-08-09:** no live expansion mode ships. Adaptive time
+> expansion was replaced by VTD on 2026-08-08, and VTD was withdrawn on
+> 2026-08-09 (see §3). The exposure discussed below is therefore historical for
+> the shipping app — and live again the moment either mode is restored. The open
+> question at the end of this section is still open.
+
 ### US 8,599,647 — "Method for listening to ultrasonic animal sounds"
 
 Wildlife Acoustics, filed 2011-05-10, priority 2010-05-10, **active, expires
@@ -288,6 +377,47 @@ attorney covering the existing ATE mode, not just sampler mode. Nobody in this
 repo is qualified to close it, and no code comment should be written as though
 it has been.
 
+### 2026-08-09: the rule narrowed from "no live expansion" to "D240x shape only"
+
+`CLAUDE.md`'s unconditional ban became a shape requirement. What changed is not
+the legal analysis — §5 already said the right thing, two paragraphs up: a
+D240x-style detector may itself read on claim 1, and that is an **invalidity**
+argument, "a defence to be funded, not a shield to rely on." That sentence still
+stands and nothing below supersedes it.
+
+What changed is that the Pettersson D240x manual was read
+(`~/Downloads/d240x.pdf`, §"THE TIME EXPANSION SYSTEM"), which turns a general
+recollection of 1990s practice into a specific, dated, documented product:
+
+- Continuous recording into a circular memory; a level trigger interrupts it and
+  the buffer is **replayed once** at 1/10 or 1/20. Memory 3.4 / 1.7 / 0.1 s.
+- **50% pretrigger** — with 3.4 s of memory the capture starts 1.7 s *before* the
+  trigger, so the window straddles it. Not a small pre-roll running forward.
+- Deaf to expansion while replaying, and explicitly untroubled by it.
+- **Heterodyne runs continuously alongside**, hard-panned: "the heterodyne signal
+  is available on the left channel and the time expansion signal on the right,
+  regardless of the setting of the HET/TIME EXP switch." Pairing live heterodyne
+  with slow replay is the D240x's own design, not an OpenBat invention.
+- Optional frequency-selective triggering, fed from the heterodyne output.
+
+Why this shape and not the others: the '647 specification states its own
+dichotomy as *discard some samples → monitor continuously* versus *output all
+samples → reduced monitoring coverage*, and names the latter as what the
+invention is distinguished from. The D240x pattern is squarely the distinguished
+alternative. ATE, VTD and sampler mode are all the other branch.
+
+**The decision was a commercial risk judgement, made by Niall, and is recorded as
+one.** Free app, small user base, a mode strictly worse than WA's RTE, and a
+design demonstrably predating the 2010 priority date by ~two decades — therefore
+a poor enforcement target. That is a judgement about *likelihood of being sued*,
+not a finding of non-infringement, and it is not clearance. The FTO opinion above
+is still wanted. GB2480358B's claims are still unread.
+
+Do not restate this section as a non-infringement argument. If a future reader
+wants to widen the rule again, the thing to check first is whether the new mode
+keeps up with a pass by deciding what to keep — if it does, it is the claimed
+family regardless of how it is implemented.
+
 ### The two ATE invariants
 
 These are design rules the code must keep. They are *not*, on their own, a
@@ -314,6 +444,125 @@ Not currently relevant: `CallAnalysis`'s Fmax/Fmin refinement uses only a
 forward, zero-padded FFT with parabolic-interpolation peak sharpening, no
 inverse FFT. Worth a targeted look *if* an inverse-FFT-based refinement is ever
 added there.
+
+---
+
+### Pulse haptics (added 2026-08-09)
+
+`Haptics/PulseHaptics.swift` renders each detected pulse as a haptic event.
+Built as an **accessibility channel**: for a deaf or hard-of-hearing user it
+replaces the listening modes rather than supplementing them, which is why it
+does not depend on a listen mode being active and why every silent-failure path
+is surfaced instead of swallowed.
+
+**The Taptic Engine has no pitch dimension.** It is a resonant actuator with a
+fixed resonance (~150–230 Hz), so call frequency cannot be reproduced at any
+scale. Core Haptics offers exactly two axes and they carry one call property
+each: **intensity ← pulse energy** ("how close"), **sharpness ← peak frequency**
+("what kind", dull thud to crisp tick). Frequency must not drive intensity —
+that spends the only proximity cue and makes a distant high call and a close low
+one identical.
+
+**Rate is a physical budget, and it is why there are two modes.** The actuator
+needs ~30–50 ms between transients to be felt as two events; a feeding buzz runs
+100–200 pulses/s. Per-pulse rendering there is impossible, not merely expensive —
+the same class of limit as the Live Activity's message budget (§12). Above
+`buzzEnterHz` (12 Hz, exiting at 8 Hz — hysteresis, for the same reason the
+trigger needs it) the taps collapse into one continuous haptic whose intensity
+follows the rate. The feeding buzz is the event a bat worker most wants to
+notice, so it should feel like a different *thing*, not just faster ticking.
+
+**Driven by detector metadata, never by samples.** Intensity and sharpness come
+from `peakLevel`/`peakFrequency`. Resampling the call itself and pushing it
+through the haptic engine at a slower rate would be a materially different thing
+and would want reading against §5 first. Nothing here touches a sample.
+
+Fed from `PulseDetector.onPulseStart`, which now carries `peakLevel` alongside
+`peakFrequency`. The rising edge rather than `onPulseWindow`: the window callback
+is already rate-limited to 20/s by `holdOffSeconds` and carries duration, which
+looks like a free budget, but it only fires once the run has ended and it would
+couple haptic behaviour to a detection knob the user can retune. Works in demo
+mode and while backgrounded — both paths feed the same detector.
+
+**Known failure modes, all handled explicitly:**
+- **Low Power Mode disables Core Haptics outright and silently.** A long night
+  session will reach it. Untreated, this reads as "no bats tonight" to exactly
+  the user who cannot check by ear. Mirrored from `ProcessInfo` and surfaced.
+- No Taptic Engine (iPad): the settings section hides rather than offering a
+  dead switch.
+- The engine stops on interruption. Handlers hop to the main actor (Core Haptics
+  calls them on an unspecified queue) and deliberately do **not** auto-restart —
+  an interruption still in progress would spin. `ensureEngine()` rebuilds
+  synchronously on the next pulse, so that pulse still renders.
+
+**Untunable from the simulator** — `supportsHaptics` is false there, so the
+feature is invisible and untestable. Everything below wants a device:
+
+**The constants are engineering guesses, so all eleven are live.** A `Haptic` tab
+in the tuning overlay edits every one of them against the running detector, and
+they persist (unlike the VTD tab's knobs, which were live-only) — a value arrived
+at in a field session survives the trip home. Defaults are reasoned from the
+actuator's limits and `amplitudeThreshold`'s 0.5 default, not measured.
+
+**The rate trace is the instrument, and the tab is built around it.** Two
+thresholds cannot be set by reasoning — you have to see where pulse rate actually
+goes during a pass and put the pair around it. The sparkline draws both
+thresholds over the live rate, with the band between them showing the hysteresis
+width directly. `currentRateHz` is computed at read time rather than cached,
+because `recentPulses` is only trimmed when a pulse arrives: a cached value would
+freeze at the last rate exactly when the trace needs to show it falling back
+through the thresholds. Sampled from a `.task` loop rather than a `TimelineView`
+body for the same reason — the trace has to keep moving when pulses stop.
+
+`buzzExitHz` is held strictly below `buzzEnterHz` by both `didSet`s, and the exit
+slider's range is capped by the enter value rather than letting the model clamp
+silently — a slider showing a value the app has already overridden would be
+lying. The gap between the pair is the real knob: wide commits and holds through
+a dip, narrow tracks the bat closely but can flicker.
+
+**Buzz mode is decided by pulse RATE** (`buzzEnterHz`/`buzzExitHz` with
+hysteresis, over `rateWindow`), with a rate trace in the tuning tab carrying both
+thresholds. Two measured findings sit under it, both from 2026-08-09
+(`TimeExpansionTuning/haptic_rate.py`):
+
+**Counting is one tap per pulse RUN, and that is correct. Do not count re-onsets
+inside a run.** Tried, and it over-counted badly — live pulse rate went from ~2/s
+to ~14/s — because an FM call's level dips below threshold mid-sweep. Of 71
+re-onsets on the demo clip, **70 showed no frequency change at all** (−2 to
++2 kHz); a genuine new call restarts at the top of its sweep and jumps up, so
+those were fragments of one call. Reverted, and `PulseDetector.onPulseRepeat` was
+removed with them. This also invalidated an earlier "270–550 pulses/s bursts"
+figure — that was fragmentation, not pulse rate.
+
+**Rate does not find the demo clip's feeding buzzes, and this is unresolved.**
+With correct counting the highest rates fall at 1.0, 3.6, 7.7, 23.7 and 24.7 s —
+*not* at the buzzes (8.5, 9.2, 10.2, 11.2 s). A buzz's calls arrive closer
+together than `maxGapMs` (6 ms), so they merge into ONE pulse run and the rate
+reads *low*. Headroom over the 95th percentile never exceeds 2× at any window.
+Niall hit this directly: he could tune the false buzzes out but never make a real
+one fire.
+
+Run length *does* separate them cleanly — over the clip's 139 runs ordinary calls
+have a p95 of 17.3 ms and a longest of 19.3 ms, while the four buzzes are 34.0,
+55.3, 60.7 and 64.7 ms, so any threshold from 20–30 ms picks exactly the buzzes.
+That was built and then **removed at Niall's request**: it replaced controls he
+had already tuned and understood, and the redesign was the wrong response to what
+was reported as a counting bug. Recorded here as the measurement it is, not as a
+plan. If the buzz case is picked up again, run length is where the signal is —
+and the lesson is to add it beside the existing controls rather than in place of
+them.
+
+**Known limitation of any run-length approach:** a constant-frequency species
+(horseshoe bats, calls of tens of ms) would read as a permanent buzz. No CF
+material in the corpus.
+
+> ⚠️ These knobs persist, so an existing install keeps its old values and must
+> use **Haptic Defaults** to pick up the recalibrated ones.
+
+**Still open:** the level window especially. `peakLevel` is normalised column
+magnitude and the assumption that real calls land in 0.45–0.95 is inferred, not
+measured — if quiet calls feel too weak or everything pins to maximum, that pair
+moves first.
 
 ---
 
@@ -361,6 +610,42 @@ added there.
   low-pitch "call" layered on the real one. Full echo cancellation risks
   degrading the ultrasonic capture path, so the app only warns and tells the
   user to wear headphones — which is confirmed to fix it.
+
+### 2026-08-09: a listen-mode switch no longer restarts the engine
+
+Switching listen mode used to `stop()` then `start()` unconditionally. Three
+things fell out of that, all visible: the Start button flicked back to its idle
+ear, the spectrogram's frequency axis collapsed to 24 kHz and snapped back, and
+— because `ContentView.onChange(of: audio.isRunning)` fires on the way down —
+**an armed recorder was silently disarmed on every mode change.**
+
+The restart was never required by the mode itself. It was required by how the
+mode was *read*: the tap closure captured which processors to feed, and the
+output source node captured which output to render, both fixed at install time.
+Changing the mode therefore meant rebuilding both, i.e. a new engine.
+
+Now `AudioEngineController.liveMode` is an `Atomic<Int>` mirroring `listenMode`,
+read per capture buffer by the tap and per callback by the render block. One tap
+and one node serve every listening mode, so **heterodyne ↔ slow replay is a
+single atomic store** — no gap in capture, no `isRunning` transition, LO and
+auto-tune left where they were.
+
+Two things this does not change, and one hazard:
+
+- **Crossing `.off` still restarts, and must.** The session category itself
+  differs (`.record`/`.measurement` when merely detecting — the proven 384 kHz
+  path above — versus `.playAndRecord` to reach the speaker), and changing
+  category means deactivating and reactivating the session. `isActive`
+  (`isRunning || isSwitchingListenMode`) covers the UI for that window;
+  `startEngine` no longer overwrites a known `actualSampleRate` with the input
+  node's provisional format rate, which is what moved the frequency axis.
+- **Anything acting on capture genuinely being down must still read
+  `isRunning`**, not `isActive` — finalizing a pass, stopping the background
+  pump, session teardown.
+- **`SnippetExpansionProcessor.reset` reallocates its ring buffer.** On an
+  in-place switch it must be called *before* the new mode is published, while
+  the audio thread still isn't touching that processor. The other order is a
+  use-after-free, not a glitch.
 
 ### Demo mode
 
@@ -536,6 +821,49 @@ added there.
   move placeholders.
 - **The whole-file spectrogram is rendered once when a segment closes** and
   cached as a JPEG, so opening a recording is instant.
+
+### 2026-08-09: the reinstall case — a placeholder is not a file
+
+Reported symptom, on a cloud-backed library after a delete/reinstall: Playback
+shows no spectrogram thumbnails at all, and tapping a recording hangs for a
+long time with no explanation. Two separate causes, both from code treating an
+iCloud placeholder as if it were an ordinary local file.
+
+**Thumbnails gave up permanently.** `ClassificationStore.load(file:)` already
+checked `CloudStorage.isDownloaded` and reported `awaitingDownload` so
+`RecordingThumbnailLoader` could retry — but that check can't see the case that
+actually happens first. `recordings.json`/`passes.json` are tiny and sync back
+almost immediately; iCloud hasn't enumerated `Classifications/images/` yet, so
+the JPEG **doesn't exist at any path**. `resourceValues` throws for a missing
+file, `isDownloaded` reads that (correctly, for its own purpose) as "not
+ubiquitous, nothing to wait for", the decode then failed, and the row got
+`.unavailable` — a terminal answer. Every row asked once, was told the
+thumbnail didn't exist, and never asked again. Fixed with
+`CloudStorage.mayArriveLater`, which distinguishes "gone" from "not here yet"
+by asking whether the library is cloud-backed at all; a failed decode on a
+cloud-backed library now returns `awaitingDownload` and the existing
+backing-off retry does its job.
+
+**Tapping a recording blocked on a whole-file download.** Nothing waited for
+the WAV. `PlaybackEngine.load` reads the 44-byte header, and on a placeholder
+`FileHandle`/`AVAudioFile` does not fail — it blocks while iCloud materialises
+the entire multi-megabyte 384 kHz file. That call is on the main actor, so the
+UI froze outright; `renderOverview`'s whole-file scan then paid the same cost
+again. `WavPlayerView.load` now calls `CloudStorage.awaitDownload` first and
+shows a "Downloading from iCloud…" state with progress, cancelled on
+`onDisappear` so a five-minute wait doesn't outlive the screen.
+
+The general rule this leaves: **before opening a library file for reading,
+either confirm its bytes are local or be prepared to block for the length of a
+network transfer.** `ensureDownloaded` alone does not give you that — it only
+requests, it doesn't wait.
+
+`downloadFraction` spells `NSURLUbiquitousItemPercentDownloadedKey` by raw
+value on purpose: the typed `URLResourceKey` is unavailable in the iOS Swift
+overlay (it redirects you to `NSMetadataQuery`, which is far too much machinery
+for a progress number on one known file). It returns nil rather than 0 when
+iCloud reports no figure, and the UI shows indeterminate progress for nil — a
+transfer stuck at "0%" reads as broken.
 
 ---
 

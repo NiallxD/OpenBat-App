@@ -21,6 +21,7 @@ struct SettingsView: View {
     let classStore: ClassificationStore
     let audio: AudioEngineController
     @Bindable var micCalSettings: MicCalibrationSettings
+    @Bindable var haptics: PulseHaptics
     @State private var showMicCalibration = false
     @Environment(\.dismiss) private var dismiss
     @State private var selectedTab = "autoID"
@@ -216,11 +217,53 @@ struct SettingsView: View {
 
     private var audioTab: some View {
         Form {
+            hapticSections
             pulseSections
             recordingSections
         }
         .sheet(isPresented: $showMicCalibration) {
             MicCalibrationView(audio: audio, settings: micCalSettings) { showMicCalibration = false }
+        }
+    }
+
+    /// Pulse haptics. Placed first in the Audio tab because for a user who
+    /// can't hear the listening modes this is the *only* live output the app
+    /// has, and burying it under the trigger thresholds would say otherwise.
+    @ViewBuilder
+    private var hapticSections: some View {
+        // No Taptic Engine (iPad) — offer nothing rather than a dead switch.
+        if haptics.isSupported {
+            Section {
+                Toggle("Feel each bat pulse", isOn: $haptics.isEnabled)
+
+                if haptics.isEnabled {
+                    VStack(alignment: .leading, spacing: 2) {
+                        LabeledContent("Strength") {
+                            Text(String(format: "%.0f%%", haptics.strength * 100))
+                                .monospacedDigit()
+                        }
+                        Slider(value: $haptics.strength, in: 0.25...1.5, step: 0.05)
+                            .accessibilityLabel("Haptic strength")
+                    }
+
+                    Button("Play a sample") { haptics.playPreview() }
+                        .disabled(haptics.unavailableReason != nil)
+                        .accessibilityHint("Plays three calls of increasing strength, then a feeding buzz")
+
+                    // The honesty path. Low Power Mode kills Core Haptics
+                    // outright, and without this the feature just stops — which
+                    // for someone relying on it reads as "no bats tonight".
+                    if let reason = haptics.unavailableReason {
+                        Label(reason, systemImage: "exclamationmark.triangle.fill")
+                            .font(.footnote)
+                            .foregroundStyle(.orange)
+                    }
+                }
+            } header: {
+                Text("Haptics")
+            } footer: {
+                Text("Every detected call becomes a tap you can feel: stronger for a closer bat, and sharper for a higher-pitched one. When calls come too fast to feel separately — a feeding buzz, when a bat is closing on an insect — the taps merge into one continuous buzz, so that moment feels different rather than just faster.\n\nWorks with the screen off and in demo mode, and doesn't need a listening mode switched on.")
+            }
         }
     }
 

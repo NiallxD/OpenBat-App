@@ -275,4 +275,94 @@ nonisolated enum CloudStorage {
         else { return true }
         return status != .notDownloaded
     }
+
+    /// Whether the library actually lives in the iCloud container on this
+    /// launch — false for a local-only library, and false while
+    /// `isUsingFallbackRoot` (this launch can't see the container at all, so
+    /// nothing is going to arrive).
+    ///
+    /// Touching `baseDirectory` first is deliberate: the root choice isn't
+    /// recorded until it resolves, so reading the flag alone on a first launch
+    /// would report "local" for a library that's about to be iCloud-backed.
+    static var isCloudBacked: Bool {
+        _ = baseDirectory
+        return UserDefaults.standard.bool(forKey: rootChoiceKey) && !isUsingFallbackRoot
+    }
+
+    /// Whether `url`'s bytes could still show up later, as opposed to being
+    /// genuinely gone.
+    ///
+    /// The case that matters is a file that doesn't exist *at all* yet.
+    /// `isDownloaded` can't speak to that — `resourceValues` throws for a
+    /// missing path, which it reads (correctly, for its own purposes) as "not
+    /// a placeholder, nothing to wait for". But right after a delete/reinstall
+    /// the tiny JSON library files sync back long before iCloud has even
+    /// enumerated the images directory, so a thumbnail's path legitimately
+    /// resolves to nothing for a while. Treating that as a permanent failure
+    /// is what left a reinstalled library showing placeholder tiles forever:
+    /// the row asked once, got "unavailable", and never asked again.
+    static func mayArriveLater(_ url: URL) -> Bool {
+        guard isCloudBacked else { return false }
+        guard FileManager.default.fileExists(atPath: url.path) else { return true }
+        return !isDownloaded(url)
+    }
+
+    /// How much of a not-yet-downloaded ubiquitous file has landed, 0...1, or
+    /// nil when iCloud isn't reporting a figure (which is common early on, and
+    /// for a file whose placeholder hasn't even been created yet) — callers
+    /// should show indeterminate progress for nil rather than a bogus 0%.
+    /// Returns 1 for anything already local. Only meaningful as a progress
+    /// readout — use `isDownloaded` for the actual decision.
+    ///
+    /// The percentage key is spelled by raw value and read out of `allValues`:
+    /// `URLResourceKey.ubiquitousItemPercentDownloadedKey` is marked
+    /// unavailable in the iOS Swift overlay (it points you at the NSMetadata
+    /// equivalent, which means standing up a whole `NSMetadataQuery` — far too
+    /// much machinery for a progress number on one known file), and it has no
+    /// `URLResourceValues` member either. The underlying key is still
+    /// populated by the file provider; when it isn't, the value is absent
+    /// rather than zero, which is exactly the nil this returns. Treat a nil as
+    /// "no figure available", never as "0% done".
+    private static let percentDownloadedKey = URLResourceKey(rawValue: "NSURLUbiquitousItemPercentDownloadedKey")
+
+    static func downloadFraction(_ url: URL) -> Double? {
+        guard let values = try? url.resourceValues(
+            forKeys: [.ubiquitousItemDownloadingStatusKey, percentDownloadedKey])
+        else { return FileManager.default.fileExists(atPath: url.path) ? 1 : nil }
+        if let status = values.ubiquitousItemDownloadingStatus, status != .notDownloaded { return 1 }
+        guard let raw = values.allValues[percentDownloadedKey],
+              let percent = (raw as? NSNumber)?.doubleValue ?? (raw as? Double)
+        else { return nil }
+        return min(max(percent / 100, 0), 1)
+    }
+
+    /// Requests `url`'s contents and waits for them, reporting progress.
+    ///
+    /// Exists because the alternative is what the app used to do: hand a
+    /// placeholder straight to `FileHandle`/`AVAudioFile` and let the read
+    /// block while iCloud pulls down a multi-megabyte 384 kHz WAV — on the
+    /// main actor, in `PlaybackEngine.load`'s case. That is the whole of "the
+    /// app hangs for ages when you tap a recording after reinstalling". A poll
+    /// rather than an `NSMetadataQuery`: this waits on ONE known file for the
+    /// life of one screen, which is the shape a query is worst at.
+    ///
+    /// Returns true once the bytes are on device, false on timeout or
+    /// cancellation. Safe to call for a local file — it returns immediately.
+    static func awaitDownload(_ url: URL,
+                              timeout: Duration = .seconds(300),
+                              onProgress: @escaping @Sendable (Double?) -> Void = { _ in }) async -> Bool {
+        if isDownloaded(url), FileManager.default.fileExists(atPath: url.path) { return true }
+        ensureDownloaded(url)
+        let deadline = ContinuousClock.now + timeout
+        while ContinuousClock.now < deadline {
+            if Task.isCancelled { return false }
+            if isDownloaded(url), FileManager.default.fileExists(atPath: url.path) {
+                onProgress(1)
+                return true
+            }
+            onProgress(downloadFraction(url))
+            do { try await Task.sleep(for: .milliseconds(400)) } catch { return false }
+        }
+        return false
+    }
 }

@@ -313,15 +313,17 @@ struct PlaybackControlsView: View {
         .accessibilityLabel("Listen mode: \(listenModeName)")
     }
 
+    // `.snippetExpansion` is live-only — it captures from the microphone tap and
+    // has no meaning against a file, which can already be expanded in full by
+    // `.timeExpansion`. It is handled explicitly (rather than via `default:`) so
+    // a future mode addition still has to be considered here, per the same
+    // convention as `AudioEngineController.startEngine`.
     private var nextListenMode: ListenMode {
         switch engine.listenMode {
         case .off:                  .heterodyne
         case .heterodyne:           .timeExpansion
         case .timeExpansion:        .off
-        // Live-only mode; never reached from this playback cycle, but handled
-        // explicitly rather than via `default:` so ListenMode stays exhaustively
-        // checked here too.
-        case .variableTimeDistortion: .off
+        case .snippetExpansion:     .off
         }
     }
 
@@ -330,7 +332,7 @@ struct PlaybackControlsView: View {
         case .off:                  "headphones"
         case .heterodyne:           "antenna.radiowaves.left.and.right"
         case .timeExpansion:        "tortoise"
-        case .variableTimeDistortion:      "wave.3.forward"
+        case .snippetExpansion:     "tortoise"
         }
     }
 
@@ -339,7 +341,7 @@ struct PlaybackControlsView: View {
         case .off:                  "Off"
         case .heterodyne:            "Heterodyne"
         case .timeExpansion:        "Time exp"
-        case .variableTimeDistortion:      "Distortion"
+        case .snippetExpansion:     "Time exp"
         }
     }
 

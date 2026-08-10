@@ -17,7 +17,8 @@ import SwiftUI
 /// The overlay's four tabs. Raw value is the short label shown in the tab bar.
 enum LiveTuningTab: String, CaseIterable, Identifiable {
     case heterodyne = "Het"
-    case distortion = "VTD"
+    case replay = "Replay"
+    case haptics = "Haptic"
     case pulse = "Pulse"
     case display = "Disp"
 
@@ -26,7 +27,8 @@ enum LiveTuningTab: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .heterodyne: "Heterodyne"
-        case .distortion: "Variable Time Distortion"
+        case .replay: "Slow Replay"
+        case .haptics: "Pulse Haptics"
         case .pulse: "Pulse Trigger"
         case .display: "Display"
         }
@@ -95,189 +97,331 @@ struct HeterodyneTuningTab: View {
     }
 }
 
-// MARK: - Variable Time Distortion
+// MARK: - Slow replay (live snippet expansion)
 
-/// Gap speed, catch-up and lookahead for `VariableTimeDistortionProcessor`, plus the
-/// telemetry that says whether it is actually working.
+/// Speed, buffer length and output routing for the D240x-pattern live mode.
 ///
-/// No settings object: the processor's knobs are lock-guarded scalars read once
-/// per output buffer, so every slider here is `onLive` only, the same as the
-/// heterodyne tab's gain. Nothing persists across launches yet.
-///
-/// **Dropped windows is the diagnostic that matters.** Call boundaries come
-/// from `PulseDetector`, which can only report a window once the call's run has
-/// ended — so the window always arrives after the audio it describes. If
-/// Lookahead is smaller than that latency the windows land behind the read
-/// pointer, every call plays unexpanded, and the mode sounds like it is doing
-/// nothing at all while reporting no error.
-struct VTDTuningTab: View {
+/// **The number that matters is neither slider — it is their product.** Buffer
+/// length × speed is how long a replay lasts, and the mode captures nothing new
+/// for that whole time, so a generous buffer at a high factor quietly turns into
+/// half a minute of deafness per trigger. It is shown as its own readout for
+/// that reason rather than left for the user to multiply.
+struct SnippetExpansionTuningTab: View {
     let audio: AudioEngineController
+    let settings: SnippetExpansionSettings
 
     private var inactive: String? {
-        audio.listenMode == .variableTimeDistortion ? nil : "Variable Time Distortion is not the active listen mode"
+        audio.listenMode == .snippetExpansion ? nil : "Slow replay is not the active listen mode"
     }
+
+    /// Taken from the processor so the slider cannot offer a value its setter
+    /// would silently clamp.
+    private static let memoryRange =
+        SnippetExpansionProcessor.minMemorySeconds...SnippetExpansionProcessor.maxMemorySeconds
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            let proc = audio.variableTimeDistortion
-
-            telemetry
-            RateSparkline(audio: audio)
-            Divider().opacity(0.3)
-
             TuningSlider(
-                label: "Gap speed", explanation: TuningHelp.vtdGapRate,
-                initial: proc.gapRate,
-                range: 1...32,
+                label: "Speed", explanation: TuningHelp.snippetExpansion,
+                initial: settings.expansion,
+                range: 4...20,
                 step: 0.5,
-                format: { String(format: "%.2f× real", $0 / 8) },
-                onLive: { proc.gapRate = $0 },
+                format: { String(format: "%.1f× slower", $0) },
+                onLive: { audio.snippetExpansion.expansion = $0 },
+                onCommit: { settings.expansion = $0 },
                 disabledReason: inactive
             )
             TuningSlider(
-                label: "Max catch-up rate", explanation: TuningHelp.vtdRateMax,
-                initial: proc.rateMax,
-                range: 8...128,
+                label: "Buffer", explanation: TuningHelp.snippetMemory,
+                initial: settings.memorySeconds,
+                range: Self.memoryRange,
+                step: 0.1,
+                format: { String(format: "%.1f s", $0) },
+                onLive: { audio.snippetExpansion.memorySeconds = $0 },
+                onCommit: { settings.memorySeconds = $0 },
+                disabledReason: inactive
+            )
+            TuningSlider(
+                label: "Hiss reduction", explanation: TuningHelp.snippetHiss,
+                initial: settings.hissReductionDB,
+                range: 0...40,
                 step: 1,
-                format: { String(format: "%.0f× real", $0 / 8) },
-                onLive: { proc.rateMax = $0 },
+                format: { $0 < 0.5 ? "off" : String(format: "−%.0f dB", $0) },
+                onLive: { audio.snippetExpansion.hissReductionDB = $0 },
+                onCommit: { settings.hissReductionDB = $0 },
                 disabledReason: inactive
             )
             TuningSlider(
-                label: "Lookahead", explanation: TuningHelp.vtdLookahead,
-                initial: proc.lookaheadMs,
-                range: 20...1_000,
-                step: 10,
+                label: "Fade in/out", explanation: TuningHelp.snippetFade,
+                initial: settings.fadeMS,
+                range: 1...250,
+                step: 1,
                 format: { String(format: "%.0f ms", $0) },
-                onLive: { proc.lookaheadMs = $0 },
+                onLive: { audio.snippetExpansion.fadeMS = $0 },
+                onCommit: { settings.fadeMS = $0 },
                 disabledReason: inactive
             )
             TuningSlider(
-                label: "Catch up after", explanation: TuningHelp.vtdCatchupAfter,
-                initial: proc.catchupAfterMs,
-                range: 100...6_000,
-                step: 50,
-                format: { String(format: "%.2f s", $0 / 1000) },
-                onLive: { proc.catchupAfterMs = $0 },
-                disabledReason: inactive
-            )
-            TuningSlider(
-                label: "Transition", explanation: TuningHelp.vtdTransition,
-                initial: proc.transitionMs,
-                range: 0.5...40,
-                step: 0.5,
-                format: { String(format: "%.1f ms", $0) },
-                onLive: { proc.transitionMs = $0 },
-                disabledReason: inactive
-            )
-            TuningSlider(
-                label: "High cut", explanation: TuningHelp.vtdHighCut,
-                initial: proc.highCutHz,
-                range: 20_000...192_000,
-                step: 2_000,
-                format: { $0 >= 191_000 ? "off (Nyquist)" : String(format: "%.0f kHz", $0 / 1000) },
-                onLive: { proc.highCutHz = $0 },
-                disabledReason: inactive
-            )
-            TuningSlider(
-                label: "Speed ducking", explanation: TuningHelp.vtdDuck,
-                initial: proc.duckAlpha,
-                range: 0...1.5,
-                step: 0.05,
-                format: { $0 <= 0.001 ? "off" : String(format: "%.2f", $0) },
-                onLive: { proc.duckAlpha = $0 },
-                disabledReason: inactive
-            )
-            TuningSlider(
-                label: "Output gain", explanation: TuningHelp.heterodyneGain,
-                initial: Double(proc.gain),
+                label: "Replay gain", explanation: TuningHelp.snippetGain,
+                initial: Double(settings.gain),
                 range: 0.5...30,
                 format: { String(format: "%.1f×", $0) },
-                onLive: { proc.gain = Float($0) },
+                onLive: { audio.snippetExpansion.gain = Float($0) },
+                onCommit: { settings.gain = Float($0) },
                 disabledReason: inactive
             )
-        }
-    }
 
-    /// Live counters, polled at 5 Hz in their own `TimelineView` so the sliders
-    /// above don't rebuild with them — same containment as the ATE tab.
-    private var telemetry: some View {
-        TimelineView(.periodic(from: .now, by: 0.2)) { _ in
-            let proc = audio.variableTimeDistortion
-            let dropped = proc.droppedWindowCount
-            let overflow = proc.overflowCount
-            VStack(alignment: .leading, spacing: 1) {
-                TuningReadout(label: "Lag", explanation: TuningHelp.vtdLag,
-                              value: String(format: "%.2f s", proc.lagSeconds))
-                TuningReadout(label: "Rate", explanation: TuningHelp.vtdRate,
-                              value: String(format: "%.2f×", proc.currentRate))
-                TuningReadout(label: "Expanded", explanation: TuningHelp.vtdExpanded,
-                              value: "\(proc.expandedCount)")
-                // The one to watch: non-zero means calls are going by
-                // unexpanded because their window arrived too late to use.
-                TuningReadout(label: "Dropped windows", explanation: TuningHelp.vtdDropped,
-                              value: "\(dropped)",
-                              emphasis: dropped > 0 ? .orange : .secondary)
-                // Discarding input is a failure in this mode, not a trade-off.
-                TuningReadout(label: "Ring overflow", explanation: TuningHelp.vtdOverflow,
-                              value: "\(overflow)",
-                              emphasis: overflow > 0 ? .red : .secondary)
+            Divider().opacity(0.5)
+
+            TuningReadout(
+                label: "Replay length", explanation: TuningHelp.snippetReplayLength,
+                value: String(format: "%.0f s per trigger", settings.replaySeconds),
+                emphasis: settings.replaySeconds > 20 ? .orange : .primary
+            )
+
+            Divider().opacity(0.5)
+
+            // A picker rather than a slider: three named destinations, not a
+            // continuum. Routing is an atomic on the controller, so this takes
+            // effect on the next render block with no engine restart.
+            VStack(alignment: .leading, spacing: 3) {
+                TuningInfoLabel(
+                    text: "Output",
+                    explanation: TuningHelp.snippetRouting,
+                    emphasis: inactive == nil ? .secondary : Color.secondary.opacity(0.5)
+                )
+                // Not the only writer of `routing`, and no longer the primary one:
+                // ContentView's listen-mode cycle (`advanceListenMode`) sets
+                // `.expansionOnly` every time it enters slow replay and `.both` on
+                // the step after, so a choice made here survives only until the
+                // next trip round that cycle. `.heterodyneOnly` is the one case
+                // this picker alone can reach.
+                Picker("Output", selection: Binding(
+                    get: { settings.routing },
+                    set: {
+                        settings.routing = $0
+                        audio.setSnippetRouting($0)
+                    }
+                )) {
+                    ForEach(SnippetOutputRouting.allCases, id: \.rawValue) { r in
+                        Text(r.label).tag(r)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .disabled(inactive != nil)
             }
         }
     }
 }
 
-/// Playback rate over the last ~2.5 s, log-scaled.
+// MARK: - Pulse haptics
+
+/// The call/buzz transition and the intensity/sharpness mapping, plus the pulse
+/// rate trace that makes the thresholds tunable at all.
 ///
-/// Log rather than linear because the interesting range spans 1× to 64× and the
-/// bottom of it is where the calls are. The two guide lines are the values worth
-/// recognising by shape: 1× (full expansion, a call) and 8× (true speed).
-private struct RateSparkline: View {
-    let audio: AudioEngineController
+/// **The trace is the instrument.** Two rate thresholds cannot be set by
+/// reasoning about them — you have to see where the actual pulse rate goes
+/// during a real pass and put the pair around it. The sparkline draws both
+/// thresholds as guide lines over the live rate, so "enter" is placed above
+/// search-phase chatter and below the buzz rather than guessed.
+///
+/// Everything here is live and persisted, so a setting arrived at in the field
+/// survives the trip home.
+struct HapticsTuningTab: View {
+    let haptics: PulseHaptics
 
-    private let minRate: Double = 1
-    private let maxRate: Double = 64
-
-    private func y(_ rate: Double, in h: CGFloat) -> CGFloat {
-        let r = min(max(rate, minRate), maxRate)
-        let f = log2(r / minRate) / log2(maxRate / minRate)
-        return h - CGFloat(f) * h                     // 1× at the bottom
+    private var inactive: String? {
+        if !haptics.isSupported { return "This device has no Taptic Engine" }
+        if !haptics.isEnabled { return "Pulse haptics are switched off in Settings › Audio" }
+        return haptics.unavailableReason
     }
 
     var body: some View {
-        // Faster than the counters above: at 5 Hz the trace visibly stutters.
-        TimelineView(.periodic(from: .now, by: 0.1)) { _ in
-            let samples = audio.variableTimeDistortion.rateHistorySnapshot()
-            GeometryReader { geo in
-                let w = geo.size.width, h = geo.size.height
-                ZStack {
-                    ForEach([1.0, 8.0], id: \.self) { guide in
-                        Path { p in
-                            let gy = y(guide, in: h)
-                            p.move(to: CGPoint(x: 0, y: gy))
-                            p.addLine(to: CGPoint(x: w, y: gy))
-                        }
-                        .stroke(style: StrokeStyle(lineWidth: 0.5, dash: [2, 3]))
-                        .foregroundStyle(.secondary.opacity(0.35))
-                    }
-                    if samples.count > 1 {
-                        Path { p in
-                            let dx = w / CGFloat(samples.count - 1)
-                            for (i, v) in samples.enumerated() {
-                                let pt = CGPoint(x: CGFloat(i) * dx, y: y(Double(v), in: h))
-                                if i == 0 { p.move(to: pt) } else { p.addLine(to: pt) }
-                            }
-                        }
-                        .stroke(.tint, style: StrokeStyle(lineWidth: 1.2, lineJoin: .round))
-                    }
+        VStack(alignment: .leading, spacing: 8) {
+            telemetry
+            PulseRateSparkline(haptics: haptics)
+            Divider().opacity(0.3)
+
+            TuningSlider(
+                label: "Buzz at", explanation: TuningHelp.hapticBuzzEnter,
+                initial: haptics.buzzEnterHz,
+                range: 3...40, step: 0.5,
+                format: { String(format: "%.1f /s", $0) },
+                onLive: { haptics.buzzEnterHz = $0 },
+                disabledReason: inactive
+            )
+            TuningSlider(
+                label: "Back to taps at", explanation: TuningHelp.hapticBuzzExit,
+                initial: haptics.buzzExitHz,
+                range: 1...max(1.5, haptics.buzzEnterHz - 0.5), step: 0.5,
+                format: { String(format: "%.1f /s", $0) },
+                onLive: { haptics.buzzExitHz = $0 },
+                disabledReason: inactive
+            )
+            .id(haptics.buzzEnterHz)
+            TuningSlider(
+                label: "Rate window", explanation: TuningHelp.hapticRateWindow,
+                initial: haptics.rateWindow,
+                range: 0.1...1.5, step: 0.05,
+                format: { String(format: "%.2f s", $0) },
+                onLive: { haptics.rateWindow = $0 },
+                disabledReason: inactive
+            )
+            TuningSlider(
+                label: "Buzz hangover", explanation: TuningHelp.hapticHangover,
+                initial: haptics.buzzHangover,
+                range: 0.05...1.0, step: 0.05,
+                format: { String(format: "%.2f s", $0) },
+                onLive: { haptics.buzzHangover = $0 },
+                disabledReason: inactive
+            )
+
+            Divider().opacity(0.3)
+
+            TuningSlider(
+                label: "Strength", explanation: TuningHelp.hapticStrength,
+                initial: haptics.strength,
+                range: 0.25...1.5, step: 0.05,
+                format: { String(format: "%.0f%%", $0 * 100) },
+                onLive: { haptics.strength = $0 },
+                disabledReason: inactive
+            )
+            TuningSlider(
+                label: "Quiet call level", explanation: TuningHelp.hapticLevelFloor,
+                initial: Double(haptics.levelFloor),
+                range: 0.1...0.9, step: 0.01,
+                format: { String(format: "%.2f", $0) },
+                onLive: { haptics.levelFloor = Float($0) },
+                disabledReason: inactive
+            )
+            TuningSlider(
+                label: "Loud call level", explanation: TuningHelp.hapticLevelCeiling,
+                initial: Double(haptics.levelCeiling),
+                range: 0.2...1.0, step: 0.01,
+                format: { String(format: "%.2f", $0) },
+                onLive: { haptics.levelCeiling = Float($0) },
+                disabledReason: inactive
+            )
+            TuningSlider(
+                label: "Weakest tap", explanation: TuningHelp.hapticMinIntensity,
+                initial: Double(haptics.minIntensity),
+                range: 0...0.8, step: 0.05,
+                format: { String(format: "%.2f", $0) },
+                onLive: { haptics.minIntensity = Float($0) },
+                disabledReason: inactive
+            )
+            TuningSlider(
+                label: "Dull below", explanation: TuningHelp.hapticFreqFloor,
+                initial: haptics.freqFloorHz,
+                range: 10_000...60_000, step: 1_000,
+                format: { String(format: "%.0f kHz", $0 / 1000) },
+                onLive: { haptics.freqFloorHz = $0 },
+                disabledReason: inactive
+            )
+            TuningSlider(
+                label: "Crisp above", explanation: TuningHelp.hapticFreqCeiling,
+                initial: haptics.freqCeilingHz,
+                range: 20_000...140_000, step: 1_000,
+                format: { String(format: "%.0f kHz", $0 / 1000) },
+                onLive: { haptics.freqCeilingHz = $0 },
+                disabledReason: inactive
+            )
+            TuningSlider(
+                label: "Min tap spacing", explanation: TuningHelp.hapticTapInterval,
+                initial: haptics.minTapInterval,
+                range: 0.02...0.2, step: 0.005,
+                format: { String(format: "%.0f ms", $0 * 1000) },
+                onLive: { haptics.minTapInterval = $0 },
+                disabledReason: inactive
+            )
+
+            Button("Play a sample") { haptics.playPreview() }
+                .font(.system(size: 11, weight: .medium))
+                .buttonStyle(.plain)
+                .foregroundStyle(.tint)
+                .disabled(inactive != nil)
+        }
+    }
+
+    /// Polled in its own `TimelineView` so the sliders above don't rebuild with
+    /// it — same containment as the other tabs' telemetry.
+    private var telemetry: some View {
+        TimelineView(.periodic(from: .now, by: 0.2)) { _ in
+            VStack(alignment: .leading, spacing: 1) {
+                TuningReadout(label: "Pulse rate", explanation: TuningHelp.hapticRate,
+                              value: String(format: "%.0f /s", haptics.currentRateHz))
+                TuningReadout(label: "Mode", explanation: TuningHelp.hapticMode,
+                              value: haptics.isInBuzzMode ? "buzz" : "taps",
+                              emphasis: haptics.isInBuzzMode ? .orange : .secondary)
+                TuningReadout(label: "Events", explanation: TuningHelp.hapticEvents,
+                              value: "\(haptics.eventCount)")
+                if let reason = inactive {
+                    Text(reason)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            .frame(height: 34)
-            .overlay(alignment: .topTrailing) {
-                Text("64×").font(.system(size: 8)).foregroundStyle(.secondary.opacity(0.6))
+        }
+    }
+}
+
+/// Pulse rate over the last ~12 s with both rate thresholds drawn across it.
+///
+/// Linear rather than log: the interesting range is a couple of octaves at most
+/// and the thresholds have to read as positions, not ratios.
+private struct PulseRateSparkline: View {
+    let haptics: PulseHaptics
+
+    @State private var history: [Double] = []
+    private static let capacity = 120          // 12 s at 10 Hz
+
+    private var ceiling: Double {
+        max(haptics.buzzEnterHz * 1.4, (history.max() ?? 0) * 1.15, 6)
+    }
+
+    private func y(_ rate: Double, in h: CGFloat) -> CGFloat {
+        h - CGFloat(min(max(rate / ceiling, 0), 1)) * h
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            let w = geo.size.width, h = geo.size.height
+            ZStack {
+                ForEach([(haptics.buzzEnterHz, Color.orange),
+                         (haptics.buzzExitHz, Color.secondary)], id: \.0) { level, tint in
+                    Path { p in
+                        let gy = y(level, in: h)
+                        p.move(to: CGPoint(x: 0, y: gy))
+                        p.addLine(to: CGPoint(x: w, y: gy))
+                    }
+                    .stroke(style: StrokeStyle(lineWidth: 0.5, dash: [2, 3]))
+                    .foregroundStyle(tint.opacity(0.6))
+                }
+                if history.count > 1 {
+                    Path { p in
+                        let dx = w / CGFloat(Self.capacity - 1)
+                        for (i, v) in history.enumerated() {
+                            let pt = CGPoint(x: CGFloat(i) * dx, y: y(v, in: h))
+                            if i == 0 { p.move(to: pt) } else { p.addLine(to: pt) }
+                        }
+                    }
+                    .stroke(.tint, style: StrokeStyle(lineWidth: 1.2, lineJoin: .round))
+                }
             }
-            .overlay(alignment: .bottomTrailing) {
-                Text("1×").font(.system(size: 8)).foregroundStyle(.secondary.opacity(0.6))
+        }
+        .frame(height: 38)
+        .overlay(alignment: .topTrailing) {
+            Text(String(format: "%.0f/s", ceiling))
+                .font(.system(size: 8)).foregroundStyle(.secondary.opacity(0.6))
+        }
+        // Sampled here rather than in a TimelineView body: the trace must keep
+        // moving when pulses stop, and appending during render is a mutation.
+        .task {
+            while !Task.isCancelled {
+                history.append(haptics.currentRateHz)
+                if history.count > Self.capacity { history.removeFirst() }
+                try? await Task.sleep(for: .milliseconds(100))
             }
         }
     }

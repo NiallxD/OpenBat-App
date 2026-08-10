@@ -21,18 +21,20 @@ struct LiveTuningSnapshot {
     var heterodyneGain: Float
     var audibleOffsetHz: Double
 
-
-    // Variable Time Distortion. Read straight off the processor: unlike ATE there is
-    // no settings object behind these yet, so the processor IS the source of
-    // truth and Revert has to put them back there.
-    var vtdGain: Float
-    var vtdGapRate: Double
-    var vtdRateMax: Double
-    var vtdLookaheadMs: Double
-    var vtdCatchupAfterMs: Double
-    var vtdDuckAlpha: Double
-    var vtdTransitionMs: Double
-    var vtdHighCutHz: Double
+    // Pulse haptics. Like the heterodyne knobs these live on the object itself
+    // rather than behind a separate settings type, so Revert writes them back
+    // there directly.
+    var hapticStrength: Double
+    var hapticLevelFloor: Float
+    var hapticLevelCeiling: Float
+    var hapticMinIntensity: Float
+    var hapticFreqFloorHz: Double
+    var hapticFreqCeilingHz: Double
+    var hapticBuzzEnterHz: Double
+    var hapticBuzzExitHz: Double
+    var hapticRateWindow: TimeInterval
+    var hapticBuzzHangover: TimeInterval
+    var hapticMinTapInterval: TimeInterval
 
     // Pulse detector
     var amplitudeThreshold: Float
@@ -52,20 +54,24 @@ struct LiveTuningSnapshot {
     /// Reads the current value of every tunable from its live source of truth.
     static func capture(audio: AudioEngineController,
                         pulse: PulseDetector,
+                        haptics: PulseHaptics,
                         bandLow: Double,
                         bandHigh: Double,
                         timeWindowSeconds: Double) -> LiveTuningSnapshot {
         LiveTuningSnapshot(
             heterodyneGain: audio.heterodyne.gain,
             audibleOffsetHz: audio.audibleOffsetHz,
-            vtdGain: audio.variableTimeDistortion.gain,
-            vtdGapRate: audio.variableTimeDistortion.gapRate,
-            vtdRateMax: audio.variableTimeDistortion.rateMax,
-            vtdLookaheadMs: audio.variableTimeDistortion.lookaheadMs,
-            vtdCatchupAfterMs: audio.variableTimeDistortion.catchupAfterMs,
-            vtdDuckAlpha: audio.variableTimeDistortion.duckAlpha,
-            vtdTransitionMs: audio.variableTimeDistortion.transitionMs,
-            vtdHighCutHz: audio.variableTimeDistortion.highCutHz,
+            hapticStrength: haptics.strength,
+            hapticLevelFloor: haptics.levelFloor,
+            hapticLevelCeiling: haptics.levelCeiling,
+            hapticMinIntensity: haptics.minIntensity,
+            hapticFreqFloorHz: haptics.freqFloorHz,
+            hapticFreqCeilingHz: haptics.freqCeilingHz,
+            hapticBuzzEnterHz: haptics.buzzEnterHz,
+            hapticBuzzExitHz: haptics.buzzExitHz,
+            hapticRateWindow: haptics.rateWindow,
+            hapticBuzzHangover: haptics.buzzHangover,
+            hapticMinTapInterval: haptics.minTapInterval,
             amplitudeThreshold: pulse.amplitudeThreshold,
             minFrequencyHz: pulse.minFrequencyHz,
             minConsecutiveColumns: pulse.minConsecutiveColumns,
@@ -85,21 +91,25 @@ struct LiveTuningSnapshot {
     /// directly to its source of truth.
     func restore(audio: AudioEngineController,
                  pulse: PulseDetector,
+                 haptics: PulseHaptics,
                  bandLow: inout Double,
                  bandHigh: inout Double,
                  timeWindowSeconds: inout Double) {
         audio.heterodyne.gain = heterodyneGain
         audio.audibleOffsetHz = audibleOffsetHz
 
-
-        audio.variableTimeDistortion.gain = vtdGain
-        audio.variableTimeDistortion.gapRate = vtdGapRate
-        audio.variableTimeDistortion.rateMax = vtdRateMax
-        audio.variableTimeDistortion.lookaheadMs = vtdLookaheadMs
-        audio.variableTimeDistortion.catchupAfterMs = vtdCatchupAfterMs
-        audio.variableTimeDistortion.duckAlpha = vtdDuckAlpha
-        audio.variableTimeDistortion.transitionMs = vtdTransitionMs
-        audio.variableTimeDistortion.highCutHz = vtdHighCutHz
+        haptics.strength = hapticStrength
+        haptics.levelFloor = hapticLevelFloor
+        haptics.levelCeiling = hapticLevelCeiling
+        haptics.minIntensity = hapticMinIntensity
+        haptics.freqFloorHz = hapticFreqFloorHz
+        haptics.freqCeilingHz = hapticFreqCeilingHz
+        // Enter before exit: enter's didSet drags a too-high exit down with it.
+        haptics.buzzEnterHz = hapticBuzzEnterHz
+        haptics.buzzExitHz = hapticBuzzExitHz
+        haptics.rateWindow = hapticRateWindow
+        haptics.buzzHangover = hapticBuzzHangover
+        haptics.minTapInterval = hapticMinTapInterval
 
         pulse.amplitudeThreshold = amplitudeThreshold
         pulse.minFrequencyHz = minFrequencyHz

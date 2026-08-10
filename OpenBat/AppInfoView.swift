@@ -30,7 +30,7 @@ enum TourID: Hashable {
     case micStatus, resetStats                 // stats header (micStatus: portrait only)
     case speciesID                             // stats row — the last-ID cell
     case sessionStatus, feedbackWarning        // stats header
-    case timeExpansionCounter                  // stats header
+    case slowReplayStatus                      // stats header — slow-replay activity
     case sessionTimer                          // spectrogram header
     case pulseSpeciesToggle, pulseSettings     // pulse-view header
     case spectrogramSpeciesToggle, compressTimeline, batRange, palette, bandSettings
@@ -92,12 +92,13 @@ enum TourScript {
         TourStep(target: .stats, symbol: "chart.bar",
                  title: "Live stats",
                  detail: "Peak frequency, bandwidth, duration, pulse rate and count for the most recent pulse, plus the current species ID and input level. They clear when activity goes stale."),
+        // Left-to-right along the stats header, matching statsStrip's own order.
+        TourStep(target: .slowReplayStatus, symbol: "ear",
+                 title: "Slow replay status",
+                 detail: "Only appears while the slow-replay listen mode is running. An ear means it's ready and waiting for a call, red means it's capturing one, and a tortoise means it's replaying — while that ring fills, no new call can be captured. (Shown here for the tour.)"),
         TourStep(target: .feedbackWarning, symbol: "exclamationmark.triangle.fill",
                  title: "Feedback warning",
                  detail: "Appears only while heterodyne or other captured audio is playing out of the phone's speaker — the mic hears that playback and shows it as a spurious second call. Wear headphones to clear it. (Shown here for the tour.)"),
-        TourStep(target: .timeExpansionCounter, symbol: "tortoise",
-                 title: "Time-expansion counter",
-                 detail: "Shown only in the time-expansion listen mode: a running count of stretched calls, and — in red, once it's non-zero — how many more triggered while a previous one was still playing back slowed down. Tap it for why that happens. (Shown here for the tour.)"),
         TourStep(target: .sessionStatus, symbol: "location.fill",
                  title: "What's running",
                  detail: "Off when nothing is detecting, Listening for an unlogged run, or Session when IDs are being logged with a GPS track."),
@@ -152,11 +153,14 @@ enum TourScript {
                  detail: "Arms WAV recording — each detected pass is saved as its own file, with the species ID in its metadata."),
         TourStep(target: .listen, symbol: "headphones",
                  title: "Listen",
-                 detail: "Cycles the listen mode — off, heterodyne (tuned-down clicks and chirps), then time expansion (each call slowed 8× so its real shape is audible) — so you can hear the bats live."),
+                 detail: "One button, four steps: off, heterodyne (tuned-down clicks and chirps), slow replay (a snippet around each call played back 8× slower, so its real shape is audible), then slow replay with heterodyne underneath it. The glyph shows which you're on — headphones, antenna, tortoise, filled tortoise."),
+        TourStep(target: .listen, symbol: "tortoise.fill",
+                 title: "Slow replay, and going deaf",
+                 detail: "While a snippet is replaying, no new call is being captured — that's the trade-off, and it's why the fourth step exists: heterodyne keeps playing underneath, so you can still hear the bat overhead while the last call is replayed. The status pill up in the stats header shows which of the two it's doing."),
 
         TourStep(target: nil, symbol: "line.3.horizontal.decrease.circle",
                  title: "Menus",
-                 detail: "Top-left switches between Detector and Sessions and reopens this Info screen. Top-right (on Detector) holds Settings and Diagnostics. That's the tour — happy detecting!"),
+                 detail: "Top-left switches between Detector and Sessions and reopens this Info screen. Top-right (on Detector) holds Settings and Help. That's the tour — happy detecting!"),
     ]
 }
 
@@ -265,8 +269,8 @@ struct AppInfoView: View {
                     "Isolates each call and renders an onset-aligned close-up.")
             feature("sparkle.magnifyingglass", "Species ID",
                     "On-device classifier names the species, with runner-up and confidence.")
-            feature("headphones", "Heterodyne & time-expansion",
-                    "Hear the ultrasound live, tuned down or slowed 8×.")
+            feature("headphones", "Heterodyne & slow replay",
+                    "Hear the ultrasound live — tuned down, replayed 8× slower, or both at once.")
             feature("square.stack.3d.up", "Sessions & map",
                     "Log passes with a GPS track and see where each was heard.")
         }

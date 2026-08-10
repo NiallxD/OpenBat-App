@@ -228,19 +228,30 @@ final class PulseDetector {
     var pcmProvider: ((_ count: Int, _ endAbsolute: Int) -> [Float])?
 
     /// Called on the main thread at the rising edge of each new pulse run, with the
-    /// peak frequency (Hz) of the triggering column. Use this to open the heterodyne
-    /// gate and snap the LO immediately — don't wait for the 67 ms stats timer.
-    var onPulseStart: ((Double) -> Void)?
+    /// peak frequency (Hz) and normalised peak level (0–1, the `amplitudeThreshold`
+    /// scale) of the triggering column. Use this to open the heterodyne gate and
+    /// snap the LO immediately — don't wait for the 67 ms stats timer.
+    ///
+    /// The level is here for `PulseHaptics`, which maps it to haptic intensity;
+    /// the rising edge is the only callback early enough for a haptic to feel
+    /// simultaneous with the call.
+    var onPulseStart: ((Double, Float) -> Void)?
+
 
     /// Fires for EVERY valid pulse with the call's absolute sample window
     /// (onset, length). Unlike the capture path this is not rate-limited, so it
     /// keeps up with pulses that render+classify drops.
     ///
     /// The length is `contentLen` columns — the trailing silence of the run is
-    /// already subtracted — which is why `VariableTimeDistortionProcessor` can use it
-    /// as a call boundary directly. A level gate cannot produce this: the echo
-    /// after a call sits 10–30 dB above the noise floor and decays smoothly out
-    /// of the call, so amplitude thresholds do not separate them.
+    /// already subtracted — so it can be used as a call boundary directly. A
+    /// level gate cannot produce this: the echo after a call sits 10–30 dB above
+    /// the noise floor and decays smoothly out of the call, so amplitude
+    /// thresholds do not separate them.
+    ///
+    /// **Currently unset.** Its only subscriber was the withdrawn live variable
+    /// time distortion mode (see `Quarantine/VariableTimeDistortion/`). Kept
+    /// because the boundary it reports is detector output, not expansion
+    /// machinery, and computing it costs nothing.
     var onPulseWindow: ((Int, Int) -> Void)?
 
     /// Called on the main thread whenever a single pulse finishes classification, with
@@ -513,7 +524,7 @@ final class PulseDetector {
                 inPulseRun = true
                 runColumns = 0
                 aboveColumns = 0
-                onPulseStart?(peakFrequency)
+                onPulseStart?(peakFrequency, peakLevel)
             }
             runColumns += 1
             aboveColumns += 1

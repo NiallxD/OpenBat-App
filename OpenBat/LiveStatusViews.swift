@@ -45,6 +45,16 @@ struct TunedPillView: View {
                  ? String(format: "%.1f kHz", audio.tunedFrequency / 1000)
                  : "tuning…")
                 .font(.caption.monospacedDigit())
+                // FIXED width, or the capsule resizes continuously and appears to
+                // whizz about. `monospacedDigit` equalises digit widths but not the
+                // character COUNT: "8.5 kHz", "48.3 kHz" and "123.4 kHz" are 7, 8
+                // and 9 characters, and the auto-tuner slews the LO at ~15 Hz.
+                // "tuning…" (shown whenever the squelch closes between passes) is a
+                // bigger jump again. Sized for the widest real value at 192 kHz
+                // Nyquist; `lineLimit` keeps a surprise from wrapping.
+                .frame(width: 62, alignment: .leading)
+                .lineLimit(1)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .foregroundStyle(audio.isAutoTune ? .green : .orange)
         .padding(.horizontal, 10)
@@ -230,124 +240,6 @@ struct SpeakerFeedbackWarningPill: View {
     }
 }
 
-// MARK: - Variable time distortion lag pill
-
-/// Live lag indicator for the `.variableTimeDistortion` listen mode: how far
-/// behind real time the output is, a running count of calls stretched, and — in
-/// orange, only once non-zero — calls that went by unstretched because their
-/// window arrived too late to use.
-///
-/// This replaces the adaptive-TE pill, and it reports the OPPOSITE trade. That
-/// mode's honest cost was calls missed while it was deaf; this mode is never
-/// deaf and misses nothing, and pays in delay instead — so the headline number
-/// here is seconds behind, not calls lost.
-///
-/// Contained deliberately: the counters are
-/// atomics set on the realtime audio thread, so reading them from a property
-/// `ContentView.body` depends on would hit the churn Context.md §13 warns
-/// about. Polled here in a self-contained leaf view instead.
-struct VariableTimeDistortionLagPill: View {
-    let audio: AudioEngineController
-    /// Set while the guided tour is running: forces the pill on with stand-in
-    /// values, since the tour is normally taken before the user has switched
-    /// into this listen mode.
-    var tourDemo: Bool = false
-
-    @State private var showExplainer = false
-
-    var body: some View {
-        if tourDemo || (audio.isRunning && audio.listenMode == .variableTimeDistortion) {
-            // Button and popover OUTSIDE the TimelineView, for the same reason
-            // as the pill above: a presenter rebuilding 10x/s drops its popover.
-            Button { showExplainer = true } label: { pillContent }
-                .buttonStyle(.plain)
-                .popover(isPresented: $showExplainer) {
-                    explainer
-                        .frame(idealWidth: 320)
-                        .presentationCompactAdaptation(.popover)
-                }
-        }
-    }
-
-    private var pillContent: some View {
-        TimelineView(.periodic(from: .now, by: 0.1)) { _ in
-            let lag = tourDemo ? 1.3 : audio.variableTimeDistortion.lagSeconds
-            let count = tourDemo ? 24 : audio.variableTimeDistortion.expandedCount
-            let dropped = tourDemo ? 0 : audio.variableTimeDistortion.droppedWindowCount
-            HStack(spacing: 4) {
-                Image(systemName: "wave.3.forward")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(Self.color(forLag: lag))
-                Text(Self.lagText(lag))
-                    .font(.system(size: 11, weight: .semibold).monospacedDigit())
-                    .foregroundStyle(.secondary)
-                Text("\(count)")
-                    .font(.system(size: 11, weight: .semibold).monospacedDigit())
-                    .foregroundStyle(.secondary)
-                // Only once something has actually been dropped — a permanent
-                // "-0" would read as a fault rather than a tally.
-                if dropped > 0 {
-                    Text("-\(dropped)")
-                        .font(.system(size: 11, weight: .semibold).monospacedDigit())
-                        .foregroundStyle(.orange)
-                }
-            }
-            .padding(.horizontal, 8)
-            .frame(height: StatusPillMetrics.height)
-            .background(.ultraThinMaterial, in: Capsule())
-            .accessibilityLabel(
-                "Variable time distortion, \(Self.lagText(lag)) behind, "
-                + "\(count) calls stretched, \(dropped) too late. Tap to explain."
-            )
-        }
-    }
-
-    /// Plain-language explanation. Same house style as the pill above: no
-    /// jargon, no patent talk — just what the number means and why.
-    private var explainer: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("Why it runs behind")
-                    .font(.headline)
-
-                Text("Bat calls are too high to hear and far too short to follow — a typical call lasts a few thousandths of a second. This mode slows each call down 8 times so you can hear its shape, and then races through the quiet in between to make the time back.")
-
-                Text("Slowing a call down takes longer than the call did, so the sound you're hearing falls behind what the microphone is picking up. This number is how far behind. It grows while bats are calling steadily and shrinks again in the quiet.")
-
-                Divider()
-
-                Text("Nothing is missed")
-                    .font(.subheadline.weight(.semibold))
-
-                Text("Unlike the older time expansion mode, the microphone is never switched off — every sound is kept and played, just not always at the same speed. Falling behind is the price of that, and it catches up on its own once the bats move away.")
-
-                Text("If the orange number appears, some calls were identified too late to be stretched and played by at normal speed. Raising Lookahead in the tuning panel gives the detector more time and should clear it.")
-
-                Text("If being behind matters more than hearing call shape, switch to heterodyne — it is always live, but gives you clicks rather than the shape of a call.")
-
-                Text("The counters reset when you change listening mode.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
-            .padding()
-        }
-    }
-
-    private static func lagText(_ lag: Double) -> String {
-        lag < 10 ? String(format: "%.1fs", lag) : String(format: "%.0fs", lag)
-    }
-
-    /// Lag is normal, so this greys the small numbers rather than alarming on
-    /// them; it only warms up once the delay is long enough to be disorienting.
-    private static func color(forLag lag: Double) -> Color {
-        switch lag {
-        case ..<2: .toggleOn
-        case ..<6: .yellow
-        default: .orange
-        }
-    }
-}
-
 // MARK: - Mic status pill
 
 /// External-mic connection indicator: a green connector icon that slowly pulses
@@ -365,7 +257,7 @@ struct MicStatusPill: View {
 
     var body: some View {
         // The Button and its popover sit OUTSIDE MicStatusPillContent on purpose —
-        // same reasoning as VariableTimeDistortionLagPill above: `audio.diagnostics`
+        // same reasoning as SpeakerFeedbackWarningPill above: `audio.diagnostics`
         // churns at 15 Hz (AudioEngineController.flushStats), and a presenter that
         // rebuilds that fast can drop its own popover/tap mid-gesture. Only the leaf
         // content (icon + rate text) reads diagnostics; this body doesn't.
@@ -391,7 +283,9 @@ private struct MicStatusPillContent: View {
         // both alarms: the red "no ultrasonic mic" slash, and the clamped-rate
         // flash for a demo clip recorded below 384 kHz. Neither is a fault the
         // user can act on, and the Demo pill beside this one already says why.
-        let rateKnown = audio.isRunning && d.actualSampleRate > 0
+        // isActive so the rate label doesn't blink out for the length of a
+        // listen-mode restart — see AudioEngineController.isActive.
+        let rateKnown = audio.isActive && d.actualSampleRate > 0
         let rateBad = !demo && rateKnown && d.actualSampleRate < micStatusRequiredRate
         // Both faded states are computed here rather than inline so each can be the
         // `value:` of its own scoped `.animation` below — see the onAppear comment.
@@ -403,14 +297,28 @@ private struct MicStatusPillContent: View {
                 .foregroundStyle(demo ? Color.orange : (connected ? .green : .red))
                 .opacity(iconFaded ? 0.35 : 1)
                 .animation(.easeInOut(duration: 1.4).repeatForever(autoreverses: true), value: iconFaded)
+                .geometryGroup()
             if rateKnown {
                 Text("\(Int((d.actualSampleRate / 1000).rounded())) kHz")
                     .font(.system(size: 9, weight: .semibold).monospacedDigit())
                     .foregroundStyle(rateBad ? Color.red : .secondary)
                     .opacity(rateFaded ? 0.25 : 1)
                     .animation(.easeInOut(duration: 0.4).repeatForever(autoreverses: true), value: rateFaded)
+                    .geometryGroup()
             }
         }
+        // The two `.geometryGroup()`s above are the fix for the rate label flying
+        // left and right across the status row while flashing red. A scoped
+        // `.animation(_:value:)` carrying `repeatForever(autoreverses:)` stays
+        // ACTIVE on that view forever once started — it doesn't only animate the
+        // `value:` it was keyed to. So every later change to the label's resolved
+        // geometry got picked up by that repeat too: when a neighbour in the row
+        // relaid out (the session timer's text changing width once a second is
+        // enough), the label's new x-position became one end of an autoreversing,
+        // never-ending interpolation, and it slid back and forth out of its
+        // capsule. `.geometryGroup()` makes each leaf take its position from the
+        // parent's (unanimated) transaction as a rigid unit, so the repeat can
+        // only reach `opacity`, which is all it was ever for.
         .padding(.horizontal, 7)
         .frame(height: StatusPillMetrics.height)
         .background(.ultraThinMaterial, in: Capsule())
@@ -438,7 +346,9 @@ private struct MicStatusExplainer: View {
     var body: some View {
         let d = audio.diagnostics
         let connected = d.usbMicAvailable
-        let rateKnown = audio.isRunning && d.actualSampleRate > 0
+        // isActive so the rate label doesn't blink out for the length of a
+        // listen-mode restart — see AudioEngineController.isActive.
+        let rateKnown = audio.isActive && d.actualSampleRate > 0
         let rateBad = rateKnown && d.actualSampleRate < micStatusRequiredRate
         let rate = d.actualSampleRate
 
@@ -447,8 +357,8 @@ private struct MicStatusExplainer: View {
             title = "Demo mode"
             let name = audio.demoFileName ?? "a recording"
             message = rateKnown
-                ? "The microphone is not in use. Audio is coming from \(name), played at \(Int((rate / 1000).rounded())) kHz through the same detection pipeline as a live capture. Recording is disabled. End the demo from Diagnostics."
-                : "The microphone is not in use. Audio will come from \(name) instead, through the same detection pipeline as a live capture. Recording is disabled. End the demo from Diagnostics."
+                ? "The microphone is not in use. Audio is coming from \(name), played at \(Int((rate / 1000).rounded())) kHz through the same detection pipeline as a live capture. Recording is disabled. End the demo from the Debug menu."
+                : "The microphone is not in use. Audio will come from \(name) instead, through the same detection pipeline as a live capture. Recording is disabled. End the demo from the Debug menu."
         } else if !connected {
             title = "No ultrasonic microphone"
             message = "Only the built-in mic is available, which hears up to about 24 kHz — most bat calls are far above that. Plug in an ultrasonic USB microphone (such as the Griff) to detect bats."
@@ -633,5 +543,164 @@ struct VerticalAmplitudeMeterView: View {
         .onChange(of: audio.diagnostics.currentLevelDB) { _, db in
             peakHold.update(db: Double(db))
         }
+    }
+}
+
+// MARK: - Slow replay status
+
+/// Icon-only status pill for the live snippet expansion mode: armed and
+/// listening, capturing, or replaying (and therefore deaf).
+///
+/// **Why this earns a pill.** Being deaf is the mode's whole trade-off and is
+/// otherwise invisible — during a replay the output sounds busiest at exactly
+/// the moment new calls are being ignored. The ring around the icon shows how
+/// far through the replay is, which answers the question a user actually has:
+/// how long until it is listening again.
+///
+/// Polled on a timeline rather than observed. `SnippetExpansionProcessor` is
+/// `nonisolated` and its state lives in an atomic touched by two realtime
+/// threads — there is nothing to observe, and nothing there should be made to
+/// notify the main actor at audio rates.
+struct SnippetStatusPill: View {
+    let audio: AudioEngineController
+    /// Forces the idle (ear) appearance so the guided tour's step has something to
+    /// spotlight — the tour is normally taken with detection off and slow replay
+    /// unselected, i.e. in the one state where this pill deliberately renders
+    /// nothing. Same device as `SessionTimerPill.tourDemo`.
+    var tourDemo: Bool = false
+    @State private var showExplainer = false
+
+    private var isLive: Bool { audio.listenMode == .snippetExpansion && audio.isRunning }
+
+    var body: some View {
+        if isLive {
+            // 0.25 s, not 0.1: the only moving part is a progress ring on a
+            // replay lasting seconds, and every tick re-lays out the pill row it
+            // sits in. See landscapeStatusPillRow's transaction note.
+            TimelineView(.periodic(from: .now, by: 0.25)) { _ in
+                pill(audio.snippetExpansion.activity)
+            }
+        } else if tourDemo {
+            // No TimelineView on this path: there is no live activity to poll, and
+            // the tour already has a dim overlay and a moving spotlight to render.
+            pill(.listening)
+        }
+    }
+
+    private func pill(_ activity: SnippetExpansionProcessor.Activity) -> some View {
+        ZStack {
+            if activity == .replaying {
+                Circle()
+                    .trim(from: 0, to: audio.snippetExpansion.replayProgress)
+                    .stroke(Color.orange, style: .init(lineWidth: 1.5, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                    .frame(width: 18, height: 18)
+            }
+            Image(systemName: icon(activity))
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(color(activity))
+        }
+        .frame(width: StatusPillMetrics.height, height: StatusPillMetrics.height)
+        .background(.ultraThinMaterial, in: Circle())
+        .contentShape(Circle())
+        .onTapGesture { showExplainer = true }
+        .accessibilityLabel(label(activity))
+        .popover(isPresented: $showExplainer) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Slow replay").font(.subheadline.weight(.semibold))
+                // "Ready to capture", not "armed and recording": this pill
+                // says nothing about the WAV recorder, and the old wording
+                // was read as if it did.
+                Text("Ear: ready, waiting for a call. Red: capturing the snippet around a call. Tortoise: replaying it slowly — while that ring fills, no new snippet is being captured. Live heterodyne keeps playing throughout, so you never lose the bat.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(12)
+            .frame(width: 250, alignment: .leading)
+            .presentationCompactAdaptation(.popover)
+        }
+    }
+
+    private func icon(_ a: SnippetExpansionProcessor.Activity) -> String {
+        switch a {
+        case .listening: "ear"
+        case .capturing: "record.circle"
+        case .replaying: "tortoise.fill"
+        }
+    }
+
+    // Orange for replaying — the app's existing "active, and costing you
+    // something" colour, and the state worth noticing.
+    private func color(_ a: SnippetExpansionProcessor.Activity) -> Color {
+        switch a {
+        case .listening: .secondary
+        case .capturing: .red
+        case .replaying: .orange
+        }
+    }
+
+    private func label(_ a: SnippetExpansionProcessor.Activity) -> String {
+        switch a {
+        case .listening: "Slow replay: listening"
+        case .capturing: "Slow replay: capturing"
+        case .replaying: "Slow replay: replaying, not capturing"
+        }
+    }
+}
+
+// MARK: - Recording status
+
+/// "Not recording" / "Recording" badge for the corner of the spectrogram.
+///
+/// The record button alone was not reading clearly enough: armed and unarmed
+/// differ only by the button's tint, which is easy to miss in the field and
+/// costly to get wrong — a whole session can be listened through without a
+/// single file being written. This states it in words, in the place the user is
+/// already looking.
+///
+/// **Static, with no pulsing dot.** The first version pulsed the dot with
+/// `.repeatForever(autoreverses:)`. That is the one animation kind
+/// `recordPulseAnimation` documents as unsafe here: it can be picked up from the
+/// transaction by unrelated views, and once inherited there is nothing to end
+/// it, so they oscillate for the rest of the run. Adding a second one to the
+/// hierarchy (the record glyph already has the one carefully scoped instance)
+/// set the status pills and toolbar sliding around the screen. The badge's job
+/// is legibility, not motion, so the motion is simply gone.
+///
+/// Tied to `isArmed` — the record BUTTON's state — not to `isWriting`.
+///
+/// Writing is the literally accurate signal, and was tried first: armed means
+/// "will record when a call arrives", so between calls nothing is being written.
+/// But that makes the pill flicker between "Recording" and "Not recording"
+/// through every gap in a pass, which is worse than useless for the one job it
+/// has. The user feedback this exists to answer is "it's easy to miss that
+/// you're not recording", and against that question the honest answer is
+/// whether recording is switched on, not whether a bat happens to be calling
+/// this second.
+struct RecordingStatusBadge: View {
+    let recorder: AudioRecorder
+    /// Forces the recording appearance for the guided tour, matching
+    /// `SessionTimerPill.tourDemo`.
+    var tourDemo: Bool = false
+
+    private var isOn: Bool { tourDemo || recorder.isArmed }
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Circle()
+                .fill(isOn ? Color.white : Color.secondary.opacity(0.7))
+                .frame(width: 6, height: 6)
+            Text(isOn ? "Recording" : "Not recording")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(isOn ? .white : Color.secondary)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(.ultraThinMaterial, in: Capsule())
+        // NO pulsing dot, deliberately — see the type's doc comment.
+        .transaction { $0.animation = nil }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(isOn ? "Recording" : "Not recording")
     }
 }

@@ -146,8 +146,7 @@ nonisolated final class TimeExpansionProcessor: @unchecked Sendable {
     /// places this processor can actually lose audio. At the sizing above,
     /// hitting this at all means a real stall happened, not ordinary drift;
     /// surfaced so the UI can show an honest "audio was dropped" signal
-    /// instead of the loss being silent, same idea as
-    /// `VariableTimeDistortionProcessor.droppedWindowCount`.
+    /// instead of the loss being silent.
     private let overflowCountA = Atomic<Int>(0)
     var overflowCount: Int { overflowCountA.load(ordering: .relaxed) }
 

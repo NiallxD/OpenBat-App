@@ -52,6 +52,19 @@ struct WavPlayerView: View {
     /// load path) — without this, a render failure left `overview` nil with
     /// no error set at all, so the UI sat on "Rendering spectrogram…" forever.
     @State private var overviewError: String?
+    /// Non-nil while this recording's WAV is still coming down from iCloud —
+    /// the fraction landed so far, or nil-within-non-nil (see `DownloadState`)
+    /// when iCloud isn't reporting one yet. Drives the "Downloading…" branch of
+    /// `spectrogramSection`; see `load()` for why the wait is explicit.
+    @State private var downloadState: DownloadState?
+    /// Owns the download-then-render sequence so leaving the screen (or opening
+    /// a different recording) cancels a wait that could otherwise run minutes.
+    @State private var loadTask: Task<Void, Never>?
+
+    /// `fraction` nil = iCloud hasn't reported a percentage yet, which is
+    /// normal for the first seconds and for a file whose placeholder hasn't
+    /// been created — the UI shows indeterminate progress rather than 0%.
+    struct DownloadState { var fraction: Double? }
     @State private var viewport = WavViewport(startSample: 0, endSample: 1, minFreqHz: 0, maxFreqHz: 1)
     @State private var selection: AnalysisBox?
     /// Default (false) is pan/zoom via drag on the spectrogram; true switches
@@ -266,6 +279,10 @@ struct WavPlayerView: View {
         .onAppear { load() }
         .onDisappear {
             followTask?.cancel()
+            // Leaving the screen must end an in-flight iCloud wait too — it
+            // polls for up to five minutes otherwise. The download itself is
+            // already requested and carries on in the background.
+            loadTask?.cancel()
             engine.stop()
         }
         .onChange(of: hideSilence) { _, _ in rebuildSilenceMap() }
@@ -465,6 +482,28 @@ struct WavPlayerView: View {
                 ContentUnavailableView("Can't render spectrogram", systemImage: "exclamationmark.triangle",
                                        description: Text(overviewError))
                     .padding(8)
+            } else if let downloadState {
+                // Distinct from "Rendering spectrogram…" on purpose: this wait
+                // is a network transfer of the whole WAV (see `load()`), can
+                // legitimately take minutes on a big file, and used to look
+                // identical to a frozen app.
+                VStack(spacing: 10) {
+                    if let fraction = downloadState.fraction {
+                        ProgressView(value: fraction) {
+                            Text("Downloading from iCloud…")
+                        }
+                        .progressViewStyle(.linear)
+                        .frame(maxWidth: 260)
+                    } else {
+                        ProgressView("Downloading from iCloud…")
+                    }
+                    Text("This recording was restored from iCloud and its audio is still being fetched.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                .padding(8)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ProgressView("Rendering spectrogram…")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -567,37 +606,73 @@ struct WavPlayerView: View {
         // completion below rebuild it if hide-silence is (persisted) on.
         silenceMap = nil
         compressedOverview = nil
-        engine.load(url: url)
-        timeExpSettings.apply(to: engine.timeExpansion)
-        applyBand()
+        downloadState = nil
 
         let pal = palette, floor = effectiveNoiseFloor
         let calCurve = micCalSettings.activeCurve
-        WavPlayerDebugLog.log("WavPlayer", "load: starting renderOverview for \(url.lastPathComponent)")
-        Task.detached(priority: .userInitiated) {
-            let result = WavPlayerDebugLog.time("WavPlayer", "renderOverview") {
-                WavSpectrogramEngine.renderOverview(wavURL: url, palette: pal, noiseFloor: floor, calibrationCurve: calCurve)
-            }
-            await MainActor.run {
-                guard let result else {
-                    WavPlayerDebugLog.log("WavPlayer", "renderOverview FAILED for \(url.lastPathComponent)")
-                    overviewError = "Couldn't render a spectrogram for this recording."
+        loadTask?.cancel()
+        loadTask = Task { @MainActor in
+            // Nothing may touch this file until its bytes are actually here.
+            // On a cloud-backed library after a delete/reinstall the WAV is an
+            // iCloud placeholder, and every reader below (PlaybackEngine.load's
+            // header read, renderOverview's whole-file scan) opens it with
+            // FileHandle/AVAudioFile — which does not fail on a placeholder, it
+            // BLOCKS while iCloud pulls down the whole multi-megabyte 384 kHz
+            // file. PlaybackEngine.load blocking that way on the main actor is
+            // what made tapping a recording appear to hang with no explanation.
+            // Waiting here instead keeps the wait off the main thread, makes it
+            // visible ("Downloading from iCloud…"), and makes it cancellable.
+            if !CloudStorage.isDownloaded(url) {
+                WavPlayerDebugLog.log("WavPlayer", "load: \(url.lastPathComponent) is an iCloud placeholder — downloading first")
+                downloadState = DownloadState(fraction: CloudStorage.downloadFraction(url))
+                let progressTask = Task { @MainActor in
+                    while !Task.isCancelled {
+                        try? await Task.sleep(for: .milliseconds(500))
+                        guard !Task.isCancelled else { return }
+                        downloadState = DownloadState(fraction: CloudStorage.downloadFraction(url))
+                    }
+                }
+                let arrived = await CloudStorage.awaitDownload(url)
+                progressTask.cancel()
+                downloadState = nil
+                guard !Task.isCancelled else { return }
+                guard arrived else {
+                    WavPlayerDebugLog.log("WavPlayer", "load: iCloud download did not complete for \(url.lastPathComponent)")
+                    overviewError = "This recording is still in iCloud and hasn't finished downloading. Check your connection and open it again."
                     return
                 }
-                WavPlayerDebugLog.log("WavPlayer", "renderOverview OK: \(Int(result.image.size.width))x\(Int(result.image.size.height)), totalSamples=\(result.totalSamples), sampleRate=\(result.sampleRate)")
-                overview = result
-                // Default to a half-zoomed view rather than the whole file —
-                // most recordings are long enough that "whole file" shows no
-                // usable call detail at all until the user zooms in manually;
-                // starting already zoomed in (centered on the file's middle)
-                // gives a useful view immediately.
-                let whole = WavViewport.wholeFile(totalSamples: result.totalSamples, maxFreqHz: result.maxFreqHz)
-                viewport = WavViewportMath.viewportForTimeZoom(
-                    committed: whole, zoomFraction: 0.5, totalSamples: result.totalSamples)
-                // Persisted hide-silence: build its compressed timeline now
-                // that the overview (its data source) exists.
-                if hideSilence { rebuildSilenceMap() }
             }
+            guard !Task.isCancelled else { return }
+
+            engine.load(url: url)
+            timeExpSettings.apply(to: engine.timeExpansion)
+            applyBand()
+
+            WavPlayerDebugLog.log("WavPlayer", "load: starting renderOverview for \(url.lastPathComponent)")
+            let result = await Task.detached(priority: .userInitiated) {
+                WavPlayerDebugLog.time("WavPlayer", "renderOverview") {
+                    WavSpectrogramEngine.renderOverview(wavURL: url, palette: pal, noiseFloor: floor, calibrationCurve: calCurve)
+                }
+            }.value
+            guard !Task.isCancelled else { return }
+            guard let result else {
+                WavPlayerDebugLog.log("WavPlayer", "renderOverview FAILED for \(url.lastPathComponent)")
+                overviewError = "Couldn't render a spectrogram for this recording."
+                return
+            }
+            WavPlayerDebugLog.log("WavPlayer", "renderOverview OK: \(Int(result.image.size.width))x\(Int(result.image.size.height)), totalSamples=\(result.totalSamples), sampleRate=\(result.sampleRate)")
+            overview = result
+            // Default to a half-zoomed view rather than the whole file —
+            // most recordings are long enough that "whole file" shows no
+            // usable call detail at all until the user zooms in manually;
+            // starting already zoomed in (centered on the file's middle)
+            // gives a useful view immediately.
+            let whole = WavViewport.wholeFile(totalSamples: result.totalSamples, maxFreqHz: result.maxFreqHz)
+            viewport = WavViewportMath.viewportForTimeZoom(
+                committed: whole, zoomFraction: 0.5, totalSamples: result.totalSamples)
+            // Persisted hide-silence: build its compressed timeline now
+            // that the overview (its data source) exists.
+            if hideSilence { rebuildSilenceMap() }
         }
     }
 

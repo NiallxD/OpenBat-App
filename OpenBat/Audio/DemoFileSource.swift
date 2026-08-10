@@ -5,17 +5,15 @@
 //  Feeds a WAV file into the capture pipeline in place of the microphone tap,
 //  for demo mode (see AudioEngineController's "Demo mode" section). Delivers
 //  `AVAudioPCMBuffer`s paced to wall clock at the file's own sample rate, so
-//  everything downstream of the tap — SpectrogramProcessor, PulseDetector, the
-//  heterodyne and adaptive time-expansion processors — behaves exactly as it
-//  does live. Nothing below the tap can tell the difference: every consumer
+//  everything downstream of the tap — SpectrogramProcessor, PulseDetector and
+//  the heterodyne processor — behaves exactly as it does live. Nothing below the tap can tell the difference: every consumer
 //  already reads `buffer.format.sampleRate` off the buffer rather than assuming
 //  384 kHz.
 //
-//  Real-time pacing is not a nicety. VariableTimeDistortionProcessor's
-//  drain-deafness and its `missedCount` are wall-clock behaviours (see the
-//  invariants in that file); feeding the pipeline faster than real time would
-//  make the mode look better than it is, and feeding it slower would hide the
-//  misses entirely.
+//  Real-time pacing is not a nicety. Detection rate, pulse-rate statistics and
+//  every listening mode's behaviour are wall-clock quantities; feeding the
+//  pipeline faster than real time flatters them and feeding it slower hides
+//  their failures.
 //
 
 import AVFoundation

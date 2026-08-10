@@ -117,9 +117,12 @@ nonisolated final class PlaybackDriver: @unchecked Sendable {
             switch self.mode {
             case .heterodyne:        hetero.render(out, frames: Int(frameCount))
             case .timeExpansion:     timeExp.render(out, frames: Int(frameCount))
-            // Live-only mode; PlaybackDriver never has this set (see ListenMode's
-            // doc comment) but is handled explicitly to keep the switch exhaustive.
-            case .off, .variableTimeDistortion:
+            // `.snippetExpansion` is live-only: it captures from the microphone
+            // tap around a trigger, which has no counterpart in file playback
+            // (where `.timeExpansion` already expands the whole recording).
+            // PlaybackView never selects it; silence rather than a `default:` so
+            // a future mode still has to be considered here.
+            case .off, .snippetExpansion:
                 for i in 0..<Int(frameCount) { out[i] = 0 }
             }
             return noErr

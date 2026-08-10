@@ -51,11 +51,16 @@ struct ContentView: View {
     @State private var pulseDetector = PulseDetector()
     @State private var recorder = AudioRecorder()
     @State private var autoIDSettings = AutoIDSettings()
+    /// Live snippet-expansion settings. Threaded down (rather than owned by the
+    /// tuning overlay) because the processor has to be seeded with them at
+    /// capture start, not only when the overlay happens to be open.
+    @State private var snippetSettings = SnippetExpansionSettings()
     @State private var micCalSettings = MicCalibrationSettings()
     @State private var classStore = ClassificationStore()
     @State private var liveActivity = LiveActivityController()
     @State private var detectionPump = BackgroundDetectionPump()
     @State private var location = LocationProvider()
+    @State private var haptics = PulseHaptics()
     // Not `@State`: the store outlives any one screen and is shared with
     // onboarding. `@Observable` tracks property reads in `body` regardless of
     // how the reference is held, so this still updates the view.
@@ -63,11 +68,16 @@ struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var showStartPrompt = false
     @State private var showMicDeniedAlert = false
-    // Easter egg: tap the footer version number 10x within the reset window
-    // below to send a swarm of bats across the screen — see BatSwarmOverlay.
+    // Easter eggs on the footer version number, both on the same tap counter:
+    // 10 taps within the rolling window sends a swarm of bats across the screen
+    // (see BatSwarmOverlay), carrying on to 15 toggles debug mode, which
+    // reveals the Debug menu entry.
     @State private var versionTapCount = 0
     @State private var versionTapResetWork: DispatchWorkItem?
     @State private var showBatSwarm = false
+    /// Persisted so the unlock survives a relaunch — the ten taps are a way in,
+    /// not something to repeat every launch. Toggled by `registerVersionTap`.
+    @AppStorage("debugModeEnabled") private var debugModeEnabled = false
     @State private var showDiagnostics = false
     @State private var showSettings = false
     /// Set once per launch when a previously-granted consent predates the
@@ -118,6 +128,10 @@ struct ContentView: View {
     /// When the current detecting run started — nil while stopped. Scopes the
     /// species ID feed to "this run only" (see SpeciesFeedView).
     @State private var feedSessionStart: Date?
+    /// One-shot "you're not recording" nudge — see `checkNotRecordingNudge`.
+    @State private var showNotRecordingNudge = false
+    @State private var notRecordingNudgeShown = false
+    @AppStorage("nudge.notRecording.suppressed") private var suppressNotRecordingNudge = false
     // .compact vertical size class == iPhone landscape → use the wide layout.
     @Environment(\.verticalSizeClass) private var vSizeClass
     @AppStorage("recording.autoRecordOnSessionStart") private var autoRecordOnSessionStart = true
@@ -163,6 +177,16 @@ struct ContentView: View {
     var body: some View {
         NavigationStack {
             sectionContent
+                // Keyed on the session start, so it re-arms for each new listening
+                // run and cancels automatically if the user stops before 60 s.
+                // A sleep beats polling here: there is exactly one deadline.
+                .task(id: feedSessionStart) {
+                    notRecordingNudgeShown = false
+                    guard feedSessionStart != nil else { return }
+                    try? await Task.sleep(for: .seconds(60))
+                    guard !Task.isCancelled else { return }
+                    checkNotRecordingNudge()
+                }
                 .navigationTitle(section.rawValue)
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
@@ -219,7 +243,8 @@ struct ContentView: View {
                     SettingsView(settings: autoIDSettings,
                                  pulseDetector: pulseDetector, recorder: recorder,
                                  location: location, consent: consent, classStore: classStore,
-                                 audio: audio, micCalSettings: micCalSettings)
+                                 audio: audio, micCalSettings: micCalSettings,
+                                 haptics: haptics)
                 }
                 // Someone who opted in, then had the terms change under them,
                 // has silently stopped contributing. Settings carries the same
@@ -368,14 +393,12 @@ struct ContentView: View {
                 recorder.append(buffer)
             }
             audio.autoTunePeakProvider = { [processor] in processor.peakFrequency }
-            pulseDetector.onPulseStart = { [audio] freq in
+            pulseDetector.onPulseStart = { [audio, haptics] freq, level in
                 audio.notifyPulseDetected(frequency: freq)
-            }
-            // Variable Time Distortion expands exactly the detector's call window —
-            // the one boundary in the app that separates a call from its echo.
-            pulseDetector.onPulseWindow = { [audio] onsetAbs, lengthSamples in
-                audio.variableTimeDistortion.submitPulseWindow(onsetAbs: onsetAbs,
-                                                         lengthSamples: lengthSamples)
+                // Accessibility channel — see PulseHaptics. Deliberately not
+                // conditional on a listen mode: for a deaf or hard-of-hearing
+                // user this IS the output, not a garnish on the audio.
+                haptics.pulse(frequency: freq, level: level)
             }
             pulseDetector.onPulseClassified = { [recorder] result, date in
                 recorder.addClassifiedPulse(result: result, date: date)
@@ -576,6 +599,8 @@ struct ContentView: View {
                 LiveTuningOverlay(
                     audio: audio,
                     pulseDetector: pulseDetector,
+                    haptics: haptics,
+                    snippetSettings: snippetSettings,
                     bandLow: $bandLow, bandHigh: $bandHigh,
                     timeWindowSeconds: $timeWindowSeconds,
                     maxFrequency: nyquist,
@@ -735,9 +760,13 @@ struct ContentView: View {
             Button { showHelp = true } label: {
                 Label("Help", systemImage: "questionmark.circle")
             }
-            Divider()
-            Button { showDiagnostics = true } label: {
-                Label("Diagnostics", systemImage: "gauge.medium")
+            // Hidden until debug mode is unlocked by tapping the footer version
+            // number 10x — see `registerVersionTap`.
+            if debugModeEnabled {
+                Divider()
+                Button { showDiagnostics = true } label: {
+                    Label("Debug", systemImage: "gauge.medium")
+                }
             }
         } label: {
             label()
@@ -891,6 +920,16 @@ struct ContentView: View {
                             isPaused: menuIsOpen,
                             logFrequency: spectrogramLogFrequency)
                 .overlay(alignment: .topTrailing) { if showTunedOverlay { tunedPillOverlay } }
+                .overlay(alignment: .bottomTrailing) {
+                    // Recording state only. `SnippetStatusPill` used to sit here
+                    // beside it and now lives with the other status indicators in
+                    // the STATS card header (`statsStrip`) / `landscapeStatusPillRow`
+                    // — it reports which listening mode is doing what, which is a
+                    // status, not a recording fact, and next to "Not recording" its
+                    // idle ear read as a claim about the recorder.
+                    RecordingStatusBadge(recorder: recorder, tourDemo: tourActive)
+                        .padding(8)
+                }
                 .opacity(spectrogramShowsSpeciesID ? 0 : 1)
                 .allowsHitTesting(!spectrogramShowsSpeciesID)
 
@@ -928,17 +967,20 @@ struct ContentView: View {
                     Spacer()
                     playStopButton
                     Spacer()
-                    // Always present (not conditional on audio.isRunning) — see
-                    // controlBar's matching comment: `setListenMode` stops and
-                    // restarts the engine to switch modes, so isRunning flickers
-                    // false→true on every mode switch, and a conditionally-shown
-                    // button with a slide/fade transition animated that flicker as
-                    // a visible glitch on every single toggle. Disabled instead of
-                    // hidden while detection isn't running — same information,
-                    // no layout churn.
+                    // Always present (not conditional) — see controlBar's matching
+                    // comment: a listen-mode change that crosses "off" restarts the
+                    // engine, so `isRunning` flickers false→true, and a
+                    // conditionally-shown button with a slide/fade transition
+                    // animated that flicker as a visible glitch. Disabled instead of
+                    // hidden while detection isn't running — same information, no
+                    // layout churn. `isActive` covers the restart window itself.
                     recordButton
-                        .disabled(!audio.isRunning)
+                        .disabled(!audio.isActive)
                     Spacer()
+                    // One control, one width, in all four listen states — the
+                    // heterodyne-with-replay toggle that used to hang off this
+                    // button's trailing edge (and get clipped by this panel's
+                    // 26 % width) is now a step in the cycle itself.
                     listenModeCycleButton
                         .geometryGroup()
                     Spacer()
@@ -974,8 +1016,8 @@ struct ContentView: View {
                             .foregroundStyle(.secondary)
                         Spacer()
                         HStack(spacing: 8) {
+                            snippetStatusPill
                             speakerFeedbackWarning
-                            distortionLagPill
                             sessionStatusPill
                             micStatusPill
                             resetButton
@@ -1004,8 +1046,8 @@ struct ContentView: View {
     private var landscapeStatusPillRow: some View {
         HStack(spacing: 8) {
             sessionStatusPill
+            snippetStatusPill
             speakerFeedbackWarning
-            distortionLagPill
             if audio.listenMode == .heterodyne {
                 TunedPillView(audio: audio, nyquist: nyquist)
             }
@@ -1077,11 +1119,31 @@ struct ContentView: View {
     /// Session-status pill (Off / Listening / Session) for the portrait stats
     /// header, next to the mic pill. Same scoping rationale — see
     /// `SessionStatusPillView`. Forced to read "Listening" during the guided
-    /// tour for the same reason as `speakerFeedbackWarning`/`distortionLagPill`
-    /// below — the tour is normally taken with detection off.
+    /// tour for the same reason as `speakerFeedbackWarning` below — the tour is
+    /// normally taken with detection off.
     private var sessionStatusPill: some View {
         SessionStatusPillView(audio: audio, classStore: classStore, tourDemo: tourActive)
             .tourTarget(.sessionStatus)
+    }
+
+    /// Slow-replay activity pill (listening / capturing / replaying), shown only
+    /// while that listen mode is running — it renders nothing otherwise, so it
+    /// simply isn't there in heterodyne or with listening off. Lives with the
+    /// other status pills rather than in the spectrogram's corner, where sitting
+    /// beside the "Not recording" badge made its idle ear look like a statement
+    /// about the recorder.
+    ///
+    /// It drives a 0.25 s `TimelineView`, so it is the one pill in these rows
+    /// that re-evaluates on a clock. That is only safe because its frame is fixed
+    /// (`StatusPillMetrics.height` square, in every activity state) and so the row
+    /// never reflows around it — and because `MicStatusPillContent`'s animated
+    /// rate label is now contained with `.geometryGroup()`. Before that fix, this
+    /// pill's ticking was exactly what sent "48 kHz" sliding across the row, which
+    /// is why it was banished to the spectrogram corner in the first place. Keep
+    /// both of those properties if this pill grows a text label.
+    private var snippetStatusPill: some View {
+        SnippetStatusPill(audio: audio, tourDemo: tourActive)
+            .tourTarget(.slowReplayStatus)
     }
 
     /// Feedback-risk warning for listening audio on the speaker. See
@@ -1091,15 +1153,6 @@ struct ContentView: View {
     private var speakerFeedbackWarning: some View {
         SpeakerFeedbackWarningPill(audio: audio, tourDemo: tourActive)
             .tourTarget(.feedbackWarning)
-    }
-
-    /// Live capturing/draining indicator for the adaptive time-expansion listen
-    /// mode. Same scoping rationale as `speakerFeedbackWarning` — see
-    /// `VariableTimeDistortionLagPill`. Forced visible during the guided tour for
-    /// the same reason as `speakerFeedbackWarning`.
-    private var distortionLagPill: some View {
-        VariableTimeDistortionLagPill(audio: audio, tourDemo: tourActive)
-            .tourTarget(.timeExpansionCounter)
     }
 
     private var resetButton: some View {
@@ -1131,7 +1184,9 @@ struct ContentView: View {
         // activeSampleRate, not diagnostics.actualSampleRate — see the comment
         // on the onChange block in body.
         let rate = audio.activeSampleRate
-        return audio.isRunning && rate > 0 ? rate / 2 : 192_000
+        // isActive, not isRunning: otherwise the axis falls back to the 192 kHz
+        // default for the length of a listen-mode restart and then snaps back.
+        return audio.isActive && rate > 0 ? rate / 2 : 192_000
     }
 
     /// True while a full-screen sheet covers the live view — none of them need
@@ -1206,9 +1261,9 @@ struct ContentView: View {
                     playStopButtonCompact
                     // Always present, disabled rather than hidden while not running —
                     // see controlBar's matching comment for why (setListenMode's
-                    // stop+restart flickers audio.isRunning on every mode switch).
+                    // stop+restart across the "off" boundary flickers isRunning).
                     recordButtonCompact
-                        .disabled(!audio.isRunning)
+                        .disabled(!audio.isActive)
                     listenModeCycleButtonCompact
                         .geometryGroup()
                 }
@@ -1444,15 +1499,15 @@ struct ContentView: View {
             Spacer()
             // Recording only makes sense once detection is actually running, but the
             // button is always present (not conditionally shown) — see
-            // landscapeControlsPanel's matching comment: `setListenMode` stops and
-            // restarts the engine to switch modes, so `audio.isRunning` flickers
-            // false→true on every heterodyne/time-expansion/off toggle, and a
-            // conditionally-shown button with a slide/fade transition animated that
-            // flicker as a glitch on every single mode switch. Disabled instead of
+            // landscapeControlsPanel's matching comment: a listen-mode change across
+            // the "off" boundary restarts the engine, so `audio.isRunning` flickers
+            // false→true, and a conditionally-shown button with a slide/fade
+            // transition animated that flicker as a glitch. Disabled instead of
             // hidden — same information, no layout churn, and the tour's Record
-            // step always has something to point at.
+            // step always has something to point at. Switching BETWEEN two listening
+            // modes no longer restarts anything (AudioEngineController.setListenMode).
             recordButton
-                .disabled(!audio.isRunning)
+                .disabled(!audio.isActive)
             Spacer()
             listenModeCycleButton
                 // Without this, the listen button's icon animated its own geometry
@@ -1484,28 +1539,47 @@ struct ContentView: View {
             .versionFooterAnchor()
     }
 
-    /// Counts taps on the version footer within a rolling window; 10 taps
-    /// before the window lapses triggers the bat swarm. Each tap restarts
-    /// the reset timer so a burst of slower-than-instant-but-still-rapid
-    /// taps still counts, but a stray single tap days apart never does.
+    /// Counts taps on the version footer within a rolling window. Ten taps
+    /// before the window lapses sends the bat swarm; keeping going to fifteen
+    /// toggles debug mode (the Debug entry in the options menu). Each tap
+    /// restarts the reset timer so a burst of slower-than-instant-but-still-
+    /// rapid taps still counts, but a stray single tap days apart never does.
     private func registerVersionTap() {
         versionTapResetWork?.cancel()
         versionTapCount += 1
-        if versionTapCount >= 10 {
+        switch versionTapCount {
+        case 10:
+            releaseBatSwarm()
+        case 15:
             versionTapCount = 0
-            showBatSwarm = true
-            flourishBatSwarmHaptics()
-            DispatchQueue.main.asyncAfter(deadline: .now() + BatSwarmOverlay.totalDuration) {
-                showBatSwarm = false
-            }
+            debugModeEnabled.toggle()
+            UINotificationFeedbackGenerator()
+                .notificationOccurred(debugModeEnabled ? .success : .warning)
             return
+        default:
+            // A tick acknowledging the tap registered. Past the swarm the ticks
+            // harden, so the five taps to the debug toggle feel like they're
+            // building to something rather than trailing off after the payoff.
+            let style: UIImpactFeedbackGenerator.FeedbackStyle =
+                versionTapCount < 10 ? .light : (versionTapCount < 13 ? .medium : .heavy)
+            UIImpactFeedbackGenerator(style: style).impactOccurred()
         }
-        // A light tick just acknowledges the tap registered — the real payoff
-        // is the haptic flourish timed to the bats actually flying out below.
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
         let resetWork = DispatchWorkItem { versionTapCount = 0 }
         versionTapResetWork = resetWork
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2, execute: resetWork)
+        // Wider window past the swarm: the flourish's own haptics run for ~1.1 s
+        // and mask the tick, so the usual 1.2 s would ask the user to keep
+        // tapping blind and on time.
+        let window = versionTapCount < 10 ? 1.2 : 2.0
+        DispatchQueue.main.asyncAfter(deadline: .now() + window, execute: resetWork)
+    }
+
+    /// The payoff for the tenth tap.
+    private func releaseBatSwarm() {
+        showBatSwarm = true
+        flourishBatSwarmHaptics()
+        DispatchQueue.main.asyncAfter(deadline: .now() + BatSwarmOverlay.totalDuration) {
+            showBatSwarm = false
+        }
     }
 
     /// A volley of impacts timed to the swarm's emergence trickle (bats leave
@@ -1532,13 +1606,20 @@ struct ContentView: View {
         Button {
             toggleDetecting()
         } label: {
-            Image(systemName: audio.isRunning ? "stop.fill" : "ear")
-                .contentTransition(.symbolEffect(.replace))
+            // Running shows the animation, not a stop square. A red button with
+            // a square in it read as "recording" to users who were only
+            // listening — the two are separate actions in this app and the icon
+            // was actively teaching the wrong thing.
+            // `isActive`, not `isRunning`: a listen-mode change that crosses "off"
+            // stops and restarts the engine, and reading isRunning made this snap
+            // back to the idle ear and then re-animate — reporting a stop the user
+            // never asked for. See AudioEngineController.isActive.
+            ListeningEarIcon(isListening: audio.isActive)
                 .controlIcon()
         }
         .buttonStyle(.borderedProminent)
-        .tint(audio.isRunning ? .red : .accentColor)
-        .accessibilityLabel(audio.isRunning ? "Stop" : "Start")
+        .tint(audio.isActive ? .orange : .accentColor)
+        .accessibilityLabel(audio.isActive ? "Stop" : "Start")
         .tourTarget(.start)
     }
 
@@ -1549,12 +1630,10 @@ struct ContentView: View {
         Button {
             toggleDetecting()
         } label: {
-            Image(systemName: audio.isRunning ? "stop.fill" : "ear")
-                .contentTransition(.symbolEffect(.replace))
-                .font(.callout)
+            ListeningEarIcon(isListening: audio.isActive, size: 17)
         }
-        .tint(audio.isRunning ? .red : .accentColor)
-        .accessibilityLabel(audio.isRunning ? "Stop" : "Start")
+        .tint(audio.isActive ? .orange : .accentColor)
+        .accessibilityLabel(audio.isActive ? "Stop" : "Start")
         .tourTarget(.start)
     }
 
@@ -1578,6 +1657,9 @@ struct ContentView: View {
         // shouldn't wait on teardown.
         liveActivity.end()
         audio.stop()
+        // End any buzz immediately rather than letting the watchdog time it out
+        // — the user just stopped detecting, so the phone should go still now.
+        haptics.reset()
         recorder.setCoordinate(nil)
         feedSessionStart = nil
         if classStore.activeSessionID != nil {
@@ -1655,11 +1737,58 @@ struct ContentView: View {
             isDemo: audio.isDemoMode,
             startDate: feedSessionStart ?? Date()
         )
+        // Seed the snippet processor before capture opens. `reset` clears DSP
+        // state but not these, and the routing atomic is independent of the
+        // settings object, so both have to be pushed here or a fresh launch
+        // would run the defaults regardless of what was persisted.
+        snippetSettings.apply(to: audio.snippetExpansion)
+        audio.setSnippetRouting(snippetSettings.routing)
         Task { await audio.start() }
     }
 
     private var recordButton: some View {
         RecordButton(recorder: recorder, action: toggleRecording)
+            .popover(isPresented: $showNotRecordingNudge) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Just so you know, you're not recording.")
+                        .font(.subheadline.weight(.semibold))
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text("You have to manually arm recording when you start.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack {
+                        Button("Don't remind me") {
+                            suppressNotRecordingNudge = true
+                            showNotRecordingNudge = false
+                        }
+                        .font(.caption)
+                        Spacer()
+                        Button("Close") { showNotRecordingNudge = false }
+                            .font(.caption.weight(.semibold))
+                    }
+                }
+                .padding(14)
+                .frame(width: 260, alignment: .leading)
+                .presentationCompactAdaptation(.popover)
+            }
+    }
+
+    /// Fires once per run, 60 s into a listening session in which recording was
+    /// never armed. Deliberately a one-shot: a repeating nag for a deliberate
+    /// choice is worse than the mistake it prevents, and "Don't remind me"
+    /// silences it for good.
+    ///
+    /// Armed (not writing) counts as recording for this purpose — the user has
+    /// made the decision, and whether a call has arrived yet is not their doing.
+    private func checkNotRecordingNudge() {
+        guard !suppressNotRecordingNudge, !notRecordingNudgeShown,
+              audio.isRunning, !recorder.isArmed, !recorder.isWriting,
+              let started = feedSessionStart,
+              Date().timeIntervalSince(started) >= 60
+        else { return }
+        notRecordingNudgeShown = true
+        showNotRecordingNudge = true
     }
 
     /// Compact variant for the full-screen transport pill — see
@@ -1683,7 +1812,7 @@ struct ContentView: View {
     /// engine restart got faster.
     private var listenModeCycleButton: some View {
         Button {
-            audio.setListenMode(nextListenMode)
+            advanceListenMode()
         } label: {
             Image(systemName: listenIcon).controlIcon()
         }
@@ -1696,11 +1825,17 @@ struct ContentView: View {
         .tourTarget(.listen)
     }
 
+    // The separate "heterodyne alongside slow replay" antenna toggle that used to
+    // live here (in a regular and a compact variant, both hung off the listen
+    // button as trailing overlays) is gone: `advanceListenMode` folds that routing
+    // choice into the mode cycle itself. See its doc comment for why, and for what
+    // that costs the tuning overlay's Output control.
+
     /// Compact variant for the full-screen transport pill — see
     /// `playStopButtonCompact`.
     private var listenModeCycleButtonCompact: some View {
         Button {
-            audio.setListenMode(nextListenMode)
+            advanceListenMode()
         } label: {
             Image(systemName: listenIcon).font(.callout)
         }
@@ -1709,36 +1844,90 @@ struct ContentView: View {
         .tourTarget(.listen)
     }
 
-    // Live listening cycles off → heterodyne → variable time distortion → off.
-    // `.timeExpansion` is playback-only (see ListenMode's doc comment) and
-    // `.timeExpansion` is playback-only; it is handled explicitly
-    // (rather than via `default:`) so `ListenMode` stays exhaustively checked.
-    private var nextListenMode: ListenMode {
-        switch audio.listenMode {
-        case .off:                        .heterodyne
-        case .heterodyne:                 .variableTimeDistortion
-        case .variableTimeDistortion:     .off
-        case .timeExpansion:              .off
+    /// One tap advances live listening through four states:
+    ///
+    ///     off → heterodyne → slow replay → slow replay + heterodyne → off
+    ///
+    /// The last two are the same `ListenMode` (`.snippetExpansion`) differing only
+    /// in `SnippetOutputRouting`, which is why this is a method over two pieces of
+    /// state rather than a `nextListenMode` computed property.
+    ///
+    /// It absorbed what used to be a separate antenna toggle beside this button.
+    /// That button had no layout width — it was hung off this one's trailing edge
+    /// as an overlay so the row wouldn't shift when slow replay was selected — and
+    /// so in landscape it simply ran past the edge of the 26 %-wide controls panel
+    /// and was clipped away. Folding it into the cycle makes the control a fixed
+    /// width in every state, which is what actually removes that failure rather
+    /// than deferring it to the next device or the next button.
+    ///
+    /// **The cycle now owns `routing`.** Entering slow replay forces
+    /// `.expansionOnly`, overwriting whatever the live tuning overlay's Output
+    /// control last persisted. That is the price of putting routing in the cycle:
+    /// there can only be one authority for it, and this is the one the user
+    /// reaches in the field. `.heterodyneOnly` stays unreachable from here — it is
+    /// what `.heterodyne` already is — so a tap from that state (only settable in
+    /// the overlay) exits to off.
+    private func advanceListenMode() {
+        switch (audio.listenMode, snippetSettings.routing) {
+        case (.off, _):
+            audio.setListenMode(.heterodyne)
+        case (.heterodyne, _):
+            applySnippetRouting(.expansionOnly)
+            audio.setListenMode(.snippetExpansion)
+        case (.snippetExpansion, .expansionOnly):
+            // Routing only — deliberately NOT a mode change, so this step alone
+            // skips `setListenMode`'s stop-and-restart and the audio keeps running
+            // through it. Turning the heterodyne bed on mid-pass is the one
+            // transition most likely to be made with a bat overhead.
+            applySnippetRouting(.both)
+        case (.snippetExpansion, _):
+            audio.setListenMode(.off)
+        // Playback-only (see ListenMode's doc comment); handled explicitly rather
+        // than via `default:` so `ListenMode` stays exhaustively checked.
+        case (.timeExpansion, _):
+            audio.setListenMode(.off)
         }
     }
+
+    /// Writes routing to both the persisted settings and the running engine — the
+    /// two the old antenna button always set together.
+    private func applySnippetRouting(_ routing: SnippetOutputRouting) {
+        snippetSettings.routing = routing
+        audio.setSnippetRouting(routing)
+    }
+
+    /// True when the button is showing one of the two slow-replay states, i.e.
+    /// when `routing` is part of what the glyph is reporting.
+    private var listenModeIsReplay: Bool { audio.listenMode == .snippetExpansion }
 
     // Spelled out because this string is the VoiceOver label on the listen-mode
-    // button, whose only visible cue is an icon.
+    // button, whose only visible cue is an icon — and with four states behind one
+    // glyph, that label is now the only unambiguous statement of which one is on.
     private var listenModeName: String {
         switch audio.listenMode {
-        case .off:                   "Off"
-        case .heterodyne:            "Heterodyne"
-        case .variableTimeDistortion:      "Variable time distortion"
-        case .timeExpansion:         "Time expansion (file)"
+        case .off:              "Off"
+        case .heterodyne:       "Heterodyne"
+        case .snippetExpansion: snippetSettings.routing == .expansionOnly
+                                    ? "Slow replay"
+                                    : "Slow replay with heterodyne"
+        case .timeExpansion:    "Time expansion (file)"
         }
     }
 
+    /// Outline vs filled tortoise is the whole visual difference between the two
+    /// slow-replay states. It is a fine distinction, and it is deliberate: a badged
+    /// or composed glyph reads better in daylight but adds a second element inside
+    /// a 24×22 icon frame, and this row is used one-handed in the dark where the
+    /// tint (grey off / orange on) and the VoiceOver label carry more than the
+    /// glyph does. `listenModeName` is the authority for anyone who needs certainty.
     private var listenIcon: String {
         switch audio.listenMode {
-        case .off:                   "headphones"
-        case .heterodyne:            "antenna.radiowaves.left.and.right"
-        case .variableTimeDistortion:      "wave.3.forward"
-        case .timeExpansion:         "tortoise"
+        case .off:              "headphones"
+        case .heterodyne:       "antenna.radiowaves.left.and.right"
+        case .snippetExpansion: snippetSettings.routing == .expansionOnly
+                                    ? "tortoise"
+                                    : "tortoise.fill"
+        case .timeExpansion:    "tortoise"
         }
     }
 

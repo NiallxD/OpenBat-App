@@ -22,6 +22,8 @@ import SwiftUI
 struct LiveTuningOverlay: View {
     let audio: AudioEngineController
     let pulseDetector: PulseDetector
+    let haptics: PulseHaptics
+    let snippetSettings: SnippetExpansionSettings
     @Binding var bandLow: Double
     @Binding var bandHigh: Double
     @Binding var timeWindowSeconds: Double
@@ -35,7 +37,7 @@ struct LiveTuningOverlay: View {
     @AppStorage("tuning.overlayX") private var posX: Double = 0.5
     @AppStorage("tuning.overlayY") private var posY: Double = 0.62
     @AppStorage("tuning.overlayCollapsed") private var collapsed = false
-    @AppStorage("tuning.overlayTab") private var tabRaw = LiveTuningTab.distortion.rawValue
+    @AppStorage("tuning.overlayTab") private var tabRaw = LiveTuningTab.heterodyne.rawValue
 
     @GestureState private var dragOffset: CGSize = .zero
     /// Captured when the overlay appears; restored by Revert.
@@ -51,7 +53,7 @@ struct LiveTuningOverlay: View {
     @State private var revertToken = 0
 
     private var tab: LiveTuningTab {
-        get { LiveTuningTab(rawValue: tabRaw) ?? .distortion }
+        get { LiveTuningTab(rawValue: tabRaw) ?? .heterodyne }
         nonmutating set { tabRaw = newValue.rawValue }
     }
 
@@ -68,7 +70,7 @@ struct LiveTuningOverlay: View {
         .onAppear {
             guard opening == nil else { return }
             opening = LiveTuningSnapshot.capture(
-                audio: audio, pulse: pulseDetector,
+                audio: audio, pulse: pulseDetector, haptics: haptics,
                 bandLow: bandLow, bandHigh: bandHigh, timeWindowSeconds: timeWindowSeconds)
         }
     }
@@ -159,8 +161,10 @@ struct LiveTuningOverlay: View {
             switch tab {
             case .heterodyne:
                 HeterodyneTuningTab(audio: audio)
-            case .distortion:
-                VTDTuningTab(audio: audio)
+            case .replay:
+                SnippetExpansionTuningTab(audio: audio, settings: snippetSettings)
+            case .haptics:
+                HapticsTuningTab(haptics: haptics)
             case .pulse:
                 PulseTuningTab(detector: pulseDetector)
             case .display:
@@ -185,9 +189,9 @@ struct LiveTuningOverlay: View {
             // there is no equivalent "factory default" for the pulse detector or
             // the display band, and a button that reset some tabs but not others
             // would be worse than one that is honest about what it touches.
-            if tab == .distortion {
-                Button("VTD Defaults") {
-                    audio.variableTimeDistortion.resetToDefaults()
+            if tab == .haptics {
+                Button("Haptic Defaults") {
+                    haptics.resetToDefaults()
                     revertToken += 1
                 }
             }
@@ -202,7 +206,7 @@ struct LiveTuningOverlay: View {
     /// Restores everything captured when the overlay opened.
     private func revert() {
         guard let snapshot = opening else { return }
-        snapshot.restore(audio: audio, pulse: pulseDetector,
+        snapshot.restore(audio: audio, pulse: pulseDetector, haptics: haptics,
                          bandLow: &bandLow, bandHigh: &bandHigh,
                          timeWindowSeconds: &timeWindowSeconds)
         // The adaptive-TE group reaches the processor via ContentView's

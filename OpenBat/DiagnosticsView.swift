@@ -45,7 +45,7 @@ struct DiagnosticsView: View {
                 }
                 .padding()
             }
-            .navigationTitle("Diagnostics")
+            .navigationTitle("Debug")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {

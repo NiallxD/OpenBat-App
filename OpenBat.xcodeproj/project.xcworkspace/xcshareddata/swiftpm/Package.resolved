@@ -1,5 +1,5 @@
 {
-  "originHash" : "d1d6ab6ca78b9106e814826c03805001dc3d24b590e3ed8d5782b9327d01eba6",
+  "originHash" : "975fe6fcdfa537527490c4a7b433dd2986f03f6b022945a5f0140af015522c44",
   "pins" : [
     {
       "identity" : "flac-binary-xcframework",
@@ -8,6 +8,15 @@
       "state" : {
         "revision" : "9005dc2cd455765fb6824eb215c9703429bbe8ff",
         "version" : "0.2.0"
+      }
+    },
+    {
+      "identity" : "lottie-spm",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/airbnb/lottie-spm.git",
+      "state" : {
+        "revision" : "0aff16288f8dc1e3dab35cbf5cf45979673fd3df",
+        "version" : "4.6.1"
       }
     },
     {

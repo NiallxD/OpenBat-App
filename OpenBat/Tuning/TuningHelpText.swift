@@ -31,6 +31,55 @@ enum TuningHelp {
         whistly. It changes only how calls sound, not which ones are found.
         """
 
+    // MARK: Slow replay
+
+    static let snippetExpansion = """
+        How much slower the captured snippet is replayed. Bat calls last only a \
+        few milliseconds, which is too short for the ear to resolve any detail; \
+        slowing them stretches that structure out. It lowers the pitch by the \
+        same factor, so a call heard at 8× also sounds three octaves down.
+        """
+
+    static let snippetMemory = """
+        How much audio is captured around the trigger. Half of it is what \
+        happened BEFORE the pulse that fired it, so the call that triggered the \
+        capture is never clipped. Longer holds more of a pass; shorter gets you \
+        back to listening sooner.
+        """
+
+    static let snippetHiss = """
+        How far the background between calls is pushed down. Slowing a snippet \
+        stretches its background hiss along with the calls, which is what makes \
+        it noticeable. This lowers quiet material rather than cutting it out, so \
+        faint calls and call tails survive instead of being chopped. Too much \
+        makes the level pump between calls.
+        """
+
+    static let snippetFade = """
+        How gently each replay starts and ends. Snippets arrive over the top of \
+        the live channel, so a short fade stops them appearing and vanishing \
+        abruptly. Very short values just prevent a click; longer ones are heard \
+        as a fade.
+        """
+
+    static let snippetGain = """
+        Makeup gain on the replayed snippet only — the live heterodyne channel \
+        has its own. Raise it if replays sit too quietly under the live sound.
+        """
+
+    static let snippetReplayLength = """
+        Buffer × speed: how long each replay takes. Nothing new is captured \
+        while one plays, so this is also how long the mode is deaf after every \
+        trigger. Live heterodyne keeps running throughout, so you never lose \
+        the bat — but a long replay means fewer passes get one.
+        """
+
+    static let snippetRouting = """
+        What reaches your ears. "Heterodyne" is the live channel alone, \
+        "Replay" the slow snippets alone, "Both" mixes them with the live \
+        channel stepping back while a replay plays.
+        """
+
     static let loFrequency = """
         Where the oscillator is currently parked. Heterodyne only makes a \
         narrow band around this audible, which is why it has to follow the \
@@ -43,89 +92,90 @@ enum TuningHelp {
         is calling. Drag the tuning pill on the main screen to go manual.
         """
 
-    // MARK: Variable Time Distortion
+    // MARK: Pulse haptics
 
-    static let vtdLag = """
-    How far behind real time the output currently is.
+    static let hapticRate = """
+    Detected pulses per second, averaged over the rate window. One count per \
+    call.
 
-    This mode never goes deaf and never drops a sample, so a dense pass is paid \
-    for in lag rather than in lost calls. Expect a sawtooth: lag builds through \
-    a pass and drains back toward zero in the quiet between passes.
+    This is the number both buzz thresholds are compared against. Watch it \
+    through a real pass before setting them.
     """
-    static let vtdRate = """
-    Current playback rate — input samples consumed per output sample.
-
-    1× is full expansion (a call), 8× is true speed (a gap), above 8× is the \
-    gaps being compressed to repay lag.
+    static let hapticMode = """
+    Which way pulses are being rendered right now: separate taps, or one \
+    continuous buzz.
     """
-    static let vtdExpanded = "Calls given an expansion window since this mode started."
-    static let vtdDropped = """
-    Call windows that arrived too late to use, so those calls played by \
-    unexpanded.
+    static let hapticEvents = "Haptic events played since the feature was switched on."
+    static let hapticBuzzEnter = """
+    Pulse rate at which taps collapse into a buzz.
 
-    The detector reports a window only once the call's run has ended, so the \
-    window always arrives after the audio it describes. If this climbs, raise \
-    Lookahead until it stops — that is the single most likely reason the mode \
-    sounds like it is doing nothing.
+    Catches a dense run of SEPARATE calls. It cannot catch a burst whose calls \
+    arrive closer together than the detector's maximum gap — those merge into \
+    one run and read as a LOW rate. "Buzz after" covers that case; the two \
+    triggers are independent and either can start a buzz.
     """
-    static let vtdOverflow = """
-    Input ring overflows — the ONLY path in this mode that discards audio, and \
-    a failure rather than a mode. Should stay at zero.
+    static let hapticBuzzExit = """
+    Pulse rate at which the buzz breaks back into taps. Always held below the \
+    buzz rate.
 
-    Non-zero means lag exceeded the ring (about 10 s) and the read pointer had \
-    to skip. Lower Gap speed or raise Max catch-up rate.
+    The gap between the two is the real knob: wide commits and holds through a \
+    dip, narrow tracks the bat closely but can flicker. No gap at all flips \
+    modes several times a second and feels like a fault.
     """
-    static let vtdGapRate = """
-    How fast the silence between calls plays.
+    static let hapticRateWindow = """
+    How long pulse rate is averaged over before it's compared to the thresholds.
 
-    8× is true speed, which keeps the rhythm between calls literally correct — \
-    the thing event-triggered expansion cannot do, where between-event spacing \
-    comes out 8× too fast. Higher values shorten the gaps and accrue less lag, \
-    at the cost of a more hurried cadence.
+    Short reacts quickly and jitters; long is steady but enters and leaves the \
+    buzz late.
     """
-    static let vtdRateMax = """
-    Ceiling on how fast the gaps may run while catching up after a pass.
+    static let hapticHangover = """
+    Silence after the last pulse before a buzz ends.
 
-    Only reached in sustained quiet. Higher drains lag faster; it also costs \
-    more CPU, since the resampler's filter widens with rate.
+    A buzz stops because the bat stopped, and that arrives as an absence — \
+    nothing announces it. Too short and a buzz stutters through natural gaps; \
+    too long and the phone keeps buzzing after the bat has gone.
     """
-    static let vtdLookahead = """
-    How far behind the live edge the read pointer starts, and the floor it holds.
-
-    This is the budget for detector latency: a call window can only be used if \
-    it arrives before the read pointer reaches it. Too low and windows are \
-    dropped and calls play unexpanded — watch Dropped windows.
+    static let hapticStrength = """
+    Overall strength trim, applied on top of the call's own energy. Scales what \
+    the bat is doing rather than flattening it.
     """
-    static let vtdCatchupAfter = """
-    How much continuous quiet before the gaps start speeding up to repay lag.
+    static let hapticLevelFloor = """
+    The call level that maps to the weakest tap, on the detector's normalised \
+    0–1 scale (the same one the amplitude threshold uses).
 
-    Long enough that gaps *inside* a pass never trigger it, so the rhythm there \
-    stays at true speed; short enough that the quiet between passes is used.
+    The likeliest of these to need changing. Raise it if distant calls feel too \
+    strong; lower it if they disappear entirely.
     """
-    static let vtdTransition = """
-    How long the glide between gap speed and full expansion takes.
+    static let hapticLevelCeiling = """
+    The call level that maps to a full-strength tap.
 
-    The step at each boundary is large: expanding admits the whole ultrasonic \
-    band into the audible one, while the gaps are filtered down to a few kHz, \
-    and noise level goes with bandwidth. Crossed quickly that reads as a pop on \
-    the way in and a cut on the way out. Longer turns the same step into a \
-    swell. Braking starts proportionally earlier, so this cannot make calls \
-    arrive before the rate has settled.
+    Lower it if everything pins to maximum and a close bat feels the same as a \
+    distant one.
     """
-    static let vtdHighCut = """
-    Highest input frequency admitted while expanding.
+    static let hapticMinIntensity = """
+    Strength given to a call sitting right on the quiet-call level.
 
-    Everything above the loudest call frequency is noise, and at full expansion \
-    all of it becomes audible hiss. Cutting it reduces the hiss without \
-    touching the calls. Lower it until the hiss stops rather than until calls \
-    thin out — raise it again if a high-frequency species sounds dull.
+    Deliberately not zero: a barely-detected bat still has to be felt, or a \
+    distant one reads as no bat at all.
     """
-    static let vtdDuck = """
-    How hard the output is ducked as playback speeds up.
+    static let hapticFreqFloor = """
+    Peak frequency at or below which a call feels as dull as it gets.
 
-    Gain follows rate, so expanded calls stay at full level while rushed \
-    background drops away. Also stops anything still sounding from being heard \
-    sweeping upward in pitch as the rate ramps.
+    Frequency drives sharpness, not strength — the Taptic Engine has no pitch, \
+    so this is a dull-thud-to-crisp-tick axis rather than a musical one.
+    """
+    static let hapticFreqCeiling = """
+    Peak frequency at or above which a call feels as crisp as it gets.
+
+    Narrow the span between this and the dull end to exaggerate the difference \
+    between species; widen it to calm that down.
+    """
+    static let hapticTapInterval = """
+    Minimum spacing between separate taps.
+
+    Below roughly 30–50 ms the actuator physically cannot render two events, \
+    and extra taps only smear the envelope. This is a hardware limit being \
+    respected rather than a preference.
     """
 
     // MARK: Pulse trigger

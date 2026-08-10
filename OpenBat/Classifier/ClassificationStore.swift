@@ -678,7 +678,18 @@ final class ClassificationStore {
                 CloudStorage.ensureDownloaded(url)
                 return .awaitingDownload
             }
-            guard let img = Self.decode(at: url, maxPixelSize: maxPixelSize) else { return .unavailable }
+            guard let img = Self.decode(at: url, maxPixelSize: maxPixelSize) else {
+                // A failed decode is NOT proof the thumbnail is gone. On a
+                // cloud-backed library right after a reinstall the file often
+                // doesn't exist yet at all — iCloud brings back
+                // recordings.json/passes.json well before it enumerates the
+                // images directory — and a missing path reads as "downloaded"
+                // to `isDownloaded` (nothing to wait on), so this used to
+                // return `.unavailable` and the row gave up for good. Ask
+                // CloudStorage whether the bytes can still show up, and let
+                // the caller keep retrying if they can.
+                return CloudStorage.mayArriveLater(url) ? .awaitingDownload : .unavailable
+            }
             return .loaded(img)
         }).value
         if case .loaded(let img) = result {

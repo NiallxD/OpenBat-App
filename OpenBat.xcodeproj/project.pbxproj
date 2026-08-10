@@ -13,6 +13,7 @@
 		69AE273C302686CD0072DDEC /* OpenBatWigetExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 69AE2728302686CB0072DDEC /* OpenBatWigetExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		83990F19EE26D85694EDAD50 /* FLAC in Frameworks */ = {isa = PBXBuildFile; productRef = 9D3BD284CDD75E44CCD9CC0F /* FLAC */; };
 		88E2E1B3B334756115E32E3E /* ogg in Frameworks */ = {isa = PBXBuildFile; productRef = 9A57C2A7819815BD0CB67EDD /* ogg */; };
+		C0FFEE0000000000AAAAAA03 /* Lottie in Frameworks */ = {isa = PBXBuildFile; productRef = C0FFEE0000000000AAAAAA02 /* Lottie */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -104,6 +105,7 @@
 				691EB6C0300AE8530043F41A /* SwiftyH3 in Frameworks */,
 				83990F19EE26D85694EDAD50 /* FLAC in Frameworks */,
 				88E2E1B3B334756115E32E3E /* ogg in Frameworks */,
+				C0FFEE0000000000AAAAAA03 /* Lottie in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -181,6 +183,7 @@
 				B1FAA001F836B3A1D8340D8A /* SwiftyH3 */,
 				9D3BD284CDD75E44CCD9CC0F /* FLAC */,
 				9A57C2A7819815BD0CB67EDD /* ogg */,
+				C0FFEE0000000000AAAAAA02 /* Lottie */,
 			);
 			productName = OpenBat;
 			productReference = 693CA9492FF0506B002CD4C1 /* OpenBat.app */;
@@ -266,6 +269,8 @@
 				729E44F3671ED067CCCA43EA /* XCRemoteSwiftPackageReference "SwiftyH3" */,
 				506664C410FD4FF2166C1F89 /* XCRemoteSwiftPackageReference "flac-binary-xcframework" */,
 				6B5E4A071775BAEC2965DFB7 /* XCRemoteSwiftPackageReference "ogg-binary-xcframework" */,
+				C0FFEE0000000000AAAAAA01 /* XCRemoteSwiftPackageReference "lottie-spm" */,
+				69AE2C79302972A20072DDEC /* XCRemoteSwiftPackageReference "lottie-spm" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 693CA94A2FF0506B002CD4C1 /* Products */;
@@ -469,7 +474,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = OpenBat/OpenBat.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 68;
+				CURRENT_PROJECT_VERSION = 70;
 				DEVELOPMENT_TEAM = 57P8LD6GWD;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -491,7 +496,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.7.6;
+				MARKETING_VERSION = 0.7.8;
 				PRODUCT_BUNDLE_IDENTIFIER = Niall.OpenBat;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -511,7 +516,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = OpenBat/OpenBat.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 68;
+				CURRENT_PROJECT_VERSION = 70;
 				DEVELOPMENT_TEAM = 57P8LD6GWD;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -533,7 +538,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.7.6;
+				MARKETING_VERSION = 0.7.8;
 				PRODUCT_BUNDLE_IDENTIFIER = Niall.OpenBat;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -700,6 +705,14 @@
 				minimumVersion = 0.2.0;
 			};
 		};
+		69AE2C79302972A20072DDEC /* XCRemoteSwiftPackageReference "lottie-spm" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/airbnb/lottie-spm.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 4.6.1;
+			};
+		};
 		6B5E4A071775BAEC2965DFB7 /* XCRemoteSwiftPackageReference "ogg-binary-xcframework" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/sbooth/ogg-binary-xcframework";
@@ -714,6 +727,14 @@
 			requirement = {
 				kind = upToNextMajorVersion;
 				minimumVersion = 0.5.0;
+			};
+		};
+		C0FFEE0000000000AAAAAA01 /* XCRemoteSwiftPackageReference "lottie-spm" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/airbnb/lottie-spm.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 4.5.0;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */
@@ -733,6 +754,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 729E44F3671ED067CCCA43EA /* XCRemoteSwiftPackageReference "SwiftyH3" */;
 			productName = SwiftyH3;
+		};
+		C0FFEE0000000000AAAAAA02 /* Lottie */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = C0FFEE0000000000AAAAAA01 /* XCRemoteSwiftPackageReference "lottie-spm" */;
+			productName = Lottie;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

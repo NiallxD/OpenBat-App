@@ -16,9 +16,13 @@
 
 import AVFoundation
 import Observation
+import Synchronization   // Atomic, for the realtime-thread-safe snippet routing
 
 /// How the captured ultrasound is rendered to the speaker for listening.
-enum ListenMode: CaseIterable {
+/// `Int`-backed so it can live in an `Atomic` the realtime threads read — see
+/// `AudioEngineController.liveMode`. Nothing persists these raw values, so the
+/// numbering is free to change.
+enum ListenMode: Int, CaseIterable {
     case off
     case heterodyne
     /// Classic time expansion of a FILE: play a recording back slower, preserving
@@ -26,11 +30,17 @@ enum ListenMode: CaseIterable {
     /// PlaybackEngine, and treated as `.off` by live capture, which can't pace
     /// itself slower than real time without falling permanently behind.
     case timeExpansion
-    /// LIVE rate-ramped expansion that discards nothing (see
-    /// VariableTimeDistortionProcessor). Expands calls 8× and compresses the silence
-    /// instead of going deaf, so it runs behind real time rather than losing
-    /// input. Live-capture only.
-    case variableTimeDistortion
+    /// LIVE snippet expansion in the Pettersson D240x pattern: capture a window
+    /// around a trigger, replay it once at 1/N, be deaf to new snippets until it
+    /// finishes, with heterodyne continuing underneath. See
+    /// SnippetExpansionProcessor, and CLAUDE.md for which live expansion shapes
+    /// are permitted and why this one is.
+    ///
+    /// This is how live expansion escapes the objection in `.timeExpansion`'s
+    /// comment above: it does not try to keep pace with real time at all. It
+    /// falls behind deliberately and then gives up the interval, rather than
+    /// deciding what to keep in order to catch up.
+    case snippetExpansion
 }
 
 @MainActor
@@ -64,6 +74,21 @@ final class AudioEngineController {
             Self.isAnyInstanceRunning = isRunning
         }
     }
+    /// True only while `setListenMode` is crossing the `.off` boundary, i.e. across
+    /// the deliberate stop-and-start that a session-category change forces (see
+    /// `setListenMode`). Capture really has stopped in that window — this does not
+    /// pretend otherwise; it marks the stop as one the user did not ask for and is
+    /// about to be undone.
+    private(set) var isSwitchingListenMode = false
+
+    /// What the UI should treat as "detecting": running, or briefly between the two
+    /// halves of a listen-mode restart. `isRunning` alone makes the Start button
+    /// flick back to its idle ear and the transport buttons disable themselves for
+    /// a few hundred ms every time the mode crosses `.off` — reporting a stop the
+    /// user did not ask for. Anything that acts on capture actually being down
+    /// (finalizing a pass, stopping the pump) must keep using `isRunning`.
+    var isActive: Bool { isRunning || isSwitchingListenMode }
+
     /// Nonisolated, thread-safe mirror of `isRunning` — lets `PlaybackDriver`
     /// (which has no reference to this @MainActor instance, and whose own
     /// AVAudioEngine/session setup runs off-main) check whether the live
@@ -82,15 +107,56 @@ final class AudioEngineController {
     /// `@MainActor` isolation by the project's default and can't be read from there.
     nonisolated static let preferredSampleRate: Double = 384_000
 
-    // MARK: Listening (heterodyne / variable time distortion)
+    // MARK: Listening (heterodyne)
 
-    /// The listening DSPs. Fed from the capture tap; the active one is rendered to
-    /// the speaker via a source node when `listenMode != .off`.
+    /// The listening DSP. Fed from the capture tap; rendered to the speaker via a
+    /// source node when `listenMode != .off`. Heterodyne is currently the only
+    /// live listening mode — see ListenMode.
     let heterodyne = HeterodyneProcessor()
-    /// Call boundaries are fed in from `PulseDetector.onPulseWindow` — see
-    /// ContentView, where the detector lives.
-    let variableTimeDistortion = VariableTimeDistortionProcessor()
-    private(set) var listenMode: ListenMode = .off
+    /// Live snippet expansion (D240x pattern) — see SnippetExpansionProcessor,
+    /// and CLAUDE.md's rule on which live expansion shapes are permitted.
+    let snippetExpansion = SnippetExpansionProcessor()
+    /// What reaches the speaker in `.snippetExpansion`, as an atomic rather than
+    /// a read of the settings object: the output render block runs on the
+    /// realtime thread and must not touch main-actor state, and changing routing
+    /// has to take effect immediately, without the engine restart
+    /// `setListenMode` performs.
+    ///
+    /// Boxed in a class because `Atomic` is non-copyable and so cannot be
+    /// captured into the `AVAudioSourceNode` render closure directly; the
+    /// closure captures this reference instead.
+    private final class RoutingBox: @unchecked Sendable {
+        let value = Atomic<Int>(SnippetOutputRouting.both.rawValue)
+    }
+    private let snippetRouting = RoutingBox()
+
+    /// Set the live routing for `.snippetExpansion`. Safe to call while running.
+    func setSnippetRouting(_ routing: SnippetOutputRouting) {
+        snippetRouting.value.store(routing.rawValue, ordering: .releasing)
+    }
+    /// The listen mode as the realtime threads see it: read per capture buffer by
+    /// the tap, and per callback by the output render block, rather than captured
+    /// into those closures when they are built.
+    ///
+    /// That indirection is the whole reason switching between two *listening*
+    /// modes no longer restarts the engine. Captured, the mode was baked into the
+    /// tap closure and into the source node at install time, so changing it meant
+    /// rebuilding both — i.e. a full stop-and-start. Read from here, one tap and
+    /// one node serve every listening mode and the switch is a single atomic
+    /// store. See `setListenMode`.
+    ///
+    /// Boxed for the same reason as `RoutingBox` above: `Atomic` is non-copyable
+    /// and so can't be captured into a render closure directly.
+    private final class ModeBox: @unchecked Sendable {
+        let value = Atomic<Int>(ListenMode.off.rawValue)
+    }
+    private let liveMode = ModeBox()
+
+    /// Mirrored into `liveMode` on every write, so the audio thread and the main
+    /// actor can never disagree about which mode is running.
+    private(set) var listenMode: ListenMode = .off {
+        didSet { liveMode.value.store(listenMode.rawValue, ordering: .releasing) }
+    }
     var isListening: Bool { listenMode != .off }
     /// How far below the detected call frequency to park the LO, so the call lands
     /// at a comfortable audible tone.
@@ -110,6 +176,25 @@ final class AudioEngineController {
     /// Wired to the spectrogram processor's peak detector.
     var autoTunePeakProvider: (() -> Double)?
     private var sourceNode: AVAudioSourceNode?
+    /// Scratch for summing replay + heterodyne in `.snippetExpansion`, so the
+    /// realtime render block never allocates. Stored on `cleanup` rather than
+    /// here because it is manually allocated and must survive into `deinit`.
+    private var snippetMixBuffer: UnsafeMutableBufferPointer<Float>? {
+        get { cleanup.snippetMixBuffer }
+        set { cleanup.snippetMixBuffer = newValue }
+    }
+    /// How far heterodyne drops while a snippet is sounding. −6 dB: enough to put
+    /// the replay in front without losing the live channel, which is the whole
+    /// reason both are audible at once.
+    private static let snippetHeterodyneDuck: Float = 0.5
+    /// Per-sample slew for that duck — ~40 ms at 48 kHz, so the live channel
+    /// steps back and returns smoothly around a replay instead of clicking.
+    private static let snippetDuckSlew: Float = 1.0 / (48_000 * 0.04)
+
+    /// Output-thread-only duck level, boxed so the render closure can carry it
+    /// across callbacks without capturing `self` (main-actor) or allocating.
+    private final class DuckBox: @unchecked Sendable { var level: Float = 1 }
+    private let snippetDuck = DuckBox()
 
     // MARK: Private
 
@@ -187,11 +272,16 @@ final class AudioEngineController {
         var pollTimer: Timer?
         var statsTimer: Timer?
         var tokens: [any NSObjectProtocol] = []
+        /// The snippet mixing scratch. Parked here for the same reason as the
+        /// timers: it is manually allocated and `deinit` on the @MainActor owner
+        /// cannot reach an isolated stored property to free it.
+        var snippetMixBuffer: UnsafeMutableBufferPointer<Float>?
         deinit {
             // A Timer must be invalidated on the run loop that scheduled it, and
             // deinit can run on any thread — hand both back to main.
             let timers = [pollTimer, statsTimer].compactMap { $0 }
             let tokens = self.tokens
+            snippetMixBuffer?.deallocate()
             DispatchQueue.main.async {
                 timers.forEach { $0.invalidate() }
                 tokens.forEach { NotificationCenter.default.removeObserver($0) }
@@ -374,24 +464,25 @@ final class AudioEngineController {
             switch listenMode {
             case .heterodyne:
                 heterodyne.reset(inputSampleRate: rate)
-            case .variableTimeDistortion:
-                variableTimeDistortion.reset(inputSampleRate: rate)
+            case .snippetExpansion:
+                heterodyne.reset(inputSampleRate: rate)
+                snippetExpansion.reset(inputSampleRate: rate)
             case .off, .timeExpansion:
                 break
             }
 
-            // Identical fan-out to the live tap closure in `startEngine()`.
+            // Identical fan-out to the live tap closure in `startEngine()`,
+            // including reading the mode per buffer — a demo is exactly where a
+            // listen-mode switch gets tried repeatedly.
             let sink = bufferSink
-            let hetero: HeterodyneProcessor? = (listenMode == .heterodyne) ? heterodyne : nil
-            // Fed unconditionally: its write counter is the shared stream clock
-            // that PulseDetector's window indices are expressed in, so it must
-            // not pause when another listen mode is selected. See
-            // VariableTimeDistortionProcessor.reset.
-            let distortion = variableTimeDistortion
+            let hetero = heterodyne
+            let snippet = snippetExpansion
+            let modeBox = liveMode
             source.start { [weak self] buffer in
                 sink?(buffer)
-                hetero?.process(buffer)
-                distortion.process(buffer)
+                let mode = ListenMode(rawValue: modeBox.value.load(ordering: .acquiring)) ?? .off
+                if mode == .heterodyne || mode == .snippetExpansion { hetero.process(buffer) }
+                if mode == .snippetExpansion { snippet.process(buffer) }
                 self?.consume(buffer)
             }
             demoSource = source
@@ -580,19 +671,27 @@ final class AudioEngineController {
         diagnostics.sessionSampleRate = AVAudioSession.sharedInstance().sampleRate
         // Provisional from the node's advertised format; flushStats overwrites it with
         // the real delivered-buffer rate (the gap between the two is the bug we surface).
-        diagnostics.actualSampleRate = format.sampleRate
+        //
+        // Only written when nothing better is known, matching the same guard in
+        // `updateInputDiagnostics`. Straight after a session-category change the
+        // input node can advertise 48 kHz for the few ms before real buffers
+        // arrive, and this drives `ContentView.nyquist` — so writing it
+        // unconditionally collapsed the spectrogram's frequency axis to 24 kHz and
+        // then snapped it back on the next stats flush, every time a listen-mode
+        // change restarted the engine. A genuinely changed rate (a different mic)
+        // still lands within one flush, ~67 ms later.
+        if diagnostics.actualSampleRate == 0 {
+            diagnostics.actualSampleRate = format.sampleRate
+        }
         diagnostics.channelCount = Int(format.channelCount)
         syncSlowDiagnostics()
 
-        // Feed the active listening processor from the tap, and attach its output.
-        let hetero: HeterodyneProcessor? = (listenMode == .heterodyne) ? heterodyne : nil
-        // Unconditional — see the note in the demo path above.
-        let distortion = variableTimeDistortion
         switch listenMode {
         case .heterodyne:
             heterodyne.reset(inputSampleRate: format.sampleRate)
-        case .variableTimeDistortion:
-            variableTimeDistortion.reset(inputSampleRate: format.sampleRate)
+        case .snippetExpansion:
+            heterodyne.reset(inputSampleRate: format.sampleRate)
+            snippetExpansion.reset(inputSampleRate: format.sampleRate)
         case .off, .timeExpansion:
             // .timeExpansion is playback-only (see ListenMode's doc comment) and
             // never reaches here in practice — ContentView doesn't offer it as a
@@ -604,10 +703,19 @@ final class AudioEngineController {
         if isListening { attachListenOutput() }
 
         let sink = bufferSink
+        let hetero = heterodyne
+        let snippet = snippetExpansion
+        let modeBox = liveMode
         input.installTap(onBus: 0, bufferSize: 2048, format: format) { [weak self] buffer, _ in
             sink?(buffer)
-            hetero?.process(buffer)
-            distortion.process(buffer)
+            // Which processors to feed is decided PER BUFFER from the atomic, not
+            // captured here — that is what lets a heterodyne↔slow-replay switch
+            // happen under a running tap. `.snippetExpansion` feeds BOTH: heterodyne
+            // is part of that mode, not an alternative to it, and the routing choice
+            // between them is made at render time.
+            let mode = ListenMode(rawValue: modeBox.value.load(ordering: .acquiring)) ?? .off
+            if mode == .heterodyne || mode == .snippetExpansion { hetero.process(buffer) }
+            if mode == .snippetExpansion { snippet.process(buffer) }
             self?.consume(buffer)
         }
 
@@ -644,16 +752,70 @@ final class AudioEngineController {
     private func attachListenOutput() {
         guard let outFormat = AVAudioFormat(standardFormatWithSampleRate: heterodyne.outputSampleRate, channels: 1) else { return }
         let hetero = heterodyne
-        let distortion = variableTimeDistortion
-        let mode = listenMode
+        let snippet = snippetExpansion
+        let routingBox = snippetRouting
+        let duckBox = snippetDuck
+        let modeBox = liveMode
+        // Mixing scratch for `.snippetExpansion`. Allocated here, on the main
+        // thread at attach time — the render block below runs on the realtime
+        // output thread and must not allocate. Sized well past any plausible
+        // frameCount; the block clamps rather than trusting that.
+        let mixCapacity = 4096
+        let mixBuffer = UnsafeMutableBufferPointer<Float>.allocate(capacity: mixCapacity)
+        mixBuffer.initialize(repeating: 0)
+        snippetMixBuffer?.deallocate()
+        snippetMixBuffer = mixBuffer
+
         let node = AVAudioSourceNode(format: outFormat) { _, _, frameCount, audioBufferList in
             let buffers = UnsafeMutableAudioBufferListPointer(audioBufferList)
             guard let data = buffers[0].mData else { return noErr }
             let out = data.assumingMemoryBound(to: Float.self)
+            let n = Int(frameCount)
+            // Per callback, not captured at attach time — one node serves every
+            // listening mode, so a mode switch needs no graph change.
+            let mode = ListenMode(rawValue: modeBox.value.load(ordering: .acquiring)) ?? .off
             switch mode {
-            case .heterodyne: hetero.render(out, frames: Int(frameCount))
-            case .variableTimeDistortion: distortion.render(out, frames: Int(frameCount))
-            case .off, .timeExpansion: for i in 0..<Int(frameCount) { out[i] = 0 }
+            case .heterodyne:
+                hetero.render(out, frames: n)
+            case .snippetExpansion:
+                let routing = SnippetOutputRouting(rawValue: routingBox.value.load(ordering: .acquiring))
+                    ?? .both
+                switch routing {
+                case .expansionOnly:
+                    snippet.render(out, frames: n)
+                case .heterodyneOnly:
+                    // The snippet processor still runs its state machine on the
+                    // capture thread; it simply isn't heard. That keeps switching
+                    // routing mid-pass from restarting anything.
+                    hetero.render(out, frames: n)
+                case .both:
+                    guard n <= mixCapacity else {
+                        hetero.render(out, frames: n)
+                        break
+                    }
+                    // Replay into the scratch, heterodyne into the output, then
+                    // sum — ducking heterodyne only while a replay is actually
+                    // sounding, so the live channel is at full level between
+                    // snippets rather than permanently attenuated.
+                    let sounding = snippet.render(mixBuffer.baseAddress!, frames: n)
+                    hetero.render(out, frames: n)
+                    // Ramp the duck rather than stepping it. Applied as a flat
+                    // per-buffer factor it jumps 6 dB at the first and last
+                    // buffer of every replay — a step on the live channel, i.e.
+                    // an audible click at exactly the moment the replay is
+                    // supposed to fade in.
+                    let target: Float = sounding ? Self.snippetHeterodyneDuck : 1.0
+                    var d = duckBox.level
+                    let slew = Self.snippetDuckSlew
+                    for i in 0..<n {
+                        if d < target { d = min(d + slew, target) }
+                        else if d > target { d = max(d - slew, target) }
+                        out[i] = out[i] * d + mixBuffer[i]
+                    }
+                    duckBox.level = d
+                }
+            case .off, .timeExpansion:
+                for i in 0..<n { out[i] = 0 }
             }
             return noErr
         }
@@ -664,17 +826,71 @@ final class AudioEngineController {
 
     // MARK: Listening control
 
-    /// Switch listening mode. Because it changes the session category and the
-    /// engine graph, a running capture is restarted to apply it.
+    /// Switch listening mode.
+    ///
+    /// **Between two listening modes this is now in-place** — no stop, no restart,
+    /// no gap in capture. The graph is identical for every listening mode: the tap
+    /// feeds whichever processors `liveMode` names, and the one source node renders
+    /// whichever output it names, so switching is a single atomic store.
+    ///
+    /// **Crossing `.off` still restarts**, and can't not. The session category
+    /// itself differs — `.record`/`.measurement` while merely detecting, which is
+    /// the proven 384 kHz path (Context.md §6), versus `.playAndRecord` to reach
+    /// the speaker — and changing category means deactivating and reactivating the
+    /// session, which tears the engine down with it. The visible artefacts of that
+    /// restart (the Start button reverting to its idle ear, the spectrogram's
+    /// frequency axis jumping while the rate is provisional) are covered by
+    /// `isActive` and by `startEngine`'s guard on `actualSampleRate` respectively.
+    ///
+    /// The old behaviour restarted on EVERY switch, which besides looking broken
+    /// dropped `isRunning` — and ContentView's `onChange(of: audio.isRunning)`
+    /// finalizes the current pass and disarms the recorder when that happens. So
+    /// cycling listen mode with recording armed used to silently disarm it. That
+    /// is now true only for the two transitions that cross `.off`.
     func setListenMode(_ mode: ListenMode) {
         guard mode != listenMode else { return }
+        // Read before `listenMode` is assigned: this is "was listening AND will be".
+        let inPlace = isRunning && isListening && mode != .off
+
+        if inPlace {
+            // Entering slow replay hands the audio thread a processor that has been
+            // idle, possibly since a different sample rate.
+            //
+            // **This must happen before the mode is published**, and that ordering
+            // is a memory-safety requirement, not a nicety: `reset` deallocates and
+            // reallocates the snippet ring buffer, so overlapping it with a
+            // `process()` call on the capture thread is a use-after-free. While
+            // `liveMode` still names the old mode, neither the tap nor the render
+            // block touches `snippetExpansion` at all — which is exactly what makes
+            // this reset safe here and unsafe one line later.
+            //
+            // Heterodyne is deliberately NOT reset: it is audible in both modes, and
+            // resetting it mid-listen would click.
+            if mode == .snippetExpansion {
+                let rate = activeSampleRate > 0 ? activeSampleRate : diagnostics.actualSampleRate
+                if rate > 0 { snippetExpansion.reset(inputSampleRate: rate) }
+            }
+            listenMode = mode      // didSet publishes to the realtime threads
+            // The LO and auto-tune state are deliberately left alone. Heterodyne is
+            // running and audible across this switch, so zeroing `tunedFrequency`
+            // would drop it back to "searching" and re-acquire a bat it is already
+            // tuned to — the audible equivalent of the restart this avoids.
+            return
+        }
+
+        // Crossing `.off`: the restart below rebuilds the graph from `listenMode`,
+        // so this assignment is what the new engine reads on the way up.
         listenMode = mode
         tunedFrequency = 0
         isAutoTune = true
         gateHoldTicks = 0
         if isRunning {
+            isSwitchingListenMode = true
             stop()
-            Task { await start() }
+            Task {
+                await start()
+                isSwitchingListenMode = false
+            }
         }
     }
 
@@ -684,7 +900,16 @@ final class AudioEngineController {
     /// more than 8 kHz — fixes silent Noctule calls when the LO is locked onto
     /// a Pipistrelle, and fixes isolated short calls that end before the timer fires.
     func notifyPulseDetected(frequency: Double) {
-        guard listenMode == .heterodyne, isAutoTune, frequency > 0 else { return }
+        // Arm a snippet on the rising edge. The processor ignores this unless it
+        // is idle, so "replay once, no retrigger while replaying" needs no state
+        // here. Trigger latency does not matter: the 50% pretrigger means the
+        // pulse that armed the capture is already in the ring, so a main-actor
+        // hop cannot clip its onset.
+        if listenMode == .snippetExpansion {
+            snippetExpansion.trigger()
+        }
+        guard listenMode == .heterodyne || listenMode == .snippetExpansion,
+              isAutoTune, frequency > 0 else { return }
         if tunedFrequency <= 0 || abs(frequency - tunedFrequency) > 8_000 {
             tunedFrequency = frequency          // snap for large species shifts
         } else {
@@ -717,7 +942,10 @@ final class AudioEngineController {
     /// gate: opens on detection, holds for ~530 ms after the last pulse, then
     /// closes so background noise is silenced between calls.
     private func updateAutoTune() {
-        guard listenMode == .heterodyne, isAutoTune else { return }
+        // `.snippetExpansion` carries a live heterodyne bed, so it wants the same
+        // auto-tune and squelch behaviour as `.heterodyne` itself.
+        guard listenMode == .heterodyne || listenMode == .snippetExpansion,
+              isAutoTune else { return }
         let peak = autoTunePeakProvider?() ?? 0
 
         if peak > 0 {
