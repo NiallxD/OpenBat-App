@@ -1,8 +1,8 @@
 # OpenBat consent + upload Worker
 
 Cloudflare Worker + D1 (+ R2) backend for device consent records and the
-recording upload endpoint (see `openbat-onboarding-consent-upload-spec.md`
-§2/§6 and the implementation plan). Chosen over val.town so the same
+recording upload endpoint (see `Context.md` §11 for the settled decisions this
+implements). Chosen over val.town so the same
 Cloudflare account owns both the consent table and the R2 recordings bucket,
 and this Worker can bind to R2 directly — no S3 request-signing needed.
 

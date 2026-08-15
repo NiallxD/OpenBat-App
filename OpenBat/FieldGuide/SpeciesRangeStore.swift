@@ -3,7 +3,7 @@
 //  OpenBat
 //
 //  Loads SpeciesRangeData.json — a snapshot of each field-guide species' GBIF
-//  occurrence points, generated offline by generate_species_range_data.py and
+//  occurrence points, generated offline by tools/generate_species_range_data.py and
 //  committed to the repo alongside SpeciesGuideData.json — with a two-tier
 //  resolution:
 //
@@ -34,7 +34,7 @@ final class SpeciesRangeStore {
 
     private(set) var ranges: [String: [GBIFService.GBIFOccurrencePoint]] = [:]
     private(set) var dataVersion = 0
-    /// ISO 8601 string set by generate_species_range_data.py alongside each
+    /// ISO 8601 string set by tools/generate_species_range_data.py alongside each
     /// `dataVersion` bump — same reasoning as `SpeciesGuide.updatedAt`, shown
     /// next to the GBIF attribution so users can see how stale the bundled
     /// range snapshot is.
@@ -46,7 +46,7 @@ final class SpeciesRangeStore {
         updatedAt.flatMap { ISO8601DateFormatter().date(from: $0) }
     }
 
-    /// Decodes a `[lat, lon]` pair — generate_species_range_data.py writes
+    /// Decodes a `[lat, lon]` pair — tools/generate_species_range_data.py writes
     /// points this way rather than `{"lat":...,"lon":...}` to skip the
     /// repeated key names, which dominate a rounded-coordinate point's byte
     /// count once pretty-printing and full float precision are already gone.
