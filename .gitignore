@@ -21,3 +21,10 @@ DerivedData/
 
 ## Jupyter
 .ipynb_checkpoints/
+
+## Python
+__pycache__/
+*.pyc
+
+## Local agent/editor state
+.claude/
