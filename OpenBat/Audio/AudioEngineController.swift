@@ -33,8 +33,8 @@ enum ListenMode: Int, CaseIterable {
     /// LIVE snippet expansion in the Pettersson D240x pattern: capture a window
     /// around a trigger, replay it once at 1/N, be deaf to new snippets until it
     /// finishes, with heterodyne continuing underneath. See
-    /// SnippetExpansionProcessor, and CLAUDE.md for which live expansion shapes
-    /// are permitted and why this one is.
+    /// SnippetExpansionProcessor, and Context.md §5 for which live expansion
+    /// shapes are permitted and why this one is.
     ///
     /// This is how live expansion escapes the objection in `.timeExpansion`'s
     /// comment above: it does not try to keep pace with real time at all. It
@@ -114,7 +114,7 @@ final class AudioEngineController {
     /// live listening mode — see ListenMode.
     let heterodyne = HeterodyneProcessor()
     /// Live snippet expansion (D240x pattern) — see SnippetExpansionProcessor,
-    /// and CLAUDE.md's rule on which live expansion shapes are permitted.
+    /// and Context.md §5's rule on which live expansion shapes are permitted.
     let snippetExpansion = SnippetExpansionProcessor()
     /// What reaches the speaker in `.snippetExpansion`, as an atomic rather than
     /// a read of the settings object: the output render block runs on the

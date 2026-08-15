@@ -10,7 +10,7 @@
 //  coverage: while a snippet replays, this mode is not capturing a new one.
 //
 //  The design is taken from the D240x manual rather than invented (see
-//  Context.md §5 for the quoted text and the dated rule change in CLAUDE.md):
+//  Context.md §5 for the quoted text and the dated rule change):
 //
 //    * 50% PRETRIGGER. The capture window straddles the trigger — half the
 //      memory is what happened BEFORE it. That is why the ring records
