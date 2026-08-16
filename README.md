@@ -1,181 +1,112 @@
 # OpenBat
 
-This repo is one of three related to this project:
+An iOS bat detector: turn a compatible ultrasonic USB microphone into a live
+detector that shows what you're hearing and names the species on-device.
 
-[OpenBat-App](https://github.com/NiallxD/OpenBat-App)
-[OpenBat-FieldGuide](https://github.com/NiallxD/OpenBat-FieldGuide/tree/main)
-[OpenBat-Website](https://github.com/NiallxD/OpenBat-website)
+This repo holds **the iOS app**. Two sibling repos hold the rest of the project:
+
+| Repo | What's in it |
+|---|---|
+| [OpenBat-App](https://github.com/NiallxD/OpenBat-App) | This one — the iOS app source. |
+| [OpenBat-FieldGuide](https://github.com/NiallxD/OpenBat-FieldGuide) | The species field guide data, and **how to contribute to it**. |
+| [OpenBat-Website](https://github.com/NiallxD/OpenBat-website) | The website. |
 
 ## What is OpenBat?
 
-OpenBat is an iOS app that turns a compatible ultrasonic USB microphone into
-a live bat detector. It captures audio at up to 384 kHz, shows a real-time
-spectrogram, detects individual echolocation pulses, and — where an openly
-available model exists for the region — identifies the species on-device.
-
-This repo is source-available for transparency, not open source — see
-[LICENSE](./LICENSE). If you'd like to contribute species or region data to
-the field guide, that lives in a separate repo with its own terms:
-[NiallxD/OpenBat-FieldGuide](https://github.com/NiallxD/OpenBat-FieldGuide).
+OpenBat captures audio at up to 384 kHz, shows a real-time spectrogram, detects
+individual echolocation pulses, and — where an openly available model exists for
+the region — identifies the species on-device. Nothing is sent anywhere to do
+it; the classifier runs on the phone.
 
 ## Why
 
-Most tools for identifying bat calls are expensive, proprietary, and hard to
-get hold of, which puts the experience out of reach for a lot of people who'd
+Most tools for identifying bat calls are expensive, proprietary, and hard to get
+hold of, which puts the experience out of reach for a lot of people who'd
 genuinely enjoy it. Free apps that work with ultrasonic microphones already
-exist, but as far as we know, none of them use the open-source machine
-learning models that have been trained on bat echolocation calls. By building
-that identification directly into the app, OpenBat helps people put a name to
-the call they just heard — a small moment of recognition that builds a real
+exist, but as far as we know, none of them use the open-source machine learning
+models that have been trained on bat echolocation calls. By building that
+identification directly into the app, OpenBat helps people put a name to the
+call they just heard — a small moment of recognition that builds a real
 connection with bats, and a bit more respect for them too.
 
 ## Features
 
 - **Real-time spectrogram** — high-resolution frequency-vs-time display with
   drag-to-scroll history.
-- **Pulse detection & zoom** — isolates each call and renders an
-  onset-aligned close-up.
-- **Species ID** — an on-device classifier names the species, with
-  runner-up and confidence.
-- **Heterodyne & time-expansion listening** — hear the ultrasound tuned down
-  live, or play a recording back slowed 8×.
-- **Sessions & map** — log passes with a GPS track and see where each was
-  heard.
-- **Community field guide** — a species reference built into the app,
-  covering morphology, echolocation, conservation status and habits (see
-  below).
+- **Pulse detection & zoom** — isolates each call and renders an onset-aligned
+  close-up.
+- **Species ID** — an on-device classifier names the species, with runner-up and
+  confidence.
+- **Listening** — heterodyne tunes the ultrasound down to something audible
+  live; recordings can be played back slowed for time expansion.
+- **Sessions & map** — log passes with a GPS track and see where each was heard.
+- **Offline review** — open a recording in the WAV player for a static zoomable
+  spectrogram and per-call measurements.
+- **Species field guide** — a community-maintained species reference built into
+  the app, covering morphology, echolocation, conservation status and habits.
+
+## Requirements
+
+- iPhone running **iOS 18** or later.
+- A **compatible ultrasonic USB microphone**. The app is developed against the
+  Griff (384 kHz sample rate, 192 kHz Nyquist).
+- A USB-C connection to the phone.
 
 ## Getting started
 
-Connect a compatible ultrasonic USB microphone, press Start, and point it at
-the sky. Detected passes are logged with their species, confidence, and a
-spectrogram of the pulses. Start a Session to also record a GPS track and
-map where each pass was heard.
+Connect the microphone, press Start, and point it at the sky. Detected passes
+are logged with their species, confidence, and a spectrogram of the pulses.
+Start a Session to also record a GPS track and map where each pass was heard.
 
-## Species Field Guide
+No microphone to hand? The app bundles a demo clip and can run against it, which
+also makes it usable in the simulator.
 
-The app downloads and displays **Species Field Guide** data — a single
-community-editable JSON file — in its Species section. That data, and the
-process for contributing to it, live in a separate repo:
-**[NiallxD/OpenBat-FieldGuide](https://github.com/NiallxD/OpenBat-FieldGuide)**.
-This section is kept here only so the schema the app expects is documented
-alongside the code that reads it; open PRs against the field guide repo, not
-this one.
+## Privacy
 
-## Contributing a species or region
+- **Recordings stay on your device.** They are yours; nothing is uploaded in the
+  background, and identification never leaves the phone.
+- **Community contribution is switched off in the shipped app.** The code for it
+  is present and readable here, but it is deliberately disabled — a recording
+  can only be verified as *reference* quality by non-acoustic identification
+  (visual, or in the hand), and the app can't provide that. Contributed
+  recordings would otherwise enter a reference library labelled by the very
+  thing the library is meant to validate.
+- Location is used only when you start a Session, to build that session's track.
 
-The field guide lives entirely in one file, `SpeciesGuideData.json`, in the
-[field guide repo](https://github.com/NiallxD/OpenBat-FieldGuide). No app code
-changes are needed to add a species, edit an existing entry, or add a new
-region — just edit the JSON there and open a PR.
+## Species field guide
 
-1. Fork **that** repo and edit `SpeciesGuideData.json`.
-2. Add your species (or region) following the schema below.
-3. **Bump `dataVersion` by 1** and set `updatedAt` to today's date — see
-   [Versioning](#versioning). This is required for every content change,
-   however small, or the app won't pick it up.
-4. Open a PR against the field guide repo. Once merged to `main`, every app
-   install picks up the change automatically the next time it launches (no
-   app update needed).
+The app downloads and displays the field guide — a single community-editable
+JSON file — in its Species section. **The data and the guide to contributing to
+it live in [OpenBat-FieldGuide](https://github.com/NiallxD/OpenBat-FieldGuide),
+including the schema, an example entry, and the versioning rules.** Open PRs
+against that repo, not this one. Adding or editing a species needs no app code
+change, and merged changes reach every install without an app update.
 
-### Schema
+## Building
 
-Top level:
+Open `OpenBat.xcodeproj` in Xcode and build the `OpenBat` scheme. There are no
+package dependencies to fetch. Two Core ML models (`BatDetect2`, `NABatML`) are
+bundled in `OpenBat/Classifier/`.
 
-| Field | Type | Notes |
-|---|---|---|
-| `schemaVersion` | Int | **Don't change this.** See [Versioning](#versioning). |
-| `dataVersion` | Int | Bump by 1 on every content edit. |
-| `updatedAt` | String (ISO 8601) | e.g. `"2026-07-06T00:00:00Z"`. Set alongside every `dataVersion` bump. |
-| `regions` | [Region] | Pins shown on the explorer globe. |
-| `species` | [Species] | The field guide entries. |
+Note that `OpenBat/OpenBat/` is a synchronized folder group: **any `.swift` file
+placed inside it is compiled into the app**, with no project-file edit required.
 
-**Region:**
+## Repo layout
 
-| Field | Type | Notes |
-|---|---|---|
-| `id` | String | Stable slug, e.g. `"uk-ireland"`. Referenced by species' `regions` list — don't rename an existing one without updating every species that references it. |
-| `name` | String | Display name, e.g. `"UK & Ireland"`. |
-| `latitude` / `longitude` | Double | Where the pin sits on the globe. |
-
-**Species:** only `id`, `commonName`, `scientificName`, and `regions` are
-required — everything else is optional. Add what you know; leave the rest
-out. The app only shows a section if its fields are present, so a sparse
-entry just renders a shorter page rather than empty boxes.
-
-| Field | Type | Notes |
-|---|---|---|
-| `id` | String | Stable slug, e.g. `"pipistrellus-pipistrellus"` (genus-species, lowercase, hyphenated). |
-| `commonName` | String | e.g. `"Common Pipistrelle"`. |
-| `scientificName` | String | e.g. `"Pipistrellus pipistrellus"`. Genus (for the taxonomy breadcrumb) is parsed from this automatically — don't add a separate genus field. |
-| `order` | String? | Taxonomic order, e.g. `"Chiroptera"`. |
-| `family` | String? | e.g. `"Vespertilionidae"`. |
-| `regions` | [String] | List of region `id`s where this species occurs. |
-| `summary` | String? | Short intro paragraph. |
-| `measurements` | Object? | `forearmMmRange`, `wingspanCmRange`, `weightGRange` (each `{ "min": Double, "max": Double }`), `color` (free text). |
-| `morphology` | Object? | `earType`, `tailType`, `noseType` (free text), `otherFeatures` (array of short strings). |
-| `echolocation` | Object? | `callType` (e.g. `"FM"`, `"CF-FM"`), `peakFreqHzRange` (Pf), `characteristicFreqHzRange` (Cf/knee), `freqHighHzRange` (Fhigh), `freqLowHzRange` (Flow), `durationMsRange` — all `{ "min", "max" }` pairs in Hz/ms — plus free-text `notes` and an optional `exemplarImageName` (must match a bundled app image asset; leave unset if you don't have one). |
-| `conservation` | Object? | `iucnStatus` (e.g. `"Least Concern"`), `localStatus` (free text, varies by region/authority). |
-| `habits` | Object? | `roosting`, `migration`, `feeding`, `reproduction`, `other` — each free text. |
-| `references` | [String]? | Citations, rendered verbatim in small type at the foot of the species page. Any format is fine as long as it's readable — e.g. `"Author, A. (Year) Title. Journal, Vol(Issue), pages."` |
-| `contributors` | [Contributor]? | Edit history shown via a sheet at the top of the References section. **The first entry is treated as the page's creator; every entry after that is an editor.** Each is `{ "name": String, "date": String (ISO 8601), "note": String? }` — add one entry (with today's date and a short note on what you changed) every time you edit a species you didn't create. |
-
-### Example entry
-
-```json
-{
-  "id": "myotis-daubentonii",
-  "commonName": "Daubenton's Bat",
-  "scientificName": "Myotis daubentonii",
-  "order": "Chiroptera",
-  "family": "Vespertilionidae",
-  "regions": ["uk-ireland", "continental-europe"],
-  "summary": "A small, agile bat that trawls for insects low over still or slow-moving water, using its large feet and tail membrane.",
-  "echolocation": {
-    "callType": "FM",
-    "peakFreqHzRange": { "min": 45000, "max": 50000 },
-    "durationMsRange": { "min": 2.0, "max": 5.0 },
-    "notes": "Steep, broadband FM sweep; often confused with other Myotis species without call context."
-  },
-  "conservation": {
-    "iucnStatus": "Least Concern"
-  },
-  "references": [
-    "Jones, G. & Rayner, J.M.V. (1988) Flight performance, foraging tactics and echolocation in free-living Daubenton's bats. Journal of Zoology, 215(1), 113–132."
-  ],
-  "contributors": [
-    { "name": "Jane Doe", "date": "2026-07-01T00:00:00Z", "note": "Created species profile" },
-    { "name": "John Smith", "date": "2026-07-06T00:00:00Z", "note": "Added echolocation measurements" }
-  ]
-}
+```
+OpenBat/          the app source, by subsystem (Audio, DSP, Classifier,
+                  Spectrogram, FieldGuide, WavPlayer, Consent, Upload, …)
+OpenBatWiget/     widget / Live Activity extension
+OpenBatTests/     unit tests
+backend/          Cloudflare Worker for consent records and uploads
+tools/            offline scripts; not part of the app target
+Context.md        why the app is built the way it is — decisions, measurements,
+                  and approaches that were tried and rejected
 ```
 
-The first `contributors` entry (Jane Doe here) is the creator; anyone else who
-later edits the entry appends their own `{ name, date, note }` after it —
-don't overwrite or remove earlier entries.
+## Licence
 
-See existing entries in `SpeciesGuideData.json` for more complete, real
-examples.
-
-### Versioning
-
-- **`dataVersion`**: bump this by 1 for *any* content change — new species,
-  corrected text, a new reference, anything. The app compares this number
-  to decide whether to adopt your update; if you forget to bump it, your
-  change won't reach anyone's device even after merging.
-- **`updatedAt`**: an ISO 8601 timestamp set alongside every `dataVersion`
-  bump, shown in the app's guide footer so users can see how fresh the data
-  is.
-- **`schemaVersion`**: this is *not* a content-versioning field — leave it
-  alone. It only changes when the JSON's *structure* changes in a way old
-  app versions can't safely read (e.g. renaming or repurposing an existing
-  field), and that requires a coordinated app release. Adding a new
-  optional field (as most content contributions will) never needs a
-  `schemaVersion` bump.
-
-### What not to touch
-
-Please don't rename or remove an existing region `id` or species `id` in
-the same PR as unrelated content changes — other entries and, in the case
-of species ids, potentially saved user data reference these by string, so a
-rename should be its own deliberate PR.
+This repo is **source-available for transparency, not open source** — it exists
+so anyone can read, inspect, and understand how the app works. See
+[LICENSE](./LICENSE) for what that does and doesn't permit. The field guide data
+is a separate repo with its own terms.
