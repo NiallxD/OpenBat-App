@@ -14,7 +14,7 @@
 
 import SwiftUI
 
-/// The overlay's four tabs. Raw value is the short label shown in the tab bar.
+/// The overlay's five tabs. Raw value is the short label shown in the tab bar.
 enum LiveTuningTab: String, CaseIterable, Identifiable {
     case heterodyne = "Het"
     case replay = "Replay"
