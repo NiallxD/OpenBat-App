@@ -30,7 +30,7 @@ final class SpeciesRangeStore {
     /// Raw content URL tracking `main`, same reasoning as
     /// `SpeciesGuideStore.remoteURL` — new commits picked up on next launch.
     static let remoteURL = URL(string:
-        "https://raw.githubusercontent.com/NiallxD/OpenBat/main/SpeciesRangeData.json")!
+        "https://raw.githubusercontent.com/NiallxD/OpenBat-FieldGuide/main/SpeciesRangeData.json")!
 
     private(set) var ranges: [String: [GBIFService.GBIFOccurrencePoint]] = [:]
     private(set) var dataVersion = 0

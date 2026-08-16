@@ -25,7 +25,7 @@ struct DeleteAllRecordingsConfirmationView: View {
         NavigationStack {
             Form {
                 Section {
-                    Text("This permanently deletes every recording (and its WAV file) on this device. Session and pulse-ID history is unaffected — only the saved recordings themselves go. This cannot be undone, and doesn't touch anything already uploaded to the community science project.")
+                    Text("This permanently deletes every recording (and its WAV file) on this device. Session and pulse-ID history is unaffected — only the saved recordings themselves go. This cannot be undone.")
                         .foregroundStyle(.secondary)
                 } header: {
                     Text("Delete all recordings")

@@ -140,7 +140,7 @@ struct SettingsView: View {
                     showDeleteAllConfirmation = true
                 }
             } footer: {
-                Text("Permanently deletes every recording (and its WAV file) on this device. Session and pulse-ID history is unaffected. Doesn't touch anything already uploaded.")
+                Text("Permanently deletes every recording (and its WAV file) on this device. Session and pulse-ID history is unaffected.")
             }
 
             Section {

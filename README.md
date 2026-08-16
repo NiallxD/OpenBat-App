@@ -65,7 +65,10 @@ also makes it usable in the simulator.
 
 - **Recordings stay on your device.** They are yours; nothing is uploaded in the
   background, and identification never leaves the phone.
-- Location is used only when you start a Session, to build that session's track.
+- **Location** is used to tag recordings, to suggest the right species model for
+  where you are, and — during a Session — to record the session's GPS track. An
+  approximate location is also sent to GBIF to look up which species occur near
+  you; nothing identifying goes with it.
 
 ## Species field guide
 

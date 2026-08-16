@@ -8,7 +8,13 @@ Read the relevant section before changing anything in the audio pipeline, the
 upload path, or the Live Activity. Most of what's here was expensive to learn.
 
 **Companions:**
-- `README.md` — public-facing, including the field-guide contribution schema.
+- `README.md` — public-facing description of the app.
+- **"How OpenBat Works"** — the long plain-language explanation of every system,
+  for learning the codebase. Lives in Obsidian (`Niall's Vault v2/002 - Notes/
+  OpenBat Documentation.md`), *not* in this repo. It was once called
+  `HOW_IT_WORKS.md`. Because it sits outside version control it drifts silently —
+  see the propagation checklist in `CLAUDE.md` for what to update when the app
+  changes.
 - `TimeExpansionTuning/FINDINGS.md` — the raw measurement corpus behind §4.
   Lives outside the repo, alongside it, so a clone won't have it.
 
@@ -1262,7 +1268,7 @@ leads to check, not as confirmed regressions.
 |---|---|
 | 3.5 Family colour tint not stable across launches | `SpeciesExplorerView.GuideSpeciesThumbnail.tint` still uses `family.hashValue % palette.count`, and comments it as deterministic. Swift randomises `hashValue` per process, so it isn't. |
 | 3.4 No antimeridian handling in the GBIF bounding box | `GBIFService.region(for:)` still takes a plain `.min()`/`.max()` over longitudes, so a range straddling ±180° yields a near-global box. |
-| 3.1 Species range store pointed at the wrong repo | `SpeciesRangeStore.remoteURL` points at `NiallxD/OpenBat`, while `SpeciesGuideStore.remoteURL` and `SpeciesRangeStore`'s own header both say `NiallxD/OpenBat-FieldGuide`. The two disagree. |
+| 3.1 Species range store pointed at the wrong repo | **Fixed 2026-08-15.** `SpeciesRangeStore.remoteURL` now points at `NiallxD/OpenBat-FieldGuide`, matching `SpeciesGuideStore` and the field guide README's promise to contributors. It had pointed at `NiallxD/OpenBat`, so range edits made in the field guide repo were a silent no-op. Both files were byte-identical at the time of the change, so no behaviour changed. `tools/generate_species_range_data.py` writes guide and range JSON side by side in one directory, which is what settles the field guide repo as the canonical home for both. |
 | 5.2 Silent GPS failure with no user-facing signal | `LocationProvider.locationManager(_:didFailWithError:)` is still an empty body. |
 | 3.2 Wikipedia photo carousel | The concurrency half (cache lock) is done. The "load several images and let the user swipe" half doesn't appear to exist — `fetchPhoto` still resolves a single `Photo`. |
 
