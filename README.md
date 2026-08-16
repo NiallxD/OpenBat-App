@@ -65,12 +65,6 @@ also makes it usable in the simulator.
 
 - **Recordings stay on your device.** They are yours; nothing is uploaded in the
   background, and identification never leaves the phone.
-- **Community contribution is switched off in the shipped app.** The code for it
-  is present and readable here, but it is deliberately disabled — a recording
-  can only be verified as *reference* quality by non-acoustic identification
-  (visual, or in the hand), and the app can't provide that. Contributed
-  recordings would otherwise enter a reference library labelled by the very
-  thing the library is meant to validate.
 - Location is used only when you start a Session, to build that session's track.
 
 ## Species field guide
