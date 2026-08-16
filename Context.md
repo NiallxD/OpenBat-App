@@ -8,11 +8,9 @@ Read the relevant section before changing anything in the audio pipeline, the
 upload path, or the Live Activity. Most of what's here was expensive to learn.
 
 **Companions:**
-- `CLAUDE.md` — the short list of rules that must hold, and build/test policy.
-- `HOW_IT_WORKS.md` — plain-language explanation of each system, for learning
-  the codebase.
-- `CODEBASE_FUNCTIONS.md` — per-function reference.
+- `README.md` — public-facing, including the field-guide contribution schema.
 - `TimeExpansionTuning/FINDINGS.md` — the raw measurement corpus behind §4.
+  Lives outside the repo, alongside it, so a clone won't have it.
 
 ---
 
@@ -60,26 +58,67 @@ Reconstructed from git history. Dates are commit dates.
 
 ## 2. Settled decisions
 
-From `openbat-onboarding-consent-upload-spec.md`, which was written for handoff
-and marks decisions `[DECIDED]`. These are not open for casual revisiting.
+Originally from the onboarding/consent/upload handoff spec, which marked each
+`[DECIDED]`. That spec has been implemented in full and removed; this section
+is now the record. These are not open for casual revisiting.
 
-- **No OS permission dialog ever fires cold.** Every one is preceded by an
-  in-app screen explaining why. Nothing is requested before the welcome screen
-  has been seen.
-- **Device identity is app-controlled**, not `identifierForVendor` (which resets
-  on reinstall). A UUID generated on first launch and kept in the Keychain, so
-  it survives reinstalls. This is what consent records key against.
-- **Consent is current state, not an append-only log.** A log of "granted"
-  events alone cannot represent withdrawal. Schema: `device_id`,
-  `consent_version`, `status`, `granted_at`, `revoked_at`.
-- **Consent copy is versioned.** If the wording changes, bump `consent_version`
-  so it's always knowable which text a given device actually agreed to.
-- **No lossy codec at any stage** of the upload path. MP3/AAC/Opus would defeat
-  the purpose of a reference library. FLAC only.
-- **Classify before filtering.** The privacy high-pass must never be what the
-  classifier sees. (This now holds by construction: ID happens live, upstream,
-  on unfiltered audio.)
-- **Strip and fuzz at the edge**, and never touch the on-device original.
+- **No OS permission popup ever fires "cold" (out of nowhere).** iOS only lets
+  an app ask for a permission — microphone, location — once without the user
+  going into Settings to reset it, so that one ask is precious. OpenBat always
+  shows its own explanation screen first ("we need your mic to detect bat
+  calls") and only *then* triggers the real iOS popup. You should never see a
+  system permission dialog appear before you've seen the welcome screen.
+- **The device's identity is one OpenBat controls itself, not Apple's
+  `identifierForVendor`.** Apple hands every app an ID for the device it's
+  running on, but that ID *resets* if the app is deleted and reinstalled —
+  which would make a reinstalled app look like a brand-new device with no
+  consent history, or leave an old consent record pointing at nothing. Instead,
+  OpenBat generates its own random ID the first time it's launched and stores
+  it in the iPhone's **Keychain** (secure storage that, unlike ordinary app
+  data, survives a delete-and-reinstall). Consent records are keyed against
+  this ID, not Apple's.
+- **A consent record stores your *current* answer, not a running list of every
+  time you clicked yes.** A log that only ever records "granted" events can't
+  represent someone changing their mind — if you later revoke consent, a
+  pure event log still shows "granted" with nothing to contradict it. So the
+  record instead stores current status (granted or revoked) alongside
+  `device_id`, which version of the consent text you agreed to
+  (`consent_version`), and the timestamps `granted_at`/`revoked_at`. The system
+  can always answer "is this device opted in right now?" correctly.
+- **The consent wording itself is versioned.** If the privacy text changes —
+  say, a new way data might be used gets added — an old "I agree" tap
+  shouldn't silently count as agreeing to the new text too. Every wording
+  change bumps `consent_version`, so it's always knowable exactly which text a
+  given device actually agreed to, and a user is re-asked rather than carried
+  forward onto wording they never saw.
+- **No lossy audio compression anywhere in the upload path.** "Lossy" formats
+  like MP3, AAC or Opus (what most music files use) shrink a file by
+  *permanently throwing away* audio detail assumed to be inaudible to humans —
+  fine for a song, but these recordings are meant to become a reference
+  library other researchers use to identify bat species by their calls, and
+  the detail thrown away might be exactly what a correct identification needs.
+  So the app uses **FLAC** only: smaller than the raw recording, but every bit
+  of the original audio can be perfectly reconstructed from it — nothing is
+  discarded.
+- **Species identification always happens before any privacy filtering, on the
+  full, unaltered recording.** To protect privacy, an uploaded recording gets
+  its lowest frequencies filtered out before it leaves the device (a
+  "high-pass filter" — think of a sieve that only lets the fine, high stuff
+  through — because low frequencies are where audible human speech nearby
+  could show up). But identifying the bat species from its call needs to work
+  on the complete, untouched sound; feeding it filtered audio risks a wrong or
+  weaker ID. So identification happens first, on-device, on the raw unfiltered
+  audio — filtering is only ever applied afterward, to the copy about to be
+  uploaded. This now holds automatically, by how the pipeline is built: ID
+  happens live, upstream of any filtering step.
+- **Anything identifying is stripped or blurred only at the very last moment,
+  right before upload — the file saved on your phone is never touched.**
+  "Strip" means deleting identifying metadata (device names, file paths) from
+  the copy about to be sent. "Fuzz" means deliberately making something less
+  precise — e.g., rounding an exact GPS coordinate down to a coarser area, so
+  a recording can't be traced back to, say, your specific backyard. Both only
+  happen to a derived copy created for upload; the original recording in your
+  library is never reopened or modified.
 
 ---
 
@@ -130,6 +169,22 @@ finding against it.
 
 **Consequence: live listening is heterodyne only.** `.timeExpansion` file
 playback is untouched.
+
+**2026-08-15 — the withdrawal was incomplete for six days.** Quarantining the
+working-tree copy never removed VTD from git history, and branch `v1` — which
+carried the source from commit `c035295` — had been pushed, so the code was
+publicly readable in this source-available repo the entire time it was supposed
+to be withdrawn. Both `CLAUDE.md` and the quarantine README asserted `v1` "has
+never been pushed"; neither was checked against the remote. `v1` has since been
+rewritten to drop the file from all 8 commits carrying it and force-pushed, and
+the pre-rewrite history is preserved on the local-only branch
+`archive/v1-with-vtd`. GitHub may still serve the old commits by SHA, and any
+clone or fork taken before 2026-08-15 retains the source.
+
+The general lesson, worth more than the incident: **removing a file from the
+working tree is not removing it from a repo.** Withdrawing something for legal
+reasons means checking `git log --all -- <path>` and what the remote actually
+has, not just where the file sits today.
 
 ### Heterodyne enhancement: measured 2026-08-09 — retune, don't rebuild
 
@@ -379,8 +434,21 @@ it has been.
 
 ### 2026-08-09: the rule narrowed from "no live expansion" to "D240x shape only"
 
-`CLAUDE.md`'s unconditional ban became a shape requirement. What changed is not
-the legal analysis — §5 already said the right thing, two paragraphs up: a
+The project's unconditional ban on live time expansion became a **shape**
+requirement. The rule as it now stands:
+
+> **Permitted:** capture-a-snippet-and-replay-it-slowly, as the Pettersson
+> D240x does it — trigger on level, 50% pretrigger, replay the buffer once at a
+> fixed 1/N, accept the deaf window, run heterodyne continuously alongside. The
+> D240x manual is the specification; follow it rather than reinventing the
+> parameters.
+>
+> **Still barred** without the FTO opinion this section asks for: any mode that
+> keeps up with a pass in real time by deciding what to keep — ATE, VTD,
+> sampler modes, anything that discards, dilates or prioritises to avoid going
+> deaf. That is the family US 8,599,647 claims.
+
+What changed is not the legal analysis — §5 already said the right thing, two paragraphs up: a
 D240x-style detector may itself read on claim 1, and that is an **invalidity**
 argument, "a defence to be funded, not a shield to rely on." That sentence still
 stands and nothing below supersedes it.
@@ -1079,6 +1147,51 @@ exactly one observable representation — `ConsentStore.shared`.
 
 ## 14. Target and build wiring
 
+### Project layout
+
+```
+OpenBat/
+  Audio/            capture, recording, WAV/GUANO, storage, playback
+  DSP/              Biquad, STFTGrid, resampler, calibration curve, log warp
+  Haptics/          pulse haptics (accessibility channel)
+  Heterodyne/       live heterodyne downmixer
+  TimeExpansion/    playback-only classic expansion, plus D240x snippet mode
+  Spectrogram/      audio-thread FFT, Metal renderer, history, calibration UI
+  Classifier/       pulse detection, models, pass aggregation, persistence
+  FieldGuide/       species reference, GBIF range maps, guide store
+  WavPlayer/        offline review: static spectrogram, call analysis
+  Consent/          consent record, device identity, sync
+  Upload/           anonymisation boundary, conversion, FLAC, upload
+  Location/         GPS track for sessions
+  LiveActivity/     lock-screen card (app side)
+  Tuning/           live tuning overlay
+  Onboarding/       first-run flow
+  ContentView.swift the detector screen; wires every subsystem together
+OpenBatWiget/       widget extension target (note the missing 'd' — see below)
+```
+
+`OpenBat/OpenBat/` is a `PBXFileSystemSynchronizedRootGroup`: **any .swift file
+placed inside it is compiled into the app.** That is why the VTD quarantine is a
+sibling directory and not a subfolder, and it is the thing to remember before
+moving a file "back where it belongs".
+
+### Key constants
+
+| Symbol | Value | Notes |
+|--------|-------|-------|
+| `windowLen` | 512 | Hann-windowed, raw samples per column |
+| `fftSize` | 2048 | zero-padded from `windowLen` — drives bin count, not hop |
+| `hopSize` | 256 | 50% overlap (of `windowLen`) |
+| `binCount` | 1024 | `fftSize / 2` |
+| `columnsPerSecond` | 1500 | at 384 kHz: `384000 / 256` (hop drives this) |
+| `maxVisibleColumns` | 2048 | seek texture width |
+| `ringTextureWidth` | 2560 | `maxVisibleColumns + 512` guard |
+| `liveHistory` capacity | 90 000 | 60 s × 1500 cols |
+| `minDB` / `maxDB` | −90 / −20 dB | display dynamic range |
+| Metal max texture dim | 16 384 | limits single-texture history |
+
+### Wiring
+
 Easy to get silently wrong:
 
 - **The widget target is named `OpenBatWigetExtension` and its folder is
@@ -1104,10 +1217,10 @@ Easy to get silently wrong:
 
 ## 15. The 2026-07-27 review
 
-A sequential, area-by-area adversarial review across 7 areas, recorded with
-verdicts in `openbat-full-review-2607.md`. Summary of what it found and what was
-decided. Most were marked "fix as per suggestion"; the ones with substantive
-direction are noted.
+A sequential, area-by-area adversarial review across 7 areas. The standalone
+review document has been removed now every finding is either fixed or listed
+below; this section is the record. Most findings were marked "fix as per
+suggestion"; the ones with substantive direction are noted.
 
 | # | Finding | Verdict |
 |---|---|---|
@@ -1182,19 +1295,25 @@ leads to check, not as confirmed regressions.
 - **BatDetect2's NoID threshold** needs verifying against labelled field data.
 - **Upload quality-gate thresholds** are placeholders and need real data.
 
-### Apparently orphaned code
+### Orphaned code — resolved 2026-08-15
 
-Found during the 2026-08-08 documentation pass. Each is fully implemented and
-looks maintained, but nothing appears to call it. Needs a decision — delete, or
-keep deliberately and say why.
+Raised by the 2026-08-08 documentation pass, decided during the 2026-08-15
+cleanup:
 
-- **`WavPlayer/TickerWheelControl.swift`** — the whole control. Zoom and pan in
-  the WAV player are gesture-driven now; `grep` finds only self-references. Its
-  header claimed to be wired into the player and has been corrected.
-- **`WavViewportMath.viewportForFreqZoom`** — same cause, smaller stakes:
-  frequency zoom is pinch-driven.
-- **`ClassificationStore.clearAll()`** — its own doc comment already notes
-  nothing calls it.
+- **`WavPlayer/TickerWheelControl.swift`** — **deleted.** Zoom and pan in the
+  WAV player are gesture-driven; nothing referenced the type.
+- **`ClassificationStore.clearAll()`** — **deleted.** `deleteAllRecordings()`
+  and `clearListening()` cover the two flows the UI actually offers; nothing
+  wiped both. Its doc comment recorded a hazard worth keeping, so it is
+  restated here: **`imagesDir` is shared between `passes` and `recordings`.**
+  A wipe that clears one collection while removing that directory orphans the
+  other's thumbnails, leaving a broken thumbnail plus a stranded WAV and JSON
+  entry. `clearListening()` shows the correct "recordings own their WAVs"
+  scoping — copy it rather than reinventing a wipe.
+- **`WavViewportMath.viewportForFreqZoom`** — **kept deliberately.** Frequency
+  zoom is pinch-driven, so it has no caller, but it is a pure function with
+  three passing tests and is the one-shot alternative to the gesture. Its doc
+  comment says so; don't re-raise it as an orphan.
 
 **Related drift to watch for:** the ticker-wheel → gesture migration left
 several `WavPlayer/` headers describing controls that no longer exist, and they
