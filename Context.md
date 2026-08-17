@@ -66,6 +66,10 @@ Reconstructed from git history. Dates are commit dates.
 | 2026-08-16 | **Tab glyphs** changed: Detector and Species are drawn artwork (bat-with-calls, bat-over-book), Sessions is `waveform.path.ecg.text.clipboard`. See §7. |
 | 2026-08-16 | **Screen cleanup pass** on Niall's review notes: simplified view stops the spectrogram scrolling; the field guide's version card becomes a toolbar popover and its search field a glass pill; Sessions loses its filter button and the map's threshold caption; a session opens on its charts, now including detections-over-time. See §7. |
 | 2026-08-16 | **Sun clock** in the detector's leading nav-bar slot: sunset time, then time since sunset, then sunrise time, then a countdown to sunrise. The two counting windows are each 15% of the night, not fixed hours. See §7. |
+| 2026-08-17 | **Four bugs from the v1.1 scan fixed.** A session no longer goes deaf behind a full-screen sheet (the processor is never suspended while one is running, and the pump takes over draining); the detector is no longer paused by a *suppressed* sheet (`menuIsOpen` and the sheet's own binding now share one expression); `evaluateLaunch` is idempotent, since its caller is a `View.init` SwiftUI may run twice; activity-chart bucket edges are rounded on the local clock rather than the epoch. See §7 and §13. |
+| 2026-08-17 | **Calibration is offered on first mic connection.** The offer that onboarding used to make before the hardware was plugged in now arrives the first time a given USB mic is actually seen, once per mic name, never over a running session or another sheet. See §7. |
+| 2026-08-17 | **Onboarding cut from eight screens to three** — welcome, the permissions ask, the ID caveat — on Niall's call. The five removed pages (echolocation, listening modes, mic calibration, the view-mode switch, "you're all set") are kept whole as `AboutAppTour`, a second tour offered on the Info & Tour screen beside the guided one. See §7. |
+| 2026-08-17 | **One card for "a model suits where you are", and the tour nudges.** The full-`Form` location-change sheet is deleted; both the post-onboarding offer and the after-a-move notice now use the same compact card. A clean install no longer raises that notice at all, and the tour's popover opens itself 15 s after the first arrival at the detector. See §7. |
 | 2026-08-16 | **Playback folds into Sessions.** The Playback tab and the recording detail page are both gone: a recording opens the player wherever you tap it, and its per-pulse IDs are a sheet over the player. Sessions loses its Sessions/Recordings segmented picker. See §7. |
 
 ---
@@ -1237,9 +1241,12 @@ hours after sunset, and the hours before sunrise.
     night from both sides of sunset — the one way they could drift.
 - **Shown in simplified view too.** It is not instrumentation — knowing to go out
   at dusk is more use to a beginner than to anyone else.
-- **No `tourDemo` stand-in**, unlike every other status pill: the detector's whole
-  nav bar is hidden while the tour runs, so a forced phase would have nothing to
-  appear in.
+- **No `tourDemo` stand-in**, unlike every other status pill. It used to be that
+  the nav bar was hidden for the whole tour, so a forced phase had nowhere to
+  appear; since 2026-08-17 the bar stays up and the tour spotlights the pill
+  directly (`TourID.sunClock`), which is better than a demo phase anyway — it
+  points at the real readout. A `.tourTarget` on a `ToolbarItem` does publish its
+  anchor, unlike one inside a `Tab` label; both were checked in the simulator.
 - Renders nothing at all with no location fix — there is no sensible default
   sunset.
 - **⚠️ Never put a `TimelineView` in a `ToolbarItem`. This one did, and it broke
@@ -1260,9 +1267,25 @@ hours after sunset, and the hours before sunrise.
     over on the minute. `Detector`'s panel-header pills (`SessionTimerPill`,
     `MicStatusPill`) may keep their `TimelineView`s — they are in the *content*,
     not the bar.
-  - The `.task` lives on a `Group` wrapping the whole body rather than inside the
+  - ~~The `.task` lives on a `Group` wrapping the whole body rather than inside the
     `if let`: a `ToolbarItem` hosts one view, and the task has to stay mounted
-    while there is nothing to draw, or the first location fix never gets picked up.
+    while there is nothing to draw, or the first location fix never gets picked up.~~
+    **This was not enough, and the pill did not appear at all (2026-08-17).** The
+    `Group` keeps the task attached to the *view*, but it cannot make SwiftUI host
+    a toolbar item that renders empty — and if the item is never hosted, nothing
+    on it runs. That closed a loop: the phase was stored `@State`, filled in only
+    by the task, so the first render had nothing to draw → no item → no task → no
+    phase, forever. The pill was never visible after the `TimelineView` rewrite;
+    it read as "the fix removed it".
+    - **The shape that actually works: derive the readout in `body`, store only
+      the instant.** `asOf` is the sole `@State`, advanced by the tick loop;
+      `phase` is a computed property off `asOf` and the coordinate. The first
+      evaluation that has a coordinate already draws something, so the item is
+      hosted, so the task runs — the dependency now points the safe way round.
+      This is what the memoisation below was *for*.
+    - **The general rule: never let a `ToolbarItem`'s content depend on state that
+      only something attached to that item can set.** Compute it, pass it in, or
+      hold it somewhere that stays alive when the item does not.
 - **`SunWindow.phase` is memoised, and that is not an optimisation.** It is what
   makes it safe to call from a body at all: it ran three passes of the sunrise
   equation, and under them `SunTimes` was constructing a `Calendar` — an ICU setup
@@ -1437,10 +1460,188 @@ one switch away.
   carried by the symbol swapping from an outline `record.circle` to a filled
   `waveform.circle.fill`. Shape is the half the system cannot overrule, and not
   resting state on colour alone is the accessible way round regardless.
-- **The tour shortens with it.** `TourScript.steps(simplified:)` drops the six
+- **The tour shortens with it.** ~~`TourScript.steps(simplified:)` drops the six
   steps whose controls the mode hides and rewords the stats, pulse-pane and
-  reset steps for what is actually on screen. A spotlight step explaining a
-  button that isn't there is worse than no step.
+  reset steps for what is actually on screen.~~ **Not enough — filtering the
+  advanced script still left sixteen steps (2026-08-17).** Every pill in the
+  stats header, both listening modes and the deaf-window trade-off survived the
+  filter, because none of those controls is hidden in simplified view; they are
+  just not what someone who has never heard a bat needs first. The two scripts
+  are now separate lists (`simplifiedSteps` / `advancedSteps`), and the short one
+  is seven steps: the three panes, a pointer at each tab, and the session button.
+  The `advancedOnly` flag is gone with the filter — a step's mode is now decided
+  by which list it is in, so there is nothing left that can disagree.
+
+### The tour's own affordance (2026-08-17)
+
+The tour no longer opens itself after onboarding. It is offered instead by a
+sparkles button in the Detector's nav bar, left of the gear, which opens a
+popover explaining what the tour is before anything takes over the screen.
+
+- **The button retires itself, asymmetrically** —
+  `OnboardingState.shouldOfferTour(simplified:)`. Finishing the *advanced* tour
+  hides it for good in both modes, because that tour is a superset and there is
+  nothing left to show. Finishing the *simplified* one only hides it in
+  simplified view: switching to advanced brings it back, offering the longer tour
+  for the controls that just appeared. Niall's rule, and the reason one flag
+  would not do.
+- **Only a finished tour counts.** `TourOverlay.finish` carries a `completed`
+  flag — true from the last step, false from "End tour" — so dismissing the tour
+  early leaves the button where it is. Taking the affordance away because someone
+  dismissed it is how a user ends up stranded from something they meant to
+  return to.
+- Info & Tour keeps the tour reachable forever, which is what makes retiring the
+  button safe, and what the popover says.
+
+### The tour nudges itself, once (2026-08-17)
+
+The button was not enough on its own: one small glyph in a nav bar, and a
+first-time user has no reason to suspect a tour is behind it. The popover now
+**opens itself 15 s after the first arrival at the detector**
+(`ContentView.nudgeTourAfterDelay`), which is when the screen has stopped being new
+and started being confusing.
+
+- **Once per install, ever** (`OnboardingState.hasNudgedTour`), and the flag is set
+  when the popover is *shown*, not when the tour is taken — the nudge has done its
+  job either way, and a nudge that returns is nagging. The button stays for anyone
+  who dismissed it and changed their mind.
+- **It waits for a clear moment rather than firing blind.** The Detector must be the
+  visible section (the anchor lives in that nav bar), no sheet or menu may be up (a
+  popover presented into a dismissing presentation is dropped silently), and the
+  tour itself must not be running. A first-run user is quite likely to be inside a
+  sheet or on another tab at exactly 15 s, so it re-checks every 2 s for two minutes
+  and then gives up.
+- Deliberately *not* blocked by a running session. A nav-bar popover pauses nothing
+  and dismisses on any tap, and someone who has just pressed Start and is watching a
+  screen they don't yet read is precisely who the tour is for.
+
+### One card for a suggested model (2026-08-17)
+
+There were two screens making the same offer in two visual languages: the compact
+`SuggestedModelSheet` after onboarding, and `LocationChangeSummaryView` — a
+`NavigationStack` + `Form` with a nav bar, a "Use" row and per-species sections —
+after a move. **The `Form` one was also the one appearing on a clean install**, which
+is how it was found. Niall's call: scrap it, use the card.
+
+- **The clean-install appearance was a real bug, not just the wrong style.** The
+  first fix on a fresh install derives priors for the first time, and every species
+  the presence grid reports as absent counts as a change away from the factory
+  default of `enabled, 1.0`. So a first fix raised a "location changed" summary
+  listing dozens of species, plus a model suggestion the post-onboarding card was
+  already making. `refreshPriors` now raises no summary at all on the first
+  derivation: nothing *changed*, it was derived.
+- **The card takes an optional model**, because a move can shift the species list
+  without changing which model covers the area. With no model there is nothing to
+  activate, so it reads as a notice with one button.
+- **The species lists are gone, replaced by a count.** A card is the wrong place to
+  reproduce a list of forty species, and the authoritative list is AutoID settings
+  itself. What survives is the part that mattered — the user is told the list moved
+  under them rather than finding out later.
+
+### What's New, and letting a release re-run onboarding (2026-08-17)
+
+`Resources/CHANGELOG.md` is bundled and parsed at runtime (`ChangeLog.swift`).
+The newest `##` block becomes the What's New sheet, shown once per build; the
+whole file is the change log screen behind it. Modelled on the same arrangement
+in Niall's Birding_Data app, in OpenBat's own visual idiom rather than that
+app's grouped `List`.
+
+- **A release can re-run onboarding** by putting an HTML comment containing
+  `openbat: reonboard` inside its `##` block. Honoured only *inside* a release
+  block, which is what lets the file's own header comment document the directive
+  without arming it — worth keeping if that header is ever rewritten.
+- **Two separate stamps, and they are not interchangeable.** `lastSeenBuild`
+  moves when What's New is dismissed; `reonboardedBuild` moves the moment
+  re-onboarding is *triggered*. Stamping re-onboarding on completion instead
+  puts anyone who quits mid-flow back through it on every launch.
+- **A fresh install never sees What's New** — the first launch stamps the build
+  and shows nothing. A changelog is a poor first screen.
+- **`@Observable` read inside a `Binding` getter does not drive presentation.**
+  The sheet was first written as `.sheet(isPresented: Binding(get: {
+  ReleaseState.shared.shouldShowWhatsNew }, ...))` and never appeared: that read
+  happens outside `body`'s observation scope, so no dependency is registered.
+  ContentView copies the flag into plain `@State` in `.onAppear` instead.
+- **Three sheets wanted the same moment on the first launch after an update**,
+  and the loser is dropped silently — the location-change summary won and What's
+  New vanished. Both it and the post-onboarding model suggestion are now gated on
+  `showWhatsNew`, joining the `!tourActive` gate that was already there for the
+  same reason. Anything else added to that screen needs to join the queue.
+
+### Species search: results dropdown, not a screen swap (2026-08-17)
+
+**The keyboard closed the instant you typed the first character**, and the whole
+screen was replaced by a long unfiltered list. The explorer's `body` was a
+`Group` with `if query.isEmpty`: empty drew the globe with the search pill
+floating on it, non-empty drew a *different* stacked layout with a full-screen
+`List`. That structural swap rebuilt the `TextField` in the other branch, so it
+lost focus — nothing to do with the search itself.
+
+- **One hierarchy now.** The globe and the pill stay in the same place in the
+  tree whatever the query is, and matches hang below the pill in a glass card.
+  The field is never rebuilt, so the keyboard stays up and the list narrows as
+  you type.
+- **The dropdown is a `ScrollView`/`LazyVStack`, not a `List`.** A `List` fills
+  the height offered to it, so as a dropdown it draws a full-height slab with
+  three rows at the top — and it carries its own background, which is why the
+  old full-screen version needed a black strip behind the pill at all.
+- **Its height is measured, not inferred.** `ScrollView` takes all the height
+  offered rather than sizing to content; the `.fixedSize(vertical:)` trick for
+  coaxing an ideal height out of one is unreliable. `onGeometryChange` measures
+  the rows and the frame is `min(measured, 360)`.
+- The globe's tap-to-dismiss-keyboard gesture no longer fights row taps: the
+  results are in an overlay above it, so they are hit-tested first. The old
+  warning about `simultaneousGesture` eating `NavigationLink` taps applied to
+  the arrangement that is now gone.
+
+### Distribution maps are square (2026-08-17)
+
+Tall ranges were still being clipped top and bottom. The card grew its height as
+needed but capped it at 340pt, and **the cap was the bug** — no cap short of
+square can fit the tallest ranges.
+
+**Square is provably sufficient, not just bigger.** Fitting a rect into a view
+matches their aspect ratios, so a range that is tall relative to the view demands
+more longitude than the world has; MapKit clamps the zoom and crops latitude
+instead, and no amount of padding helps. But in Mercator map points the world is
+*square*: every range's height is at most `MKMapRect.world.height`, which equals
+`world.width`. At aspect 1 the longitude a range needs is exactly its height, so
+it is never more than one world-width — for any range that can exist. Hence
+`.aspectRatio(1, contentMode: .fit)` and no height maths at all.
+
+`mapHeight` now sizes only the "no data" placeholder. `mapSize` survives purely
+as a re-frame guard; there is no longer a size → height → size loop to converge.
+
+### The species page could be dragged sideways (2026-08-17)
+
+A vertical `ScrollView` is backed by a `UIScrollView` whose `contentSize` is the
+measured content in **both** axes, so one over-wide child makes the whole page
+pan horizontally even though only `.vertical` was requested. Declaring the axis
+is not enough — the content has to actually fit.
+
+Fixed with `.containerRelativeFrame(.horizontal)` on the scroll content rather
+than by finding the guilty child: the page assembles ~10 optional cards from
+community-maintained JSON, so a long unbroken citation URL or a wide photo is one
+bad entry away at any time. `cardHeroPhoto` documents a previous instance of
+exactly this failure (a `scaledToFill` photo reporting ~500pt wide, which
+`.clipped()` does not fix because it clips drawing, not layout). Over-wide
+content is now clipped rather than scrollable.
+
+### Spotlighting anything the tab bar draws
+
+`.tourTarget` does not work inside a `Tab` label: on iOS 26 the bar renders the
+label outside the view tree the anchor preference travels through, so the anchor
+never arrives and the step silently degrades to a centred card. The tab and
+session-button steps take their rects from `SessionButtonLocator` instead —
+the same UIKit search that already places the recording glow — and ContentView
+merges them over the anchor-derived ones in `tabBarTargets(in:)`.
+
+- **Exclude `UILabel` and `UIImageView` when matching by accessibility label.**
+  A `UILabel` derives its accessibility label from its own text, so the title
+  inside the Sessions tab answers to "Sessions" exactly as the tab does; the
+  smallest-match rule then drew the spotlight ring around the word and left the
+  icon above it in the dark. Verified in the simulator before and after.
+- The search is scoped to the `UITabBar` subtree where one exists. "Sessions"
+  and "Species" are ordinary words that appear elsewhere on the Detector.
 - **Settings folded from five tabs to three** (General / AutoID / Audio) in the
   same change. Location, Storage and Privacy were a tab each and none filled
   one; five segments were also too wide for a phone, which is why "Recordings"

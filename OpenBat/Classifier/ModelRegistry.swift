@@ -8,7 +8,7 @@
 //  and the pulse detector are all driven off this registry, so adding a new
 //  model is a one-line append here — no other code changes required. Priors
 //  aren't part of the descriptor: every model starts neutral and
-//  AutoIDSettings suggests real ones from GBIF occurrence data near the
+//  AutoIDSettings derives real ones from the bundled presence grid at the
 //  user's location (see SpeciesPresenceStore).
 //
 //  Only ONE model classifies at a time (see AutoIDSettings.activeModelID).
@@ -123,8 +123,8 @@ struct ModelDescriptor: Identifiable {
     let classNames: [String]
     /// Code → scientific name, for every code in `classNames` that names a real
     /// taxon (a model's non-bat "NOISE"-equivalent class, if any, is omitted).
-    /// Used to look up GBIF occurrence data near the user's location and suggest
-    /// per-species priors (see AutoIDSettings.refreshPriors) — there is no static
+    /// Used to look the species up in the bundled presence grid at the user's
+    /// location and derive per-species priors (see AutoIDSettings.refreshPriors) — there is no static
     /// "default prior" anymore; every model starts neutral (every species
     /// enabled, prior 1.0) until a location fix refines it.
     let scientificNames: [String: String]
@@ -203,8 +203,8 @@ nonisolated enum ModelRegistry {
         isBeta: false,
         summary: "USGS North American Bat Monitoring Program classifier — 31 classes "
                + "covering North American bat species plus a non-bat (NOISE) class. "
-               + "Priors are suggested automatically from GBIF occurrence data near "
-               + "your location, and refresh as you move.",
+               + "Which species are considered likely is set automatically from where "
+               + "you are, and updates as you move.",
         citation: "North American Bat Monitoring Program (NABat) acoustic ML classifier, "
                 + "U.S. Geological Survey, Version 1.0.1. Licensed CC BY 4.0 — model files "
                 + "and training code are published by the authors.",

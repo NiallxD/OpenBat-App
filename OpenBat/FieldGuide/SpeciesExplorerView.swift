@@ -31,6 +31,9 @@ struct SpeciesExplorerView: View {
     let userCoordinate: CLLocationCoordinate2D?
 
     @State private var query = ""
+    /// Measured height of the search results, so the dropdown can be as tall as
+    /// its rows rather than as tall as the space offered — see `searchResults`.
+    @State private var contentHeight: CGFloat = 0
     @State private var showSources = false
     @State private var showGuideInfo = false
     @FocusState private var searchFieldFocused: Bool
@@ -51,6 +54,11 @@ struct SpeciesExplorerView: View {
     /// firing and mutating `camera` on an off-screen view for the rest of its
     /// ~`swoopDuration` regardless of navigation.
     @State private var swoopTimer: Timer?
+
+    /// Ceiling on the results dropdown. Roughly four rows — enough that the list
+    /// visibly shrinks as the query narrows, while leaving the globe readable
+    /// behind it and staying clear of the keyboard.
+    private static let maxResultsHeight: CGFloat = 360
 
     private static let fallbackCenter = CLLocationCoordinate2D(latitude: 30, longitude: -10)
     /// Opening camera position — Null Island (0, 0), out in the Atlantic —
@@ -85,37 +93,41 @@ struct SpeciesExplorerView: View {
         // The globe fills the screen and the search field floats ON it as a glass
         // capsule. It used to be a row in a VStack above the globe, which gave it
         // a black strip of its own — a bare text field on black, pushing the globe
-        // down the screen for no gain (Niall, 2026-08-16). Over the search RESULTS
-        // it still needs a solid strip, since a list scrolling under a floating
-        // pill is unreadable; that branch keeps the stacked layout.
-        Group {
-            if query.trimmingCharacters(in: .whitespaces).isEmpty {
-                globe
-                    // Tapping anywhere on the globe dismisses the keyboard. Scoped to
-                    // just this branch — applying the same gesture to an ancestor of
-                    // `searchResults`' List (as this used to) silently ate
-                    // NavigationLink taps on list rows; `simultaneousGesture` doesn't
-                    // actually avoid that conflict for List-backed content the way
-                    // its name implies.
-                    .contentShape(Rectangle())
-                    .simultaneousGesture(TapGesture().onEnded { searchFieldFocused = false })
-                    .overlay(alignment: .top) {
-                        searchPill
-                            .padding(.horizontal)
-                            .padding(.top, 8)
-                    }
-            } else {
-                VStack(spacing: 0) {
+        // down the screen for no gain (Niall, 2026-08-16).
+        //
+        // **One hierarchy, always — the search results hang UNDER the pill rather
+        // than replacing the screen.** This was a `Group` with an `if` on the
+        // query: empty showed the globe with the pill floating on it, non-empty
+        // showed a completely different stacked layout with a full-screen List.
+        // That swap rebuilt the `TextField` inside a different branch, so it lost
+        // focus and **the keyboard closed the instant the first character was
+        // typed** — and the whole screen was replaced by a long list before the
+        // user had typed enough to narrow anything. Keeping the globe and the
+        // pill in the same place in the tree, and putting the matches in a
+        // dropdown attached below the pill, means the field is never rebuilt: the
+        // keyboard stays up and the list narrows as you type (Niall, 2026-08-17).
+        globe
+            // Tapping the globe dismisses the keyboard. It no longer competes with
+            // taps on result rows: those are in an overlay ABOVE this, so they are
+            // hit-tested first and never reach the globe. (The old comment here
+            // warned that the same gesture ate NavigationLink taps when the
+            // results were a List in the same branch — that arrangement is gone.)
+            .contentShape(Rectangle())
+            .simultaneousGesture(TapGesture().onEnded { searchFieldFocused = false })
+            .overlay(alignment: .top) {
+                VStack(spacing: 8) {
                     searchPill
-                        .padding(.horizontal)
-                        .padding(.vertical, 8)
-                    searchResults
-                        // The List-native way to dismiss the keyboard on interaction —
-                        // doesn't compete with row taps the way a custom tap gesture does.
-                        .scrollDismissesKeyboard(.immediately)
+                    if !query.trimmingCharacters(in: .whitespaces).isEmpty {
+                        searchResults
+                            // Grows downward out of the pill rather than fading in
+                            // place, so it reads as attached to the field.
+                            .transition(.move(edge: .top).combined(with: .opacity))
+                    }
                 }
+                .padding(.horizontal)
+                .padding(.top, 8)
+                .animation(.snappy(duration: 0.22), value: results.count)
             }
-        }
         .navigationDestination(for: SpeciesGuideDestination.self) { destination in
             switch destination {
             case .region(let region):
@@ -248,16 +260,71 @@ struct SpeciesExplorerView: View {
         .onTapGesture { searchFieldFocused = true }
     }
 
+    /// The matches, in a card hanging below the search pill.
+    ///
+    /// A `ScrollView`/`LazyVStack` rather than a `List`, for two reasons that
+    /// both matter here: a `List` insists on filling the space offered to it, so
+    /// as a dropdown it would draw a full-height slab with three rows at the top
+    /// and a lot of empty below; and it brings its own background, which is what
+    /// made the old full-screen version need a solid black strip behind the pill
+    /// in the first place. Sized to its content and capped, this shrinks as the
+    /// query narrows, which is the whole feedback the user is after.
     @ViewBuilder private var searchResults: some View {
-        if results.isEmpty {
-            ContentUnavailableView.search(text: query)
-        } else {
-            List(results) { species in
-                NavigationLink(value: SpeciesGuideDestination.species(species)) {
-                    GuideSpeciesRow(species: species)
+        VStack(spacing: 0) {
+            if results.isEmpty {
+                // A row, not a `ContentUnavailableView`: that type is built to
+                // own a screen, and in a dropdown it renders as a large centred
+                // island of empty space.
+                Text("No species match \u{201C}\(query.trimmingCharacters(in: .whitespaces))\u{201D}")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 14)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(Array(results.enumerated()), id: \.element.id) { index, species in
+                            if index > 0 {
+                                Divider().padding(.leading, 14)
+                            }
+                            NavigationLink(value: SpeciesGuideDestination.species(species)) {
+                                GuideSpeciesRow(species: species)
+                                    .padding(.horizontal, 14)
+                                    .padding(.vertical, 10)
+                                    // So the whole row width is tappable, not
+                                    // just the text inside it.
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    // Measured, and the height below is driven from it. A
+                    // `ScrollView` takes all the height it is offered rather than
+                    // sizing to its content, so without this the card would be a
+                    // full-height slab with three rows at the top of it. The
+                    // `.fixedSize` trick sometimes coaxes an ideal height out of
+                    // it and sometimes does not; measuring is not a guess.
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: {
+                        contentHeight = $0
+                    }
                 }
+                // Sized to the rows, capped so the card never reaches up-rising
+                // keyboard — it hangs from the top of the screen. `max(1,)` keeps
+                // the frame valid on the first pass, before anything is measured.
+                .frame(height: min(max(contentHeight, 1), Self.maxResultsHeight))
+                // Keyboard stays up while scrolling the matches: the point of
+                // this list is to narrow it further, and dismissing the keyboard
+                // on the first scroll makes correcting a typo a two-tap job.
+                .scrollDismissesKeyboard(.never)
+                // No rubber-banding when the matches already fit.
+                .scrollBounceBehavior(.basedOnSize)
             }
-            .listStyle(.plain)
+        }
+        .liquidGlass(in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(.white.opacity(0.12), lineWidth: 1)
         }
     }
 

@@ -2,22 +2,28 @@
 //  OnboardingView.swift
 //  OpenBat
 //
-//  First-run flow: welcome → how bat detecting works → permissions soft-ask
-//  (+ the real mic and location dialogs, in that order) → optional mic
-//  calibration → AutoID caveats → done.
+//  First-run flow, all three screens of it: welcome → permissions soft-ask
+//  (+ the real mic and location dialogs, in that order) → AutoID caveats, and
+//  straight into the app.
 //
-//  Two things this flow is built around:
+//  **It was eight screens until 2026-08-17** — echolocation, listening modes,
+//  microphone calibration and the view-mode switch sat in the middle, and a
+//  "you're all set" screen closed it. Niall cut it to these three. The removed
+//  pages were not bad, they were early: they explain the hobby and the app's
+//  options to someone who has not yet been allowed to open either. They are
+//  kept, whole, in `AboutAppTour` — the second tour on the Info & Tour screen —
+//  where the same words land on someone who went looking for them.
+//
+//  What is left is only what has to happen before the app can be used at all:
 //
 //  1. No OS dialog ever fires cold. The permissions step explains both asks on
-//     one screen *before* either dialog appears, and the button that triggers
-//     them says so. Folding mic and location onto one page rather than one
-//     each is deliberate: they are asked for the same reason (recording a bat
-//     pass and knowing where it happened), and two near-identical soft-ask
-//     screens back to back read as nagging.
-//  2. It has to sell the hobby, not just the app. Most people arriving here
-//     have never used a bat detector, so `.echolocation` explains what one
-//     *is* before any permission is requested — the ask lands very differently
-//     once you know what the microphone is for.
+//     one screen *before* either dialog appears. Folding mic and location onto
+//     one page rather than one each is deliberate: they are asked for the same
+//     reason (recording a bat pass and knowing where it happened), and two
+//     near-identical soft-ask screens back to back read as nagging.
+//  2. The caveat about identifications is said before the app has a chance to
+//     make one. That is the one claim the app makes that a user could be misled
+//     by, so it does not get to be optional reading.
 //
 //  `OpenBatApp` mounts this instead of `ContentView` until
 //  `hasCompletedOnboarding` is set, which also means `ContentView`'s own
@@ -34,8 +40,10 @@ import CoreLocation
 struct OnboardingView: View {
     let onComplete: () -> Void
 
+    /// The whole flow. See this file's header for the five screens that used to
+    /// sit between these and where they went.
     private enum Step: Int, CaseIterable {
-        case welcome, echolocation, listening, permissions, calibrate, autoID, viewMode, done
+        case welcome, permissions, autoID
     }
 
     @State private var step: Step = .welcome
@@ -48,11 +56,6 @@ struct OnboardingView: View {
     // so the permissions step's status row reads this instead, refreshed after
     // the request resolves.
     @State private var micStatus = AVAudioApplication.shared.recordPermission
-    /// The interface mode, asked on its own step. Written straight through to
-    /// the same key the detector and Settings read (`SimplifiedView.key`), so
-    /// there is nothing to hand over at the end — whatever the switch is left
-    /// at IS the setting.
-    @AppStorage(SimplifiedView.key) private var simplifiedMode = true
     // Drives the direction of the step transition, so going Back slides the
     // opposite way to going forward rather than both looking like "forward".
     @State private var isMovingBackward = false
@@ -61,14 +64,19 @@ struct OnboardingView: View {
     // authorization is process-global, so requesting here doesn't cause a second
     // prompt later — by the time ContentView appears the status is already decided.
     @State private var location = LocationProvider()
-    // Same throwaway-instance pattern as `location` above: this is only alive
-    // long enough to drive the optional calibration capture; ContentView
-    // creates its own instance afterwards. Saving through `micCalSettings`
-    // writes the same UserDefaults keys ContentView's own instance later
-    // reads, so no hand-off is needed beyond that.
-    @State private var calibrationAudio = AudioEngineController()
-    @State private var micCalSettings = MicCalibrationSettings()
-    @State private var showMicCalibration = false
+
+    // The interface mode is no longer asked here — the view-mode step moved to
+    // `AboutAppTour`. Nothing has to be written on the way out for that to be
+    // safe: every reader of `SimplifiedView.key` declares the same `true`
+    // default, so an untouched install is in simplified view, which is the
+    // answer that step defaulted to anyway.
+    //
+    // Microphone calibration moved with it. It was an offer to calibrate
+    // hardware most first-run users have not plugged in yet, and it lives under
+    // Microphone in Settings, which is where someone who plugs one in later has
+    // to go anyway. `AudioEngineController` and `MicCalibrationSettings` are no
+    // longer constructed here as a result — onboarding now touches no audio at
+    // all before ContentView does.
 
     // Deliberately NOT wrapped in a `NavigationStack`. The only thing it ever
     // hosted was a toolbar Back button, which existed on every step except the
@@ -135,13 +143,6 @@ struct OnboardingView: View {
         }
         .background(Color(.systemBackground))
         .sheet(isPresented: $showPrivacyDetail) { SafariView(url: PrivacyLinks.policyURL) }
-        .sheet(isPresented: $showMicCalibration) {
-            MicCalibrationView(audio: calibrationAudio, settings: micCalSettings) {
-                showMicCalibration = false
-                go(to: .autoID)
-            }
-        }
-        .onAppear { calibrationAudio.activate() }
         // A light tap on each step change — the flow is a sequence of discrete
         // moves, and the feedback makes it feel like one.
         .sensoryFeedback(.selection, trigger: step)
@@ -168,8 +169,11 @@ struct OnboardingView: View {
                     message: "A community driven initiative based in Squamish, BC, with a mission to make bat detecting and appreciation accessible and affordable to as many people as possible.")
 
                 VStack(spacing: 10) {
+                    // The same two drawn glyphs the tab bar wears for Detector
+                    // and Species, so the three things promised here are already
+                    // recognisable as the tabs they land on.
                     OnboardingCard(
-                        systemImage: "waveform.badge.magnifyingglass",
+                        glyph: .asset("batCall"),
                         title: "Detect",
                         detail: "Every call is drawn on a live spectrogram the moment it arrives, and recorded at full ultrasonic quality if you want to keep it.")
                     OnboardingCard(
@@ -177,51 +181,9 @@ struct OnboardingView: View {
                         title: "Identify",
                         detail: "Open-source machine learning names the species on-device as bats pass — nothing is sent anywhere to do it.")
                     OnboardingCard(
-                        systemImage: "book.closed.fill",
+                        glyph: .asset("batBook"),
                         title: "Learn",
                         detail: "A built-in, community-maintained field guide covers the species in your region, with range maps, call measurements and photos.")
-                }
-            }
-
-        case .echolocation:
-            VStack(spacing: 20) {
-                OnboardingStepView(
-                    systemImage: "waveform.badge.magnifyingglass",
-                    title: "Echolocation",
-                    message: "To navigate and hunt, a bat shouts dozens of times per second as it flies, then listens for the echo to build a picture of the world around it.")
-
-                VStack(spacing: 10) {
-                    OnboardingCard(
-                        systemImage: "arrow.up.right.circle.fill",
-                        title: "Too high to hear",
-                        detail: "Most calls sit between 20 and 120 kHz. Human hearing gives out around 20 kHz, so almost all of it passes by in silence — which is where a bat detector comes in.")
-                    OnboardingCard(
-                        systemImage: "metronome.fill",
-                        title: "The rhythm tells you a lot",
-                        detail: "A searching bat calls steadily. As it closes on an insect the calls speed up into a feeding buzz — the moment most bat workers listen for.")
-                }
-            }
-
-        case .listening:
-            VStack(spacing: 20) {
-                OnboardingStepView(
-                    systemImage: "waveform.and.person.filled",
-                    title: "Hearing them",
-                    message: "OpenBat brings each call down into your hearing range as it arrives — two ways round, and you can switch between them while you listen.")
-
-                VStack(spacing: 10) {
-                    OnboardingCard(
-                        systemImage: "headphones",
-                        title: "Hear it",
-                        detail: "Calls are shifted down into the audible range live, so a pass sounds like the characteristic clicks and warble bat workers listen for.")
-                    OnboardingCard(
-                        systemImage: "tortoise.fill",
-                        title: "Slow it down",
-                        detail: "Slow replay grabs a short snippet of a call and plays it back at a fraction of its speed, which brings out detail the shifted-down version glosses over. The detector is deaf while a snippet replays — a trade you choose in Settings.")
-                    OnboardingCard(
-                        systemImage: "hand.tap.fill",
-                        title: "Feel it",
-                        detail: "To make bat detecting accessible to all, each call can also be rendered as a vibration — its strength tracks how close the bat is, and its texture changes with the kind of call, so a feeding buzz feels different from a passing bat. Turn it on under Audio in Settings.")
                 }
             }
 
@@ -241,7 +203,11 @@ struct OnboardingView: View {
                     PermissionRow(
                         systemImage: "location.fill",
                         title: "Location",
-                        detail: "Tags where each call was heard, records a track for each session, picks the right species model for your region and weights the identification by what lives near you.",
+                        // NO mention of a track: GPS courses were removed on
+                        // 2026-08-16 along with the background location mode,
+                        // and this line still promised one. Location is now four
+                        // one-shot uses, all of them listed here.
+                        detail: "Shows tonight's sunset and sunrise times so you know when to head out, tags where each call was heard, picks the right species model for your region and weights the identification by what lives near you.",
                         state: locationRowState)
                 }
 
@@ -264,31 +230,12 @@ struct OnboardingView: View {
                 .padding(.horizontal, 8)
             }
 
-        case .calibrate:
-            VStack(spacing: 20) {
-                OnboardingStepView(
-                    systemImage: "tuningfork",
-                    title: "Calibrate your microphone",
-                    message: "Optional, takes about 15 seconds, and you can do it any time later from Settings.")
-
-                VStack(spacing: 10) {
-                    OnboardingCard(
-                        systemImage: "waveform.path.ecg",
-                        title: "Why it helps",
-                        detail: "Affordable ultrasonic microphones have an uneven frequency response, which shows up as fixed noise bands across the spectrogram and skews frequency measurements.")
-                    OnboardingCard(
-                        systemImage: "ear.badge.waveform",
-                        title: "What happens",
-                        detail: "Find somewhere quiet and OpenBat listens to your microphone's own noise floor for 15 seconds, then corrects for it. It doesn't change or upload any recording.")
-                }
-            }
-
         case .autoID:
             VStack(spacing: 20) {
                 OnboardingStepView(
                     systemImage: "sparkle.magnifyingglass",
                     title: "About the IDs",
-                    message: "OpenBat names the species with on-device machine learning. It tries its best, and it can be wrong — some species simply cannot be told apart by sound.")
+                    message: "OpenBat offers ID on the bats it detects with on-device machine learning. While it tries its best to offer an accurate ID, some species simply cannot be told apart by sound.")
 
                 // The two labels these cards teach are real, and the wording
                 // here must track them exactly: see `ComplexIndicator.text` in
@@ -306,67 +253,19 @@ struct OnboardingView: View {
                         systemImage: "questionmark.diamond.fill",
                         title: "\u{201C}or SPECIES\u{201D}",
                         detail: "On this call, a second species scored almost as highly as the winner. Read it as “probably the first one, but don't bank on it” — tap the pass to see both scores and judge for yourself.")
-                }
-
-                complexList
-            }
-
-        case .viewMode:
-            VStack(spacing: 20) {
-                OnboardingStepView(
-                    systemImage: "slider.horizontal.below.rectangle",
-                    title: "How much do you want to see?",
-                    message: "The detector can show a lot at once. Start simple — you can change this whenever you like.")
-
-                // A real toggle rather than two choice cards: this is one
-                // setting with two states, it lives in Settings as a toggle,
-                // and showing it here in the same form it will take there is
-                // what makes "you can change this later" a findable promise
-                // rather than a vague one.
-                VStack(spacing: 14) {
-                    Toggle("Simplified view", isOn: $simplifiedMode)
-                        .font(.headline)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 12)
-                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
-
-                    OnboardingCard(
-                        systemImage: simplifiedMode ? "eye" : "eye.trianglebadge.exclamationmark",
-                        title: simplifiedMode ? "You'll see" : "You'll see everything",
-                        detail: simplifiedMode
-                            ? "A running list of every species heard, the input level, and the spectrogram. Enough to know which bat flew over."
-                            : "Every readout and control: peak frequency, bandwidth, duration and pulse rate, the pulse close-up, and the timeline, palette and frequency-band controls.")
+                    // The last thing said before the app opens, and the only
+                    // thing left of the five screens that used to follow this
+                    // one: none of what they asked about is being asked any
+                    // more, so the promise that it is all still reachable is
+                    // the part that has to survive. It names the two places by
+                    // name — a vague "in Settings somewhere" is not a findable
+                    // promise.
                     OnboardingCard(
                         systemImage: "gearshape.fill",
-                        title: "Change it any time",
-                        detail: "It's the first switch in Settings, under General. Nothing is lost by switching either way — anything you've adjusted is kept and comes back.")
+                        title: "You can change all these settings in the app",
+                        detail: "Listening mode, haptics, microphone calibration and how much of the detector you see all live in Settings, and nothing here is permanent. Info & Tour, in the same top-right menu, has a guided tour of the screen and a longer walk through how bat detecting works.")
                 }
-                .padding(.top, 4)
             }
-
-        case .done:
-            OnboardingStepView(
-                hero: {
-                    SonarPulseHero {
-                        Image(systemName: "checkmark.circle.fill")
-                            .font(.system(size: 56))
-                            .foregroundStyle(Color.batAccent)
-                    }
-                },
-                title: "You're all set",
-                message: "Let's take a quick tour of the detector screen so you know what you're looking at.")
-
-            VStack(spacing: 10) {
-                OnboardingCard(
-                    systemImage: "gearshape.fill",
-                    title: "Everything is changeable",
-                    detail: "Microphone and location access, listening mode, haptics and calibration all live in Settings, and none of these choices are permanent.")
-                OnboardingCard(
-                    systemImage: "questionmark.circle.fill",
-                    title: "Stuck?",
-                    detail: "Help — in the top-right options menu, alongside Settings — covers which microphones work, how to read the spectrogram, and what to do when nothing seems to be coming through.")
-            }
-            .padding(.top, 20)
         }
     }
 
@@ -382,43 +281,83 @@ struct OnboardingView: View {
             // plainly and early. Leaving it to the Settings help page means a
             // user can finish onboarding, reach a silent detector screen, and
             // conclude the app is broken.
-            HStack(spacing: 25) {
+            cautionFooter {
                 PlugInAnimation(tint: .white)
                     .frame(width: 76, height: 76)
-                Text("Our app works with USB microphones designed to be able to hear the ultra-high pitch calls which bats produce as they navigate the world. Visit the Help page in the top-right options menu to learn more.")
-                    .font(.footnote)
-                    .foregroundStyle(.white)
-                    .multilineTextAlignment(.leading)
+            } text: {
+                "Our app works with USB microphones designed to be able to hear the ultra-high pitch calls which bats produce as they navigate the world. Visit the Help page in the top-right options menu to learn more."
             }
-            .padding(12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.orange.opacity(0.2), in: RoundedRectangle(cornerRadius: 12))
-            .padding(.horizontal, 24)
-            .padding(.top, 12)
-            // The gap down to the buttons. Larger than the top gap on purpose:
-            // this footer is a note about the app, and it shouldn't read as
-            // being attached to the primary action.
-            .padding(.bottom, 28)
 
-        case .echolocation:
-            EcholocationDiagram()
-                .padding(12)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 24)
-                .padding(.top, 12)
-                .padding(.bottom, 28)
+        case .autoID:
+            // A warning triangle rather than the plug animation this reused at
+            // first: the animation says "connect your microphone", which is a
+            // different message from the one the paragraph beside it is making,
+            // and a footer whose picture and words disagree is worse than one
+            // with no picture at all.
+            // No fixed frame, and a tighter gap than the welcome step's. The
+            // 76×76 slot is sized for `PlugInAnimation`, which fills it; a
+            // symbol does not, so the box added ~19pt of dead space on each side
+            // on top of the 25pt gap and left the triangle marooned.
+            cautionFooter(spacing: 14) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 40))
+                    .foregroundStyle(.orange)
+            } text: {
+                "Identifying bats with acoustics alone is very difficult. The calls can change depending on the environment, sound pollution, other bats, insects, and more. Identifications are suggestions, and will usually get you somewhere near, but further analysis is needed to confirm. Consider submitting to community science platforms."
+            }
 
+        // The echolocation step's diagram footer went to `AboutAppTour` with the
+        // step itself.
         default:
             EmptyView()
         }
     }
 
+    /// The orange note a step can hang at the bottom of the screen: a glyph on
+    /// the left, a paragraph beside it.
+    ///
+    /// Shared rather than written out per step, which is how it started — two
+    /// copies of the same twelve lines, differing only in the picture and the
+    /// words. Everything about the shape (the tint, the corner radius, and
+    /// particularly the asymmetric padding below, which keeps the note from
+    /// reading as attached to the primary action) has to stay identical between
+    /// them for the flow to look like one thing.
+    ///
+    /// `spacing` is the one thing callers vary: a glyph that fills its own box
+    /// needs less room beside it than one carrying optical padding.
+    private func cautionFooter(
+        spacing: CGFloat = 25,
+        @ViewBuilder leading: () -> some View,
+        text: () -> String
+    ) -> some View {
+        HStack(spacing: spacing) {
+            leading()
+            Text(text())
+                .font(.footnote)
+                .foregroundStyle(.white)
+                .multilineTextAlignment(.leading)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.orange.opacity(0.2), in: RoundedRectangle(cornerRadius: 12))
+        .padding(.horizontal, 24)
+        .padding(.top, 12)
+        // The gap down to the buttons. Larger than the top gap on purpose: this
+        // footer is a note about the app, and it shouldn't read as being
+        // attached to the primary action.
+        .padding(.bottom, 28)
+    }
+
     // MARK: - Controls
 
     /// The pinned bottom bar: Back as a compact arrow on the left, the step's
-    /// primary action filling the rest. `.calibrate` is the one step with a
-    /// second choice, and it hangs below rather than competing for the row —
-    /// skipping is a legitimate answer there, but not an equal one.
+    /// primary action filling the rest.
+    ///
+    /// The trailing slot is always empty now. It used to hold "Skip" on the
+    /// calibration step — the one step with a second, unequal choice — which is
+    /// what the slot was sized for; that step moved to `AboutAppTour`. The slot
+    /// stays because the geometry below depends on it: it is what keeps the
+    /// primary button centred.
     private var controls: some View {
         VStack(spacing: 10) {
             // Fixed-width slots on both sides, on every step. That is what
@@ -453,32 +392,21 @@ struct OnboardingView: View {
                 .controlSize(.large)
                 .disabled(isAwaitingPermission)
 
-                // Calibration is genuinely optional, so Skip sits beside it as
-                // a real alternative — bordered rather than prominent, so it
-                // doesn't compete with the action we'd rather you took.
-                if step == .calibrate {
-                    Button("Skip") { go(to: .autoID) }
-                        .buttonStyle(.bordered)
-                        .controlSize(.large)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.8)
-                        .frame(width: Self.sideSlotWidth, alignment: .trailing)
-                } else {
-                    // A fixed-width Spacer, not an empty view with a `.frame`
-                    // on it — an empty branch collapses to nothing in an
-                    // HStack no matter what width is asked for, handing the
-                    // slot back to the primary button and pushing it right.
-                    Spacer()
-                        .frame(width: Self.sideSlotWidth)
-                }
+                // A fixed-width Spacer, not an empty view with a `.frame` on it
+                // — an empty branch collapses to nothing in an HStack no matter
+                // what width is asked for, handing the slot back to the primary
+                // button and pushing it right.
+                Spacer()
+                    .frame(width: Self.sideSlotWidth)
             }
         }
         .animation(.snappy(duration: 0.28), value: step)
     }
 
     /// Width reserved on each side of the primary button. Sized for the widest
-    /// thing either slot ever holds — "Skip" as a large bordered button — so
-    /// the middle never has to give ground to it.
+    /// thing either slot has ever held — "Skip" as a large bordered button — so
+    /// the middle never has to give ground to it. Kept at that width now the
+    /// Skip is gone, so the button sits where it always has.
     private static let sideSlotWidth: CGFloat = 80
 
     private var backArrowButton: some View {
@@ -493,17 +421,15 @@ struct OnboardingView: View {
 
     private var primaryLabel: String {
         switch step {
-        case .welcome:      return "Continue"
-        case .echolocation: return "Continue"
-        case .listening:    return "Continue"
-        // Once both dialogs have been answered the button stops offering to ask
-        // again — re-tapping would be a no-op, since iOS only shows each of
-        // these once.
-        case .permissions:  return allPermissionsDecided ? "Continue" : "Allow Access"
-        case .calibrate:    return "Calibrate"
-        case .autoID:       return "Got it!"
-        case .viewMode:     return "Continue"
-        case .done:         return "Take the Tour"
+        case .welcome:     return "Continue"
+        // "Continue" either way, deliberately. It used to read "Allow Access"
+        // until both dialogs had been answered, which described the button
+        // honestly but made the flow look like it had a gate in it — and the
+        // step advances on the second tap regardless. Whether a tap opens a
+        // system dialog or moves on is `advance()`'s business, not the label's.
+        case .permissions: return "Continue"
+        // The last step, so this is the button that opens the app.
+        case .autoID:      return "Let's go!"
         }
     }
 
@@ -525,12 +451,6 @@ struct OnboardingView: View {
         }
     }
 
-    /// Whether there's an ultrasonic mic attached worth calibrating. Read from
-    /// the throwaway controller this view activates in `onAppear`, which
-    /// populates its diagnostics from the current audio route without needing
-    /// capture to be running.
-    private var canCalibrate: Bool { calibrationAudio.diagnostics.canCalibrate }
-
     /// Both dialogs answered, however they were answered. Denial is not a
     /// blocker — the app degrades rather than refuses — so this only asks
     /// whether iOS still has a prompt left to show.
@@ -538,74 +458,36 @@ struct OnboardingView: View {
         micStatus != .undetermined && location.authorization != .notDetermined
     }
 
-    // MARK: - Species complexes
-
-    /// All species complexes across every bundled model, deduped by *name* — the same
-    /// grouping (e.g. "Myotis species") recurs under a different id per region/model,
-    /// but it's one concept to explain to the user, not one row per model.
-    private var allComplexes: [SpeciesComplex] {
-        var seen = Set<String>()
-        return ModelRegistry.all.flatMap(\.complexes).filter { seen.insert($0.name).inserted }
-    }
-
-    /// Deliberately terse: a name and a few words each, no sentences. This is a
-    /// heads-up that certain groups are hard, not the place to teach why — the
-    /// full `note` is one tap away on any ID that actually lands in a complex.
-    private var complexList: some View {
-        VStack(spacing: 6) {
-            ForEach(allComplexes) { complex in
-                HStack(spacing: 10) {
-                    Image(systemName: "questionmark.circle.fill")
-                        .foregroundStyle(.orange)
-                    Text(complex.name)
-                        .font(.subheadline.weight(.semibold))
-                    Spacer(minLength: 8)
-                    Text(complex.shortNote)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.trailing)
-                }
-                .padding(.vertical, 8)
-                .padding(.horizontal, 12)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 10))
-            }
-        }
-    }
+    // Onboarding used to end this step with a list of every species complex
+    // across every bundled model, one orange row each. It was the longest thing
+    // in the flow and it named groups the user has no reason to care about
+    // before hearing their first bat — the two cards above teach the labels,
+    // which is the part that has to land here. The full note is still one tap
+    // away on any ID that actually falls in a complex.
 
     // MARK: - Navigation
 
     private func advance() {
         switch step {
         case .welcome:
-            go(to: .echolocation)
-        case .echolocation:
-            go(to: .listening)
-        case .listening:
             go(to: .permissions)
         case .permissions:
+            // The first tap fires the two OS dialogs and leaves the user here to
+            // watch the rows tick; the second moves on. See `requestPermissions`.
             if allPermissionsDecided {
-                // Skipped entirely with no ultrasonic mic attached: there is
-                // nothing to calibrate, and asking someone to calibrate hardware
-                // they haven't plugged in yet is a step that can only fail. It
-                // stays available in Settings, which is where someone who plugs
-                // a mic in later has to go find it — offering it automatically
-                // on first connection is still to do.
-                go(to: canCalibrate ? .calibrate : .autoID)
+                go(to: .autoID)
             } else {
                 requestPermissions()
             }
-        case .calibrate:
-            // "Skip for now", in the bottom bar, is the other way out of this step.
-            showMicCalibration = true
         case .autoID:
-            go(to: .viewMode)
-        case .viewMode:
-            go(to: .done)
-        case .done:
             // Consumed once by ContentView's .onAppear, which clears it right back
-            // to false — see OnboardingState.shouldAutoStartTour's doc comment.
-            OnboardingState.shared.shouldAutoStartTour = true
+            // to false — see OnboardingState.justFinishedOnboarding's doc comment.
+            // It does not open the tour: dropping someone straight out of
+            // onboarding into another guided thing, on a detector that has
+            // nothing on it yet, is more onboarding at exactly the point they
+            // were promised it had ended. Both tours are under Info & Tour,
+            // which is where the card above points.
+            OnboardingState.shared.justFinishedOnboarding = true
             onComplete()
         }
     }
@@ -654,7 +536,11 @@ struct OnboardingView: View {
 /// Same shape as the ADHD app's onboarding progress bar: a capsule track with
 /// a tinted fill sized to (completed step + 1) / total, so the first step
 /// still shows a sliver of progress rather than an empty bar.
-private struct OnboardingProgressBar: View {
+///
+/// Internal rather than private because `AboutAppTour` — which is the retired
+/// middle of this flow — draws the same bar. Two bars that only look alike is
+/// what a shared component is for.
+struct OnboardingProgressBar: View {
     let completed: Int
     let total: Int
 
@@ -681,15 +567,37 @@ private struct OnboardingProgressBar: View {
 /// by a stack of these, so the flow has one rhythm rather than a different
 /// layout per screen. `PermissionRow` is the same shape plus a status glyph,
 /// since those cards describe something you're being asked to grant.
-private struct OnboardingCard: View {
-    let systemImage: String
+///
+/// Internal rather than private: `AboutAppTour` is built from these too, and it
+/// holds the pages this flow used to end with — they have to keep looking like
+/// the same app.
+struct OnboardingCard: View {
+    /// Either an SF Symbol or a drawn glyph from the asset catalog. The two size
+    /// by different means and neither works on the other — a symbol takes its
+    /// size from `font`, artwork carries its own pixel dimensions — which is the
+    /// same split `AppSection.Icon` makes for the tab bar.
+    enum Glyph {
+        case symbol(String)
+        case asset(String)
+    }
+
+    let glyph: Glyph
     let title: String
     let detail: String
 
+    init(systemImage: String, title: String, detail: String) {
+        self.init(glyph: .symbol(systemImage), title: title, detail: detail)
+    }
+
+    init(glyph: Glyph, title: String, detail: String) {
+        self.glyph = glyph
+        self.title = title
+        self.detail = detail
+    }
+
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            Image(systemName: systemImage)
-                .font(.system(size: 20))
+            icon
                 .foregroundStyle(Color.batAccent)
                 .frame(width: 28)
             VStack(alignment: .leading, spacing: 2) {
@@ -705,6 +613,24 @@ private struct OnboardingCard: View {
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    /// Artwork is height-matched to the symbols beside it rather than fitted to
+    /// the 28pt box: `batCall` is landscape, so binding it on width would draw it
+    /// noticeably shorter than every symbol in the column — the same trap
+    /// `AppSection.iconSized(_:)` documents for the tab bar.
+    @ViewBuilder private var icon: some View {
+        switch glyph {
+        case .symbol(let name):
+            Image(systemName: name)
+                .font(.system(size: 20))
+        case .asset(let name):
+            Image(name)
+                .renderingMode(.template)
+                .resizable()
+                .scaledToFit()
+                .frame(height: 20)
+        }
     }
 }
 

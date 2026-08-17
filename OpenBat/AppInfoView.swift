@@ -33,6 +33,17 @@ enum TourID: Hashable {
     case pulseSpeciesToggle, pulseSettings     // pulse-view header
     case spectrogramSpeciesToggle, compressTimeline, batRange, palette, bandSettings
     case start, record, listen                 // session button + its transport menu
+    /// The transport menu as a whole. The simplified tour covers Record, Listen
+    /// and End in one step; the advanced tour keeps `record` and `listen`
+    /// separate.
+    case transportMenu
+    case sunClock                              // nav bar
+    /// The three ordinary tabs. Unlike every other case these are NOT published
+    /// by `.tourTarget` — on iOS 26 a `Tab`'s label is drawn by the bar, outside
+    /// the view tree the anchor preference travels through, so ContentView feeds
+    /// these in from `SessionButtonLocator` instead. `.start` is fed the same way
+    /// for the same reason.
+    case tab(AppSection)
 }
 
 /// Accumulates one bounds anchor per tagged control (see `tourTarget(_:)`
@@ -79,40 +90,88 @@ struct TourStep: Identifiable {
     /// step index and opens the menu for exactly these, so the spotlight has
     /// something real to point at — see its `onChange(of: tourIndex)`.
     var opensTransportMenu: Bool = false
-    /// Set on the steps whose control only exists in advanced view. Filtered out
-    /// in simplified view by `TourScript.steps(simplified:)` — a spotlight step
-    /// explaining a button that isn't on screen is worse than no step, and the
-    /// overlay would draw its caption over a cutout of nothing.
-    var advancedOnly: Bool = false
+    // There used to be an `advancedOnly` flag here, filtering the one shared
+    // script down for simplified view. The two scripts are separate lists now
+    // (see `TourScript`), so a step's mode is decided by which list it is in —
+    // there is no longer a flag that can disagree with that.
     let title: String
     let detail: String
 }
 
 /// The guided tour's script, driving `AppInfoView`'s `TourOverlay`.
 ///
-/// Simplified view gets a genuinely shorter tour rather than the same one with
-/// gaps: `steps(simplified:)` drops every step whose control that mode hides,
-/// and the stats step describes what is actually in the card. This is the
-/// "advanced offers a longer tour" half of the mode — the tour is not split
-/// arbitrarily, it just stops describing things that aren't there.
+/// **Two genuinely different tours, not one tour with gaps.**
+///
+/// The simplified tour used to be the advanced one with the advanced-only steps
+/// filtered out, which left sixteen steps — every pill in the stats header, both
+/// listening modes, the deaf-window trade-off — for someone who has not yet heard
+/// a bat. It is now its own short script of five: the three panes, then the
+/// session button and what its second tap opens.
+///
+/// The advanced tour is unchanged in shape and still walks the whole screen; it
+/// remains the superset, which is what makes `OnboardingState.shouldOfferTour`
+/// safe to retire the button on once it has been finished.
 enum TourScript {
     static func steps(simplified: Bool) -> [TourStep] {
-        all(simplified: simplified).filter { !(simplified && $0.advancedOnly) }
+        simplified ? simplifiedSteps : advancedSteps
     }
 
-    // Walks the screen top-to-bottom: each pane first, then each button inside it
-    // individually, then the session button and the controls in its menu, then
-    // how to get around.
-    private static func all(simplified: Bool) -> [TourStep] { [
+    /// The short tour. No welcome card: the popover that offers the tour has
+    /// already said what it is, and opening with a step that says "here is a
+    /// tour" inside a tour is the kind of padding this rewrite exists to remove.
+    private static let simplifiedSteps: [TourStep] = [
+        TourStep(target: .stats, symbol: "chart.bar",
+                 title: "Status and level",
+                 detail: "How loud the microphone is hearing, and whether it's connected. If this stays flat when a bat goes over, check the mic rather than the sky."),
+
+        TourStep(target: .pulseView, symbol: "sparkle.magnifyingglass",
+                 title: "Species ID",
+                 detail: "Every species identified this session, most recent first. Tap any one to see the calls behind it and how confident the identification was."),
+
+        TourStep(target: .spectrogram, symbol: "waveform.badge.magnifyingglass",
+                 title: "Spectrogram",
+                 detail: "A picture of what the microphone is hearing: time across, pitch up the side. A bat call is a bright stroke sweeping downward. Drag it to look back at what just went past."),
+
+        // The three tabs used to get a spotlight each here. They are labelled,
+        // permanently on screen, and a beginner finds them by tapping them —
+        // three steps to say "this is the Sessions tab" is the tour explaining
+        // its own furniture. What actually needs explaining is the one control
+        // that is not self-evident: a round button whose second tap does
+        // something different from its first.
+        //
+        // `play.fill` because that is the glyph on the button being pointed at
+        // (see `ContentView.sessionSymbol`) — a card showing a record dot beside
+        // a spotlight on a play triangle asks the user to work out whether they
+        // are looking at the right control.
+        TourStep(target: .start, symbol: "play.fill",
+                 title: "Start listening",
+                 detail: "The round button starts a session. That's the whole thing: tap it, point the microphone at the open sky, and wait. Once it's running, tap it again to open the controls below."),
+
+        TourStep(target: .transportMenu, symbol: "slider.horizontal.3", opensTransportMenu: true,
+                 title: "Record, listen, end",
+                 detail: "Record keeps a file of each pass. Listen brings the calls down into your hearing, tapping through the options. End stops the session and files it away. (Shown here for the tour.)"),
+    ]
+
+    // Walks the screen top-to-bottom: the nav bar, each pane first, then each
+    // button inside it individually, then the session button and the controls in
+    // its menu, then how to get around.
+    //
+    // No longer parameterised on `simplified` — every step here is shown, because
+    // this script only ever runs in advanced view now. The simplified branches
+    // each case used to carry moved out into `simplifiedSteps`, which no longer
+    // has to describe the same control in two registers at once.
+    private static let advancedSteps: [TourStep] = [
         TourStep(target: nil, symbol: "hand.wave",
                  title: "Welcome to OpenBat",
                  detail: "A real-time bat detector for the ultrasonic mic. Here's a quick tour of the screen — tap Next to step through, or End tour any time."),
 
+        TourStep(target: .sunClock, symbol: "sunset",
+                 title: "Sun clock",
+                 detail: "Tonight's sunset, then how long it's been since, then the coming sunrise. A filled sun means you're inside one of the two windows bats are busiest in — the first and last sixth of the night. Tap it for both times."),
+
         TourStep(target: .stats, symbol: "chart.bar",
-                 title: simplified ? "Status and level" : "Live stats",
-                 detail: simplified
-                    ? "How loud the input is, and pills showing what's running and whether the mic is connected."
-                    : "Peak frequency, bandwidth, duration, pulse rate and count for the most recent pulse, plus the input level. They clear when activity goes stale."),
+                 title: "Live stats",
+                 detail: "Peak frequency, bandwidth, duration, pulse rate and count for the most recent pulse, plus the input level. They clear when activity goes stale."),
         // Left-to-right along the stats header, matching statsStrip's own order.
         TourStep(target: .slowReplayStatus, symbol: "ear",
                  title: "Slow replay status",
@@ -127,20 +186,15 @@ enum TourScript {
                  title: "Mic status",
                  detail: "Shows whether the ultrasonic mic is attached and the sample rate it's running at — this should show 384 kHz."),
         TourStep(target: .resetStats, symbol: "arrow.counterclockwise",
-                 title: simplified ? "Reset the meter" : "Reset stats",
-                 detail: simplified
-                    ? "Clears the level meter's peak-hold marker."
-                    : "Clears the pulse count, pulse rate and the level meter's peak-hold."),
-        TourStep(target: .pulseView,
-                 symbol: simplified ? "sparkle.magnifyingglass" : "waveform.path.ecg",
-                 title: simplified ? "Species ID" : "Pulse view & Species ID",
-                 detail: simplified
-                    ? "Every species identified this session, most recent first. Tap any one for the pulses and scores behind it."
-                    : "A zoomed, onset-aligned render of the latest call. Pinch and drag to inspect it. It can also show the live Species ID feed instead."),
-        TourStep(target: .pulseSpeciesToggle, symbol: "sparkle.magnifyingglass", advancedOnly: true,
+                 title: "Reset stats",
+                 detail: "Clears the pulse count, pulse rate and the level meter's peak-hold."),
+        TourStep(target: .pulseView, symbol: "waveform.path.ecg",
+                 title: "Pulse view & Species ID",
+                 detail: "A zoomed, onset-aligned render of the latest call. Pinch and drag to inspect it. It can also show the live Species ID feed instead."),
+        TourStep(target: .pulseSpeciesToggle, symbol: "sparkle.magnifyingglass",
                  title: "Species ID feed",
                  detail: "The bat glyph swaps this pane between the pulse close-up and the live Species ID feed. In the feed, tap any ID for the pulses and scores behind it."),
-        TourStep(target: .pulseSettings, symbol: "slider.horizontal.3", advancedOnly: true,
+        TourStep(target: .pulseSettings, symbol: "slider.horizontal.3",
                  title: "Pulse view settings",
                  detail: "Display settings for the pulse close-up — zoom window span and noise floor."),
 
@@ -150,17 +204,17 @@ enum TourScript {
         TourStep(target: .sessionTimer, symbol: "timer",
                  title: "Elapsed time",
                  detail: "How long the current run has been detecting, counting from when you started. It appears once detection is running and disappears when you stop. (Shown here for the tour.)"),
-        TourStep(target: .spectrogramSpeciesToggle, symbol: "sparkle.magnifyingglass", advancedOnly: true,
+        TourStep(target: .spectrogramSpeciesToggle, symbol: "sparkle.magnifyingglass",
                  title: "Species ID here too",
                  detail: "Swaps this pane to the Species ID feed, same as in the pulse view — useful when you want the running list on the larger of the two panes."),
-        TourStep(target: .compressTimeline, symbol: "lines.measurement.horizontal.aligned.bottom", advancedOnly: true,
+        TourStep(target: .compressTimeline, symbol: "lines.measurement.horizontal.aligned.bottom",
                  title: "Compress timeline",
                  detail: "Drops the silent gaps so the display shows just the detected pulses, back-to-back."),
         TourStep(target: .batRange, symbol: "minus.plus.lines.measurement.horizontal.aligned.bottom",
-                 symbolRotation: .degrees(-90), advancedOnly: true,
+                 symbolRotation: .degrees(-90),
                  title: "Bat frequency band",
                  detail: "One-tap preset snapping the frequency axis to 15–90 kHz, where most bat calls live. Tap again to restore the full range. Custom ranges can be set also."),
-        TourStep(target: .palette, symbol: "paintpalette", advancedOnly: true,
+        TourStep(target: .palette, symbol: "paintpalette",
                  title: "Colour palette",
                  detail: "Picks the colormap for the spectrogram and pulse view — Inferno, Viridis, Jet and friends."),
         TourStep(target: .bandSettings, symbol: "slider.horizontal.3",
@@ -180,10 +234,77 @@ enum TourScript {
                  title: "Slow replay, and going deaf",
                  detail: "While a snippet is replaying, no new call is being captured — that's the trade-off, and it's why the fourth step exists: heterodyne keeps playing underneath, so you can still hear the bat overhead while the last call is replayed. The status pill up in the stats header shows which of the two it's doing."),
 
-        TourStep(target: nil, symbol: "square.grid.2x2",
-                 title: "Getting around",
-                 detail: "The bar along the bottom switches between the Detector, your Sessions, the Species guide and Playback. Top-right on the Detector holds Settings, Help and this Info screen — including the switch between this simplified view and the full set of controls. That's the tour — happy detecting!"),
-    ] }
+        // Was one card claiming a Playback tab that no longer exists — playback
+        // folded into Sessions (2026-08-16), so a recording now has exactly one
+        // place to be. Split into a spotlight per tab so it points at each rather
+        // than listing them.
+        TourStep(target: .tab(.detector), symbol: "wave.3.up",
+                 title: "Detector",
+                 detail: "This screen — the live view, and where a session runs from."),
+        TourStep(target: .tab(.sessions), symbol: "waveform.path.ecg.text.clipboard",
+                 title: "Sessions",
+                 detail: "Every run you've logged: the species heard, where they were heard, and any recordings kept — played back from the session itself."),
+        TourStep(target: .tab(.species), symbol: "book.closed",
+                 title: "Species",
+                 detail: "The field guide: the bats in your region, their calls and measurements, and range maps."),
+
+        TourStep(target: nil, symbol: "gearshape",
+                 title: "The rest of it",
+                 detail: "Top-right holds Settings and Help, and this Info & Tour screen — come back here any time to run the tour again. The switch between simplified and full view is the first thing in Settings, under General. That's the tour — happy detecting!"),
+    ]
+}
+
+// MARK: - Tour offer
+
+/// What the Detector's tour button opens: a short pitch for the tour and the
+/// button that starts it.
+///
+/// Sized for a popover, so it says one thing. The mode-specific line is the
+/// point of the two variants — someone in simplified view is being offered a
+/// five-step walk round three panes and the session button, and someone in full
+/// view a walk round every control on the screen. Promising the wrong one of
+/// those is how a tour gets abandoned halfway.
+struct TourOfferPopover: View {
+    let simplified: Bool
+    let start: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 10) {
+                Image(systemName: "sparkles")
+                    .font(.title3)
+                    .foregroundStyle(Color.batAccent)
+                Text("New here?")
+                    .font(.headline)
+            }
+
+            Text(simplified
+                 ? "A quick guided tour points out what's on the screen and how to start listening — five taps."
+                 : "A guided tour walks you round every readout and control on the detector, one at a time.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            // Says plainly that this offer goes away, and that the tour doesn't.
+            // Without it, a user who dismisses the popover has no way to know
+            // whether they have just lost something.
+            Text("This button disappears once you've been through it. The tour stays available under Info & Tour.")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Button(action: start) {
+                Text("Start the tour")
+                    .font(.headline)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 4)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.batAccent)
+        }
+        .padding(18)
+        .frame(width: 300)
+    }
 }
 
 // MARK: - Info sheet
@@ -193,6 +314,10 @@ struct AppInfoView: View {
     /// host launches the tour from the sheet's onDismiss, once it's actually gone.
     var startTour: () -> Void
     @Environment(\.dismiss) private var dismiss
+    /// The second tour — the retired middle of onboarding. Presented from here
+    /// rather than flagged-and-dismissed like the guided one: it has nothing to
+    /// spotlight, so it has no reason to wait for this sheet to get out of the way.
+    @State private var showAboutTour = false
 
     var body: some View {
         NavigationStack {
@@ -211,6 +336,11 @@ struct AppInfoView: View {
                     section("Getting started",
                             "Connect the mic, tap the round button beside the tab bar, and point it at the sky. Every run is a session: detected passes are logged with their species, confidence, and a spectrogram of the pulses, and mapped where they were heard.")
 
+                    // Two tours, and they answer different questions — see
+                    // `AboutAppTour`'s header. The guided one is prominent
+                    // because it is the one someone standing in front of a
+                    // detector they don't understand needs; the other is
+                    // reading material.
                     Button {
                         // Flag the tour, then dismiss; the host starts it from the
                         // sheet's onDismiss so the spotlight lands on the real,
@@ -227,6 +357,47 @@ struct AppInfoView: View {
                     .tint(.batAccent)
                     .padding(.top, 4)
 
+                    Text("Points at each control on the detector in turn and says what it does.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .center)
+
+                    // A sheet rather than a push, unlike What's New below. This
+                    // is a paged flow with its own bottom bar and its own Back
+                    // arrow, and pushing it would put a second Back in the nav
+                    // bar pointing somewhere else entirely. It stacks over this
+                    // sheet rather than replacing it, which is fine — it has a
+                    // Done of its own and this one is still underneath when it
+                    // goes.
+                    Button { showAboutTour = true } label: {
+                        Label("About the app", systemImage: "book")
+                            .font(.headline)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 6)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.batAccent)
+
+                    Text("Echolocation, the two ways of hearing a call, calibration and how much of the detector to show.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .center)
+
+                    // Where What's New lives once the after-update sheet has
+                    // been dismissed. A push rather than another sheet: this one
+                    // is already a sheet, and stacking them is how a user loses
+                    // track of what dismissing gets them back to.
+                    NavigationLink {
+                        WhatsNewContent()
+                    } label: {
+                        Label("What's New", systemImage: "sparkles")
+                            .font(.headline)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 6)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.batAccent)
+
                     attributionSection
                 }
                 .padding(20)
@@ -238,6 +409,7 @@ struct AppInfoView: View {
                     Button("Done") { dismiss() }
                 }
             }
+            .sheet(isPresented: $showAboutTour) { AboutAppTour() }
         }
     }
 
@@ -461,8 +633,11 @@ struct TourOverlay: View, Equatable {
     let targets: [TourID: CGRect]
     @Binding var index: Int
     let steps: [TourStep]
-    /// Ends the tour (Skip / Done / finishing the last step).
-    let finish: () -> Void
+    /// Ends the tour. The flag says whether it was seen all the way through —
+    /// true from the last step's Done, false from "End tour". The host uses it
+    /// to decide whether to retire the button that offers the tour, so the two
+    /// exits must stay distinguishable here.
+    let finish: (_ completed: Bool) -> Void
 
     /// The detector UI relayouts many times a second while running (stats text,
     /// meters, button tints), and every pass republishes the anchor preferences,
@@ -558,7 +733,7 @@ struct TourOverlay: View, Equatable {
                 .fixedSize(horizontal: false, vertical: true)
 
             HStack(spacing: 12) {
-                Button("End tour") { finish() }
+                Button("End tour") { finish(false) }
                     .foregroundStyle(.secondary)
                 Spacer()
                 if index > 0 {
@@ -597,7 +772,7 @@ struct TourOverlay: View, Equatable {
     }
 
     private func advance() {
-        if index >= steps.count - 1 { finish() }
+        if index >= steps.count - 1 { finish(true) }
         else { withAnimation { index += 1 } }
     }
 }

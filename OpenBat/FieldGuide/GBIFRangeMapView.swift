@@ -45,10 +45,10 @@ struct GBIFDistributionCard: View {
     /// Bundled presence grid. Ships in the app, so this card has no loading
     /// state and no network path — see SpeciesPresenceStore's header.
     let presenceStore: SpeciesPresenceStore
-    /// Height of the map area. Callers own this rather than the card hardcoding
-    /// one, so the same card can sit at a fixed height in the normal stacked
-    /// layout or be squared off next to the overview text on iPad landscape
-    /// (see SpeciesDetailView).
+    /// Height of the "no data" placeholder only — the map itself is square (see
+    /// `Self.aspect`) and takes its height from its width. Callers own this
+    /// rather than the card hardcoding one so the placeholder doesn't tower over
+    /// a short caller's layout.
     var mapHeight: CGFloat = 220
 
     @State private var showInfoPopover = false
@@ -57,12 +57,32 @@ struct GBIFDistributionCard: View {
     /// is never re-applied when it changes — so the camera ends up framed for a
     /// width the view never had, and the range clips.
     @State private var camera: MapCameraPosition = .automatic
+    /// Last size the camera was framed for, purely so the re-frame runs once per
+    /// real size change instead of on every geometry callback. It no longer
+    /// feeds a height calculation — the map is square now and takes its height
+    /// from its width, so there is no size → height → size loop to converge.
     @State private var mapSize: CGSize = .zero
 
-    /// Tallest the map is allowed to grow. Past this a very tall range is better
-    /// slightly cropped than turned into a column that pushes the rest of the
-    /// species page off-screen.
-    private static let maxMapHeight: CGFloat = 340
+    /// The map is square, and that is what makes cropping impossible rather
+    /// than merely unlikely.
+    ///
+    /// Fitting a rect into a view means matching their aspect ratios, so a range
+    /// that is tall relative to the view forces the map to show more longitude
+    /// than the world has — MapKit clamps the zoom there and crops the latitude
+    /// instead. Padding cannot fix that; only a taller frame can.
+    ///
+    /// **In Mercator map points the world is square**, so any range's height is
+    /// at most `MKMapRect.world.height`, which equals `MKMapRect.world.width`.
+    /// At aspect 1 the longitude a range needs is exactly its height — therefore
+    /// never more than one world-width, for any range that can exist. A square
+    /// map fits everything.
+    ///
+    /// This replaced a grow-the-height-as-needed calculation capped at 340pt
+    /// (2026-08-17). The cap was the bug: measured against the real data, hoary
+    /// bat needs 1.30 world-widths in a wide card, eastern red 1.26, Mexican
+    /// free-tailed 1.12 — and any cap short of square leaves the tallest ranges
+    /// clipped no matter how it is tuned.
+    private static let aspect: CGFloat = 1
 
     /// One drawn block: a run of horizontally adjacent cells in a single row.
     private struct RangeBlock: Identifiable {
@@ -81,10 +101,13 @@ struct GBIFDistributionCard: View {
                                 .stroke(Color.purple.opacity(0.75), lineWidth: 0.5)
                         }
                     }
-                    .frame(height: height(for: range.rect))
+                    // **Square, and that is a correctness fix rather than a
+                    // taste one** — see `Self.aspect`.
+                    .aspectRatio(Self.aspect, contentMode: .fit)
                     .onGeometryChange(for: CGSize.self) { $0.size } action: { size in
-                        // Converges in a pass or two: the height depends on the
-                        // width, the width doesn't depend on the height.
+                        // Re-frames on a real size change (first layout,
+                        // rotation) — see `camera`, which cannot be set correctly
+                        // up front because the layout width isn't known then.
                         guard size.width > 0, size != mapSize else { return }
                         mapSize = size
                         camera = .rect(range.rect)
@@ -116,26 +139,6 @@ struct GBIFDistributionCard: View {
             return "This species isn't covered by any of the identification models yet, so there's no range data for it."
         }
         return "There aren't enough records of this species to map where it lives."
-    }
-
-    /// How tall the map has to be to show `rect` without cropping it.
-    ///
-    /// A map cannot display more than one world-width of longitude. Fitting a
-    /// rect into a view means matching their aspect ratios, so a range that is
-    /// tall relative to its width forces the map to show more longitude than
-    /// exists — MapKit clamps the zoom there and crops the latitude instead.
-    /// Padding cannot fix that; only a taller frame can.
-    ///
-    /// Measured against the real data: in a 3.5:1 card, five of the 47 species
-    /// are un-fittable — hoary bat would need 1.30 world-widths, eastern red
-    /// 1.26, Mexican free-tailed 1.12. Since the required width is
-    /// `rectHeight × aspect`, the height that makes it fit is simply the rect's
-    /// share of the world's height times the view's width.
-    private func height(for rect: MKMapRect) -> CGFloat {
-        guard mapSize.width > 0 else { return mapHeight }
-        let heightFraction = rect.height / MKMapRect.world.height
-        let needed = heightFraction * mapSize.width
-        return min(Self.maxMapHeight, max(mapHeight, needed))
     }
 
     private var resolvedRange: (rect: MKMapRect, blocks: [RangeBlock])? {

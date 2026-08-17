@@ -59,6 +59,14 @@ final class AudioEngineController {
     /// notifies on every set, changed or not). See Context.md §13.
     private(set) var activeSampleRate: Double = 0
     private(set) var activeInputName = "—"
+    /// Whether a USB (ultrasonic) mic is attached at all, active route or not.
+    /// Same equality-guarded-mirror pattern as `activeInputName`, and it exists
+    /// for the same reason: the first-connection calibration offer has to watch
+    /// this from `ContentView`'s modifier chain, and reading
+    /// `diagnostics.usbMicAvailable` there would re-render the whole detector
+    /// 15×/s while capturing. Mirrors `diagnostics.usbMicAvailable` exactly —
+    /// don't let the two definitions drift.
+    private(set) var ultrasonicMicAttached = false
     /// True when the current output route is the built-in speaker rather than
     /// headphones/Bluetooth/AirPlay. Same equality-guarded-mirror pattern as
     /// `activeSampleRate` — set only from `updateInputDiagnostics()`. Drives the
@@ -651,6 +659,9 @@ final class AudioEngineController {
         }
         if activeInputName != diagnostics.inputName {
             activeInputName = diagnostics.inputName
+        }
+        if ultrasonicMicAttached != diagnostics.usbMicAvailable {
+            ultrasonicMicAttached = diagnostics.usbMicAvailable
         }
     }
 

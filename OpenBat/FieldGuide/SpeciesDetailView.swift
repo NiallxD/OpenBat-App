@@ -125,6 +125,22 @@ struct SpeciesDetailView: View {
                     }
                 }
                 .padding(16)
+                // **Pins the content to the viewport width, so the page cannot
+                // be dragged sideways.** A vertical `ScrollView` is backed by a
+                // `UIScrollView` whose `contentSize` is the measured content in
+                // *both* axes — so a single child that measures wider than the
+                // screen makes the whole page pan horizontally, even though only
+                // `.vertical` was ever asked for. Declaring the axis is not
+                // enough; the content has to actually fit.
+                //
+                // Applied here rather than by hunting the guilty child because
+                // this page assembles ~10 optional cards from
+                // community-maintained JSON — a long unbroken citation URL or a
+                // wide photo is one bad entry away at any time, and `cardHeroPhoto`
+                // below documents a previous instance of exactly this. Anything
+                // over-wide is now clipped instead of scrollable, which is the
+                // behaviour asked for (Niall, 2026-08-17).
+                .containerRelativeFrame(.horizontal)
             }
         }
         .background(Color(.systemGroupedBackground))

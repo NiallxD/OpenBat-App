@@ -90,6 +90,19 @@ struct OpenBatApp: App {
 private struct RootView: View {
     private let onboarding = OnboardingState.shared
 
+    /// Decided once, here, because one of its outcomes changes which branch
+    /// below is taken. `init` rather than `.onAppear`: by the time `onAppear`
+    /// runs, `body` has already chosen a screen, and re-running onboarding after
+    /// the detector has been shown would be a visible flip rather than a
+    /// decision. See `ReleaseState.evaluateLaunch`.
+    init() {
+        let decision = ReleaseState.shared.evaluateLaunch(
+            hasCompletedOnboarding: OnboardingState.shared.hasCompletedWelcome)
+        if decision == .runOnboardingAgain {
+            OnboardingState.shared.hasCompletedWelcome = false
+        }
+    }
+
     var body: some View {
         Group {
             // Gates ContentView (and its .onAppear side effects, including the

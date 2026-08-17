@@ -117,7 +117,11 @@ enum SessionActivity {
     /// detections but no measurable span (every ID inside one second, which a
     /// demo-mode run can produce) still returns one bucket rather than nil, so the
     /// chart shows a single bar instead of vanishing.
-    static func buckets(at dates: [Date], from start: Date, to end: Date)
+    /// `timeZone` is a parameter only so the tests can drive a half-hour offset
+    /// (see `bucketEdgesAreAlignedInAHalfHourTimeZone`). Callers in the app want
+    /// the default: the buckets are labelled on the user's own clock.
+    static func buckets(at dates: [Date], from start: Date, to end: Date,
+                        timeZone: TimeZone = .current)
         -> (buckets: [Bucket], width: TimeInterval)? {
         guard !dates.isEmpty else { return nil }
 
@@ -131,10 +135,19 @@ enum SessionActivity {
         let width = candidateWidths.first { span / $0 <= Double(targetBucketCount) }
             ?? candidateWidths.last!
 
-        // Anchored to a whole multiple of the width in absolute time, so edges land
-        // on round clock times rather than on whenever the session happened to
-        // start.
-        let originEpoch = (lower.timeIntervalSince1970 / width).rounded(.down) * width
+        // Anchored to a whole multiple of the width, so edges land on round clock
+        // times rather than on whenever the session happened to start.
+        //
+        // **Measured in local time, not epoch time.** Epoch multiples are round
+        // in UTC, which is only the same thing where the offset is a whole number
+        // of hours. In India (+5:30) or Newfoundland (−3:30) an hourly bucket
+        // anchored to the epoch starts at half past, so every label on the axis
+        // read :30 — the one property this anchoring exists to provide. Shifting
+        // by the offset before rounding and back after puts the edges on the
+        // clock the user is actually reading.
+        let offset = Double(timeZone.secondsFromGMT(for: lower))
+        let originEpoch = ((lower.timeIntervalSince1970 + offset) / width).rounded(.down)
+            * width - offset
         let origin = Date(timeIntervalSince1970: originEpoch)
         let count = max(1, Int(((upper.timeIntervalSince(origin)) / width).rounded(.down)) + 1)
 

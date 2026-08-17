@@ -46,25 +46,51 @@ struct SunWindowPill: View {
     /// default sunset.
     let coordinate: CLLocationCoordinate2D?
 
-    // No `tourDemo` stand-in, unlike the other status pills: the detector's whole
-    // nav bar is hidden while the tour runs (see `detectorScreen`), so there
-    // would be nothing for a forced phase to appear in.
+    // No `tourDemo` stand-in, unlike the other status pills. It used to be that
+    // the nav bar was hidden for the whole tour, so a forced phase had nowhere
+    // to appear; the bar stays up now (2026-08-17) and the tour spotlights this
+    // pill directly, which is better than a demo phase — it points at the real
+    // readout rather than a staged one.
 
     @State private var showExplainer = false
-    /// The readout, recomputed once a minute by `tick(at:)`. Plain `@State`
-    /// deliberately — **NOT a `TimelineView`**; see `tick(at:)`.
-    @State private var phase: SunWindow.Phase?
+    /// The instant the readout is drawn for, advanced once a minute by `tick()`.
+    /// Plain `@State` deliberately — **NOT a `TimelineView`**; see `tick()`.
+    ///
+    /// This is the pill's ONLY stored state, and the phase is derived from it in
+    /// `body` rather than stored alongside it. That is load-bearing — see
+    /// `phase`.
     @State private var asOf = Date()
+
+    /// Where we are in the night, computed during `body` from `asOf`.
+    ///
+    /// **Derived rather than stored, because a toolbar item that renders empty
+    /// may never be hosted at all — and then nothing attached to it, `.task`
+    /// included, ever runs.** This was stored `@State`, filled in by the tick
+    /// loop, which made the first render of the pill empty by construction: no
+    /// phase yet, so nothing to draw, so (apparently) no item, so no task, so no
+    /// phase. A deadlock that resolves itself only if SwiftUI happens to mount an
+    /// empty item, which is not a guarantee to rest a permanent piece of chrome
+    /// on. Deriving it means the very first evaluation with a coordinate in hand
+    /// already has something to draw, and the tick loop only has to keep it
+    /// current once the item is definitely on screen.
+    ///
+    /// Safe to call from a body: `SunWindow.phase` is memoised precisely so it
+    /// can be (see its `solarEvents` cache). The bug that started all this was
+    /// the *update mechanism* — a `TimelineView` dragging the nav bar into its
+    /// cycle — not the cost of the computation.
+    private var phase: SunWindow.Phase? {
+        coordinate.flatMap { SunWindow.phase(at: asOf, coordinate: $0) }
+    }
 
     private static let clock: DateFormatter = {
         let f = DateFormatter(); f.timeStyle = .short; return f
     }()
 
     var body: some View {
-        // One `Group`, not a bare `if`: a `ToolbarItem` hosts a single view, and
-        // the `.task` has to stay mounted even while there is nothing to draw —
-        // before the first location fix, `phase` is nil and the pill is empty, and
-        // a task attached inside the `if` would never get the chance to fill it in.
+        // Empty until there is a location to anchor to — there is no sensible
+        // default sunset. Both of these come straight from the arguments and
+        // `asOf` now, so this is non-empty on the first evaluation after a fix
+        // lands rather than on the first tick after that; see `phase`.
         Group {
             if let coordinate, let phase {
                 Button { showExplainer = true } label: { pill(phase, now: asOf) }
@@ -75,11 +101,10 @@ struct SunWindowPill: View {
                     }
             }
         }
-        // Keyed on the coordinate so moving recomputes. `CLLocationCoordinate2D` is
-        // not `Equatable`, hence the string key — the same trick ContentView uses.
-        .task(id: coordinate.map { "\($0.latitude),\($0.longitude)" }) {
-            await tick(at: coordinate)
-        }
+        // Only keeps `asOf` current — it no longer has to run for the pill to
+        // appear, which is the whole point of deriving `phase`. Moving is picked
+        // up without it too: a new coordinate re-evaluates `body` directly.
+        .task { await tick() }
     }
 
     /// Updates the readout on the minute, for as long as the pill is on screen.
@@ -96,13 +121,10 @@ struct SunWindowPill: View {
     /// A `@State` write invalidates this view and nothing above it, which is the
     /// property a toolbar needs. Sleeping to the next wall-clock minute keeps the
     /// digits changing on the minute rather than a minute after launch.
-    private func tick(at coordinate: CLLocationCoordinate2D?) async {
-        guard let coordinate else { phase = nil; return }
+    private func tick() async {
         while !Task.isCancelled {
             let now = Date()
             asOf = now
-            phase = SunWindow.phase(at: now, coordinate: coordinate)
-
             let intoMinute = now.timeIntervalSince1970.truncatingRemainder(dividingBy: 60)
             do { try await Task.sleep(for: .seconds(60 - intoMinute)) } catch { return }
         }
@@ -236,7 +258,7 @@ private struct SunWindowExplainer: View {
                     row("sunrise.fill", "Sunrise", Self.clock.string(from: night.sunrise))
                 }
 
-                Text("Most bats emerge soon after sunset and are busiest for the first couple of hours; there is often a second, quieter burst before sunrise as they return to the roost.")
+                Text("Most bats emerge soon after sunset and are most active for the first couple of hours, with a second, quieter burst before sunrise as they return to the roost.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -244,7 +266,7 @@ private struct SunWindowExplainer: View {
                 // Names the actual window length rather than "15%" — a fraction is
                 // the implementation, and what the user wants to know is how long
                 // they have got.
-                Text("This pill counts through those two windows — about \(SunWindowPill.compact(minutes: Int(night.window / 60))) at each end of tonight's \(SunWindowPill.compact(minutes: Int(night.sunrise.timeIntervalSince(night.sunset) / 60))) of darkness. The sun icon is filled while you are inside one.")
+                Text("This timer counts through those two windows, which for tonight is about \(SunWindowPill.compact(minutes: Int(night.window / 60))) after sunset and before sunrise. Night time is about \(SunWindowPill.compact(minutes: Int(night.sunrise.timeIntervalSince(night.sunset) / 60))) long tonight.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -252,13 +274,13 @@ private struct SunWindowExplainer: View {
                 // Polar day or night — the pill itself is hidden then, so this is
                 // only reachable if the sun stops crossing the horizon while the
                 // popover is open. Still worth saying rather than showing a blank.
-                Text("The sun doesn't rise or set at your location today, so there is no dusk to work from.")
+                Text("The sun doesn't rise or set at your location today so you're either really far north or south, or astrophage has eaten the Sun.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            Text("Worked out on your phone from your location and the date — no signal needed.")
+            Text("These times are calculated on-device and are accurate to within a few minutes.")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)

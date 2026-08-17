@@ -5,7 +5,8 @@
 //  Finds out where the system tab bar actually put the session button, so the
 //  things that hang off it — the recording glow behind it, the tap catcher in
 //  front of it — can be placed against the real thing rather than against a
-//  guess.
+//  guess. It locates the ordinary tabs the same way, for the guided tour's
+//  spotlight; everything below about *why* applies equally to those.
 //
 //  Why this exists. On iOS 26 the session button is a `Tab(role: .search)`,
 //  drawn by the bar, and the bar tells us nothing about where it drew it. The
@@ -39,6 +40,18 @@ import UIKit
 final class SessionButtonLocator {
     private(set) var frameInWindow: CGRect?
 
+    /// Where the bar put each ordinary tab, in window coordinates. Empty until
+    /// found, and missing entries are normal — same contract as `frameInWindow`:
+    /// draw nothing rather than guess.
+    ///
+    /// Only the guided tour needs these, and only so it can spotlight a real tab
+    /// rather than gesture at the bottom of the screen. They come from the same
+    /// search as the session button for the same reason: on iOS 26 a `Tab`'s
+    /// label is rendered by the bar, outside the normal view tree, so a
+    /// `.tourTarget` anchor placed on one never reaches the preference the
+    /// overlay reads.
+    private(set) var tabFramesInWindow: [AppSection: CGRect] = [:]
+
     /// Identifier set on the Tab's label and matched here. Also the reason this
     /// is a shared constant rather than two string literals that can drift.
     static let accessibilityIdentifier = "openbat.session-button"
@@ -50,9 +63,20 @@ final class SessionButtonLocator {
         "Start session", "Session controls", "Close session controls"
     ]
 
+    /// Per-tab identifier, set in `ContentView.systemTabs`. Same
+    /// identifier-then-label pairing as the session button above.
+    static func tabIdentifier(_ section: AppSection) -> String {
+        "openbat.tab.\(section.rawValue)"
+    }
+
     func update(_ frame: CGRect?) {
         guard frame != frameInWindow else { return }
         frameInWindow = frame
+    }
+
+    func updateTabs(_ frames: [AppSection: CGRect]) {
+        guard frames != tabFramesInWindow else { return }
+        tabFramesInWindow = frames
     }
 }
 
@@ -113,6 +137,64 @@ struct SessionButtonProbe: UIViewRepresentable {
             guard let window else { return }
             let found = Self.findSessionButton(in: window)
             locator.update(found.map { window.convert($0.bounds, from: $0) })
+
+            // Scoped to the tab bar's own subtree where one can be found. The
+            // section titles are ordinary words — "Sessions" and "Species" both
+            // appear elsewhere on the Detector — so searching the whole window
+            // for them by label would happily match a pill in the stats header.
+            // Inside the bar there is nothing else they could be.
+            let searchRoot = Self.findTabBar(in: window) ?? window
+            var tabs: [AppSection: CGRect] = [:]
+            for section in AppSection.allCases {
+                if let view = Self.findTab(section, in: searchRoot) {
+                    tabs[section] = window.convert(view.bounds, from: view)
+                }
+            }
+            locator.updateTabs(tabs)
+        }
+
+        /// The system bar, when there is one. `UITabBar` is public API and this
+        /// only narrows the search — a miss falls back to the whole window rather
+        /// than failing, so the pre-iOS 26 hand-built bar (which is not a
+        /// `UITabBar` at all, and whose tabs the tour reaches by `.tourTarget`
+        /// anyway) costs nothing here.
+        static func findTabBar(in root: UIView) -> UIView? {
+            var stack = [root]
+            while let view = stack.popLast() {
+                if view is UITabBar { return view }
+                stack.append(contentsOf: view.subviews)
+            }
+            return nil
+        }
+
+        /// One tab: the whole item, icon and title together.
+        ///
+        /// Identifier matches are preferred outright, and label matches exclude
+        /// `UILabel` and `UIImageView`. Both rules exist for the same reason —
+        /// **a `UILabel` derives its accessibility label from its own text**, so
+        /// the title inside the Sessions tab answers to "Sessions" exactly as the
+        /// tab itself does. Taking the smallest match without excluding it (which
+        /// is what the session button's search can safely do — nothing inside it
+        /// is a label reading "Start session") drew the spotlight ring around the
+        /// word and left the icon above it out in the dark.
+        static func findTab(_ section: AppSection, in root: UIView) -> UIView? {
+            let identifier = SessionButtonLocator.tabIdentifier(section)
+            var byIdentifier: [UIView] = []
+            var byLabel: [UIView] = []
+            var stack = [root]
+            while let view = stack.popLast() {
+                if view.accessibilityIdentifier == identifier {
+                    byIdentifier.append(view)
+                } else if view.accessibilityLabel == section.rawValue,
+                          !(view is UILabel), !(view is UIImageView) {
+                    byLabel.append(view)
+                }
+                stack.append(contentsOf: view.subviews)
+            }
+            let matches = byIdentifier.isEmpty ? byLabel : byIdentifier
+            return matches
+                .filter { $0.bounds.width > 1 && $0.bounds.height > 1 }
+                .min { $0.bounds.width * $0.bounds.height < $1.bounds.width * $1.bounds.height }
         }
 
         /// Depth-first search for the button. Identifier first — it is exact —

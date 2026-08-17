@@ -372,6 +372,11 @@ struct TransportMenu: View {
             RoundedRectangle(cornerRadius: width / 2)
                 .strokeBorder(.white.opacity(0.12), lineWidth: 1)
         }
+        // The whole menu as one target, alongside the per-item ones above. The
+        // simplified tour introduces the three controls in a single step rather
+        // than three, so it needs to spotlight the group; the advanced tour
+        // still takes them one at a time.
+        .tourTarget(.transportMenu)
     }
 
     private var divider: some View {

@@ -90,23 +90,31 @@ final class AutoIDSettings {
 
     // MARK: Location-based priors
 
-    /// What changed the last time a location move triggered a refresh — surfaced once
+    /// What changed the last time a location *move* triggered a refresh — surfaced once
     /// so the app can tell the user "we updated X for your new location" instead of
     /// silently rewriting priors underneath them. `recommendedModel` is set only when
     /// it differs from the model that was active at refresh time (never re-suggests
-    /// the model already in use). Species lists are codes for the *active* model only
-    /// — a refresh touches every model's priors, but only the active one affects what
-    /// the user sees classified right now. Cleared via `acknowledgeChangeSummary()`.
+    /// the model already in use). `speciesChanged` counts codes for the *active* model
+    /// only — a refresh touches every model's priors, but only the active one affects
+    /// what the user sees classified right now. Cleared via `acknowledgeChangeSummary()`.
+    ///
+    /// **Never set on the first derivation** (2026-08-17). Until then it was, and on a
+    /// clean install that was a bug the user saw: every species the grid reports as
+    /// absent counts as a change away from the factory default, so a first fix raised
+    /// a summary listing dozens of species and a model suggestion the post-onboarding
+    /// card was already making. Nothing *changed* on a first fix — the priors were
+    /// derived for the first time — so there is nothing to report.
     private(set) var pendingChangeSummary: PriorRefreshSummary?
 
     struct PriorRefreshSummary {
         var recommendedModel: ModelDescriptor?
-        var newlyEnabledSpecies: [String]
-        var newlyDisabledSpecies: [String]
+        /// How many of the active model's species were switched on or off by this
+        /// refresh. A count rather than two lists: the sheet that showed the lists
+        /// was scrapped on 2026-08-17 (see `SuggestedModelSheet`), and nothing else
+        /// ever read them — the authoritative list is AutoID settings itself.
+        var speciesChanged: Int
 
-        var isEmpty: Bool {
-            recommendedModel == nil && newlyEnabledSpecies.isEmpty && newlyDisabledSpecies.isEmpty
-        }
+        var isEmpty: Bool { recommendedModel == nil && speciesChanged == 0 }
     }
 
     func acknowledgeChangeSummary() {
@@ -203,6 +211,9 @@ final class AutoIDSettings {
 
         priorRefreshLock.lock()
         guard !refreshInFlight else { priorRefreshLock.unlock(); return }
+        // Read inside the lock, with the same value the distance gate below uses:
+        // a first derivation reports nothing (see `pendingChangeSummary`).
+        let isFirstDerivation = lastPriorCheckCoordinate == nil
         if let last = lastPriorCheckCoordinate {
             let moved = CLLocation(latitude: last.latitude, longitude: last.longitude)
                 .distance(from: CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude))
@@ -238,22 +249,19 @@ final class AutoIDSettings {
             save()
             isRefreshingPriors = false
 
-            var newlyEnabled: [String] = []
-            var newlyDisabled: [String] = []
+            var speciesChanged = 0
             if let activeID = activeIDAtStart, let newSpecies = updated[activeID]?.species {
                 for (code, newState) in newSpecies {
                     let wasEnabled = previousActiveSpecies[code]?.enabled ?? true
-                    if newState.enabled && !wasEnabled { newlyEnabled.append(code) }
-                    if !newState.enabled && wasEnabled { newlyDisabled.append(code) }
+                    if newState.enabled != wasEnabled { speciesChanged += 1 }
                 }
             }
             // Never re-recommend the model already in use.
             let recommended = suggestedModel.flatMap { $0.id == activeIDAtStart ? nil : $0 }
 
             let summary = PriorRefreshSummary(recommendedModel: recommended,
-                                              newlyEnabledSpecies: newlyEnabled.sorted(),
-                                              newlyDisabledSpecies: newlyDisabled.sorted())
-            if !summary.isEmpty {
+                                              speciesChanged: speciesChanged)
+            if !summary.isEmpty && !isFirstDerivation {
                 pendingChangeSummary = summary
             }
         }
@@ -344,8 +352,8 @@ final class AutoIDSettings {
 
     /// Default settings for a model, derived from its descriptor: every species
     /// starts enabled with a neutral prior (no location-based bias yet — see
-    /// `refreshPriorsFromGBIFIfNeeded`, which overwrites these from GBIF
-    /// occurrence data as soon as a location fix is available). The descriptor's
+    /// `refreshPriors`, which overwrites these from the bundled presence grid as
+    /// soon as a location fix is available). The descriptor's
     /// gate is used as-is. `minPassConfidence`/`minPassPulseCount` default to a
     /// real bar rather than "almost anything wins" — the old 0.05/1 defaults
     /// meant nearly every pulse produced *a* winning species regardless of how

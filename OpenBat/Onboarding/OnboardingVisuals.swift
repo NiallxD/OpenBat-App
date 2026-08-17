@@ -67,6 +67,40 @@ struct SonarPulseHero<Center: View>: View {
     }
 }
 
+// MARK: - Drawn-artwork hero
+
+/// A step header built from asset-catalog artwork instead of an SF Symbol,
+/// landing with the same one-shot bounce `OnboardingStepView` gives a symbol.
+///
+/// The bounce has to be hand-rolled: `.symbolEffect(.bounce)` only does anything
+/// to an SF Symbol, and applied to a raster template image it fails silently —
+/// the glyph simply sits there while every other step's header lands. Reduce
+/// Motion skips straight to the resting state.
+struct BounceInGlyph: View {
+    let assetName: String
+    var height: CGFloat = 60
+    var tint: Color = .batAccent
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var landed = false
+
+    var body: some View {
+        Image(assetName)
+            .renderingMode(.template)
+            .resizable()
+            .scaledToFit()
+            .frame(height: height)
+            .foregroundStyle(tint)
+            .scaleEffect(landed ? 1 : 0.7)
+            .opacity(landed ? 1 : 0)
+            .onAppear {
+                guard !reduceMotion else { landed = true; return }
+                withAnimation(.spring(response: 0.42, dampingFraction: 0.52)) { landed = true }
+            }
+            .accessibilityHidden(true)
+    }
+}
+
 // MARK: - Echolocation diagram
 
 /// A small looping spectrogram showing a run of downward-sweeping echolocation

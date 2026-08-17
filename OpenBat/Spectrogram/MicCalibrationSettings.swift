@@ -25,6 +25,8 @@ final class MicCalibrationSettings {
     private static func curveKey(forMicName micName: String) -> String {
         "MicCal.\(micName).curve"
     }
+    /// Mic names the first-connection offer has already been made for.
+    private static let keyOffered = "MicCal.offeredMics"
 
     init() {
         let d = UserDefaults.standard
@@ -42,6 +44,46 @@ final class MicCalibrationSettings {
             return
         }
         curve = loaded
+    }
+
+    // MARK: First-connection offer
+
+    /// Whether the app should offer to calibrate `micName` on sight.
+    ///
+    /// Two conditions, and the second is the one that matters. There must be no
+    /// stored curve for this mic — obviously — **and the offer must not already
+    /// have been made for it.** Without that second half, "Not now" is not an
+    /// answer: the offer would come back on the next reconnect, and on the one
+    /// after that, which turns a helpful nudge into something a user learns to
+    /// dismiss without reading.
+    ///
+    /// Keyed by mic name rather than a single global flag, so someone who
+    /// declines for one microphone and later attaches a different one is asked
+    /// about the new one. The curve is stored per mic name too — a calibration
+    /// measures a particular piece of hardware's response, so a second mic
+    /// genuinely is a new question.
+    func shouldOfferCalibration(forMicName micName: String) -> Bool {
+        guard !micName.isEmpty, micName != "—" else { return false }
+        guard UserDefaults.standard.data(forKey: Self.curveKey(forMicName: micName)) == nil
+        else { return false }
+        return !offeredMics.contains(micName)
+    }
+
+    /// Records that the offer has been made, however it was answered.
+    ///
+    /// Called when the prompt is *shown*, not when it is accepted. Someone who
+    /// taps Calibrate and then abandons the capture has still been told this
+    /// exists and where to find it; re-asking them is the same nagging the
+    /// name-keyed check above exists to prevent. Settings is the way back.
+    func recordCalibrationOffered(forMicName micName: String) {
+        guard !micName.isEmpty, micName != "—" else { return }
+        var mics = offeredMics
+        guard mics.insert(micName).inserted else { return }
+        UserDefaults.standard.set(Array(mics), forKey: Self.keyOffered)
+    }
+
+    private var offeredMics: Set<String> {
+        Set(UserDefaults.standard.stringArray(forKey: Self.keyOffered) ?? [])
     }
 
     /// Saves a freshly-measured curve and makes it the active one.

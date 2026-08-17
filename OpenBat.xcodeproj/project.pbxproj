@@ -470,7 +470,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = OpenBat/OpenBat.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 89;
+				CURRENT_PROJECT_VERSION = 93;
 				DEVELOPMENT_TEAM = 57P8LD6GWD;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -478,7 +478,7 @@
 				INFOPLIST_KEY_CFBundleDisplayName = OpenBat;
 				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = NO;
 				INFOPLIST_KEY_NSLocationAlwaysAndWhenInUseUsageDescription = "OpenBat records a GPS course for your session and saves accurate coordinates to each recorded audio file, including while the screen is off.";
-				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "OpenBat records a GPS course for your session and pins where each species was detected on a map.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "OpenBat pins where each species was detected on a map, shows tonight's sunset and sunrise times, and picks the species model for your region. It takes occasional one-shot fixes and never tracks you continuously.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "OpenBat needs microphone access to receive the ultrasonic audio stream from your bat detector microphone.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -493,7 +493,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.8.9;
+				MARKETING_VERSION = 0.9.1;
 				PRODUCT_BUNDLE_IDENTIFIER = Niall.OpenBat;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -513,7 +513,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = OpenBat/OpenBat.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 89;
+				CURRENT_PROJECT_VERSION = 93;
 				DEVELOPMENT_TEAM = 57P8LD6GWD;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -521,7 +521,7 @@
 				INFOPLIST_KEY_CFBundleDisplayName = OpenBat;
 				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = NO;
 				INFOPLIST_KEY_NSLocationAlwaysAndWhenInUseUsageDescription = "OpenBat records a GPS course for your session and saves accurate coordinates to each recorded audio file, including while the screen is off.";
-				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "OpenBat records a GPS course for your session and pins where each species was detected on a map.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "OpenBat pins where each species was detected on a map, shows tonight's sunset and sunrise times, and picks the species model for your region. It takes occasional one-shot fixes and never tracks you continuously.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "OpenBat needs microphone access to receive the ultrasonic audio stream from your bat detector microphone.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -536,7 +536,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.8.9;
+				MARKETING_VERSION = 0.9.1;
 				PRODUCT_BUNDLE_IDENTIFIER = Niall.OpenBat;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;

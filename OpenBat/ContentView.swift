@@ -92,20 +92,40 @@ struct ContentView: View {
     @State private var tourActive = false
     @State private var tourPending = false
     @State private var tourIndex = 0
-    /// Set when the CURRENT tour run was auto-launched from onboarding's "Take
-    /// the Tour" step (see OnboardingState.shouldAutoStartTour) — on that path
-    /// only, finishing the tour opens ONE follow-up sheet: `SuggestedModelSheet`
-    /// if the user's location suggests a model, otherwise Start Detecting
-    /// directly — so the tour leads straight into something actionable instead
-    /// of dropping the user back on an idle screen. Not set for a tour launched
-    /// from the Info sheet mid-use, where popping either sheet up unsolicited
-    /// would be unwelcome.
-    @State private var tourWillPromptStart = false
-    /// Set from `finish` (below) when the onboarding tour just ended and the
-    /// user's location suggests a model — drives `SuggestedModelSheet`. Standalone:
-    /// dismissing it does NOT also open Start Detecting (see that sheet's own
-    /// modifier below) — the two are deliberately independent.
+    /// The nav-bar tour offer's popover — see `tourButton`.
+    @State private var showTourOffer = false
+    /// One self-opening attempt per launch — see `nudgeTourAfterDelay`.
+    @State private var tourNudgeScheduled = false
+    /// How long after the detector first appears the tour offers itself, and how
+    /// long it keeps waiting for a clear moment before giving up.
+    private static let tourNudgeDelay: TimeInterval = 15
+    private static let tourNudgeWindow: TimeInterval = 120
+    /// What's New, once per build. Copied out of `ReleaseState` in `.onAppear`
+    /// rather than read from it live — see the sheet modifier for why.
+    @State private var showWhatsNew = false
+    /// Set once, on the first arrival here after onboarding, when the user's
+    /// location suggests a model that isn't already active — drives
+    /// `SuggestedModelSheet`. Standalone: dismissing it does NOT chain into
+    /// anything else (see that sheet's own modifier below). It used to be raised
+    /// at the end of the onboarding tour instead, which no longer auto-launches.
     @State private var suggestedModelToOffer: ModelDescriptor?
+    /// The first-connection calibration offer, and the capture it leads to. Two
+    /// flags because they are two presentations: the offer is a compact sheet,
+    /// and accepting it opens the real calibration sheet *after* the offer has
+    /// finished dismissing — see `offerCalibrationIfAppropriate`.
+    @State private var showCalibrationOffer = false
+    @State private var showMicCalibration = false
+    /// Set by the offer's Calibrate button and consumed by its `onDismiss`. The
+    /// second sheet cannot be raised from inside the first's button action:
+    /// presenting from within a dismissing presentation drops it silently, which
+    /// CLAUDE.md lists as having already caused two separate bugs.
+    @State private var calibrationAccepted = false
+    /// The mic's display name, copied when the offer is raised rather than read
+    /// live in the sheet. Reading any field of `audio.diagnostics` from inside
+    /// `body` — the sheet's content closure included — registers a dependency on
+    /// a struct that churns at the 15 Hz stats flush; see the note on
+    /// `activeInputName` at the `onChange` below.
+    @State private var calibrationOfferMicName = ""
     @State private var showPulseView = false
     @State private var showBand = false
     /// Live tuning overlay. Deliberately absent from `menuIsOpen` — see that
@@ -243,22 +263,34 @@ struct ContentView: View {
                     }
                 }
                 .sheet(isPresented: Binding(
-            // `&& !tourActive`: this fires from AutoIDSettings.refreshPriorsFromGBIFIfNeeded
+            // `&& !tourActive`: this fires from AutoIDSettings.refreshPriors
             // (ContentView's own onChange(of: location.currentCoordinate)), which can land
-            // squarely in the middle of the guided tour — most obviously right after
-            // onboarding, when the tour auto-starts at the same moment the very first
-            // location fix comes in. A `.sheet` still presents over an active full-screen
-            // overlay, so without this it visibly popped up on top of the dimmed tour.
-            // Suppressing it here doesn't lose the summary — `pendingChangeSummary` stays
-            // set and the binding re-evaluates once `tourActive` goes false, so it still
-            // presents normally after a tour NOT heading into `tourWillPromptStart`'s own
-            // post-tour sheet (which explicitly acknowledges it first — see `finish` below
-            // — since that sheet already surfaces the same recommended-model information).
-            get: { autoIDSettings.pendingChangeSummary != nil && !tourActive },
+            // squarely in the middle of the guided tour if a fix arrives while it runs.
+            // A `.sheet` still presents over an active full-screen overlay, so without
+            // this it visibly popped up on top of the dimmed tour. Suppressing it here
+            // doesn't lose the summary — `pendingChangeSummary` stays set and the binding
+            // re-evaluates once `tourActive` goes false, so it presents as soon as the
+            // tour ends.
+            //
+            // `&& !shouldShowWhatsNew` is the same guard against the same hazard,
+            // and it was found the same way — on the first launch after an
+            // update this sheet won the race and What's New was silently
+            // dropped. What's New goes first because it is a once-per-update
+            // notice: this summary recurs whenever the user moves, and the
+            // binding re-presents it as soon as the flag clears.
+            // One expression, shared with `menuIsOpen` — see `showingChangeSummary`
+            // for the bug that came of writing the condition out twice.
+            get: { showingChangeSummary },
             set: { if !$0 { autoIDSettings.acknowledgeChangeSummary() } }
         )) {
             if let summary = autoIDSettings.pendingChangeSummary {
-                LocationChangeSummaryView(settings: autoIDSettings, summary: summary)
+                // The same card the post-onboarding suggestion uses, deliberately:
+                // this is the same offer, arriving for the same reason, and it used
+                // to be a full `Form` sheet in its own visual language
+                // (`LocationChangeSummaryView`, deleted 2026-08-17).
+                SuggestedModelSheet(model: summary.recommendedModel,
+                                    speciesChanged: summary.speciesChanged,
+                                    onUse: { model in autoIDSettings.activeModelID = model.id })
             }
         }
         .sheet(isPresented: $showInfo, onDismiss: {
@@ -283,35 +315,25 @@ struct ContentView: View {
         .overlayPreferenceValue(TourTargetKey.self) { anchors in
             GeometryReader { proxy in
                 if tourActive {
-                    TourOverlay(targets: anchors.mapValues { proxy[$0] },
+                    TourOverlay(targets: anchors.mapValues { proxy[$0] }
+                                    .merging(tabBarTargets(in: proxy)) { _, fromBar in fromBar },
                                 index: $tourIndex,
                                 steps: TourScript.steps(simplified: simplifiedMode),
-                                finish: {
+                                // The tour is only ever launched deliberately now — from
+                                // Info & Tour — so finishing it just puts the screen
+                                // back. It used to chain into a model suggestion and
+                                // Start Detecting when it had been auto-launched by
+                                // onboarding; the suggestion now happens on arrival
+                                // instead (see the `justFinishedOnboarding` handoff in
+                                // `.onAppear`), and starting a session was never ours to
+                                // do unasked.
+                                finish: { completed in
                                     withAnimation(.easeInOut(duration: 0.25)) { tourActive = false }
-                                    if tourWillPromptStart {
-                                        tourWillPromptStart = false
-                                        // Acknowledge any pending GBIF-prior-refresh summary
-                                        // first — it was suppressed while the tour ran (see
-                                        // the sheet above), and would otherwise still be
-                                        // sitting there ready to pop up alongside the two
-                                        // sheets below. SuggestedModelSheet covers the same
-                                        // recommended-model information on its own terms, so
-                                        // there's nothing lost by not showing the old one too.
-                                        autoIDSettings.acknowledgeChangeSummary()
-                                        // Let the dim overlay's own dismiss animation finish
-                                        // before presenting a sheet on top of it. Suggestion
-                                        // first if the location fix landed in time and found
-                                        // one — its own onDismiss chains into Start Detecting;
-                                        // otherwise go straight there.
-                                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                                            if let coordinate = location.currentCoordinate,
-                                               let suggested = ModelRegistry.suggestedModel(for: coordinate),
-                                               suggested.id != autoIDSettings.activeModelID {
-                                                suggestedModelToOffer = suggested
-                                            } else {
-                                                startDetecting()
-                                            }
-                                        }
+                                    // Only a tour seen to its last step retires the
+                                    // button that offers it — see
+                                    // `OnboardingState.recordTourCompleted`.
+                                    if completed {
+                                        OnboardingState.shared.recordTourCompleted(simplified: simplifiedMode)
                                     }
                                 })
                     // Skip re-diffing the overlay on the constant anchor-preference
@@ -454,35 +476,90 @@ struct ContentView: View {
             LiveActivityController.endOrphanedActivities()
             location.store = classStore
             applyBand()
-            // Region fix so species priors can be suggested from GBIF occurrence
-            // data near the user (see the onChange below) — same lightweight,
-            // one-shot fix AutoIDSettingsView already uses, just requested
-            // proactively on launch instead of only when that screen is opened.
+            // Region fix so species priors can be derived from the bundled
+            // presence grid for where the user is (see the onChange below) — same
+            // lightweight, one-shot fix AutoIDSettingsView already uses, just
+            // requested proactively on launch instead of only when that screen is
+            // opened. It was a live GBIF query until 2026-08-16.
             location.requestRegionFix()
 
             // Onboarding's last step sets this right before handing off to
             // ContentView — consumed once here, immediately, so a later
             // .onAppear re-fire (e.g. returning from the background) can't
-            // relaunch the tour a second time.
-            if OnboardingState.shared.shouldAutoStartTour {
-                OnboardingState.shared.shouldAutoStartTour = false
-                tourIndex = 0
-                tourWillPromptStart = true
-                // Let this frame land — the tour's `.tourTarget` anchors only exist
-                // once `detectorLayout` has actually mounted — same reasoning as the
-                // Info sheet's tour launch above.
-                DispatchQueue.main.async {
-                    withAnimation(.easeInOut(duration: 0.3)) { tourActive = true }
+            // repeat the offer.
+            //
+            // This used to auto-launch the guided tour; it now only makes the
+            // one-off recommended-model offer, and only if the region fix
+            // requested just above has already landed. It usually hasn't on a
+            // cold first launch, in which case nothing is shown here and the
+            // suggestion still reaches the user the way it always did — from
+            // AutoID settings.
+            // Decided back in `RootView.init`, acted on here — the detector is
+            // the first thing that exists to present a sheet over.
+            if ReleaseState.shared.shouldShowWhatsNew {
+                showWhatsNew = true
+            }
+
+            if OnboardingState.shared.justFinishedOnboarding {
+                OnboardingState.shared.justFinishedOnboarding = false
+                // Not when What's New is about to present: that happens when an
+                // update re-ran onboarding, and two sheets racing for the same
+                // moment means one of them is silently dropped. The changelog
+                // wins — it is the thing that explains why the intro reappeared
+                // — and the model suggestion is still reachable from AutoID
+                // settings, which is where it lived before this shortcut existed.
+                if !ReleaseState.shared.shouldShowWhatsNew,
+                   let coordinate = location.currentCoordinate,
+                   let suggested = ModelRegistry.suggestedModel(for: coordinate),
+                   suggested.id != autoIDSettings.activeModelID {
+                    suggestedModelToOffer = suggested
                 }
             }
+
+            nudgeTourAfterDelay()
         }
-        // Shown once, right after an onboarding-triggered tour finishes, if the
-        // user's location suggests a model that isn't already active — see
-        // `finish` below. Standalone: dismissing it (either "Use" or "Not Now")
+        // Shown once, on the first arrival here after onboarding, if the user's
+        // location suggests a model that isn't already active — see the
+        // handoff in `.onAppear`. Standalone: dismissing it (either "Use" or "Not Now")
         // just closes it — it does NOT chain into Start Detecting, which stays a
         // separate, deliberate action from the transport bar.
+        // Once per build, for someone who already had the app — see
+        // `ReleaseState`. Presented from here rather than from `RootView` so it
+        // arrives over the detector, with the app fully up, rather than over a
+        // screen still assembling itself.
+        //
+        // Driven by plain `@State` copied out of `ReleaseState` in `.onAppear`,
+        // NOT by a `Binding` reading the store directly. A read inside a
+        // `Binding`'s getter happens outside `body`'s observation scope, so it
+        // registers no dependency and the sheet never presents — which is
+        // exactly what it did.
+        .sheet(isPresented: $showWhatsNew, onDismiss: {
+            ReleaseState.shared.markWhatsNewSeen()
+        }) {
+            WhatsNewSheet()
+                .presentationDragIndicator(.visible)
+        }
         .sheet(item: $suggestedModelToOffer) { model in
-            SuggestedModelSheet(model: model, onUse: { autoIDSettings.activeModelID = model.id })
+            SuggestedModelSheet(model: model, speciesChanged: 0,
+                                onUse: { autoIDSettings.activeModelID = $0.id })
+        }
+        // The first-connection calibration offer — see
+        // `offerCalibrationIfAppropriate`. The capture it leads to is raised
+        // from `onDismiss` rather than from the button, so it is presented over
+        // a screen with nothing else on it.
+        .sheet(isPresented: $showCalibrationOffer, onDismiss: {
+            guard calibrationAccepted else { return }
+            calibrationAccepted = false
+            showMicCalibration = true
+        }) {
+            CalibrationOfferSheet(micName: calibrationOfferMicName) {
+                calibrationAccepted = true
+            }
+        }
+        .sheet(isPresented: $showMicCalibration) {
+            MicCalibrationView(audio: audio, settings: micCalSettings) {
+                showMicCalibration = false
+            }
         }
         // AudioEngineController.start() sets this exact status string when
         // AVAudioApplication.requestRecordPermission (or a prior denial) blocks
@@ -505,9 +582,29 @@ struct ContentView: View {
             micCalSettings.load(forMicName: name)
             processor.calibrationCurve = micCalSettings.currentCurve(forMicName: name)
             recorder.setInputName(name)
+            offerCalibrationIfAppropriate()
         }
+        // Plugging the mic in is the moment worth catching, and it is not always
+        // the same moment as the input name changing: iOS can report the new
+        // port before it makes it the active route. Both hooks funnel into one
+        // guarded function rather than one of them trying to be the only trigger.
+        .onChange(of: audio.ultrasonicMicAttached) { _, _ in
+            offerCalibrationIfAppropriate()
+        }
+        // **Never suspend a live session.** Suspending the processor behind a
+        // full-screen sheet is free when nothing is running and it is what keeps
+        // an idle detector cheap — but it stops the FFT outright, so with a
+        // session in progress it meant no columns, nothing for the pump to
+        // drain, and no detections for as long as Settings or Help was open. A
+        // detector that goes deaf because the user opened Help is worse than one
+        // that costs some battery while they read it.
+        //
+        // Paired with `updateColumnDrainOwner` below: the sheet still pauses the
+        // *display* (there is nothing to see behind it), so the pump has to take
+        // over the draining at the same moment.
         .onChange(of: menuIsOpen) { _, open in
-            processor.suspended = open
+            processor.suspended = open && !audio.isActive
+            updateColumnDrainOwner()
         }
         .onChange(of: simplifiedMode) { _, _ in applySimplifiedDefaultsIfNeeded() }
         .onChange(of: bandLow)  { _, _ in applyBand() }
@@ -550,6 +647,14 @@ struct ContentView: View {
                 // tracks the session rather than the engine. Same distinction,
                 // same reason, as `handleSessionButtonTap`.
                 if !audio.isActive { showTransportMenu = false }
+                // A mic attached mid-session is refused by the calibration
+                // offer's own guard — rightly, since calibrating needs the mic
+                // and a quiet room — and being refused doesn't mark the offer
+                // as made. Without asking again once the session is genuinely
+                // over, the question would never come back this launch.
+                // `isActive` for the same reason the line above uses it: the
+                // engine dips out of `running` on every listening-mode change.
+                if !audio.isActive { offerCalibrationIfAppropriate() }
                 // Nothing to drain once the engine is down, and a timer left running in
                 // the background is pure battery cost. Covers the interruption path too,
                 // which deliberately doesn't go through stopDetecting().
@@ -740,6 +845,37 @@ struct ContentView: View {
         }
     }
 
+    /// Spotlight rects for the things the tab bar draws — the three tabs and the
+    /// session button — converted from the locator's window coordinates into the
+    /// overlay's own space.
+    ///
+    /// These cannot come from `.tourTarget` like every other target does. On
+    /// iOS 26 a `Tab`'s label is rendered by the bar, outside the view tree the
+    /// anchor preference travels through, so an anchor placed on one never
+    /// arrives; the step would fall back to a centred card and the tour would
+    /// talk about a button it wasn't pointing at. Below iOS 26 the bar is
+    /// hand-built from ordinary views whose `.tourTarget` anchors work fine —
+    /// the merge at the call site prefers these when present and keeps those
+    /// otherwise, so both paths land on the real control.
+    private func tabBarTargets(in proxy: GeometryProxy) -> [TourID: CGRect] {
+        // The proxy's own global frame is the bridge between window space and
+        // this overlay's space; they share an origin only when nothing insets
+        // the overlay, which is not something to assume.
+        let host = proxy.frame(in: .global)
+        func local(_ windowRect: CGRect) -> CGRect {
+            windowRect.offsetBy(dx: -host.minX, dy: -host.minY)
+        }
+
+        var targets: [TourID: CGRect] = [:]
+        for (section, frame) in sessionButtonLocator.tabFramesInWindow {
+            targets[.tab(section)] = local(frame)
+        }
+        if let button = sessionButtonLocator.frameInWindow {
+            targets[.start] = local(button)
+        }
+        return targets
+    }
+
     /// The detector, plus the nav-bar chrome that used to be written inline on
     /// the app's single shared stack.
     private var detectorScreen: some View {
@@ -753,6 +889,14 @@ struct ContentView: View {
                 // sunrise, and this says which of those you are standing in.
                 ToolbarItem(placement: .topBarLeading) {
                     SunWindowPill(coordinate: location.currentCoordinate)
+                        .tourTarget(.sunClock)
+                }
+                // Left of the gear, and only until the tour has been seen — see
+                // `OnboardingState.shouldOfferTour`. Declaration order is what
+                // puts it there: trailing items are laid out left to right in the
+                // order they're declared.
+                if OnboardingState.shared.shouldOfferTour(simplified: simplifiedMode) {
+                    ToolbarItem(placement: .topBarTrailing) { tourButton }
                 }
                 ToolbarItem(placement: .topBarTrailing) { optionsMenu }
             }
@@ -768,21 +912,19 @@ struct ContentView: View {
             // overload) blocks that sampling outright. Same root cause the tour
             // dim overlay hit.
             .toolbarBackground(Color.black, for: .navigationBar)
-            // Hidden during the tour: even with a fixed toolbar background, the
-            // dim overlay's cutout ring sits directly under the bar and its own
-            // animation still reads as motion to the buttons. They're not usable
-            // mid-tour anyway; the bar returns when the tour ends.
+            // The bar STAYS UP during the tour (2026-08-17, Niall's call: the
+            // tour should show the screen as it really is, and hiding the bar
+            // took the sun clock with it — a permanent piece of the Detector
+            // that the tour then couldn't point at).
             //
-            // The reveal must NOT be animated: finish() flips tourActive
-            // inside a 0.25 s withAnimation so the dim overlay can fade out,
-            // and if the toolbar's .hidden→.visible rode along in that same
-            // transaction, the buttons would fade back in while the busy dim
-            // backdrop was still animating underneath them — re-triggering the
-            // same pulsing, except this time it got stuck oscillating instead of
-            // settling. Snapping the toolbar in instantly (no shared animation
-            // with the dim fade) keeps the buttons still while any backdrop
-            // motion is happening.
-            .toolbar(tourActive ? .hidden : .visible, for: .navigationBar)
+            // It used to be hidden, to stop the dim overlay's animating cutout
+            // ring reading as motion to the buttons above it. What makes keeping
+            // it safe is the opaque `.toolbarBackground` above: the buttons no
+            // longer sample anything behind the bar, so there is nothing for the
+            // ring's animation to show through. The `.animation(nil,
+            // value: tourActive)` stays regardless — it keeps the bar out of the
+            // 0.25 s dim-fade transaction, which is what stopped the pulsing
+            // getting stuck oscillating.
             .animation(nil, value: tourActive)
     }
 
@@ -822,6 +964,11 @@ struct ContentView: View {
                         .overlay(alignment: transportMenuAlignment) { recordingGlowOverlay }
                 } label: {
                     Label { Text(s.rawValue) } icon: { s.iconImage }
+                        // So the tour can find this tab in the bar's own view
+                        // tree and spotlight it — a `.tourTarget` here would not
+                        // survive the trip out of a `Tab` label. Same mechanism
+                        // as `sessionTabLabel` below.
+                        .accessibilityIdentifier(SessionButtonLocator.tabIdentifier(s))
                 }
             }
             // Never actually selected, so its content is never shown — the role
@@ -1205,22 +1352,153 @@ struct ContentView: View {
             + TransportMenuMetrics.gap
     }
 
-    /// Exactly one owner drains FFT columns at a time (Context.md §7): the Metal
-    /// render loop while the detector is actually on screen and the app is
-    /// active, the background pump in every other case.
+    /// Offers to calibrate a microphone the first time it turns up, if this is a
+    /// good moment to ask. Safe to call as often as you like — every condition
+    /// is checked here rather than at the call sites.
     ///
-    /// The tab bar added a second way for the render loop to stop drawing. Before
+    /// **Why this exists.** Calibration used to be a step in onboarding, which
+    /// asked people to calibrate hardware they had not plugged in yet: a step
+    /// that could only fail, and one that has since moved out to Settings. But
+    /// "it's in Settings" only helps someone who knows to look. The moment the
+    /// mic is actually attached is the first moment the offer makes any sense,
+    /// and it is the moment the user is most likely to act on it.
+    ///
+    /// **What it deliberately will not interrupt.** Not while capture is
+    /// running — calibration needs quiet and its own use of the mic, so asking
+    /// mid-session is both wrong and destructive. Not over the guided tour, the
+    /// What's New sheet, the model suggestion, or anything else already
+    /// presented: a sheet raised over a sheet is dropped silently, and the one
+    /// that would be lost here is the one the user is currently reading.
+    /// Nothing is lost by waiting — the mic stays plugged in, and the next
+    /// route change or launch asks again.
+    private func offerCalibrationIfAppropriate() {
+        // `isActive` as well as `isRunning`: the engine drops out of `running`
+        // for a moment on every listening-mode change, and a session is very
+        // much still in progress across that dip.
+        guard audio.ultrasonicMicAttached, !audio.isRunning, !audio.isActive else { return }
+        guard !tourActive, !showWhatsNew, !showCalibrationOffer, !showMicCalibration,
+              suggestedModelToOffer == nil, !menuIsOpen else { return }
+
+        let name = audio.activeInputName
+        guard micCalSettings.shouldOfferCalibration(forMicName: name) else { return }
+
+        micCalSettings.recordCalibrationOffered(forMicName: name)
+        // Safe to read `diagnostics` here: this runs from an `onChange` closure,
+        // not from `body`, so it registers no observation dependency.
+        calibrationOfferMicName = audio.diagnostics.micDisplayName
+        showCalibrationOffer = true
+    }
+
+    /// Exactly one owner drains FFT columns at a time (Context.md §7): the Metal
+    /// render loop while it is actually drawing, the background pump in every
+    /// other case.
+    ///
+    /// **The test is "is the render loop drawing", not "is the detector the
+    /// selected tab".** Those came apart twice. The tab bar was the first: before
     /// it, leaving the detector destroyed the spectrogram outright and nothing
-    /// took over the draining, so a run kept capturing audio while quietly
-    /// detecting nothing for as long as you were reading Sessions.
+    /// took over, so a run kept capturing audio while quietly detecting nothing
+    /// for as long as you were reading Sessions.
+    ///
+    /// The second was `menuIsOpen`, and it survived that fix (found 2026-08-17).
+    /// A full-screen sheet — Settings, Help, the location-change summary —
+    /// pauses the Metal view while the Detector is still the selected tab, so
+    /// this function saw nothing wrong and left the pump stopped. A session ran
+    /// on, deaf, for as long as the sheet was up. `SpectrogramView`'s own
+    /// `isPaused` is the authority on whether it is drawing, and this now asks
+    /// the same question it does.
     private func updateColumnDrainOwner() {
-        if scenePhase == .active && section == .detector {
+        if scenePhase == .active && section == .detector && !menuIsOpen {
             detectionPump.stop()
         } else if audio.isRunning {
             detectionPump.start(processor: processor, detector: pulseDetector)
         } else {
             detectionPump.stop()
         }
+    }
+
+    /// Opens the tour's popover by itself, once per install, `tourNudgeDelay`
+    /// after the first arrival at the detector.
+    ///
+    /// The button alone was not enough: it is one small glyph in a nav bar, and a
+    /// first-time user has no reason to suspect there is a tour behind it. Fifteen
+    /// seconds is chosen to land *after* the screen has stopped being new — long
+    /// enough that the person has looked around and formed the question the tour
+    /// answers, short enough that they have not yet given up on it.
+    ///
+    /// Three conditions, and all three are about not arriving rudely:
+    ///
+    /// - **The tour button must be on screen**, since that is what the popover is
+    ///   anchored to. If the user has already finished the tour there is nothing
+    ///   to nudge towards.
+    /// - **Nothing else may be up.** A popover presented while a sheet is
+    ///   dismissing is dropped silently (CLAUDE.md), and one presented over the
+    ///   guided tour would be pointing at a screen the tour has taken over.
+    /// - **The Detector must be the visible section.** The anchor lives in that
+    ///   nav bar; from Species or Sessions the popover has nothing to hang on.
+    ///
+    /// If those aren't met at fifteen seconds it keeps checking, briefly, rather
+    /// than giving up on the first miss — a first-run user is quite likely to be
+    /// inside a sheet or on another tab at exactly that moment. After
+    /// `tourNudgeWindow` it stops trying and leaves the button to do its job.
+    private func nudgeTourAfterDelay() {
+        guard !OnboardingState.shared.hasNudgedTour else { return }
+        // `.onAppear` re-fires on return from the background; one scheduled
+        // attempt per launch is enough.
+        guard !tourNudgeScheduled else { return }
+        tourNudgeScheduled = true
+
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(Self.tourNudgeDelay))
+            let deadline = Date().addingTimeInterval(Self.tourNudgeWindow)
+            while Date() < deadline {
+                if OnboardingState.shared.hasNudgedTour { return }
+                if section == .detector, !tourActive, !menuIsOpen, !showTourOffer,
+                   OnboardingState.shared.shouldOfferTour(simplified: simplifiedMode) {
+                    OnboardingState.shared.hasNudgedTour = true
+                    showTourOffer = true
+                    return
+                }
+                try? await Task.sleep(for: .seconds(2))
+            }
+        }
+    }
+
+    /// The standing offer of a guided tour, left of the gear.
+    ///
+    /// A popover rather than a button that launches the tour outright: the tour
+    /// takes over the whole screen, and something that does that should say so
+    /// before it happens. It also gives the offer somewhere to explain itself —
+    /// "tour" alone doesn't tell a first-time user whether this is a video, a
+    /// help page, or the thing it actually is.
+    ///
+    /// It disappears once the tour has been finished (see
+    /// `OnboardingState.shouldOfferTour`), so it is a first-run affordance that
+    /// removes itself rather than permanent chrome. Info & Tour keeps the tour
+    /// reachable forever afterwards.
+    private var tourButton: some View {
+        Button { showTourOffer = true } label: {
+            Image(systemName: "sparkles")
+        }
+        .popover(isPresented: $showTourOffer) {
+            TourOfferPopover(simplified: simplifiedMode) {
+                showTourOffer = false
+                // Deferred, for the reason CLAUDE.md gives: a presentation
+                // started from inside a dismissing one is dropped silently. The
+                // tour isn't a sheet, but it does re-lay-out the screen the
+                // popover is anchored into, and starting it in the same frame as
+                // the dismissal left the spotlight measuring a screen that was
+                // still moving.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                    tourIndex = 0
+                    withAnimation(.easeInOut(duration: 0.3)) { tourActive = true }
+                }
+            }
+            .presentationCompactAdaptation(.popover)
+        }
+        // Same reasoning as `optionsMenu` below — no animated state of its own,
+        // so it must never ride along with an ambient `withAnimation`.
+        .transaction { $0.animation = nil }
+        .accessibilityLabel("Take the guided tour")
     }
 
     /// Settings / diagnostics menu — shown in the nav-bar trailing slot on the
@@ -1564,8 +1842,28 @@ struct ContentView: View {
     /// live display + pulse detection pause. Deliberately excludes the pulse
     /// zoom (showPulseView) and frequency-band (showBand) popovers: those are
     /// meant to be used while watching the live feed.
+    /// Whether the location-change summary is actually on screen.
+    ///
+    /// **The single source of truth for that question** — the sheet's own
+    /// `isPresented` binding reads this, and so does `menuIsOpen`. They were two
+    /// separate expressions and they drifted: the sheet grew `!tourActive` and
+    /// then `!showWhatsNew` to stop it stealing a presentation it would have
+    /// dropped, and `menuIsOpen` kept testing the bare `pendingChangeSummary`.
+    /// So a location fix arriving during the tour paused the detector — render
+    /// loop and processor both — with no sheet on screen and nothing to say why,
+    /// for the whole length of the tour (found 2026-08-17).
+    private var showingChangeSummary: Bool {
+        autoIDSettings.pendingChangeSummary != nil && !tourActive && !showWhatsNew
+    }
+
+    /// Something full-screen is covering the detector. Pauses the render loop,
+    /// and the processor too when no session is running — see the `onChange`
+    /// above, and `updateColumnDrainOwner` for who drains columns meanwhile.
+    ///
+    /// Every entry must be a presentation that is *up*, never one that is merely
+    /// wanted; see `showingChangeSummary`.
     private var menuIsOpen: Bool {
-        showDiagnostics || showSettings || showHelp || showInfo || autoIDSettings.pendingChangeSummary != nil
+        showDiagnostics || showSettings || showHelp || showInfo || showWhatsNew || showingChangeSummary
     }
 
     private func applyBand() {
@@ -2177,16 +2475,43 @@ struct ContentView: View {
 
 }
 
-/// Shown once, right after an onboarding-triggered tour finishes, when the
-/// user's location suggests a model that isn't already active — see
-/// ContentView's `finish` closure. Same compact-sheet visual language as
-/// `SuggestedModelSheet` (centered title/subtitle, accent circle, drag
-/// indicator) but its own sheet rather than folded into that one, so each can
-/// be dismissed independently and chained via `onDismiss`.
+/// The app's one "a model suits where you are" card. Two things present it:
+/// the first arrival at the detector after onboarding (the
+/// `justFinishedOnboarding` handoff in ContentView), and a location move far
+/// enough to re-derive priors (`AutoIDSettings.pendingChangeSummary`).
+///
+/// **It used to be two unrelated screens** — this card, and a full `Form` sheet
+/// with a navigation bar and per-species sections
+/// (`LocationChangeSummaryView`), deleted 2026-08-17 on Niall's call. They were
+/// the same offer in two visual languages, and the `Form` one was the one that
+/// turned up on a clean install.
+///
+/// `model` is optional because a move can change the species list without
+/// changing which model covers the area. With no model there is nothing to
+/// activate, so the card becomes a notice with one button.
 private struct SuggestedModelSheet: View {
-    let model: ModelDescriptor
-    let onUse: () -> Void
+    let model: ModelDescriptor?
+    /// How many species the refresh switched on or off, 0 when this is the
+    /// post-onboarding offer (nothing has changed yet — it is the first
+    /// derivation). Only ever shown as a count: the list itself is AutoID
+    /// settings, and a card is the wrong place to reproduce it.
+    let speciesChanged: Int
+    let onUse: (ModelDescriptor) -> Void
     @Environment(\.dismiss) private var dismiss
+
+    private var message: String {
+        var lines: [String] = []
+        if let model {
+            lines.append("\(model.displayName) covers your area (\(model.region)). "
+                       + "Activate it to start identifying species here.")
+        }
+        if speciesChanged > 0 {
+            lines.append(speciesChanged == 1
+                ? "One species has been switched on or off for your new area."
+                : "\(speciesChanged) species have been switched on or off for your new area.")
+        }
+        return lines.joined(separator: "\n\n")
+    }
 
     var body: some View {
         VStack(spacing: 24) {
@@ -2196,9 +2521,9 @@ private struct SuggestedModelSheet: View {
                     .foregroundStyle(Color.accentColor)
                     .frame(width: 72, height: 72)
                     .background(Color.accentColor.opacity(0.15), in: Circle())
-                Text("Suggested Model")
+                Text(model == nil ? "New Area" : "Suggested Model")
                     .font(.title2.weight(.semibold))
-                Text("\(model.displayName) covers your area (\(model.region)). Activate it to start identifying species here.")
+                Text(message)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .wrapsFully()
@@ -2206,11 +2531,94 @@ private struct SuggestedModelSheet: View {
             }
             .frame(maxWidth: .infinity)
 
+            if let model {
+                Button {
+                    onUse(model)
+                    dismiss()
+                } label: {
+                    Text("Use \(model.displayName)")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 6)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.batAccent)
+
+                Button("Not Now", role: .cancel) { dismiss() }
+                    .padding(.top, 4)
+            } else {
+                Button {
+                    dismiss()
+                } label: {
+                    Text("OK")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 6)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.batAccent)
+            }
+        }
+        .padding(.horizontal, 24)
+        .padding(.top, 28)
+        .padding(.bottom, 20)
+        .frame(maxWidth: .infinity)
+        .contentSizedDetent()
+        .presentationDragIndicator(.visible)
+    }
+}
+
+/// Shown the first time a given ultrasonic microphone is attached, offering to
+/// calibrate it — see `ContentView.offerCalibrationIfAppropriate`.
+///
+/// Same compact-sheet visual language as `SuggestedModelSheet`, deliberately:
+/// the two are the same kind of thing, a one-off contextual offer that arrives
+/// because the app noticed something, and they should be recognisable as such.
+///
+/// A sheet rather than an alert because the *why* takes a sentence and an alert
+/// has no room for one. "Calibrate your microphone?" with two buttons tells
+/// someone who has never heard of calibration nothing about whether they want
+/// it, and the honest answer to "can I skip this" is yes — which is why the
+/// dismiss is a plain "Not Now" rather than anything discouraging.
+private struct CalibrationOfferSheet: View {
+    let micName: String
+    let onCalibrate: () -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(spacing: 24) {
+            VStack(spacing: 10) {
+                Image(systemName: "tuningfork")
+                    .font(.system(size: 26, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                    .frame(width: 72, height: 72)
+                    .background(Color.accentColor.opacity(0.15), in: Circle())
+                Text("Calibrate \(micName)?")
+                    .font(.title2.weight(.semibold))
+                    .multilineTextAlignment(.center)
+                Text("Affordable ultrasonic mics hear some frequencies louder than others, which shows up as fixed bands across the spectrogram and skews the measurements. OpenBat can listen to this one's noise floor for 15 seconds and correct for it.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .wrapsFully()
+                    .multilineTextAlignment(.center)
+                // Both of the things someone hesitating wants to know, and the
+                // second is the one that makes "Not Now" a real answer rather
+                // than a decision they might regret.
+                Text("Find somewhere quiet first. You can do this any time from Settings instead.")
+                    .font(.footnote)
+                    .foregroundStyle(.tertiary)
+                    .wrapsFully()
+                    .multilineTextAlignment(.center)
+            }
+            .frame(maxWidth: .infinity)
+
             Button {
-                onUse()
+                // Only flags intent; the host opens the capture from this
+                // sheet's onDismiss. See `ContentView.calibrationAccepted`.
+                onCalibrate()
                 dismiss()
             } label: {
-                Text("Use \(model.displayName)")
+                Text("Calibrate")
                     .font(.headline)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 6)
