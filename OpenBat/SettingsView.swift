@@ -2,12 +2,16 @@
 //  SettingsView.swift
 //  OpenBat
 //
-//  The Settings sheet: five tabs (AutoID / Audio / Location / Recordings /
-//  Privacy) picked by a segmented control rather than a `TabView`, so only the
-//  active tab's `Form` exists at a time. Audio further merges what used to be
-//  separate Time Expansion / Pulse / Recording tabs into one `Form` built from
-//  `@ViewBuilder` section groups — section header text is kept from the
-//  original tabs it came from.
+//  The Settings sheet: three tabs (General / AutoID / Audio) picked by a
+//  segmented control rather than a `TabView`, so only the active tab's `Form`
+//  exists at a time.
+//
+//  Both General and Audio are composites, built from `@ViewBuilder` section
+//  groups rather than owning their sections directly — General absorbed the
+//  Location, Storage and Privacy tabs (2026-08-16, alongside the simplified-view
+//  switch it now leads with), and Audio absorbed the old Time Expansion, Pulse
+//  and Recording tabs before that. Section header text is kept from whichever
+//  tab it came from, so the sections still read as their original groups.
 //
 
 import SwiftUI
@@ -24,17 +28,24 @@ struct SettingsView: View {
     @Bindable var haptics: PulseHaptics
     @State private var showMicCalibration = false
     @Environment(\.dismiss) private var dismiss
-    @State private var selectedTab = "autoID"
+    @State private var selectedTab = "general"
 
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
+                // Three tabs, not five. Location, Storage and Privacy were a
+                // tab each and none of them filled one — Location was a single
+                // section, Privacy a single disabled toggle. Five segments were
+                // also too many for a phone's width, which is why "Recordings"
+                // had already been shortened to "Storage" to stop it
+                // truncating. They fold into General, which is also where the
+                // simplified-view switch belongs: it governs the whole app
+                // rather than any one tab, so it goes first, in the tab the
+                // sheet opens on.
                 Picker("Section", selection: $selectedTab) {
+                    Text("General").tag("general")
                     Text("AutoID").tag("autoID")
                     Text("Audio").tag("audio")
-                    Text("Location").tag("location")
-                    Text("Recordings").tag("recordings")
-                    Text("Privacy").tag("privacy")
                 }
                 .pickerStyle(.segmented)
                 .padding(.horizontal)
@@ -42,11 +53,9 @@ struct SettingsView: View {
                 .padding(.bottom, 4)
 
                 switch selectedTab {
-                case "autoID":      AutoIDSettingsView(settings: settings, location: location)
-                case "audio":       audioTab
-                case "location":    locationTab
-                case "recordings":  recordingsTab
-                default:            privacyTab
+                case "autoID":  AutoIDSettingsView(settings: settings, location: location)
+                case "audio":   audioTab
+                default:        generalTab
                 }
             }
             .navigationTitle("Settings")
@@ -76,7 +85,65 @@ struct SettingsView: View {
     /// tuned against real recordings without a code change.
     @AppStorage("display.cfTailFraction") private var cfTailFraction = CallAnalysis.defaultCFTailFraction
 
-    // MARK: Recordings tab
+    // MARK: General tab
+
+    /// The app-wide interface mode. `true` hides the readouts and controls that
+    /// only mean something once you already know what they are — see
+    /// `SimplifiedView` for the full list and the reasoning.
+    @AppStorage(SimplifiedView.key) private var simplifiedMode = true
+
+    /// General: the interface mode, then what used to be the Location, Storage
+    /// and Privacy tabs, in that order — least destructive first, so the bulk
+    /// deletes stay well below the fold.
+    private var generalTab: some View {
+        Form {
+            Section {
+                Toggle("Simplified view", isOn: $simplifiedMode)
+            } header: {
+                Text("Interface")
+            } footer: {
+                // Says what it does in terms of what the user will SEE, and —
+                // the part that matters — that nothing is being thrown away.
+                // Someone who has tuned an advanced control and then turns this
+                // on needs to know their settings are still there, or the
+                // switch reads as destructive and they won't touch it.
+                Text(simplifiedMode
+                     ? "Shows just the species ID, the level meter and the spectrogram. Turn this off for the full set of readouts and controls — pulse measurements, the pulse close-up, the timeline and palette controls. Nothing is deleted either way: your settings are kept and come back when you switch."
+                     : "Showing every readout and control. Turn this on for a simpler screen: just the species ID, the level meter and the spectrogram.")
+            }
+
+            locationSections
+            storageSections
+            privacySections
+        }
+        .onChange(of: keepInICloud) { _, _ in showRestartNeeded = true }
+        .alert("Restart OpenBat to finish", isPresented: $showRestartNeeded) {
+            Button("OK") { }
+        } message: {
+            Text("Your existing recordings are moved the next time OpenBat starts. Until then they stay where they are — nothing is lost either way.")
+        }
+        .sheet(isPresented: $showDeleteAllConfirmation) {
+            DeleteAllRecordingsConfirmationView(classStore: classStore) { }
+        }
+        .confirmationDialog("Delete every NoID recording?",
+                            isPresented: $showDeleteNoIDConfirm, titleVisibility: .visible) {
+            Button("Delete", role: .destructive) { classStore.deleteNoIDRecordings() }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("This can't be undone.")
+        }
+        .confirmationDialog("Delete every recording under \(Int(Self.lowConfidenceDeleteThreshold * 100))% confidence?",
+                            isPresented: $showDeleteLowConfidenceConfirm, titleVisibility: .visible) {
+            Button("Delete", role: .destructive) {
+                classStore.deleteRecordings(belowConfidence: Self.lowConfidenceDeleteThreshold)
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("This can't be undone.")
+        }
+    }
+
+    // MARK: Storage sections
 
     /// Below this, a real species ID counts as "low confidence" for the bulk
     /// delete below — separate from RecordingUploader.minUploadConfidence (75%,
@@ -94,8 +161,9 @@ struct SettingsView: View {
     @State private var showDeleteNoIDConfirm = false
     @State private var showDeleteLowConfidenceConfirm = false
 
-    private var recordingsTab: some View {
-        Form {
+    @ViewBuilder
+    private var storageSections: some View {
+        Group {
             Section {
                 Toggle("Keep recordings in iCloud", isOn: $keepInICloud)
             } header: {
@@ -159,37 +227,13 @@ struct SettingsView: View {
                 Text("Deletes every recording with a species-ID confidence under \(Int(Self.lowConfidenceDeleteThreshold * 100))%. Doesn't include NoID recordings — use the option above for those.")
             }
         }
-        .onChange(of: keepInICloud) { _, _ in showRestartNeeded = true }
-        .alert("Restart OpenBat to finish", isPresented: $showRestartNeeded) {
-            Button("OK") { }
-        } message: {
-            Text("Your existing recordings are moved the next time OpenBat starts. Until then they stay where they are — nothing is lost either way.")
-        }
-        .sheet(isPresented: $showDeleteAllConfirmation) {
-            DeleteAllRecordingsConfirmationView(classStore: classStore) { }
-        }
-        .confirmationDialog("Delete every NoID recording?",
-                            isPresented: $showDeleteNoIDConfirm, titleVisibility: .visible) {
-            Button("Delete", role: .destructive) { classStore.deleteNoIDRecordings() }
-            Button("Cancel", role: .cancel) { }
-        } message: {
-            Text("This can't be undone.")
-        }
-        .confirmationDialog("Delete every recording under \(Int(Self.lowConfidenceDeleteThreshold * 100))% confidence?",
-                            isPresented: $showDeleteLowConfidenceConfirm, titleVisibility: .visible) {
-            Button("Delete", role: .destructive) {
-                classStore.deleteRecordings(belowConfidence: Self.lowConfidenceDeleteThreshold)
-            }
-            Button("Cancel", role: .cancel) { }
-        } message: {
-            Text("This can't be undone.")
-        }
     }
 
-    // MARK: Privacy tab
+    // MARK: Privacy sections
 
-    private var privacyTab: some View {
-        Form {
+    @ViewBuilder
+    private var privacySections: some View {
+        Group {
             Section {
                 Toggle("Contribute recordings to the community science project", isOn: .constant(false))
                     .disabled(true)
@@ -209,6 +253,20 @@ struct SettingsView: View {
 
     // MARK: Audio tab (formerly separate Time Expansion / Pulse / Audio tabs,
     // merged into one Form — sections keep their original header text from each source tab)
+
+    /// Why the calibration button is or isn't available, in that order of
+    /// precedence — "no mic attached" is the more fundamental blocker, and
+    /// telling someone to stop detecting when they have nothing to detect with
+    /// would send them round in a circle.
+    private var calibrationFooter: String {
+        if !audio.diagnostics.canCalibrate {
+            return "Connect your ultrasonic microphone to calibrate it. There's nothing to measure on the phone's built-in mic — it can't hear the frequencies bats call at."
+        }
+        if audio.isRunning {
+            return "Stop detecting first to calibrate."
+        }
+        return "Corrects for your microphone's own uneven frequency response, flattening the spectrogram's noise floor and sharpening frequency measurements. Takes about 15 seconds in a quiet spot; doesn't change or upload any recording."
+    }
 
     private var pulseMinFreqKHz: Binding<Double> {
         Binding(get: { pulseDetector.minFrequencyHz / 1000 },
@@ -347,11 +405,12 @@ struct SettingsView: View {
     }
 
 
-    // MARK: Location tab
+    // MARK: Location sections
 
     /// Map-pin gates: only session IDs clearing both end up as species pins on the map.
-    private var locationTab: some View {
-        Form {
+    @ViewBuilder
+    private var locationSections: some View {
+        Group {
             Section {
                 VStack(alignment: .leading) {
                     HStack {
@@ -382,7 +441,7 @@ struct SettingsView: View {
             } header: {
                 Text("Recording")
             } footer: {
-                Text("When on, starting a New Session automatically arms the triggered WAV recorder. Just Listening always starts unarmed regardless of this setting.")
+                Text("When on, starting detection automatically arms the triggered WAV recorder.")
             }
 
             Section {
@@ -442,13 +501,11 @@ struct SettingsView: View {
                 } label: {
                     Text(micCalSettings.curve == nil ? "Calibrate Microphone" : "Recalibrate Microphone")
                 }
-                .disabled(audio.isRunning)
+                .disabled(audio.isRunning || !audio.diagnostics.canCalibrate)
             } header: {
                 Text("Microphone Calibration")
             } footer: {
-                Text(audio.isRunning
-                     ? "Stop detecting first to calibrate."
-                     : "Corrects for your microphone's own uneven frequency response, flattening the spectrogram's noise floor and sharpening frequency measurements. Takes about 30 seconds in a quiet spot; doesn't change or upload any recording.")
+                Text(calibrationFooter)
             }
         }
     }

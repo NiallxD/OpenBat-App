@@ -80,6 +80,17 @@ struct SpectrogramView: View {
     /// Explicit palette override — see `SpectrogramRenderer.palette`. nil (the
     /// default) falls back to `pulseDetector?.displayPalette`.
     var palette: Palette? = nil
+    /// Drag-to-scroll into the history buffer. Off in simplified view (Niall,
+    /// 2026-08-16): scrolling back is a review gesture, and there it is only ever
+    /// reached by accident — a finger resting on the spectrogram silently freezes
+    /// the live feed, and the way back is a "Return to live" button that only
+    /// exists *because* you are already lost. The whole feature is one the user
+    /// has to know about to want.
+    ///
+    /// This is a hard override rather than a hidden control: there is nothing to
+    /// hide (it is a gesture), and no state to strand the user in — see
+    /// `SimplifiedView`'s header for which of the two mechanisms applies when.
+    var scrollEnabled: Bool = true
 
     @State private var isScrolling = false
     @State private var scrollColumnOffset: Double = 0
@@ -117,7 +128,10 @@ struct SpectrogramView: View {
                 }
             }
             .background(.black, in: RoundedRectangle(cornerRadius: 12))
-            .gesture(dragGesture(viewWidth: geo.size.width))
+            // `nil` rather than a `.disabled` gesture: an attached-but-disabled
+            // DragGesture still claims the touch sequence, which would swallow
+            // taps meant for the pills overlaid on top of the spectrogram.
+            .gesture(scrollEnabled ? dragGesture(viewWidth: geo.size.width) : nil)
         }
     }
 

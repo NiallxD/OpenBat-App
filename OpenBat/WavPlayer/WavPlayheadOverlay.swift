@@ -5,7 +5,7 @@
 //  Draws the current playback position as a vertical line over the
 //  spectrogram — a separate leaf View reading `engine.currentTimeSeconds`
 //  inside its OWN `TimelineView`, per the same isolation rule
-//  PlaybackScrubberView and PulseStatsViews.SpeciesStatCell already document:
+//  PlaybackScrubberView and PulseStatsViews.PulseStatsRow already document:
 //  `PlaybackDriver.onProgress` posts `currentTimeSeconds` at ~20-25 Hz during
 //  playback, and reading it inline in a parent's `body` would invalidate that
 //  ENTIRE body at that rate — poisoning the zoom/pan gesture state and

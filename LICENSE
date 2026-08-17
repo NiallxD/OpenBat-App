@@ -13,8 +13,9 @@ others) remain under their own licenses — see the in-app "About" screen for
 attribution and license text for each.
 
 The OpenBat field guide's species and region data is maintained in a separate,
-community-contributed repository (NiallxD/OpenBat-FieldGuide) with its own
-license — this notice does not apply there.
+community-contributed repository (NiallxD/OpenBat-FieldGuide) and is licensed
+under Creative Commons Attribution 4.0 International (CC BY 4.0) — this notice
+does not apply there, and that permission does not extend back to this code.
 
 THIS SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,

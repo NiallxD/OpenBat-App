@@ -17,6 +17,7 @@ import AVFoundation
 import Accelerate
 import Observation
 import CoreGraphics
+import Synchronization   // Atomic, for the capture hand-off ring
 import UIKit
 
 /// Everything ClassificationStore needs to persist a finished, kept segment as a
@@ -62,6 +63,21 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
     private(set) var lastSavedFilename: String?
     /// Sample rate actually written into the most recent recording file.
     private(set) var lastWrittenSampleRate: Double = 0
+    /// Message from the most recent failed PCM write, or nil. Surfaced so a
+    /// segment discarded for a write failure (a full disk, most likely) says so
+    /// somewhere instead of a recording simply never appearing — the same
+    /// reasoning as `PulseHaptics.unavailableReason`: a silent stop reads
+    /// exactly like "the bats stopped". Shown in Diagnostics.
+    private(set) var lastWriteError: String? {
+        didSet {
+            guard lastWriteError != nil else { return }
+            let message = lastWriteError
+            DispatchQueue.main.async { [weak self] in self?.writeErrorForDisplay = message }
+        }
+    }
+    /// Main-actor mirror of `lastWriteError` for the UI to read — `lastWriteError`
+    /// itself is written on the recorder queue.
+    private(set) var writeErrorForDisplay: String?
 
     /// Fired (on the main thread) each time a segment closes and is kept (i.e. not
     /// rejected as NOISE) — set from ContentView to persist it as a `Recording`.
@@ -76,7 +92,7 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
     /// it off — i.e. the silence gap that ends one activity "bout". Reset on every
     /// new pulse while the segment is open, so a bat giving several passes with
     /// gaps shorter than this all land in ONE file instead of fragmenting into many.
-    /// User-configurable in Settings (SettingsView's Recording tab).
+    /// User-configurable in Settings (the Audio tab's recording section).
     var postRollSeconds = 3.0
     var maxSegmentSeconds = 600.0   // safety cap so a very long continuous bout can't make one unbounded file
 
@@ -121,6 +137,10 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
     // write. Writing the header ourselves guarantees the file rate == the capture rate.
     private var handle: FileHandle?
     private var dataBytes: Int = 0            // PCM bytes written to the current file
+    /// Set by `write` when a PCM write fails; condemns the current segment. Reset
+    /// per segment in `openSegment`, not globally — one bad segment must not
+    /// poison the next, and the disk may well have been freed in between.
+    private var segmentWriteFailed = false
     private var currentURL: URL?
     private var preRoll: [Float] = []     // rolling pre-trigger buffer
     private var postRollRemaining = 0     // samples left to write after the pulse ends
@@ -128,14 +148,94 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
 
     // MARK: Audio thread
 
+    /// Lock-free SPSC hand-off from the realtime capture thread to the recorder
+    /// queue — the producer only advances `captureWriteA`, the consumer only
+    /// `captureReadA`, same shape as the listening processors' output rings.
+    ///
+    /// This exists because `append` used to do `Array(UnsafeBufferPointer(...))`
+    /// per callback: a heap allocation of the whole buffer, on the realtime
+    /// thread, ~187 times a second at 384 kHz — the exact thing the project bans
+    /// there, and which every sibling DSP type already avoids. A malloc that
+    /// takes the slow path under memory pressure costs a dropped capture buffer,
+    /// which is a lost call.
+    ///
+    /// ~1.4 s of headroom at 384 kHz. Manually managed rather than a Swift Array
+    /// because both threads touch it concurrently, which Array's exclusivity
+    /// rules don't allow.
+    private static let captureRingCapacity = 1 << 19
+    private let captureRing: UnsafeMutableBufferPointer<Float> = {
+        let b = UnsafeMutableBufferPointer<Float>.allocate(capacity: AudioRecorder.captureRingCapacity)
+        b.initialize(repeating: 0)
+        return b
+    }()
+    private let captureWriteA = Atomic<Int>(0)
+    private let captureReadA = Atomic<Int>(0)
+    /// Capture rate, published as a bit pattern so the cross-thread read is a
+    /// genuine atomic rather than an assumed-atomic `Double` load.
+    private let captureRateA = Atomic<UInt64>(0)
+    /// Consumer-side scratch, reused across drains — queue-local, never touched
+    /// by the audio thread.
+    private var drainScratch: [Float] = []
+
+    deinit { captureRing.deallocate() }
+
     /// Copy samples off the realtime thread and hand them to the recorder queue.
+    ///
+    /// Allocation-free: the samples go into the preallocated ring, and the only
+    /// thing handed to `queue.async` is the fixed-size closure context (which
+    /// libdispatch pools) rather than a fresh buffer of the capture's length.
     func append(_ buffer: AVAudioPCMBuffer) {
         guard let ch = buffer.floatChannelData?[0] else { return }
         let n = Int(buffer.frameLength)
         guard n > 0 else { return }
-        let sr = buffer.format.sampleRate
-        let samples = Array(UnsafeBufferPointer(start: ch, count: n))
-        queue.async { [weak self] in self?.handle(samples, sampleRate: sr) }
+        captureRateA.store(buffer.format.sampleRate.bitPattern, ordering: .releasing)
+
+        let cap = Self.captureRingCapacity
+        var w = captureWriteA.load(ordering: .relaxed)
+        let r = captureReadA.load(ordering: .acquiring)
+        for i in 0..<n {
+            let next = (w + 1) % cap
+            // Full (the recorder queue is behind) — drop the remainder rather
+            // than overwrite unread audio. At 1.4 s of headroom this means the
+            // queue has stalled for longer than any recording could survive
+            // anyway.
+            if next == r { break }
+            captureRing[w] = ch[i]
+            w = next
+        }
+        captureWriteA.store(w, ordering: .releasing)
+        queue.async { [weak self] in self?.drainCapture() }
+    }
+
+    /// Recorder-queue side of the hand-off: pull everything currently readable
+    /// and run the existing segment logic over it in one pass.
+    private func drainCapture() {
+        let cap = Self.captureRingCapacity
+        let w = captureWriteA.load(ordering: .acquiring)
+        var r = captureReadA.load(ordering: .relaxed)
+        let available = (w - r + cap) % cap
+        guard available > 0 else { return }
+        let sr = Double(bitPattern: captureRateA.load(ordering: .acquiring))
+        guard sr > 0 else { return }
+
+        if drainScratch.count < available {
+            drainScratch = [Float](repeating: 0, count: available)
+        }
+        drainScratch.withUnsafeMutableBufferPointer { dst in
+            // Up to two chunks: the readable region can wrap the end of the ring.
+            let firstChunk = min(available, cap - r)
+            dst.baseAddress!.update(from: captureRing.baseAddress! + r, count: firstChunk)
+            if available > firstChunk {
+                (dst.baseAddress! + firstChunk).update(from: captureRing.baseAddress!,
+                                                      count: available - firstChunk)
+            }
+        }
+        r = (r + available) % cap
+        captureReadA.store(r, ordering: .releasing)
+
+        drainScratch.withUnsafeBufferPointer { src in
+            handle(UnsafeBufferPointer(start: src.baseAddress!, count: available), sampleRate: sr)
+        }
     }
 
     // MARK: Control (main thread)
@@ -240,7 +340,7 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
 
     // MARK: Queue work
 
-    private func handle(_ samples: [Float], sampleRate sr: Double) {
+    private func handle(_ samples: UnsafeBufferPointer<Float>, sampleRate sr: Double) {
         sampleRate = sr
 
         // Demo mode: drop the audio entirely rather than just refusing to open a
@@ -281,6 +381,7 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
         try? h.write(contentsOf: Self.wavHeader(sampleRate: UInt32(sr), dataBytes: 0))
         handle = h
         dataBytes = 0
+        segmentWriteFailed = false
         currentURL = url
         DispatchQueue.main.async { [weak self] in self?.lastWrittenSampleRate = sr }
         writtenSamples = 0
@@ -293,7 +394,7 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
             // shift the reported start (and ClassificationStore's pulse-matching
             // window) later than the file's true content.
             segmentStartDate = triggerDate.addingTimeInterval(-Double(preRoll.count) / sr)
-            write(preRoll)
+            preRoll.withUnsafeBufferPointer { write($0) }
             writtenSamples += preRoll.count
             preRoll.removeAll(keepingCapacity: true)
         } else {
@@ -310,6 +411,12 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
         // never actually ran) — discard rather than hand back an unreadable,
         // headers-only WAV that Files/other apps can't play.
         guard dataBytes > 0 else { discardSegment(handle: h, url: url); return }
+
+        // A segment with a failed write in it has a hole in its PCM stream and no
+        // honest length to declare, so it is discarded rather than saved — better
+        // a missing recording (reported via `lastWriteError`) than one whose
+        // header lies about what it contains. See `write`.
+        guard !segmentWriteFailed else { discardSegment(handle: h, url: url); return }
 
         let outcome = speciesAutoID(segmentStart: segmentStartDate ?? Date(), segmentEnd: Date())
 
@@ -390,7 +497,7 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
     private var floatScratch: [Float] = []
     private var pcm16Scratch: [Int16] = []
 
-    private func write(_ samples: [Float]) {
+    private func write(_ samples: UnsafeBufferPointer<Float>) {
         guard let handle else { return }
         // Float32 [-1,1] → 16-bit PCM via vDSP (clip, scale, truncate). iOS is
         // little-endian, so the Int16 buffer's raw bytes are already WAV byte order.
@@ -398,16 +505,33 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
         if floatScratch.count < n { floatScratch = [Float](repeating: 0, count: n) }
         if pcm16Scratch.count < n { pcm16Scratch = [Int16](repeating: 0, count: n) }
         var lo: Float = -1, hi: Float = 1, scale: Float = 32767
-        samples.withUnsafeBufferPointer { src in
-            vDSP_vclip(src.baseAddress!, 1, &lo, &hi, &floatScratch, 1, vDSP_Length(n))
-        }
+        vDSP_vclip(samples.baseAddress!, 1, &lo, &hi, &floatScratch, 1, vDSP_Length(n))
         vDSP_vsmul(floatScratch, 1, &scale, &floatScratch, 1, vDSP_Length(n))
         let data = pcm16Scratch.withUnsafeMutableBufferPointer { dst -> Data in
             vDSP_vfix16(floatScratch, 1, dst.baseAddress!, 1, vDSP_Length(n))
             return Data(bytes: dst.baseAddress!, count: n * 2)
         }
-        try? handle.write(contentsOf: data)
-        dataBytes += n * 2
+        // `dataBytes` advances ONLY on a write that actually landed. It is the
+        // number the WAV header's RIFF/data sizes and the GUANO chunk's offset
+        // are all computed from at close (see `closeAndKeep`), so counting a
+        // failed write produced a header claiming more PCM than exists on disk:
+        // the GUANO seek then lands past real EOF and zero-fills the gap, and
+        // the file is handed to ClassificationStore as a normal saved recording.
+        // A disk that fills mid-bout is the realistic way in — every subsequent
+        // write fails, and the old code recorded a full-length file of nothing.
+        // This is review item 5.5 (Context.md §15), which was logged as fixed
+        // and was not.
+        do {
+            try handle.write(contentsOf: data)
+            dataBytes += n * 2
+        } catch {
+            // One failure condemns the segment: the PCM stream now has a hole in
+            // it, and there is no honest length to report for a file missing a
+            // chunk out of its middle. `closeSegment` discards it instead of
+            // saving something unreadable.
+            segmentWriteFailed = true
+            lastWriteError = error.localizedDescription
+        }
     }
 
     // MARK: GUANO metadata

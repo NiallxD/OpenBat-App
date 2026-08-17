@@ -71,6 +71,7 @@ struct LiveTuningOverlay: View {
             guard opening == nil else { return }
             opening = LiveTuningSnapshot.capture(
                 audio: audio, pulse: pulseDetector, haptics: haptics,
+                snippet: snippetSettings,
                 bandLow: bandLow, bandHigh: bandHigh, timeWindowSeconds: timeWindowSeconds)
         }
     }
@@ -207,6 +208,7 @@ struct LiveTuningOverlay: View {
     private func revert() {
         guard let snapshot = opening else { return }
         snapshot.restore(audio: audio, pulse: pulseDetector, haptics: haptics,
+                         snippet: snippetSettings,
                          bandLow: &bandLow, bandHigh: &bandHigh,
                          timeWindowSeconds: &timeWindowSeconds)
         // The adaptive-TE group reaches the processor via ContentView's

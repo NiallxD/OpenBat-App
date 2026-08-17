@@ -401,8 +401,30 @@ final class PulseDetector {
                        complexAmbiguous: complexAmbiguous)
     }
 
-    /// Clears the session counters (count, rate, last capture).
+    /// Clears the session counters (count, rate, last capture) AND invalidates any
+    /// capture or classification still in flight.
+    ///
+    /// The invalidation is the load-bearing half. Clearing the accumulators alone
+    /// left the capture state machine running: a CoreML classification is a slow,
+    /// background path (cold model load on a busy device — Context.md §9), and
+    /// `ContentView.startDetecting` calls this with no wait, so a stop→start lands
+    /// the previous run's pulse in the NEW session's `passAggPulses` seconds later,
+    /// carrying the new session's ID and coordinate. Bumping `captureGeneration`
+    /// makes both completions in `scheduleCapture` drop themselves instead.
+    ///
+    /// The pending-capture fields are cleared for a second reason: `pendingArmAbs`
+    /// and friends are ABSOLUTE sample indices, and a full engine restart rebases
+    /// that counter — a stale `pendingArmAbs` from the previous run compares
+    /// against the new stream's indices as a wildly negative wait, so the deferred
+    /// capture could neither fire nor be replaced.
     func resetStats() {
+        captureGeneration &+= 1
+        isCapturing = false
+        pendingCapture = false
+        pendingOnsetAbs = 0
+        pendingFireAbs = 0
+        pendingArmAbs = 0
+        pendingClassifications = 0
         pulseCount = 0
         pulseRateHz = 0
         recentDetections.removeAll()
@@ -436,6 +458,10 @@ final class PulseDetector {
     private var aboveColumns = 0    // above-threshold columns in the run (validates min duration)
     private var belowRun = 0        // current streak of consecutive below-threshold columns
     private var columnsSinceLastDetection: Int = Int.max / 2
+    /// Bumped by `resetStats` so in-flight captures/classifications from a previous
+    /// run can recognise themselves as stale and drop out. `&+=` because it only
+    /// ever needs to differ from the value a completion snapshotted, not to count.
+    private var captureGeneration = 0
     private var isCapturing = false
     private let captureQueue = DispatchQueue(label: "bat.PulseDetector.capture",
                                              qos: .userInitiated)
@@ -635,6 +661,9 @@ final class PulseDetector {
         guard !isCapturing else { return }
         isCapturing = true
         pendingClassifications += 1
+        // Snapshotted so both completions below can tell whether the run they
+        // belong to is still the current one — see `resetStats`.
+        let generation = captureGeneration
 
         // This pulse's own wall-clock capture time — NOT `lastDetectionDate`, which is
         // display-only (gated by quality/refresh-window logic below) and can go several
@@ -710,6 +739,10 @@ final class PulseDetector {
             // and caused every other pulse to be skipped, halving the reported rate.
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
+                // Dropped if the detector was reset while this was in flight —
+                // `resetStats` has already cleared the gate and the counters, so
+                // touching them here would resurrect state from the previous run.
+                guard self.captureGeneration == generation else { return }
                 // Count + rate are handled at detection time in registerDetection();
                 // this completion only owns the (rate-limited) display refresh and
                 // releasing the capture gate.
@@ -750,11 +783,22 @@ final class PulseDetector {
                 ? cls?.classify(pcm: clsPCM, gate: gate, prior: { priorSnapshot[$0] ?? 1.0 })
                 : nil
             guard let classification else {
-                DispatchQueue.main.async { [weak self] in self?.pendingClassifications -= 1 }
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.captureGeneration == generation else { return }
+                    self.pendingClassifications -= 1
+                }
                 return
             }
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
+                // The important one: without this, a classification still running
+                // when the user stops and immediately restarts lands its pulse in
+                // the NEW session's accumulator, attributed to that session's ID
+                // and coordinate. The decrement is inside the guard too —
+                // `resetStats` zeroes `pendingClassifications`, so a stale
+                // decrement would drive it negative and the `== 0` gate in
+                // `feed()` would never let a pass finalize again.
+                guard self.captureGeneration == generation else { return }
                 defer { self.pendingClassifications -= 1 }
                 // A classified pulse joins the pass even when the display render
                 // failed — the ID shouldn't lose evidence over a missing thumbnail.

@@ -79,6 +79,31 @@ struct AudioDiagnostics: Equatable {
 
     /// Convenience: native rate is anything meaningfully above the 48 kHz ceiling.
     var isNativeRate: Bool { actualSampleRate > 60_000 }
+
+    /// Whether there is anything attached that calibration could meaningfully
+    /// measure.
+    ///
+    /// Calibration exists to flatten an affordable ultrasonic microphone's
+    /// uneven response across the bat band — the phone's built-in mic cannot
+    /// reach that band at all, so calibrating it measures nothing and corrects
+    /// nothing. Offering it anyway is how a new user ended up watching a
+    /// fifteen-second countdown on a simulator with no mic attached, reassured
+    /// it was "nice and quiet", before being told it hadn't worked.
+    var canCalibrate: Bool { usbMicAvailable }
+
+    /// The microphone's name for display, or a generic phrase when there isn't a
+    /// usable one.
+    ///
+    /// `inputName` is the port name iOS reports, which for USB audio is the
+    /// device's own product string — the right thing to show. For anything else
+    /// it is a system identifier like "MicrophoneBuiltIn", which is a code name
+    /// leaking into a sentence a user reads.
+    var micDisplayName: String {
+        guard isUSBInput, inputName != "—", !inputName.isEmpty else {
+            return "your ultrasonic microphone"
+        }
+        return inputName
+    }
 }
 
 /// `nonisolated`: same reasoning as `Biquad` — the project's

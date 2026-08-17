@@ -25,9 +25,13 @@
 //  so re-exporting from LottieFiles later needs no re-editing here.
 //
 //  The animation is only mounted while listening. LottieView keeps a display
-//  link running for as long as it exists, and this sits in a control bar that
-//  is on screen for the whole session — an always-mounted animation would burn
-//  frames continuously behind a spectrogram that is already GPU-bound.
+//  link running for as long as it exists, and this sits in the session button,
+//  which is on screen for the whole session — an always-mounted animation would
+//  burn frames continuously behind a spectrogram that is already GPU-bound.
+//
+//  Only the pre-26 bar uses it. On iOS 26 the session button is a `Tab` whose
+//  label the system renders outside the normal view tree, which is no place to
+//  rely on a Lottie view — that path shows an SF Symbol instead.
 //
 
 import SwiftUI

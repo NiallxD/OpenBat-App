@@ -78,12 +78,24 @@ struct SilenceMap: Equatable {
     /// Non-nil ONLY when `r` falls inside a hidden gap (or before the first
     /// segment): the real start of the next active segment, for playback to
     /// skip to. Nil when `r` is inside an active segment or past the last one.
+    /// Binary search, like its two neighbours above — this was the one linear
+    /// scan left in the file, and it runs from the playhead follow loop at ~30 Hz
+    /// for the whole of playback whenever hide-silence is on, over a segment list
+    /// that grows with the number of detected pulses in the recording.
     func nextActiveRealStart(after r: Int) -> Int? {
-        for seg in segments {
-            if r < seg.realStart { return seg.realStart }
-            if r < seg.realEnd { return nil }   // inside an active segment
+        guard !segments.isEmpty else { return nil }
+        // First segment whose realEnd is strictly greater than `r` — i.e. the
+        // first one not already entirely behind the playhead.
+        var lo = 0, hi = segments.count
+        while lo < hi {
+            let mid = (lo + hi) / 2
+            if segments[mid].realEnd <= r { lo = mid + 1 } else { hi = mid }
         }
-        return nil   // past the last segment — nothing left to skip to
+        guard lo < segments.count else { return nil }   // past the last segment
+        let seg = segments[lo]
+        // Inside that segment already: nothing to skip. Otherwise `r` is in the
+        // gap before it, and its start is where playback should jump to.
+        return r < seg.realStart ? seg.realStart : nil
     }
 
     /// The real slices covering `[virtualStart, virtualEnd)`, each paired

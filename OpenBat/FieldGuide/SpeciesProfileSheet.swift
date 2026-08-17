@@ -14,7 +14,7 @@ import SwiftUI
 struct SpeciesProfileSheet: View {
     let species: GuideSpecies
     let store: SpeciesGuideStore
-    let rangeStore: SpeciesRangeStore
+    let presenceStore: SpeciesPresenceStore
 
     @Environment(\.dismiss) private var dismiss
 
@@ -24,7 +24,7 @@ struct SpeciesProfileSheet: View {
         // can push — the stack is purely to give it a bar to put the title and
         // the Done button in.
         NavigationStack {
-            SpeciesDetailView(species: species, store: store, rangeStore: rangeStore)
+            SpeciesDetailView(species: species, store: store, presenceStore: presenceStore)
                 .toolbar {
                     ToolbarItem(placement: .confirmationAction) {
                         Button("Done") { dismiss() }

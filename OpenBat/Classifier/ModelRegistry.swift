@@ -9,7 +9,7 @@
 //  model is a one-line append here — no other code changes required. Priors
 //  aren't part of the descriptor: every model starts neutral and
 //  AutoIDSettings suggests real ones from GBIF occurrence data near the
-//  user's location (see GBIFService.suggestPriors).
+//  user's location (see SpeciesPresenceStore).
 //
 //  Only ONE model classifies at a time (see AutoIDSettings.activeModelID).
 //
@@ -53,6 +53,12 @@ struct SpeciesComplex: Identifiable {
     let id: String            // stable key, persisted on a pass ("myotis")
     let name: String          // "Myotis species"
     let codes: Set<String>    // members
+    /// A few words, for places that list every complex at once and so cannot
+    /// afford `note` in full — onboarding's "these are the hard ones" screen.
+    /// Written out rather than derived from `note` by trimming: the first
+    /// sentence of a `note` is still a whole sentence, which is exactly the
+    /// wordiness such a list needs to avoid.
+    let shortNote: String
     let note: String          // one-line, honest explanation shown to the user
 
     /// A runner-up within this posterior gap of the winner is treated as an *active*
@@ -118,7 +124,7 @@ struct ModelDescriptor: Identifiable {
     /// Code → scientific name, for every code in `classNames` that names a real
     /// taxon (a model's non-bat "NOISE"-equivalent class, if any, is omitted).
     /// Used to look up GBIF occurrence data near the user's location and suggest
-    /// per-species priors (see GBIFService.suggestPriors) — there is no static
+    /// per-species priors (see AutoIDSettings.refreshPriors) — there is no static
     /// "default prior" anymore; every model starts neutral (every species
     /// enabled, prior 1.0) until a location fix refines it.
     let scientificNames: [String: String]
@@ -238,6 +244,7 @@ nonisolated enum ModelRegistry {
                 name: "Myotis species",
                 codes: ["MYAU","MYCA","MYCI","MYEV","MYGR","MYLE",
                         "MYLU","MYSE","MYSO","MYTH","MYVE","MYVO","MYYU"],
+                shortNote: "Near-identical broadband calls",
                 note: "Myotis species produce very similar broadband calls and are "
                     + "frequently indistinguishable by acoustic ID alone. Treat a "
                     + "Myotis identification as \u{201C}a Myotis\u{201D} unless a call sequence "
@@ -246,6 +253,7 @@ nonisolated enum ModelRegistry {
                 id: "lowfreq",
                 name: "Low-frequency bats",
                 codes: ["EPFU","LANO","LACI"],
+                shortNote: "Overlapping low-frequency calls",
                 note: "Big Brown, Silver-haired and Hoary bats all call at low "
                     + "frequencies with overlapping shapes, and single passes are "
                     + "easily confused — especially Big Brown and Silver-haired."),
@@ -307,6 +315,7 @@ nonisolated enum ModelRegistry {
                 id: "uk-myotis",
                 name: "Myotis species",
                 codes: ["MYOMYS","MYOALC","MYONAT","MYODAU","MYOBRA","MYOBEC"],
+                shortNote: "Near-identical broadband calls",
                 note: "UK Myotis species produce very similar broadband calls and are "
                     + "frequently indistinguishable by acoustic ID alone — whiskered "
                     + "and Alcathoe bats in particular are near-inseparable acoustically. "
@@ -316,6 +325,7 @@ nonisolated enum ModelRegistry {
                 id: "uk-pipistrelles",
                 name: "Pipistrelle species",
                 codes: ["PIPNAT","PIPPIP","PIPPYG"],
+                shortNote: "Common and soprano overlap at ~45 and ~55 kHz",
                 note: "Common and soprano pipistrelles have overlapping peak "
                     + "frequencies (~45 and ~55 kHz) and are commonly confused; "
                     + "Nathusius' pipistrelle is more separable but included here "
@@ -324,12 +334,14 @@ nonisolated enum ModelRegistry {
                 id: "uk-nyctalus",
                 name: "Nyctalus species",
                 codes: ["NYCLEI","NYCNOC"],
+                shortNote: "Leisler's and noctule overlap on single passes",
                 note: "Leisler's and noctule bats call in overlapping frequency "
                     + "ranges and are frequently confused on single passes."),
             SpeciesComplex(
                 id: "uk-plecotus",
                 name: "Long-eared bats",
                 codes: ["PLEAUR","PLEAUS"],
+                shortNote: "Very quiet, near-inseparable whispers",
                 note: "Brown and grey long-eared bats produce extremely quiet, "
                     + "similar whispering calls and are effectively inseparable by "
                     + "acoustic ID alone."),

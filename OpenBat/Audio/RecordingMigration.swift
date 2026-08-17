@@ -6,11 +6,12 @@
 //  created going forward once that model landed — WAVs saved before that (or by a
 //  build in between that had the new bout scheme but not yet the Recording model)
 //  are orphaned files on disk with no entry in recordings.json, so they don't show
-//  up in the Listening tab or Playback. This walks Documents/Recordings, reads each
-//  WAV's embedded GUANO chunk back out (species/timestamp/session/location), and
-//  adds the missing `Recording` entries. Triggered manually from PlaybackListView
-//  (a button, not automatic on launch — this does real file IO and FFT work per
-//  file, and only needs to run once per orphaned file).
+//  up anywhere in Sessions. This walks Documents/Recordings, reads each WAV's
+//  embedded GUANO chunk back out (species/timestamp/session/location), and adds
+//  the missing `Recording` entries. Deliberately not automatic on launch — it
+//  does real file IO and FFT work per file, and only needs to run once per
+//  orphaned file. NOTE: nothing in the UI calls it at present; it used to be a
+//  button on the Playback list, which no longer exists.
 //
 
 import Foundation

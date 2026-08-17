@@ -25,13 +25,14 @@ enum SpeciesGuideDestination: Hashable {
 
 struct SpeciesExplorerView: View {
     let store: SpeciesGuideStore
-    let rangeStore: SpeciesRangeStore
+    let presenceStore: SpeciesPresenceStore
     /// Where to pre-pan the globe — the user's current location, if known.
     /// Falls back to a fixed mid-Atlantic center when nil (no fix yet / denied).
     let userCoordinate: CLLocationCoordinate2D?
 
     @State private var query = ""
     @State private var showSources = false
+    @State private var showGuideInfo = false
     @FocusState private var searchFieldFocused: Bool
     /// Start far enough out that the realistic-elevation imagery style renders
     /// the whole planet as a spinnable globe — just pre-panned toward the user
@@ -62,9 +63,9 @@ struct SpeciesExplorerView: View {
     private static let swoopDuration = 2.0
     private static let swoopStepInterval = 1.0 / 60.0
 
-    init(store: SpeciesGuideStore, rangeStore: SpeciesRangeStore, userCoordinate: CLLocationCoordinate2D? = nil) {
+    init(store: SpeciesGuideStore, presenceStore: SpeciesPresenceStore, userCoordinate: CLLocationCoordinate2D? = nil) {
         self.store = store
-        self.rangeStore = rangeStore
+        self.presenceStore = presenceStore
         self.userCoordinate = userCoordinate
         _camera = State(initialValue: .camera(
             MapCamera(centerCoordinate: Self.openingCenter, distance: 60_000_000)
@@ -81,10 +82,13 @@ struct SpeciesExplorerView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            searchBar
-                .padding(.horizontal)
-                .padding(.vertical, 10)
+        // The globe fills the screen and the search field floats ON it as a glass
+        // capsule. It used to be a row in a VStack above the globe, which gave it
+        // a black strip of its own — a bare text field on black, pushing the globe
+        // down the screen for no gain (Niall, 2026-08-16). Over the search RESULTS
+        // it still needs a solid strip, since a list scrolling under a floating
+        // pill is unreadable; that branch keeps the stacked layout.
+        Group {
             if query.trimmingCharacters(in: .whitespaces).isEmpty {
                 globe
                     // Tapping anywhere on the globe dismisses the keyboard. Scoped to
@@ -95,11 +99,21 @@ struct SpeciesExplorerView: View {
                     // its name implies.
                     .contentShape(Rectangle())
                     .simultaneousGesture(TapGesture().onEnded { searchFieldFocused = false })
+                    .overlay(alignment: .top) {
+                        searchPill
+                            .padding(.horizontal)
+                            .padding(.top, 8)
+                    }
             } else {
-                searchResults
-                    // The List-native way to dismiss the keyboard on interaction —
-                    // doesn't compete with row taps the way a custom tap gesture does.
-                    .scrollDismissesKeyboard(.immediately)
+                VStack(spacing: 0) {
+                    searchPill
+                        .padding(.horizontal)
+                        .padding(.vertical, 8)
+                    searchResults
+                        // The List-native way to dismiss the keyboard on interaction —
+                        // doesn't compete with row taps the way a custom tap gesture does.
+                        .scrollDismissesKeyboard(.immediately)
+                }
             }
         }
         .navigationDestination(for: SpeciesGuideDestination.self) { destination in
@@ -107,7 +121,7 @@ struct SpeciesExplorerView: View {
             case .region(let region):
                 RegionSpeciesView(region: region, store: store)
             case .species(let species):
-                SpeciesDetailView(species: species, store: store, rangeStore: rangeStore)
+                SpeciesDetailView(species: species, store: store, presenceStore: presenceStore)
             }
         }
         // Flat black bar. Matters most here: the globe's bright satellite imagery
@@ -117,11 +131,97 @@ struct SpeciesExplorerView: View {
         // `OpenBatApp.configureNavigationBarAppearance`.
         .toolbarBackground(Color.black, for: .navigationBar)
         .flatTopScrollEdge()
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button { showGuideInfo = true } label: {
+                    Image(systemName: "info.circle")
+                }
+                .accessibilityLabel("About this guide")
+                .popover(isPresented: $showGuideInfo) {
+                    guideInfoPopover
+                        .presentationCompactAdaptation(.popover)
+                }
+            }
+        }
+        // At the root, not inside `globeFooter` where it used to live: the footer
+        // only exists on the globe branch, so a sheet attached to it disappeared
+        // along with its presenter the moment a search filtered the globe away.
+        // The button that opens it is now in the toolbar, which is always there.
+        .sheet(isPresented: $showSources) { sourcesSheet }
+    }
+
+    /// Which guide data is loaded, where it came from, and the credits.
+    ///
+    /// This was a footer card floating at the bottom of the globe, and it was
+    /// colliding with the bottom tab bar — `ignoresSafeArea(edges: .bottom)` on the
+    /// globe put its 24pt bottom padding below the bar rather than above it, so the
+    /// version line sat under the chrome. It is reference material read once, which
+    /// makes a toolbar button the right home for it rather than a permanent card
+    /// over the map (Niall, 2026-08-16).
+    private var guideInfoPopover: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Field guide data")
+                .font(.subheadline.weight(.semibold))
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Text("Version").font(.caption).foregroundStyle(.secondary)
+                    Spacer(minLength: 12)
+                    Text("v\(store.guide.dataVersion)")
+                        .font(.caption.monospacedDigit().weight(.semibold))
+                    if store.isRefreshing { ProgressView().controlSize(.mini) }
+                }
+                HStack(spacing: 6) {
+                    Text("Source").font(.caption).foregroundStyle(.secondary)
+                    Spacer(minLength: 12)
+                    Text(store.source.rawValue).font(.caption.weight(.semibold))
+                }
+                if let updated = store.guide.updatedDate {
+                    HStack(spacing: 6) {
+                        Text("Updated").font(.caption).foregroundStyle(.secondary)
+                        Spacer(minLength: 12)
+                        Text(Self.updatedAtFormatter.string(from: updated))
+                            .font(.caption.weight(.semibold))
+                    }
+                }
+            }
+
+            Text("The guide is community-maintained and updates itself in the background — species, photos and range maps arrive without an app update.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            // Credits the field guide's data (GBIF/Wikipedia) and the classifier
+            // models — including BatDetect2's CC BY-NC non-commercial licence —
+            // from within the guide itself, so it's reachable without going to the
+            // app-info sheet.
+            Button("Sources & licences") {
+                showGuideInfo = false
+                // Deferred, and it does not work without this: presenting a sheet
+                // while the popover it was tapped in is still dismissing gets
+                // silently DROPPED by SwiftUI — the button appeared completely
+                // dead. Same failure and the same fix as `PlaybackListView`'s
+                // import-error alert (now `SessionsView.reportImport`), which was
+                // being swallowed by the file importer's own dismissal.
+                Task {
+                    try? await Task.sleep(for: .milliseconds(350))
+                    showSources = true
+                }
+            }
+            .font(.caption.weight(.semibold))
+        }
+        .padding(14)
+        .frame(width: 280, alignment: .leading)
     }
 
     // MARK: Search
 
-    private var searchBar: some View {
+    /// A Liquid Glass capsule, so it reads as a control floating over the globe
+    /// rather than a field sunk into a black band. `interactive: true` for the
+    /// press response and — the part that is not cosmetic — so the whole capsule
+    /// is the tap target rather than just the glyph and the text baseline; see
+    /// `liquidGlass`'s own note.
+    private var searchPill: some View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
                 .foregroundStyle(.secondary)
@@ -139,8 +239,13 @@ struct SpeciesExplorerView: View {
                 .buttonStyle(.plain)
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
+        .liquidGlass(interactive: true, in: Capsule())
+        // The glass shape is the tap target, but a TextField only takes focus from
+        // a tap that lands on the field itself — so the padding around it would be
+        // dead. This hands the whole capsule to the field.
+        .onTapGesture { searchFieldFocused = true }
     }
 
     @ViewBuilder private var searchResults: some View {
@@ -200,8 +305,13 @@ struct SpeciesExplorerView: View {
             }
         }
         .mapStyle(.imagery(elevation: .realistic))
-        .overlay(alignment: .bottom) { globeFooter }
+        // ORDER MATTERS: the imagery bleeds into the bottom safe area, and the
+        // footer must not. Overlaying first and ignoring the safe area afterwards
+        // (which is what this used to do) expands the overlay along with the map
+        // and drops the footer under the tab bar — the bug that sent the version
+        // line under the chrome.
         .ignoresSafeArea(edges: .bottom)
+        .overlay(alignment: .bottom) { globeFooter }
         .opacity(globeOpacity)
         .onAppear {
             guard !hasNudgedCameraOnce else { return }
@@ -266,51 +376,39 @@ struct SpeciesExplorerView: View {
         return f
     }()
 
+    /// Just the one instruction now — everything else that used to be down here
+    /// (version, source, updated date, credits) moved to the toolbar's info
+    /// popover, which is also what stopped it colliding with the tab bar. This
+    /// stays on the globe because it is not reference material: it tells a
+    /// first-time user the map is tappable, which nothing else does.
+    ///
+    /// Positioned against the safe area rather than the ignored bottom edge, so it
+    /// sits above the tab bar instead of under it.
     private var globeFooter: some View {
-        VStack(spacing: 4) {
-            Text("Tap a region to explore its species")
-                .font(.footnote)
-            HStack(spacing: 4) {
-                Text("Guide v\(store.guide.dataVersion) · \(store.source.rawValue)")
-                if let updated = store.guide.updatedDate {
-                    Text("· updated \(Self.updatedAtFormatter.string(from: updated))")
-                }
-                if store.isRefreshing {
-                    ProgressView().controlSize(.mini)
-                }
-                Text("·")
-                // Credits the field guide's data (GBIF/Wikipedia) and the
-                // classifier models — including BatDetect2's CC BY-NC
-                // non-commercial licence — from within the guide itself, so it's
-                // reachable without going to the app-info sheet.
-                Button("Sources") { showSources = true }
-                    .buttonStyle(.plain)
-                    .underline()
+        Text("Tap a region to explore its species")
+            .font(.footnote)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .liquidGlass(in: Capsule())
+            .padding(.bottom, 12)
+    }
+
+    private var sourcesSheet: some View {
+        NavigationStack {
+            ScrollView {
+                DataModelSourcesView()
+                    .padding()
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .font(.caption2)
-            .foregroundStyle(.secondary)
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12))
-        .padding(.bottom, 24)
-        .sheet(isPresented: $showSources) {
-            NavigationStack {
-                ScrollView {
-                    DataModelSourcesView()
-                        .padding()
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .navigationTitle("Sources & Licences")
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .confirmationAction) {
-                        Button("Done") { showSources = false }
-                    }
+            .navigationTitle("Sources & Licences")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { showSources = false }
                 }
             }
-            .presentationDetents([.medium, .large])
         }
+        .presentationDetents([.medium, .large])
     }
 }
 
@@ -384,19 +482,41 @@ private struct RegionLabel: View {
 /// unrecognized (or absent) falls back to a neutral gray "?" rather than
 /// hiding the badge, since a wrong-but-visible status is easier to notice and
 /// fix in the guide JSON than a silently-missing one.
-private enum IUCNBadge {
-    static func forStatus(_ status: String?) -> (text: String, color: Color) {
-        guard let status else { return ("?", .gray) }
-        switch status.lowercased() {
-        case "least concern":         return ("LC", .green)
-        case "near threatened":       return ("NT", .yellow)
-        case "vulnerable":            return ("VU", .orange)
-        case "endangered":            return ("EN", .red)
-        case "critically endangered": return ("CR", .purple)
-        case "extinct in the wild":   return ("EW", .black)
-        case "extinct":               return ("EX", .black)
-        case "data deficient":        return ("DD", .gray)
-        default:                      return ("?", .gray)
+/// Shared by the species list's row badge and the detail page's header badge —
+/// one mapping, so the two can't disagree about what a status means.
+enum IUCNStatusStyle {
+    /// The badge for a status string, or nil when there isn't one to show.
+    ///
+    /// Matched by prefix rather than equality, and nil rather than "?", because
+    /// the guide is community-edited free text and an exact-match switch was
+    /// quietly losing to it. Real values in the shipped guide today include
+    /// "Least Concern (global)" and one that continues "…; note that two
+    /// isolated US subspecies, Ozark and Virginia big-eared bat, are federally
+    /// Endangered in the US" — all correct, none of them equal to "least
+    /// concern", so five of nineteen species rendered an unexplained grey "?"
+    /// where their status should be.
+    ///
+    /// An unrecognised or absent status now shows no badge at all. A "?" that
+    /// means "this app couldn't parse a sentence" is worse than silence: the
+    /// full text is on the Conservation card regardless, so nothing is lost.
+    ///
+    /// Order matters — the longer names have to be tested before the shorter
+    /// ones they contain, or "critically endangered" reads as "endangered" and
+    /// "extinct in the wild" as "extinct".
+    static func forStatus(_ status: String?) -> (text: String, color: Color)? {
+        guard let status else { return nil }
+        let s = status.lowercased()
+        switch true {
+        case s.hasPrefix("critically endangered"): return ("CR", .purple)
+        case s.hasPrefix("near threatened"):       return ("NT", .yellow)
+        case s.hasPrefix("least concern"):         return ("LC", .green)
+        case s.hasPrefix("vulnerable"):            return ("VU", .orange)
+        case s.hasPrefix("endangered"):            return ("EN", .red)
+        case s.hasPrefix("extinct in the wild"):   return ("EW", .black)
+        case s.hasPrefix("extinct"):               return ("EX", .black)
+        case s.hasPrefix("data deficient"):        return ("DD", .gray)
+        case s.hasPrefix("not evaluated"):         return ("NE", .gray)
+        default:                                   return nil
         }
     }
 }
@@ -485,8 +605,8 @@ struct GuideSpeciesRow: View {
 
             Spacer()
 
-            if let iucn = species.conservation?.iucnStatus {
-                let badge = IUCNBadge.forStatus(iucn)
+            if let iucn = species.conservation?.iucnStatus,
+               let badge = IUCNStatusStyle.forStatus(iucn) {
                 Text(badge.text)
                     .font(.caption2.weight(.bold))
                     .foregroundStyle(.white)
@@ -508,7 +628,7 @@ struct RegionSpeciesView: View {
     private static let unclassified = "Other"
     /// Repo the community-editable guide JSON (SpeciesGuideData.json) lives
     /// in — same repo `SpeciesGuideStore.remoteURL` fetches from.
-    private static let repoURL = "https://github.com/NiallxD/OpenBat"
+    private static let repoURL = "https://github.com/NiallxD/OpenBat-FieldGuide"
 
     /// Species in this region grouped by family — a lightweight stand-in for
     /// the full taxonomy browser planned later (see Context.md §16);

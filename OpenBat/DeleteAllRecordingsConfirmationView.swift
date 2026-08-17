@@ -7,7 +7,7 @@
 //  same stronger friction EraseDataConfirmationView uses for the server-side
 //  erasure, rather than a plain confirmation alert. Distinct from that other
 //  flow: this never touches anything already uploaded — see SettingsView's
-//  Privacy tab for erasing server-side data.
+//  General tab's privacy section for erasing server-side data.
 //
 
 import SwiftUI

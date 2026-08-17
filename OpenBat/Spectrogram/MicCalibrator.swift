@@ -2,7 +2,7 @@
 //  MicCalibrator.swift
 //  OpenBat
 //
-//  Captures ~30s of audio during a deliberately quiet period to measure a
+//  Captures ~15s of audio during a deliberately quiet period to measure a
 //  microphone's own frequency response, producing a `MicCalibrationCurve`.
 //  Deliberately a small, self-contained FFT pass — not a reuse of
 //  `SpectrogramProcessor`, which is coupled to ring-buffer/renderer/trigger-
@@ -98,7 +98,7 @@ final class MicCalibrator: @unchecked Sendable {
     /// wave off as "benign," since this holds several arrays, not a scalar.
     private let stateLock = NSLock()
 
-    init(sampleRate: Double, captureSeconds: Double = 30) {
+    init(sampleRate: Double, captureSeconds: Double = 15) {
         self.sampleRate = sampleRate
         let columnsPerSecond = sampleRate / Double(Self.hopSize)
         self.minColumns = Int(columnsPerSecond * captureSeconds * 0.9)

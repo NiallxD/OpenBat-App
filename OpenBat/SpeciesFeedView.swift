@@ -4,7 +4,7 @@
 //
 //  Merlin Sound ID-style "recently detected" stack: one row per species, the
 //  most recently heard on top. Swaps in for the spectrogram or pulse-zoom panel
-//  when the matching Settings toggle is on (see SettingsView's Display tab).
+//  when the matching Settings toggle is on (see SettingsView).
 //
 //  Backed by ClassificationStore.speciesFeed(sessionID:), which dedupes
 //  `passes` (already newest-first) by species — no separate ordering state to
@@ -16,12 +16,18 @@ import SwiftUI
 
 struct SpeciesFeedView: View {
     let store: ClassificationStore
+    /// Only used to resolve a species code to a field-guide page for the book
+    /// button on each row — held as references and never read in this body, so
+    /// they add no invalidation of their own.
+    let guide: SpeciesGuideStore
+    let presenceStore: SpeciesPresenceStore
     let activeSessionID: UUID?
     /// When the current run started (nil when nothing is running) — see
     /// ClassificationStore.speciesFeed(sessionID:since:) for why this matters.
     let sessionStart: Date?
-    /// The pulse-view column in iPhone landscape is too narrow for the pulse
-    /// thumbnail + text + badge to share a row — that placement passes false.
+    /// A narrow host — the pulse-view panel, and its column in the iPad-landscape
+    /// layout — has no room for the pulse thumbnail, text and badge to share a
+    /// row, so that placement passes false.
     var showsThumbnail: Bool = true
     /// False when no AutoID model is active (`AutoIDSettings.activeModelID == nil`) —
     /// the feed can never populate in that state, so the empty view explains how to
@@ -40,7 +46,9 @@ struct SpeciesFeedView: View {
                 ScrollView {
                     LazyVStack(spacing: 8) {
                         ForEach(entries) { pass in
-                            SpeciesFeedRow(pass: pass, store: store, showsThumbnail: showsThumbnail)
+                            SpeciesFeedRow(pass: pass, store: store, guide: guide,
+                                           presenceStore: presenceStore,
+                                           showsThumbnail: showsThumbnail)
                                 .transition(.move(edge: .top).combined(with: .opacity))
                         }
                     }
@@ -85,12 +93,26 @@ struct SpeciesFeedView: View {
 private struct SpeciesFeedRow: View {
     let pass: PassRecord
     let store: ClassificationStore
+    let guide: SpeciesGuideStore
+    let presenceStore: SpeciesPresenceStore
     let showsThumbnail: Bool
 
     /// Tapping a row opens the same pass-detail screen the Sessions list uses —
     /// the pulses behind the ID, per-pulse score bars, runner-up, complex notes.
     @State private var showDetail = false
+    /// The field-guide page for this species, when the guide has one. Opened by
+    /// the book button rather than by the row itself, so the two destinations —
+    /// "what did the app hear" and "what is this animal" — stay distinct.
+    @State private var profile: GuideSpecies?
     @State private var image: UIImage?
+
+    /// nil whenever the guide has no page for this code, which is the common
+    /// case: the models name far more bats than the community guide describes.
+    /// The button is simply absent then — offering a link to a page that doesn't
+    /// exist is worse than offering none.
+    private var guidePage: GuideSpecies? {
+        pass.isNoID ? nil : guide.guide.species(forCode: pass.species)
+    }
 
     var body: some View {
         // Re-evaluates every second so "3s ago" keeps counting up without needing a
@@ -102,8 +124,8 @@ private struct SpeciesFeedRow: View {
             let isStale = context.date.timeIntervalSince(pass.date) > staleIDSeconds
             // The runner-up/noise lines sit below the main row at full width —
             // sharing the middle column with the name scrunches everything when
-            // this feed is in a narrow panel (e.g. the pulse-view column in
-            // iPhone landscape).
+            // this feed is in a narrow panel (e.g. the pulse-view column of the
+            // iPad-landscape layout).
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 10) {
                     if showsThumbnail {
@@ -122,8 +144,19 @@ private struct SpeciesFeedRow: View {
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
         .contentShape(RoundedRectangle(cornerRadius: 10))
         .onTapGesture { showDetail = true }
-        .task(id: representativePulse.id) {
-            image = await store.loadImage(for: representativePulse)
+        .task(id: representativePulse?.id) {
+            guard let pulse = representativePulse else { return }
+            image = await store.loadImage(for: pulse)
+        }
+        .sheet(item: $profile) { page in
+            NavigationStack {
+                SpeciesDetailView(species: page, store: guide, presenceStore: presenceStore)
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Done") { profile = nil }
+                        }
+                    }
+            }
         }
         .sheet(isPresented: $showDetail) {
             NavigationStack {
@@ -138,7 +171,7 @@ private struct SpeciesFeedRow: View {
     }
 
     // Both lines shrink a little rather than wrap or truncate — in the narrow
-    // pulse-view column (iPhone landscape) there's ~100 pt for this text and
+    // pulse-view column there's ~100 pt for this text and
     // "Spotted Bat" / "EUMA · 29s ago" would otherwise become "Spo…" and a
     // three-line caption.
     private func titleAndTime(now: Date) -> some View {
@@ -179,10 +212,36 @@ private struct SpeciesFeedRow: View {
         // where the model never settled on anything) — showing "0%" would read as
         // a real score rather than "we don't know".
         if !pass.isNoID {
-            VStack(alignment: .trailing, spacing: 4) {
-                ConfidenceBadge(confidence: pass.confidence)
-                ComplexIndicator(pass: pass)
+            HStack(spacing: 8) {
+                VStack(alignment: .trailing, spacing: 4) {
+                    ConfidenceBadge(confidence: pass.confidence)
+                    ComplexIndicator(pass: pass)
+                }
+                guideButton
             }
+        }
+    }
+
+    /// Opens the species' field-guide page from the detector, without leaving
+    /// it. This shortcut used to live on the species cell in the stats card;
+    /// it came back here when that cell was removed (2026-08-16), which is the
+    /// better home for it anyway — this row already IS the species.
+    ///
+    /// Its own tap target rather than a second gesture on the row: the row goes
+    /// to the pass detail (the evidence behind this identification), and the
+    /// book goes to the profile (the animal itself). Those are different
+    /// questions and a single tap can't serve both.
+    @ViewBuilder private var guideButton: some View {
+        if let page = guidePage {
+            Button { profile = page } label: {
+                Image(systemName: "book.closed")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Color.batAccent)
+                    .frame(width: 30, height: 30)
+                    .background(.ultraThinMaterial, in: Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Field guide page for \(page.commonName)")
         }
     }
 
@@ -202,8 +261,16 @@ private struct SpeciesFeedRow: View {
         }
     }
 
-    private var representativePulse: PulseRecord {
-        pass.pulses.max(by: { $0.confidence < $1.confidence }) ?? pass.pulses[0]
+    /// Optional, and the `?? pulses.first` matters: `max(by:)` returns nil
+    /// EXACTLY when the array is empty, so the old `?? pass.pulses[0]` fallback
+    /// could only ever run in the one case where index 0 is out of bounds — a
+    /// guaranteed crash dressed as a default. Live construction always guards
+    /// against an empty `pulses` (PulseDetector.finalizePass, and again in
+    /// ClassificationStore.addPass), but a PassRecord decoded from a corrupt or
+    /// future-schema recordings.json has no such guarantee. The thumbnail view
+    /// already renders a placeholder for a nil image.
+    private var representativePulse: PulseRecord? {
+        pass.pulses.max(by: { $0.confidence < $1.confidence }) ?? pass.pulses.first
     }
 
     /// Natural, exact-at-short-intervals relative time. `RelativeDateTimeFormatter`

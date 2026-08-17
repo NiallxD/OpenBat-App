@@ -86,8 +86,8 @@ struct TunedPillView: View {
 // MARK: - Session status pill
 
 /// Small always-visible indicator of what a currently-detecting run is: a logged
-/// "Session" (IDs + GPS track) vs a bare "Listening" bucket, or "Off" when nothing
-/// is running — shown beside `MicStatusPill`. A standalone View struct for the same
+/// "Session", a bare "Listening" bucket (which now only the demo uses), or "Off"
+/// when nothing is running — shown beside `MicStatusPill`. A standalone View struct for the same
 /// reason as the other status pills — `audio.isRunning`/`classStore.activeSessionID`
 /// are stored properties on churning `@Observable` objects, so scoping the read here
 /// keeps it from invalidating ContentView.body (see the @Observable-churn note in
@@ -500,52 +500,6 @@ struct AmplitudeMeterView: View {
     }
 }
 
-/// Vertical amplitude meter for the landscape sidebar. Same scoping rationale as
-/// `AmplitudeMeterView`.
-struct VerticalAmplitudeMeterView: View {
-    let audio: AudioEngineController
-    let peakHold: PeakHoldTracker
-    let detector: PulseDetector
-
-    var body: some View {
-        let palette = detector.displayPalette
-        let level = MeterMath.normalized(Double(audio.diagnostics.currentLevelDB))
-        let segments = 20
-        VStack(spacing: 2) {
-            Text(String(format: "%.0f", audio.diagnostics.currentLevelDB))
-                .font(.system(size: 6).monospacedDigit())
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.7)
-            GeometryReader { geo in
-                ZStack {
-                    VStack(spacing: 1) {
-                        ForEach((0..<segments).reversed(), id: \.self) { i in
-                            let frac = Double(i) / Double(segments - 1)
-                            RoundedRectangle(cornerRadius: 1.5)
-                                .fill(MeterMath.color(frac, palette: palette).opacity(frac <= level ? 1 : 0.12))
-                        }
-                    }
-                    if peakHold.peakHold > 0 {
-                        Circle()
-                            .fill(MeterMath.color(peakHold.peakHold, palette: palette))
-                            .frame(width: 6, height: 6)
-                            .shadow(color: MeterMath.color(peakHold.peakHold, palette: palette).opacity(0.8), radius: 2)
-                            .position(x: geo.size.width / 2,
-                                      y: geo.size.height * (1.0 - CGFloat(peakHold.peakHold)))
-                    }
-                }
-            }
-            Text("dB")
-                .font(.system(size: 6))
-                .foregroundStyle(.secondary)
-        }
-        .onChange(of: audio.diagnostics.currentLevelDB) { _, db in
-            peakHold.update(db: Double(db))
-        }
-    }
-}
-
 // MARK: - Slow replay status
 
 /// Icon-only status pill for the live snippet expansion mode: armed and
@@ -575,8 +529,8 @@ struct SnippetStatusPill: View {
     var body: some View {
         if isLive {
             // 0.25 s, not 0.1: the only moving part is a progress ring on a
-            // replay lasting seconds, and every tick re-lays out the pill row it
-            // sits in. See landscapeStatusPillRow's transaction note.
+            // replay lasting seconds, and every tick re-lays out the stats
+            // header row it sits in.
             TimelineView(.periodic(from: .now, by: 0.25)) { _ in
                 pill(audio.snippetExpansion.activity)
             }

@@ -1,5 +1,5 @@
 {
-  "originHash" : "975fe6fcdfa537527490c4a7b433dd2986f03f6b022945a5f0140af015522c44",
+  "originHash" : "38052ee57203492bbb733e302edf172c842c56f78d34001e5c52d1b1259d11b8",
   "pins" : [
     {
       "identity" : "flac-binary-xcframework",
@@ -26,15 +26,6 @@
       "state" : {
         "revision" : "48cbf24e7fb5d329b1f5e24cd2e5b048585ff770",
         "version" : "0.1.3"
-      }
-    },
-    {
-      "identity" : "swiftyh3",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/pawelmajcher/SwiftyH3.git",
-      "state" : {
-        "revision" : "6d9b5774cc7cc198597b14aaccf213587947678c",
-        "version" : "0.5.0"
       }
     }
   ],

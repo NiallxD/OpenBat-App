@@ -145,6 +145,17 @@ struct WavPlayerView: View {
     /// want it. Its detection sensitivity/padding still persist as tuning
     /// preferences below.
     @State private var hideSilence = false
+    /// Collapsed by default so the spectrogram — the reason this screen exists
+    /// — gets the whole height it can. The GUANO card is reference material
+    /// consulted occasionally, not while reading a call, and on a small phone
+    /// it was taking a fifth of the screen permanently. Persisted, so a user
+    /// who wants it open keeps it open across recordings; the DEFAULT is what
+    /// "closed by default" means, not a per-recording reset.
+    @AppStorage("display.wavPlayerShowFileInfo") private var showFileInfo = false
+    /// The per-pulse ID sheet (RecordingPulsesSheet) — NOT persisted, unlike the
+    /// GUANO card's disclosure: it covers the screen, so a remembered "open" would
+    /// mean every recording opens with its spectrogram hidden behind a sheet.
+    @State private var showPulses = false
     @AppStorage("display.wavPlayerSilenceSensitivity") private var silenceSensitivity = 0.5
     /// Seconds of audio kept each side of a pulse before cutting silence —
     /// SilenceMap.compute's `padSeconds`. Small by default so silence is cut
@@ -411,7 +422,11 @@ struct WavPlayerView: View {
     @ViewBuilder private var minimapBlock: some View {
         if let displayOverview {
             WavMinimapView(overview: displayOverview, viewport: viewport, engine: engine,
-                          silenceMap: silenceMap, followState: followState, onRecenter: recenter,
+                          silenceMap: silenceMap, followState: followState,
+                          // Explicit closure, not `recenter` by name: the span
+                          // override is a domain-crossing concern and the minimap
+                          // never crosses domains.
+                          onRecenter: { recenter(sample: $0) },
                           bufferDebugStatus: bufferDebugStatus)
                 .frame(height: 32)
                 .padding(.horizontal, 8)
@@ -420,10 +435,62 @@ struct WavPlayerView: View {
         }
     }
 
+    /// The GUANO card behind a disclosure row. Collapsed, this is one ~28pt
+    /// row; expanded, the card appears beneath it. Because the spectrogram is
+    /// the only `maxHeight: .infinity` element in either layout's stack, that
+    /// difference is taken from and given back to the spectrogram directly —
+    /// there is nothing else here that can absorb it, which is what makes
+    /// closing it fill the screen with spectrogram on a small phone.
     @ViewBuilder private var fileInfoBlock: some View {
         if displayOverview != nil {
-            WavFileInfoCard(wavURL: store.wavURL(for: recording), recording: recording, store: store)
-                .padding(.horizontal, 8)
+            VStack(spacing: 6) {
+                HStack(spacing: 6) {
+                    Button {
+                        // Animated so the spectrogram grows/shrinks into the space
+                        // rather than jumping. `.snappy` matches the other
+                        // disclosure-style transitions in the app (see
+                        // MicCalibrationView/OnboardingView).
+                        withAnimation(.snappy(duration: 0.28)) { showFileInfo.toggle() }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Text("GUANO Metadata")
+                                .font(.caption.weight(.semibold))
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 10, weight: .semibold))
+                                .rotationEffect(.degrees(showFileInfo ? 90 : 0))
+                            Spacer()
+                        }
+                        .foregroundStyle(.secondary)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(showFileInfo ? "Hide file metadata" : "Show file metadata")
+
+                    // The per-pulse IDs for this recording. Deliberately a plain
+                    // text button rather than another disclosure: unlike the
+                    // GUANO card it is a LIST that pushes its own detail screens,
+                    // and inlining it here would cost the spectrogram the height
+                    // this card's collapse is there to protect.
+                    Button("Pulses") { showPulses = true }
+                        .font(.caption.weight(.semibold))
+                        .buttonStyle(.plain)
+                        .foregroundStyle(Color.batAccent)
+                        .accessibilityLabel("Show every pulse detected in this recording")
+                }
+
+                if showFileInfo {
+                    WavFileInfoCard(wavURL: store.wavURL(for: recording), recording: recording, store: store)
+                        .transition(.opacity.combined(with: .move(edge: .bottom)))
+                }
+            }
+            .padding(.horizontal, 8)
+            // Presented from HERE, not from `body`, which already carries the
+            // share sheet: two `.sheet` modifiers on the same view is a shape
+            // SwiftUI has historically resolved by honouring only one of them.
+            // This is also simply where the button that opens it lives.
+            .sheet(isPresented: $showPulses) {
+                RecordingPulsesSheet(recording: recording, store: store)
+            }
         }
     }
 
@@ -701,10 +768,14 @@ struct WavPlayerView: View {
         silenceGeneration += 1
         let myGeneration = silenceGeneration
 
-        // The real-sample center to preserve, read in whatever domain the
-        // viewport is currently in.
-        let oldCenter = (viewport.startSample + viewport.endSample) / 2
-        let centerReal = silenceMap?.virtualToReal(oldCenter) ?? oldCenter
+        // The real-sample window to preserve, read in whatever domain the
+        // viewport is currently in. BOTH EDGES, not just the centre: the span has
+        // to be re-derived in the destination domain too, or the zoom level is
+        // reinterpreted as if real and virtual samples were 1:1 — see
+        // `WavViewportMath.recentered`'s `span` parameter.
+        let oldStartReal = silenceMap?.virtualToReal(viewport.startSample) ?? viewport.startSample
+        let oldEndReal   = silenceMap?.virtualToReal(viewport.endSample) ?? viewport.endSample
+        let centerReal = (oldStartReal + oldEndReal) / 2
 
         // Suspended entirely while PLAYING — playback runs on the real,
         // linear timeline (see the `engine.isPlaying` onChange). The map is
@@ -714,7 +785,11 @@ struct WavPlayerView: View {
             // timeline and recenter the real-domain viewport on the same audio.
             silenceMap = nil
             compressedOverview = nil
-            if overview != nil { recenter(sample: centerReal) }
+            // Leaving the compressed domain: the preserved window is already in
+            // real samples, so its span is the real span.
+            if overview != nil {
+                recenter(sample: centerReal, span: oldEndReal - oldStartReal)
+            }
             return
         }
 
@@ -747,8 +822,11 @@ struct WavPlayerView: View {
                 self.compressedOverview = WavSpectrogramEngine.Overview(
                     rawTile: compRaw, image: tile.image, sampleRate: sr, totalSamples: map.virtualTotal)
                 // Recenter on the preserved audio, now in the virtual domain
-                // (displayOverview already returns the compressed one).
-                self.recenter(sample: map.realToVirtual(centerReal))
+                // (displayOverview already returns the compressed one). The span
+                // is re-derived by mapping both edges through the NEW map, so the
+                // window covers the same audio rather than the same sample count.
+                self.recenter(sample: map.realToVirtual(centerReal),
+                              span: map.realToVirtual(oldEndReal) - map.realToVirtual(oldStartReal))
             }
         }
     }
@@ -797,9 +875,9 @@ struct WavPlayerView: View {
 
     /// `sample` is in the DISPLAY domain (virtual while hide-silence is on)
     /// — callers doing real-domain work (the playhead follow loop) map first.
-    private func recenter(sample: Int) {
+    private func recenter(sample: Int, span: Int? = nil) {
         guard let total = displayOverview?.totalSamples else { return }
-        viewport = WavViewportMath.recentered(viewport, on: sample, totalSamples: total)
+        viewport = WavViewportMath.recentered(viewport, on: sample, totalSamples: total, span: span)
     }
 
     private func requestAnalysis(startSample: Int, endSample: Int,

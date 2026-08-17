@@ -43,7 +43,7 @@ nonisolated final class BatDetect2Classifier: SpeciesClassifier {
     /// Code → scientific name, read directly from the checkpoint's own stored
     /// `targets_config.classification_targets` (each entry's `dwc:scientificName`
     /// tag) during conversion — see batdetect2_conversion.md. Used to suggest
-    /// location-based priors from GBIF occurrence data (GBIFService.suggestPriors).
+    /// location-based priors from the bundled presence grid (SpeciesPresenceStore).
     static let scientificNames: [String: String] = [
         "MYOMYS": "Myotis mystacinus",
         "MYOALC": "Myotis alcathoe",

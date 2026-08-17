@@ -65,7 +65,7 @@ nonisolated final class BatClassifier: SpeciesClassifier {
     /// been superseded there, but is independently confirmed as the NABat ML
     /// classifier's own code for the western red bat. "NOISE" has no scientific
     /// name and is deliberately absent — it's not a real taxon, so GBIF-based prior
-    /// suggestion (see GBIFService.suggestPriors) never touches its species state.
+    /// suggestion (see AutoIDSettings.refreshPriors) never touches its species state.
     static let scientificNames: [String: String] = [
         "ANPA": "Antrozous pallidus",
         "COTO": "Corynorhinus townsendii",
@@ -110,7 +110,7 @@ nonisolated final class BatClassifier: SpeciesClassifier {
     /// Render `pcm` (raw 384 kHz samples) as a NABat spectrogram and run inference.
     /// `prior` maps a species code to its weight (0.01–1.0); defaults to neutral
     /// (no bias) — real priors come from AutoIDSettings, populated from GBIF
-    /// occurrence data near the user's location (see GBIFService.suggestPriors).
+    /// the bundled presence grid for the user's location (see AutoIDSettings.refreshPriors).
     /// Safe to call on any background queue; returns nil if the PCM is too short or the model fails.
     func classify(pcm: [Float],
                   gate: QualityGate = QualityGate(),

@@ -66,8 +66,21 @@ enum WavViewportMath {
     /// snapping. Clamps both edges together against `[0, totalSamples)`
     /// rather than independently — same "balloon outward" reasoning
     /// `resolvedViewport` documents.
-    static func recentered(_ viewport: WavViewport, on center: Int, totalSamples: Int) -> WavViewport {
-        let span = min(viewport.sampleSpan, totalSamples)
+    ///
+    /// `span` overrides the viewport's own span, and exists for exactly one
+    /// caller: a recenter that CROSSES the hide-silence domain boundary. Real and
+    /// virtual samples are not 1:1 (that is the whole point of the compressed
+    /// timeline), so carrying `viewport.sampleSpan` across the switch reuses a
+    /// span measured in the domain being left. The compressed timeline is always
+    /// the shorter of the two, so turning hide-silence on with a zoomed-in view
+    /// inflated the span in virtual terms and clamped the viewport to nearly the
+    /// whole compressed file — the user's zoom thrown away at the moment they
+    /// asked to look closer. Every same-domain caller (the playback follow loop,
+    /// the minimap) omits it and keeps the old behaviour exactly.
+    static func recentered(_ viewport: WavViewport, on center: Int, totalSamples: Int,
+                           span overrideSpan: Int? = nil) -> WavViewport {
+        let requested = overrideSpan.map { max($0, minSampleSpan) } ?? viewport.sampleSpan
+        let span = min(requested, totalSamples)
         var start = center - span / 2
         var end = start + span
         if start < 0 { end -= start; start = 0 }

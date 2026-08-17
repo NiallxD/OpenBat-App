@@ -31,19 +31,29 @@ connection with bats, and a bit more respect for them too.
 
 ## Features
 
-- **Real-time spectrogram** — high-resolution frequency-vs-time display with
-  drag-to-scroll history.
+- **Real-time spectrogram** — high-resolution frequency-vs-time display, with
+  drag-to-scroll history in the full view.
 - **Pulse detection & zoom** — isolates each call and renders an onset-aligned
   close-up.
 - **Species ID** — an on-device classifier names the species, with runner-up and
   confidence.
-- **Listening** — heterodyne tunes the ultrasound down to something audible
-  live; recordings can be played back slowed for time expansion.
-- **Sessions & map** — log passes with a GPS track and see where each was heard.
-- **Offline review** — open a recording in the WAV player for a static zoomable
-  spectrogram and per-call measurements.
+- **Listening** — two live modes: heterodyne tunes the ultrasound down to
+  something audible, and slow replay captures a short snippet of a call and
+  replays it at a fraction of speed (going deaf while it does). Recordings can
+  also be played back slowed for time expansion.
+- **Sessions & map** — every outing is logged automatically, with each pass mapped where it was heard.
+- **Sun clock** — bats are busiest in the hours after sunset and before sunrise,
+  so the detector screen always shows where in that night you are: time to
+  sunset, then time since it, then the coming sunrise. Computed on-device from
+  your latitude, so it works with no signal.
+- **Offline review** — tap any recording in a session to open it in the WAV
+  player: a static zoomable spectrogram, per-call measurements, and the
+  per-pulse IDs behind the species it was given.
 - **Species field guide** — a community-maintained species reference built into
   the app, covering morphology, echolocation, conservation status and habits.
+- **Simplified view** — the default: species, level and spectrogram, and little
+  else. One switch in Settings adds every measurement and control back, and
+  nothing you've adjusted is lost either way.
 
 ## Requirements
 
@@ -54,21 +64,32 @@ connection with bats, and a bit more respect for them too.
 
 ## Getting started
 
-Connect the microphone, press Start, and point it at the sky. Detected passes
-are logged with their species, confidence, and a spectrogram of the pulses.
-Start a Session to also record a GPS track and map where each pass was heard.
+Connect the microphone, tap the round button beside the tab bar, and point it at
+the sky. Detected passes are logged with their species, confidence, and a
+spectrogram of the pulses. Every outing is saved as a session, mapped where each
+pass was heard. Tapping that button again during a run opens the session
+controls — recording, listening mode, and ending the session.
 
 No microphone to hand? The app bundles a demo clip and can run against it, which
 also makes it usable in the simulator.
 
 ## Privacy
 
-- **Recordings stay on your device.** They are yours; nothing is uploaded in the
-  background, and identification never leaves the phone.
-- **Location** is used to tag recordings, to suggest the right species model for
-  where you are, and — during a Session — to record the session's GPS track. An
-  approximate location is also sent to GBIF to look up which species occur near
-  you; nothing identifying goes with it.
+- **Recordings stay on your device.** Nothing leaves the phone unless you
+  choose to contribute it, and you are asked first, every time. Identification
+  runs entirely on device.
+- **Location** is used to tag detections, to suggest the right species model for
+  where you are, to name a session after the place it happened, and to work out
+  your local sunset and sunrise for the detector's sun clock. These are
+  occasional one-shot fixes — the app never tracks you continuously, never asks
+  for "Always" access, and does not use location in the background.
+- **No GPS tracks.** Sessions used to record a continuous course. That was
+  removed: each detection already carries a coordinate and a timestamp, so a
+  track can be rebuilt from exported data by any GIS tool without the app
+  keeping a second, denser record of your movements.
+- **Species ranges are decided on device**, from range data that ships with the
+  app. Earlier versions asked GBIF, at your location, which species occurred
+  nearby; that network lookup is gone.
 
 ## Species field guide
 

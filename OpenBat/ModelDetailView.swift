@@ -153,7 +153,8 @@ struct ModelDetailView: View {
                         code: code,
                         commonName: SpeciesInfo.commonName[code] ?? code,
                         enabled: enabledBinding(for: code),
-                        prior:   priorBinding(for: code)
+                        prior:   priorBinding(for: code),
+                        resolved: settings.perModel[model.id]?.species[code]?.resolved ?? false
                     )
                 }
             } header: {
@@ -203,7 +204,7 @@ struct ModelDetailView: View {
             get: { settings.perModel[model.id]?.species[code]?.enabled ?? true },
             set: { value in
                 var s = settings.perModel[model.id]?.species[code]
-                        ?? AutoIDSettings.SpeciesState(enabled: true, prior: 1.0)
+                        ?? AutoIDSettings.SpeciesState(enabled: true, prior: 1.0, resolved: false)
                 s.enabled = value
                 settings.perModel[model.id]?.species[code] = s
             }
@@ -215,7 +216,7 @@ struct ModelDetailView: View {
             get: { settings.perModel[model.id]?.species[code]?.prior ?? 1.0 },
             set: { value in
                 var s = settings.perModel[model.id]?.species[code]
-                        ?? AutoIDSettings.SpeciesState(enabled: true, prior: 1.0)
+                        ?? AutoIDSettings.SpeciesState(enabled: true, prior: 1.0, resolved: false)
                 s.prior = value
                 settings.perModel[model.id]?.species[code] = s
             }
@@ -229,7 +230,7 @@ struct ModelDetailView: View {
     private func setGroup(_ codes: [String], enabled: Bool) {
         for code in codes {
             var s = settings.perModel[model.id]?.species[code]
-                    ?? AutoIDSettings.SpeciesState(enabled: true, prior: 1.0)
+                    ?? AutoIDSettings.SpeciesState(enabled: true, prior: 1.0, resolved: false)
             s.enabled = enabled
             settings.perModel[model.id]?.species[code] = s
         }
@@ -243,6 +244,11 @@ private struct SpeciesRow: View {
     let commonName: String
     @Binding var enabled: Bool
     @Binding var prior: Float
+    /// False when no range data backs this species — see
+    /// `AutoIDSettings.SpeciesState.resolved`. Shown, rather than kept internal,
+    /// because the failure this replaced was invisible: a species nobody had
+    /// confirmed looked exactly like one confirmed to be underfoot.
+    var resolved: Bool = true
 
     var body: some View {
         HStack(spacing: 10) {
@@ -260,8 +266,18 @@ private struct SpeciesRow: View {
             .accessibilityLabel(enabled ? "Enabled" : "Disabled")
 
             VStack(alignment: .leading, spacing: 1) {
-                Text(code).bold()
-                Text(commonName).font(.caption).foregroundStyle(.secondary)
+                HStack(spacing: 4) {
+                    Text(code).bold()
+                    if !resolved {
+                        Image(systemName: "questionmark.circle")
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                            .accessibilityLabel("No range data")
+                    }
+                }
+                Text(resolved ? commonName : "No range data")
+                    .font(.caption)
+                    .foregroundStyle(resolved ? Color.secondary : Color.orange)
             }
             .frame(width: 90, alignment: .leading)
 

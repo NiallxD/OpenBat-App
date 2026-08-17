@@ -191,6 +191,33 @@ final class AudioEngineController {
     /// steps back and returns smoothly around a replay instead of clicking.
     private static let snippetDuckSlew: Float = 1.0 / (48_000 * 0.04)
 
+    /// Makeup gain applied to EVERYTHING leaving the listen output node, on top
+    /// of each processor's own gain.
+    ///
+    /// Live listening was far quieter than file playback at the same system
+    /// volume — quiet enough at maximum to be unusable in the field — while
+    /// PlaybackEngine, playing the same calls through the same speaker, was
+    /// loud. The two differ in exactly one relevant way: PlaybackEngine runs the
+    /// session as `.playback`/`.default`, and live listening runs it as
+    /// `.playAndRecord`/`.measurement`. `.measurement` attenuates the output
+    /// path substantially — that is part of what "no signal processing" means,
+    /// and it is not separately adjustable.
+    ///
+    /// The obvious fix — drop `.measurement` while listening — is barred:
+    /// `.measurement` is what disables automatic gain control on the INPUT, and
+    /// without it every amplitude number the app reports becomes a lie
+    /// (Context.md §6, which calls it not optional). So the compensation is
+    /// digital and lives here, on the output side only, where it cannot reach
+    /// capture, the recorder, detection or calibration.
+    ///
+    /// `+12 dB`, with the soft clip below rather than a hard clamp so a close
+    /// pass distorts gracefully instead of buzzing. The processors' own gains
+    /// (heterodyne 6×, replay 4×) are unchanged and remain the knobs to tune per
+    /// bat; this is a fixed correction for a fixed attenuation.
+    private static let listenOutputMakeupGain: Float = 4.0
+    /// Where the soft clip starts. Below this the makeup gain is exactly linear.
+    private static let listenSoftClipThreshold: Float = 0.7
+
     /// Output-thread-only duck level, boxed so the render closure can carry it
     /// across callbacks without capturing `self` (main-actor) or allocating.
     private final class DuckBox: @unchecked Sendable { var level: Float = 1 }
@@ -253,6 +280,30 @@ final class AudioEngineController {
     private nonisolated(unsafe) var sessionTotalSamples: Int64 = 0
     private var statsTimer: Timer?
     private let statsFlushRate = 15.0 // Hz
+
+    // MARK: Delivered-rate debounce
+    //
+    // The delivered buffer rate is ground truth (see `consume`), but it is not
+    // STABLE across a plug-in: attaching the Griff tears the engine down and
+    // rebuilds it, and while iOS renegotiates the route the input node can hand
+    // out 48 kHz buffers for a few hundred ms before the native 384 kHz stream
+    // settles — and a USB device that enumerates more than once does that more
+    // than once. Published straight through, that made the mic pill flick
+    // between a red "48 kHz" and a green "384 kHz" while the user watched, which
+    // reads as "the mic doesn't work" at exactly the moment it started to.
+    //
+    // So a CHANGED rate has to hold before it is published. Asymmetrically: a
+    // rate at or above native is believed quickly, while a drop below native —
+    // the alarming claim, and the one a route transient produces — has to
+    // survive a full second and a half of flushes before the pill is allowed to
+    // say it. A genuinely clamped feed still reports, just not instantly; a
+    // transient during renegotiation never reaches the UI at all.
+    private var pendingRate: Double = 0
+    private var pendingRateTicks = 0
+    /// ~0.33 s at 15 Hz.
+    private let rateRiseConfirmTicks = 5
+    /// ~1.5 s at 15 Hz.
+    private let rateDropConfirmTicks = 23
     /// Idle-time poll for mic plug/unplug — see `prepareInputMonitoring()`.
     private var inputPollTimer: Timer?
 
@@ -510,6 +561,10 @@ final class AudioEngineController {
         sessionClippedCount = 0
         sessionTotalSamples = 0
         statsLock.unlock()
+        // A half-counted rate change from the previous capture must not carry
+        // into this one — the next flush would adopt it a tick or two later.
+        pendingRate = 0
+        pendingRateTicks = 0
         diagnostics.noiseFloorDB = 0
         diagnostics.peakLevelDB = AudioLevel.minDB
         diagnostics.dcOffsetPercent = 0
@@ -542,8 +597,9 @@ final class AudioEngineController {
         diagnostics.bufferCount = count
         diagnostics.currentLevelDB = level
         // Correct the reported rate to what's actually being delivered (the node's
-        // advertised format set at startEngine can disagree with the real buffers).
-        if rate > 0 { diagnostics.actualSampleRate = rate }
+        // advertised format set at startEngine can disagree with the real buffers)
+        // — but only once it has held, see the debounce fields' comment.
+        if rate > 0 { publishDeliveredRate(rate) }
         if channels > 0 { diagnostics.channelCount = channels }
         diagnostics.noiseFloorDB = noiseFloor
         diagnostics.peakLevelDB = peak
@@ -552,6 +608,38 @@ final class AudioEngineController {
         diagnostics.totalSampleCount = totalSamples
         syncSlowDiagnostics()
         updateAutoTune()
+    }
+
+    /// Adopt a delivered buffer rate into `diagnostics.actualSampleRate` once it
+    /// has held for long enough to be believed — see the debounce fields above
+    /// for why this can't just be an assignment.
+    ///
+    /// The first rate of a capture is adopted immediately: there is nothing on
+    /// screen yet for it to flicker against, and making the pill wait a third of
+    /// a second to say anything at all would be its own regression.
+    private func publishDeliveredRate(_ rate: Double) {
+        guard rate != diagnostics.actualSampleRate else {
+            pendingRate = 0
+            pendingRateTicks = 0
+            return
+        }
+        guard diagnostics.actualSampleRate > 0 else {
+            diagnostics.actualSampleRate = rate
+            pendingRate = 0
+            pendingRateTicks = 0
+            return
+        }
+        if rate == pendingRate {
+            pendingRateTicks += 1
+        } else {
+            pendingRate = rate
+            pendingRateTicks = 1
+        }
+        let needed = rate < diagnostics.actualSampleRate ? rateDropConfirmTicks : rateRiseConfirmTicks
+        guard pendingRateTicks >= needed else { return }
+        diagnostics.actualSampleRate = rate
+        pendingRate = 0
+        pendingRateTicks = 0
     }
 
     /// Re-publish the slow-changing diagnostics fields to their standalone
@@ -773,6 +861,31 @@ final class AudioEngineController {
             let n = Int(frameCount)
             // Per callback, not captured at attach time — one node serves every
             // listening mode, so a mode switch needs no graph change.
+            // Advance the replay state machine without anyone hearing it, by
+            // rendering into the scratch and throwing the audio away.
+            //
+            // This exists because the phase machine's ONLY route back to
+            // `.recording` is the tail of `SnippetExpansionProcessor.render`
+            // (see the `produced < frames` branch there). `process()` refuses to
+            // capture while the phase is `.replaying`, so a routing choice that
+            // never calls `render` doesn't merely mute the replay — it parks the
+            // processor in `.replaying` forever and the mode goes permanently
+            // deaf, with no user-visible cause and no way back short of changing
+            // routing again. Rendering-and-discarding keeps the machine on
+            // exactly the same timeline as the audible path.
+            //
+            // Chunked, so a frameCount larger than the scratch can't reintroduce
+            // the same freeze by skipping the call — the old `.both` path had
+            // that edge in its `guard n <= mixCapacity` bail-out.
+            func advanceSnippetSilently(frames: Int) {
+                var remaining = frames
+                while remaining > 0 {
+                    let chunk = min(remaining, mixCapacity)
+                    snippet.render(mixBuffer.baseAddress!, frames: chunk)
+                    remaining -= chunk
+                }
+            }
+
             let mode = ListenMode(rawValue: modeBox.value.load(ordering: .acquiring)) ?? .off
             switch mode {
             case .heterodyne:
@@ -786,10 +899,14 @@ final class AudioEngineController {
                 case .heterodyneOnly:
                     // The snippet processor still runs its state machine on the
                     // capture thread; it simply isn't heard. That keeps switching
-                    // routing mid-pass from restarting anything.
+                    // routing mid-pass from restarting anything — but it only
+                    // holds if the replay side keeps being advanced too, hence
+                    // the discard render.
+                    advanceSnippetSilently(frames: n)
                     hetero.render(out, frames: n)
                 case .both:
                     guard n <= mixCapacity else {
+                        advanceSnippetSilently(frames: n)
                         hetero.render(out, frames: n)
                         break
                     }
@@ -816,6 +933,27 @@ final class AudioEngineController {
                 }
             case .off, .timeExpansion:
                 for i in 0..<n { out[i] = 0 }
+                return noErr
+            }
+            // Applied once, to whatever the mode produced, so heterodyne, replay
+            // and the mix of the two are corrected identically — see
+            // `listenOutputMakeupGain`. `.off` returns above rather than
+            // multiplying a buffer of zeroes.
+            let makeup = Self.listenOutputMakeupGain
+            let knee = Self.listenSoftClipThreshold
+            for i in 0..<n {
+                let x = out[i] * makeup
+                let mag = abs(x)
+                if mag <= knee {
+                    out[i] = x
+                } else {
+                    // Quadratic soft knee: continuous in value and slope at
+                    // `knee`, asymptotic to ±1, so loud passes compress instead
+                    // of squaring off into a buzz.
+                    let over = (mag - knee) / (1 - knee)
+                    let shaped = knee + (1 - knee) * (over / (1 + over))
+                    out[i] = x < 0 ? -shaped : shaped
+                }
             }
             return noErr
         }

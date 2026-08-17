@@ -1222,11 +1222,14 @@ struct WavSpectrogramView: View {
                         dragVelocityX = 0
                         return
                     }
-                    // *** SUSPECTED SNAPBACK PATH *** if this fires right
-                    // after a pinch with a large transl, the lingering finger
-                    // was misclassified as a fresh touch and will pan by the
-                    // whole pinch translation.
-                    WavPlayerDebugLog.log("WavSpectrogram", "pan.onChanged: postPinch CLEAR (isDragging=false -> treated as FRESH touch) transl=(\(Int(value.translation.width)),\(Int(value.translation.height))) <<< watch for snapback")
+                    // Reached when a lingering finger is misclassified as a
+                    // fresh touch (or a real fresh touch arrives). Either way
+                    // it is now harmless: the rebase below baselines against
+                    // this event's own translation rather than zero, so the
+                    // pan resumes from where the finger is instead of jumping
+                    // by the pinch's accumulated distance. That jump was the
+                    // snapback this path used to be flagged for.
+                    WavPlayerDebugLog.log("WavSpectrogram", "pan.onChanged: postPinch CLEAR (isDragging=false -> treated as FRESH touch) transl=(\(Int(value.translation.width)),\(Int(value.translation.height)))")
                     postPinchRebasePending = false   // fresh touch — resume normally
                 }
                 // `value.translation` is cumulative from THIS touch's own
@@ -1249,8 +1252,21 @@ struct WavSpectrogramView: View {
                     // assigning an unchanged `viewport` doesn't fire
                     // `.onChange`.
                     commitPan()
-                    dragTranslationXAtLastCommit = 0
-                    dragTranslationYAtLastCommit = 0
+                    // Rebase against THIS event's translation, not against zero.
+                    //
+                    // This is the snapback the block above marks as suspected. For
+                    // a genuinely new touch the two are the same thing —
+                    // `value.translation` is ~0 at touch-down — so nothing changes
+                    // in the common case. They differ for the one case that block
+                    // is about: a finger left over from a pinch, whose DragGesture
+                    // never restarted and whose `translation` is therefore the
+                    // whole cumulative distance since the PINCH began. Baselining
+                    // that to 0 made `dxSinceCommit` the entire pinch translation
+                    // on the very next event, panning the view by it in one frame.
+                    // Baselining to the current value makes the delta 0, which is
+                    // what "resume normally from here" has to mean.
+                    dragTranslationXAtLastCommit = value.translation.width
+                    dragTranslationYAtLastCommit = value.translation.height
                     gestureBaseOffsetX = 0
                     gestureBaseOffsetY = 0
                     lastVelocitySampleTime = nil

@@ -2,17 +2,27 @@
 //  SessionsView.swift
 //  OpenBat
 //
-//  The Sessions area, split three ways:
-//    • SessionsView      — list of field outings (RecordingSession), grouped by day
-//    • SessionDetailView — one outing: GPS course on a map + species pins + its IDs
-//    • ListeningView     — the flat "Just Listening" log of passes (no session/map)
+//  The Sessions area, split two ways:
+//    • SessionsView      — field outings (RecordingSession) grouped by day, plus a
+//                          trailing section for recordings that belong to no
+//                          session (imports, and pre-sessions leftovers)
+//    • SessionDetailView — one outing: species pins on a map + its IDs
 //
-//  All three share PassRow / PassDetailView so a field ID can still be traced back to
+//  Both share PassRow / PassDetailView so a field ID can still be traced back to
 //  the per-pulse spectrogram evidence it was built from.
+//
+//  This is also where playback lives now. There used to be a separate Playback
+//  tab listing every recording grouped by session — the same recordings, in the
+//  same buckets, one tab over — so a recording had two destinations depending on
+//  which list you found it in: the player, or a static detail page. Tapping a
+//  recording anywhere now opens the player (WavPlayerView), and the per-pulse IDs
+//  are a sheet over it (RecordingPulsesSheet). The WAV importer came here too,
+//  since an imported file lands outside every session.
 //
 
 import SwiftUI
 import MapKit
+import UniformTypeIdentifiers
 
 /// Cached formatters — `DateFormatter()` init is expensive (locale/calendar setup),
 /// and these are read once per row per list body evaluation.
@@ -31,35 +41,17 @@ struct SessionsView: View {
     @Bindable var store: ClassificationStore
     let settings: AutoIDSettings
     let consent: ConsentStore
-    @State private var selectedTab: SessionTab = .sessions
+    /// Only used to hand the player its calibration curve — this screen shows no
+    /// spectrogram of its own.
+    let micCalSettings: MicCalibrationSettings
+    @State private var showImporter = false
+    @State private var importError: String?
+    @State private var isImporting = false
     /// Sessions queued by a swipe-delete, pending user confirmation (deleting a
     /// session irreversibly removes all its IDs and thumbnails).
     @State private var sessionsPendingDelete: [RecordingSession] = []
-    /// Hides NoID recordings (triggered, but never classified confidently enough to
-    /// call a species OR the model's own noise class) — shared with PlaybackListView
-    /// and RecordingDetailView via the same UserDefaults key, off by default since a
-    /// single-pulse-or-ambiguous trigger is mostly clutter to browse past.
-    @AppStorage("display.showNoID") private var showNoID = false
-
-    private enum SessionTab { case sessions, listening }
-
     var body: some View {
-        VStack(spacing: 0) {
-            Picker("", selection: $selectedTab) {
-                Text("Sessions").tag(SessionTab.sessions)
-                Text("Recordings").tag(SessionTab.listening)
-            }
-            .pickerStyle(.segmented)
-            .padding(.horizontal)
-            .padding(.vertical, 8)
-
-            Divider()
-
-            switch selectedTab {
-            case .sessions:  sessionsContent
-            case .listening: listeningContent
-            }
-        }
+        sessionsContent
         .navigationTitle("Sessions")
         .navigationBarTitleDisplayMode(.inline)
         // Flat black bar, matching every other section. This colour only fills the
@@ -69,21 +61,20 @@ struct SessionsView: View {
         // drops the scroll-edge scrim this section's list would otherwise add.
         .toolbarBackground(Color.black, for: .navigationBar)
         .flatTopScrollEdge()
-        .toolbar {
-            // Only filters `filteredListeningRecordings` (the Recordings tab) —
-            // sessionsContent doesn't read `showNoID` at all, so the toggle has
-            // no effect on the Sessions tab and stays hidden there.
-            if selectedTab == .listening {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        showNoID.toggle()
-                    } label: {
-                        Image(systemName: showNoID ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
-                            .foregroundStyle(showNoID ? .blue : .primary)
-                    }
-                    .accessibilityLabel(showNoID ? "Hide unclassified recordings" : "Show unclassified recordings")
-                }
+        .toolbar { toolbarContent }
+        .fileImporter(isPresented: $showImporter,
+                      allowedContentTypes: [.wav, .aiff, .audio],
+                      allowsMultipleSelection: true) { result in
+            switch result {
+            case .success(let urls): importAll(urls)
+            case .failure(let error): importError = error.localizedDescription
             }
+        }
+        .alert("Import failed", isPresented: .init(get: { importError != nil },
+                                                  set: { if !$0 { importError = nil } })) {
+            Button("OK") { importError = nil }
+        } message: {
+            Text(importError ?? "")
         }
         .confirmationDialog("Delete this session and all its IDs?",
                             isPresented: Binding(
@@ -97,16 +88,61 @@ struct SessionsView: View {
             }
             Button("Cancel", role: .cancel) { }
         } message: {
-            Text("The GPS track and every ID logged in this session will be removed. This can't be undone.")
+            Text("Every ID and recording logged in this session will be removed. This can't be undone.")
         }
     }
 
+    @ToolbarContentBuilder private var toolbarContent: some ToolbarContent {
+        // Import an external WAV — the only way to audition a known bat call
+        // through the listening modes without a live bat, since WavPlayerView
+        // drives the real DSP from the file at its native rate. See
+        // RecordingImporter. Came here when the Playback tab was folded in.
+        ToolbarItem(placement: .topBarTrailing) {
+            Button {
+                showImporter = true
+            } label: {
+                if isImporting {
+                    ProgressView()
+                } else {
+                    Image(systemName: "plus")
+                }
+            }
+            .disabled(isImporting)
+            .accessibilityLabel("Import a recording")
+        }
+        // No unclassified-recordings filter here (Niall, 2026-08-16). This screen
+        // is a list of outings, not of classifications; the filter belongs where
+        // the recordings are, which is inside a session — SessionDetailView carries
+        // it. Nothing on this screen reads `display.showNoID` at all now.
+
+    }
+
+    /// One list: sessions by day, then whatever recordings belong to no session.
+    ///
+    /// These used to be two tabs behind a segmented picker. Every outing has been
+    /// a session for a long time now, so the second tab was showing an empty list
+    /// (or a handful of pre-sessions leftovers) to everyone, permanently, in
+    /// exchange for a control at the top of the screen. The leftovers still have
+    /// to go somewhere — an import deliberately lands outside every session (see
+    /// `importAll`) — so they are a section at the bottom rather than a tab.
     @ViewBuilder private var sessionsContent: some View {
-        if store.sessions.isEmpty {
+        // Filtered and sorted ONCE per evaluation, then read from the local.
+        // Reading the computed property from several places re-ran the whole
+        // chain each time — a filter over every recording, then a sort — on every
+        // redraw, and this screen redraws for each of the dozens of `@Observable`
+        // recordings changes an upload sweep or an iCloud sync produces.
+        //
+        // Deliberately NOT filtered by `showNoID`. There is no filter control on
+        // this screen any more, so hiding a row here would leave a recording
+        // unreachable with nothing to tap to bring it back — the same
+        // strand-the-user rule `SimplifiedView`'s header sets out for hidden
+        // controls. The filter lives inside a session, where the button does.
+        let looseRecordings = store.listeningRecordings.sorted { $0.date > $1.date }
+        if store.sessions.isEmpty && looseRecordings.isEmpty {
             ContentUnavailableView(
                 "No sessions yet",
                 systemImage: "square.stack.3d.up",
-                description: Text("Tap Start ▸ New Session to log IDs and a GPS track on a map.")
+                description: Text("Tap Start to begin detecting. Every outing is logged here automatically.")
             )
         } else {
             List {
@@ -114,7 +150,8 @@ struct SessionsView: View {
                     Section(group.title) {
                         ForEach(group.sessions) { session in
                             NavigationLink {
-                                SessionDetailView(session: session, store: store, settings: settings, consent: consent)
+                                SessionDetailView(session: session, store: store, settings: settings,
+                                                  consent: consent, micCalSettings: micCalSettings)
                             } label: {
                                 SessionRow(session: session, store: store)
                             }
@@ -124,44 +161,108 @@ struct SessionsView: View {
                         }
                     }
                 }
+
+                if !looseRecordings.isEmpty {
+                    Section {
+                        ForEach(looseRecordings) { recording in
+                            NavigationLink {
+                                recordingDestination(recording)
+                            } label: {
+                                RecordingRow(recording: recording, store: store, consent: consent)
+                            }
+                        }
+                        .onDelete { offsets in offsets.map { looseRecordings[$0] }.forEach(store.delete) }
+                    } header: {
+                        Text("Not in a session")
+                    } footer: {
+                        Text("Imported WAVs, and anything recorded before every outing became a session.")
+                    }
+                }
             }
             .listStyle(.insetGrouped)
         }
     }
 
-    private var filteredListeningRecordings: [Recording] {
-        store.listeningRecordings.filteredByNoID(showNoID: showNoID)
+    /// Lazy: WavPlayerView's `@State` engine is expensive to construct — see
+    /// LazyDestination.
+    @ViewBuilder private func recordingDestination(_ recording: Recording) -> some View {
+        LazyDestination {
+            WavPlayerView(recording: recording, store: store, micCalSettings: micCalSettings)
+        }
     }
 
-    @ViewBuilder private var listeningContent: some View {
-        if store.listeningRecordings.isEmpty {
-            ContentUnavailableView(
-                "No recordings yet",
-                systemImage: "waveform.badge.magnifyingglass",
-                description: Text("Recordings made while Just Listening (with recording turned on) appear here.")
-            )
-        } else if filteredListeningRecordings.isEmpty {
-            ContentUnavailableView(
-                "No classified recordings",
-                systemImage: "line.3.horizontal.decrease.circle",
-                description: Text("Every recording here is unclassified (NoID) — tap the filter icon to show them.")
-            )
-        } else {
-            List {
-                ForEach(groupRecordingsByDay(filteredListeningRecordings), id: \.key) { group in
-                    Section(group.title) {
-                        ForEach(group.recordings) { recording in
-                            NavigationLink {
-                                RecordingDetailView(recording: recording, store: store)
-                            } label: {
-                                RecordingRow(recording: recording, store: store, consent: consent)
-                            }
-                        }
-                        .onDelete { offsets in offsets.map { group.recordings[$0] }.forEach(store.delete) }
-                    }
-                }
+    // MARK: Import
+
+    /// Copies each picked file, then renders thumbnails and registers them.
+    ///
+    /// The copy runs RIGHT HERE, synchronously, still inside the `.fileImporter`
+    /// completion handler — the sandbox extension the picker grants doesn't
+    /// survive a hop onto another task, and doing the copy there instead made
+    /// every import fail with a permissions error. Only the FFT-heavy overview
+    /// render is deferred, and by then the file is in our own container.
+    private func importAll(_ urls: [URL]) {
+        var copied: [RecordingImporter.Copied] = []
+        var failures: [String] = []
+        for url in urls {
+            do {
+                copied.append(try RecordingImporter.copyIntoLibrary(source: url))
+            } catch {
+                failures.append("\(url.lastPathComponent): \(error.localizedDescription)")
             }
-            .listStyle(.insetGrouped)
+        }
+
+        // No need to force `display.showNoID` on for an unclassified import any
+        // more, which is what used to happen here: an import lands outside every
+        // session, and the "Not in a session" section is unfiltered, so the row is
+        // visible the moment it is inserted whatever that setting says. Flipping it
+        // now would only change the filter inside sessions — somewhere the imported
+        // file will never appear.
+
+        guard !copied.isEmpty else {
+            reportImport(failures: failures)
+            return
+        }
+
+        isImporting = true
+        Task {
+            for file in copied {
+                let image = await Task.detached(priority: .userInitiated) {
+                    RecordingImporter.renderOverview(at: file.url)
+                }.value
+                // Species/confidence/pulses/coordinate come from the file's own
+                // GUANO chunk when it has one, so re-importing an OpenBat export
+                // round-trips rather than arriving as a dateless "NoID".
+                //
+                // `sessionID: nil` regardless: an import always lands outside
+                // every session. Filing it into whichever survey session's time
+                // window happens to contain its timestamp — which is what
+                // RecordingMigration does, correctly, for WAVs this app recorded —
+                // would silently alter that session's species list and map pins
+                // using a file the user merely opened.
+                store.addRecording(date: file.date,
+                                   durationSeconds: file.durationSeconds,
+                                   species: file.species,
+                                   confidence: file.confidence,
+                                   pulseCount: file.pulseCount,
+                                   sessionID: nil, coordinate: file.coordinate,
+                                   relativeWavPath: file.relativeWavPath,
+                                   spectrogramImage: image)
+            }
+            isImporting = false
+            reportImport(failures: failures)
+        }
+    }
+
+    /// Surfaces import failures after a short delay. Presenting an alert while
+    /// `.fileImporter` is still dismissing gets silently dropped by SwiftUI, so
+    /// a failure reported immediately never reaches the user at all — which is
+    /// how the first version of this managed to fail completely silently.
+    private func reportImport(failures: [String]) {
+        guard !failures.isEmpty else { return }
+        let message = failures.joined(separator: "\n\n")
+        Task {
+            try? await Task.sleep(for: .milliseconds(400))
+            importError = message
         }
     }
 }
@@ -176,7 +277,7 @@ private struct SessionRow: View {
         // inflated by triggers that never resolved to one.
         let passes = store.passes(inSession: session.id).filter { !$0.isNoise && !$0.isNoID }
         HStack(spacing: 12) {
-            SessionMapThumbnail(track: session.track.map(\.coordinate))
+            SessionMapThumbnail(points: passes.compactMap(\.coordinate))
             VStack(alignment: .leading, spacing: 3) {
                 Text(session.title).font(.headline).lineLimit(1)
                 Text(timeRange).font(.caption).foregroundStyle(.secondary)
@@ -184,9 +285,6 @@ private struct SessionRow: View {
                     Label("\(passes.count) ID\(passes.count == 1 ? "" : "s")",
                           systemImage: "waveform.badge.magnifyingglass")
                     if let top = dominantSpecies(passes) { Text("· \(top)") }
-                    if !session.track.isEmpty {
-                        Label("GPS", systemImage: "location.fill")
-                    }
                 }
                 .font(.caption2)
                 .foregroundStyle(.secondary)
@@ -208,22 +306,30 @@ private struct SessionRow: View {
     }
 }
 
-/// Small non-interactive GPS-track preview for a session row — same slot/size as
+/// Small non-interactive map preview for a session row — same slot/size as
 /// RecordingRow's spectrogram thumbnail. Disabled interaction so a tap still
 /// reaches the enclosing NavigationLink instead of panning the mini-map.
+///
+/// Shows where the IDs happened. It used to draw the session's GPS track as a
+/// polyline; tracks were removed (see LocationProvider) because detections
+/// already carry coordinates and timestamps — the same information, without a
+/// second and much denser recording of the user's movements.
 private struct SessionMapThumbnail: View {
-    let track: [CLLocationCoordinate2D]
+    let points: [CLLocationCoordinate2D]
     static let size = CGSize(width: 56, height: 40)
 
     var body: some View {
         Group {
-            if track.isEmpty {
+            if points.isEmpty {
                 RoundedRectangle(cornerRadius: 6)
                     .fill(.quaternary)
                     .overlay { Image(systemName: "location.slash").font(.caption2).foregroundStyle(.secondary) }
             } else {
-                Map(initialPosition: .region(fittedRegion(for: track)), interactionModes: []) {
-                    MapPolyline(coordinates: track).stroke(.blue, lineWidth: 2)
+                Map(initialPosition: .region(fittedRegion(for: points)), interactionModes: []) {
+                    ForEach(Array(points.enumerated()), id: \.offset) { _, point in
+                        MapCircle(center: point, radius: 120)
+                            .foregroundStyle(.blue.opacity(0.7))
+                    }
                 }
                 .mapControlVisibility(.hidden)
                 .allowsHitTesting(false)
@@ -262,29 +368,43 @@ struct SessionDetailView: View {
     @Bindable var store: ClassificationStore
     let settings: AutoIDSettings
     let consent: ConsentStore
+    let micCalSettings: MicCalibrationSettings
     @AppStorage("display.showNoID") private var showNoID = false
 
     var body: some View {
         List {
             if hasGeo {
                 Section {
-                    SessionMap(track: trackCoords, pins: mappablePasses)
+                    SessionMap(pins: mappablePasses)
                         .frame(height: 240)
                         .listRowInsets(EdgeInsets())
                 }
-                if !mappablePasses.isEmpty {
-                    Text("\(mappablePasses.count) pinned of \(sessionPasses.count) ID\(sessionPasses.count == 1 ? "" : "s") (≥ \(Int(settings.mapPinMinConfidence * 100))% · ≥ \(settings.mapPinMinPulseCount) pulses)")
-                        .font(.caption2).foregroundStyle(.secondary)
-                        .listRowBackground(Color.clear)
+                // The "N pinned of M IDs (≥ 60% · ≥ 3 pulses)" caption that used to
+                // sit under the map is gone (Niall, 2026-08-16). It was explaining
+                // the map's own filtering thresholds in the map's smallest type —
+                // a discrepancy nobody had asked about, stated in the language of
+                // the settings that cause it. The thresholds are still in AutoID
+                // settings, where they can be changed.
+            }
+            if !sessionPasses.isEmpty {
+                // Species first, then when they were about. Both used to sit below
+                // the recordings list; the summary of an outing is the reason to
+                // open it, and the file list is what you go to afterwards.
+                Section {
+                    SessionSpeciesSummary(passes: sessionPasses)
+                } header: {
+                    SessionChartHeader(title: "Species detected", kind: .species)
+                }
+                Section {
+                    SessionActivityChart(passes: sessionPasses,
+                                         start: session.startDate,
+                                         end: session.endDate ?? Date())
+                } header: {
+                    SessionChartHeader(title: "Detections over time", kind: .timeline)
                 }
             }
             if !session.notes.isEmpty {
                 Section("Notes") { Text(session.notes) }
-            }
-            if !sessionPasses.isEmpty {
-                Section("Species") {
-                    SessionSpeciesSummary(passes: sessionPasses)
-                }
             }
             Section("Recordings") {
                 if sessionRecordings.isEmpty {
@@ -295,7 +415,11 @@ struct SessionDetailView: View {
                 } else {
                     ForEach(sessionRecordings) { recording in
                         NavigationLink {
-                            RecordingDetailView(recording: recording, store: store)
+                            // Lazy: WavPlayerView's `@State` engine is expensive
+                            // to construct — see LazyDestination.
+                            LazyDestination {
+                                WavPlayerView(recording: recording, store: store, micCalSettings: micCalSettings)
+                            }
                         } label: {
                             RecordingRow(recording: recording, store: store, consent: consent)
                         }
@@ -324,20 +448,15 @@ struct SessionDetailView: View {
         store.recordings(inSession: session.id).filteredByNoID(showNoID: showNoID)
     }
     private var mappablePasses: [PassRecord] { sessionPasses.filter(settings.isMappable) }
-    private var trackCoords: [CLLocationCoordinate2D] { session.track.map(\.coordinate) }
-    private var hasGeo: Bool { !trackCoords.isEmpty || !mappablePasses.isEmpty }
+    private var hasGeo: Bool { !mappablePasses.isEmpty }
 }
 
-/// The course polyline plus a species pin per high-quality ID, framed to fit them all.
+/// A species pin per high-quality ID, framed to fit them all.
 private struct SessionMap: View {
-    let track: [CLLocationCoordinate2D]
     let pins: [PassRecord]
 
     var body: some View {
         Map(initialPosition: .region(region)) {
-            if track.count > 1 {
-                MapPolyline(coordinates: track).stroke(.blue, lineWidth: 3)
-            }
             ForEach(pins) { pass in
                 if let c = pass.coordinate {
                     Marker(pass.species, systemImage: "waveform", coordinate: c)
@@ -348,32 +467,12 @@ private struct SessionMap: View {
     }
 
     private var region: MKCoordinateRegion {
-        fittedRegion(for: track + pins.compactMap(\.coordinate))
+        fittedRegion(for: pins.compactMap(\.coordinate))
     }
 }
 
 
 // MARK: - Day grouping (shared)
-
-private struct PassDayGroup { let key: Date; let title: String; let passes: [PassRecord] }
-private func groupPassesByDay(_ passes: [PassRecord]) -> [PassDayGroup] {
-    let cal = Calendar.current
-    let dict = Dictionary(grouping: passes) { cal.startOfDay(for: $0.date) }
-    return dict.keys.sorted(by: >).map { day in
-        PassDayGroup(key: day, title: dayTitle(day),
-                     passes: dict[day]!.sorted { $0.date > $1.date })
-    }
-}
-
-private struct RecordingDayGroup { let key: Date; let title: String; let recordings: [Recording] }
-private func groupRecordingsByDay(_ recordings: [Recording]) -> [RecordingDayGroup] {
-    let cal = Calendar.current
-    let dict = Dictionary(grouping: recordings) { cal.startOfDay(for: $0.date) }
-    return dict.keys.sorted(by: >).map { day in
-        RecordingDayGroup(key: day, title: dayTitle(day),
-                          recordings: dict[day]!.sorted { $0.date > $1.date })
-    }
-}
 
 private struct SessionDayGroup { let key: Date; let title: String; let sessions: [RecordingSession] }
 private func groupSessionsByDay(_ sessions: [RecordingSession]) -> [SessionDayGroup] {
@@ -433,8 +532,9 @@ struct PassRow: View {
             }
         }
         .padding(.vertical, 2)
-        .task(id: representativePulse.id) {
-            image = await store.loadImage(for: representativePulse)
+        .task(id: representativePulse?.id) {
+            guard let pulse = representativePulse else { return }
+            image = await store.loadImage(for: pulse)
         }
     }
 
@@ -454,8 +554,16 @@ struct PassRow: View {
         }
     }
 
-    private var representativePulse: PulseRecord {
-        pass.pulses.max(by: { $0.confidence < $1.confidence }) ?? pass.pulses[0]
+    /// Optional, and the `?? pulses.first` matters: `max(by:)` returns nil
+    /// EXACTLY when the array is empty, so the old `?? pass.pulses[0]` fallback
+    /// could only ever run in the one case where index 0 is out of bounds — a
+    /// guaranteed crash dressed as a default. Live construction always guards
+    /// against an empty `pulses` (PulseDetector.finalizePass, and again in
+    /// ClassificationStore.addPass), but a PassRecord decoded from a corrupt or
+    /// future-schema recordings.json has no such guarantee. The thumbnail view
+    /// already renders a placeholder for a nil image.
+    private var representativePulse: PulseRecord? {
+        pass.pulses.max(by: { $0.confidence < $1.confidence }) ?? pass.pulses.first
     }
 
     private static func time(_ d: Date) -> String {
@@ -670,7 +778,15 @@ struct ConfidenceBadge: View {
 /// Small amber pill shown alongside a `ConfidenceBadge` when the winning species is
 /// one the model can't cleanly separate. Non-interactive — the full explanation lives
 /// in `ComplexCallout` on the detail screen. When the ID is an *active* ambiguity it
-/// names the close alternative ("cf. MYYU"); otherwise it just flags the complex.
+/// names the close alternative ("or MYYU"); otherwise it flags the group ("sounds
+/// alike").
+///
+/// The wording is deliberately not the field's own vocabulary. This used to read
+/// "complex" and "cf. MYYU" — both standard in bat acoustics and both opaque to
+/// everyone else: "complex" is a term of art that a newcomer reads as the ordinary
+/// adjective, and "cf." is an abbreviation of Latin *confer*. Neither appears in
+/// GUANO metadata or the upload path, so they were only ever teaching a vocabulary,
+/// not carrying data — see the onboarding cards, which explain both jobs.
 struct ComplexIndicator: View {
     let pass: PassRecord
 
@@ -690,16 +806,16 @@ struct ComplexIndicator: View {
 
     private var text: String {
         if pass.isComplexAmbiguous, let runnerUp = pass.runnerUpSpecies {
-            return "cf. \(runnerUp)"
+            return "or \(runnerUp)"
         }
-        return "complex"
+        return "sounds alike"
     }
 
     private var accessibility: String {
         if pass.isComplexAmbiguous, let runnerUp = pass.runnerUpSpecies {
             return "Confusable with \(SpeciesInfo.commonName[runnerUp] ?? runnerUp)"
         }
-        return "Part of a species complex that is hard to separate acoustically"
+        return "Sounds like other species the model cannot reliably separate"
     }
 }
 

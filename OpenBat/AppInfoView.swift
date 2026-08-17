@@ -2,7 +2,7 @@
 //  AppInfoView.swift
 //  OpenBat
 //
-//  "Info" sheet (what the app does) launched from the leading toolbar menu, plus
+//  "Info" sheet (what the app does) launched from the Detector's options menu, plus
 //  the guided spotlight tour it can kick off. The tour dims the whole screen and
 //  cuts a hole over one real control at a time, with a caption explaining it.
 //
@@ -19,22 +19,20 @@ import UIKit
 
 // MARK: - Tour target plumbing
 
-/// Stable IDs for the controls the tour can spotlight. Each is attached to both
-/// the portrait and landscape variant of its control (only one is ever in the
-/// view tree, so only one anchor is recorded).
+/// Stable IDs for the controls the tour can spotlight. A control that exists in
+/// more than one layout tags every variant — only one is ever in the view tree,
+/// so only one anchor is recorded.
 enum TourID: Hashable {
     // The three panes, top to bottom.
     case stats, pulseView, spectrogram
-    // Individual buttons. Tagged on the shared button properties, so the portrait
-    // and landscape placements both resolve to whichever one is in the tree.
-    case micStatus, resetStats                 // stats header (micStatus: portrait only)
-    case speciesID                             // stats row — the last-ID cell
+    // Individual buttons, tagged on the shared button properties.
+    case micStatus, resetStats                 // stats header
     case sessionStatus, feedbackWarning        // stats header
     case slowReplayStatus                      // stats header — slow-replay activity
     case sessionTimer                          // spectrogram header
     case pulseSpeciesToggle, pulseSettings     // pulse-view header
     case spectrogramSpeciesToggle, compressTimeline, batRange, palette, bandSettings
-    case start, record, listen                 // transport bar
+    case start, record, listen                 // session button + its transport menu
 }
 
 /// Accumulates one bounds anchor per tagged control (see `tourTarget(_:)`
@@ -76,22 +74,45 @@ struct TourStep: Identifiable {
     /// Rotation applied to the card's symbol, matching icons the UI itself renders
     /// rotated (the bat-range button draws its bracket at -90°).
     var symbolRotation: Angle = .zero
+    /// Set on the steps whose target lives inside the session button's transport
+    /// menu, which is closed unless the user opened it. ContentView watches the
+    /// step index and opens the menu for exactly these, so the spotlight has
+    /// something real to point at — see its `onChange(of: tourIndex)`.
+    var opensTransportMenu: Bool = false
+    /// Set on the steps whose control only exists in advanced view. Filtered out
+    /// in simplified view by `TourScript.steps(simplified:)` — a spotlight step
+    /// explaining a button that isn't on screen is worse than no step, and the
+    /// overlay would draw its caption over a cutout of nothing.
+    var advancedOnly: Bool = false
     let title: String
     let detail: String
 }
 
-/// The guided tour's fixed script, driving `AppInfoView`'s `TourOverlay`.
+/// The guided tour's script, driving `AppInfoView`'s `TourOverlay`.
+///
+/// Simplified view gets a genuinely shorter tour rather than the same one with
+/// gaps: `steps(simplified:)` drops every step whose control that mode hides,
+/// and the stats step describes what is actually in the card. This is the
+/// "advanced offers a longer tour" half of the mode — the tour is not split
+/// arbitrarily, it just stops describing things that aren't there.
 enum TourScript {
+    static func steps(simplified: Bool) -> [TourStep] {
+        all(simplified: simplified).filter { !(simplified && $0.advancedOnly) }
+    }
+
     // Walks the screen top-to-bottom: each pane first, then each button inside it
-    // individually, then the transport bar buttons, then the menus.
-    static let steps: [TourStep] = [
+    // individually, then the session button and the controls in its menu, then
+    // how to get around.
+    private static func all(simplified: Bool) -> [TourStep] { [
         TourStep(target: nil, symbol: "hand.wave",
                  title: "Welcome to OpenBat",
                  detail: "A real-time bat detector for the ultrasonic mic. Here's a quick tour of the screen — tap Next to step through, or End tour any time."),
 
         TourStep(target: .stats, symbol: "chart.bar",
-                 title: "Live stats",
-                 detail: "Peak frequency, bandwidth, duration, pulse rate and count for the most recent pulse, plus the current species ID and input level. They clear when activity goes stale."),
+                 title: simplified ? "Status and level" : "Live stats",
+                 detail: simplified
+                    ? "How loud the input is, and pills showing what's running and whether the mic is connected."
+                    : "Peak frequency, bandwidth, duration, pulse rate and count for the most recent pulse, plus the input level. They clear when activity goes stale."),
         // Left-to-right along the stats header, matching statsStrip's own order.
         TourStep(target: .slowReplayStatus, symbol: "ear",
                  title: "Slow replay status",
@@ -101,24 +122,25 @@ enum TourScript {
                  detail: "Appears only while heterodyne or other captured audio is playing out of the phone's speaker — the mic hears that playback and shows it as a spurious second call. Wear headphones to clear it. (Shown here for the tour.)"),
         TourStep(target: .sessionStatus, symbol: "location.fill",
                  title: "What's running",
-                 detail: "Off when nothing is detecting, Listening for an unlogged run, or Session when IDs are being logged with a GPS track."),
+                 detail: "Off when nothing is detecting, and Session once a run is going and its IDs are being logged."),
         TourStep(target: .micStatus, symbol: "cable.connector",
                  title: "Mic status",
                  detail: "Shows whether the ultrasonic mic is attached and the sample rate it's running at — this should show 384 kHz."),
         TourStep(target: .resetStats, symbol: "arrow.counterclockwise",
-                 title: "Reset stats",
-                 detail: "Clears the pulse count, pulse rate and the level meter's peak-hold."),
-        TourStep(target: .speciesID, symbol: "book.closed",
-                 title: "Species profile",
-                 detail: "The last ID, with how many pulses it was based on and how confident it is. When that species has a page in the field guide, a small book icon appears beside its code — tap the cell to read the profile without leaving the detector. (Shown here for the tour.)"),
-
-        TourStep(target: .pulseView, symbol: "waveform.path.ecg",
-                 title: "Pulse view & Species ID",
-                 detail: "A zoomed, onset-aligned render of the latest call. Pinch and drag to inspect it. It can also show the live Species ID feed instead."),
-        TourStep(target: .pulseSpeciesToggle, symbol: "sparkle.magnifyingglass",
+                 title: simplified ? "Reset the meter" : "Reset stats",
+                 detail: simplified
+                    ? "Clears the level meter's peak-hold marker."
+                    : "Clears the pulse count, pulse rate and the level meter's peak-hold."),
+        TourStep(target: .pulseView,
+                 symbol: simplified ? "sparkle.magnifyingglass" : "waveform.path.ecg",
+                 title: simplified ? "Species ID" : "Pulse view & Species ID",
+                 detail: simplified
+                    ? "Every species identified this session, most recent first. Tap any one for the pulses and scores behind it."
+                    : "A zoomed, onset-aligned render of the latest call. Pinch and drag to inspect it. It can also show the live Species ID feed instead."),
+        TourStep(target: .pulseSpeciesToggle, symbol: "sparkle.magnifyingglass", advancedOnly: true,
                  title: "Species ID feed",
                  detail: "The bat glyph swaps this pane between the pulse close-up and the live Species ID feed. In the feed, tap any ID for the pulses and scores behind it."),
-        TourStep(target: .pulseSettings, symbol: "slider.horizontal.3",
+        TourStep(target: .pulseSettings, symbol: "slider.horizontal.3", advancedOnly: true,
                  title: "Pulse view settings",
                  detail: "Display settings for the pulse close-up — zoom window span and noise floor."),
 
@@ -128,40 +150,40 @@ enum TourScript {
         TourStep(target: .sessionTimer, symbol: "timer",
                  title: "Elapsed time",
                  detail: "How long the current run has been detecting, counting from when you started. It appears once detection is running and disappears when you stop. (Shown here for the tour.)"),
-        TourStep(target: .spectrogramSpeciesToggle, symbol: "sparkle.magnifyingglass",
+        TourStep(target: .spectrogramSpeciesToggle, symbol: "sparkle.magnifyingglass", advancedOnly: true,
                  title: "Species ID here too",
-                 detail: "Swaps this pane to the Species ID feed, same as in the pulse view — handy in landscape when the spectrogram is full screen."),
-        TourStep(target: .compressTimeline, symbol: "lines.measurement.horizontal.aligned.bottom",
+                 detail: "Swaps this pane to the Species ID feed, same as in the pulse view — useful when you want the running list on the larger of the two panes."),
+        TourStep(target: .compressTimeline, symbol: "lines.measurement.horizontal.aligned.bottom", advancedOnly: true,
                  title: "Compress timeline",
                  detail: "Drops the silent gaps so the display shows just the detected pulses, back-to-back."),
         TourStep(target: .batRange, symbol: "minus.plus.lines.measurement.horizontal.aligned.bottom",
-                 symbolRotation: .degrees(-90),
+                 symbolRotation: .degrees(-90), advancedOnly: true,
                  title: "Bat frequency band",
                  detail: "One-tap preset snapping the frequency axis to 15–90 kHz, where most bat calls live. Tap again to restore the full range. Custom ranges can be set also."),
-        TourStep(target: .palette, symbol: "paintpalette",
+        TourStep(target: .palette, symbol: "paintpalette", advancedOnly: true,
                  title: "Colour palette",
                  detail: "Picks the colormap for the spectrogram and pulse view — Inferno, Viridis, Jet and friends."),
         TourStep(target: .bandSettings, symbol: "slider.horizontal.3",
                  title: "Display range",
                  detail: "Fine control over the displayed frequency range, time window and noise floor."),
 
-        TourStep(target: .start, symbol: "ear",
-                 title: "Start & stop",
-                 detail: "Starts and stops detecting. A Session logs IDs and groups them together with a GPS track on a map; Just Listening logs to the Listening bucket and carries over all GUANO metadata to the file."),
-        TourStep(target: .record, symbol: "record.circle",
+        TourStep(target: .start, symbol: "record.circle",
+                 title: "Start a session",
+                 detail: "The round button beside the tab bar starts detecting. Every run is logged as a session — its IDs are grouped together and mapped where they were heard, and any recordings carry the full GUANO metadata. Tap it again once a run is going and it opens the controls below."),
+        TourStep(target: .record, symbol: "record.circle", opensTransportMenu: true,
                  title: "Record",
-                 detail: "Arms WAV recording — each detected pass is saved as its own file, with the species ID in its metadata."),
-        TourStep(target: .listen, symbol: "headphones",
+                 detail: "Arms WAV recording — each detected pass is saved as its own file, with the species ID in its metadata. It arms itself when a session starts unless you've turned that off in Settings."),
+        TourStep(target: .listen, symbol: "headphones", opensTransportMenu: true,
                  title: "Listen",
                  detail: "One button, four steps: off, heterodyne (tuned-down clicks and chirps), slow replay (a snippet around each call played back 8× slower, so its real shape is audible), then slow replay with heterodyne underneath it. The glyph shows which you're on — headphones, antenna, tortoise, filled tortoise."),
-        TourStep(target: .listen, symbol: "tortoise.fill",
+        TourStep(target: .listen, symbol: "tortoise.fill", opensTransportMenu: true,
                  title: "Slow replay, and going deaf",
                  detail: "While a snippet is replaying, no new call is being captured — that's the trade-off, and it's why the fourth step exists: heterodyne keeps playing underneath, so you can still hear the bat overhead while the last call is replayed. The status pill up in the stats header shows which of the two it's doing."),
 
-        TourStep(target: nil, symbol: "line.3.horizontal.decrease.circle",
-                 title: "Menus",
-                 detail: "Top-left switches between Detector and Sessions and reopens this Info screen. Top-right (on Detector) holds Settings and Help. That's the tour — happy detecting!"),
-    ]
+        TourStep(target: nil, symbol: "square.grid.2x2",
+                 title: "Getting around",
+                 detail: "The bar along the bottom switches between the Detector, your Sessions, the Species guide and Playback. Top-right on the Detector holds Settings, Help and this Info screen — including the switch between this simplified view and the full set of controls. That's the tour — happy detecting!"),
+    ] }
 }
 
 // MARK: - Info sheet
@@ -187,7 +209,7 @@ struct AppInfoView: View {
                     featureList
 
                     section("Getting started",
-                            "Connect the mic, press Start, and point it at the sky. Detected passes are logged with their species, confidence, and a spectrogram of the pulses. Start a Session to also record a GPS track and map where each pass was heard.")
+                            "Connect the mic, tap the round button beside the tab bar, and point it at the sky. Every run is a session: detected passes are logged with their species, confidence, and a spectrogram of the pulses, and mapped where they were heard.")
 
                     Button {
                         // Flag the tour, then dismiss; the host starts it from the
@@ -272,7 +294,7 @@ struct AppInfoView: View {
             feature("headphones", "Heterodyne & slow replay",
                     "Hear the ultrasound live — tuned down, replayed 8× slower, or both at once.")
             feature("square.stack.3d.up", "Sessions & map",
-                    "Log passes with a GPS track and see where each was heard.")
+                    "Every outing is logged automatically — see where each pass was heard.")
         }
     }
 
@@ -343,9 +365,6 @@ struct DataModelSourcesView: View {
             licenseRow(name: "libogg", detail: "Ogg container support, bundled alongside FLAC.",
                        url: URL(string: "https://github.com/sbooth/ogg-binary-xcframework"),
                        licenseName: "BSD 3-Clause", licenseText: Self.xiphBSD3LicenseText(project: "libogg", years: "2002", holder: "Xiph.org Foundation"))
-            licenseRow(name: "SwiftyH3", detail: "H3 hexagonal geospatial indexing, used to bin GBIF occurrence points for the distribution map.",
-                       url: URL(string: "https://github.com/pawelmajcher/SwiftyH3"),
-                       licenseName: "Apache License 2.0", licenseText: Self.apache2NoticeText)
         }
     }
 
@@ -430,24 +449,6 @@ struct DataModelSourcesView: View {
         OF THE POSSIBILITY OF SUCH DAMAGE.
         """
     }
-
-    /// Apache-2.0 permits satisfying the "provide a copy of the License"
-    /// requirement by reference to its canonical, stable URL rather than
-    /// inlining the full ~11 KB text — the standard form used in most
-    /// iOS acknowledgements screens.
-    private static let apache2NoticeText = """
-        Licensed under the Apache License, Version 2.0 (the "License"); you \
-        may not use this file except in compliance with the License. You \
-        may obtain a copy of the License at
-
-            https://www.apache.org/licenses/LICENSE-2.0
-
-        Unless required by applicable law or agreed to in writing, software \
-        distributed under the License is distributed on an "AS IS" BASIS, \
-        WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or \
-        implied. See the License for the specific language governing \
-        permissions and limitations under the License.
-        """
 }
 
 // MARK: - Guided tour overlay

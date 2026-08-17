@@ -4,7 +4,7 @@
 //
 //  "Calibrate Microphone" sheet — reachable from Settings (reusing
 //  ContentView's already-activated AudioEngineController) and from an
-//  optional onboarding step (its own throwaway instance). Records ~30s
+//  optional onboarding step (its own throwaway instance). Records ~15s
 //  during a deliberately quiet period via `MicCalibrator`, then either saves
 //  the resulting `MicCalibrationCurve` or explains why the run wasn't usable.
 //
@@ -23,7 +23,21 @@ struct MicCalibrationView: View {
         case result(MicCalibrator.Result)
     }
 
-    private static let captureSeconds: Double = 30
+    /// Was 30 s. Shortened because nothing about the measurement needed it:
+    /// the curve is an average over ~1500 columns/s, so 15 s still gives ~22k
+    /// columns and an estimator standard error around 0.04 dB — against a
+    /// curve that is only ever allowed to apply ±12 dB. The extra 15 s bought
+    /// about 0.01 dB and cost the user half a minute of standing still. It
+    /// also cut the other way: the longer the window, the more chance a
+    /// transient intrudes and fails the run outright.
+    private static let captureSeconds: Double = 15
+
+    /// How long to wait before deciding no audio is arriving. Long enough for
+    /// the engine to start and the first buffers to land on a slow route,
+    /// short enough that a dead input fails while the user is still holding
+    /// still rather than after they've stood in a quiet corner for a quarter
+    /// of a minute.
+    private static let deadInputCheckSeconds: Double = 2
 
     @State private var stage: Stage = .intro
     @State private var calibrator: MicCalibrator?
@@ -44,25 +58,32 @@ struct MicCalibrationView: View {
     /// floor isn't known until it's been observed.
     @State private var baselineDB: Float?
 
+    // Same compact-sheet language as `SuggestedModelSheet` in ContentView: no NavigationStack, no title bar,
+    // an accent circle for the glyph, centred title/subtitle, one prominent
+    // action tinted `.batAccent`, and a plain text button out. The old
+    // navigation chrome existed only to host a Cancel button, and every stage
+    // now carries its own way out.
     var body: some View {
-        NavigationStack {
-            VStack(spacing: 24) {
-                switch stage {
-                case .intro:               introContent
-                case .recording:           recordingContent
-                case .result(let result):  resultContent(result)
-                }
-            }
-            .padding()
-            .navigationTitle("Calibrate Microphone")
-            .navigationBarTitleDisplayMode(.inline)
-            .background(BaselineTracker(audio: audio, baselineDB: $baselineDB))
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { cancel() }
-                }
+        VStack(spacing: 24) {
+            switch stage {
+            case .intro:               introContent
+            case .recording:           recordingContent
+            case .result(let result):  resultContent(result)
             }
         }
+        .padding(.horizontal, 24)
+        .padding(.top, 28)
+        .padding(.bottom, 20)
+        .frame(maxWidth: .infinity)
+        .background(BaselineTracker(audio: audio, baselineDB: $baselineDB))
+        // Each stage is a different height, so the sheet resizes with it rather
+        // than being fixed to the tallest — these sheets are compact by design,
+        // and a single detent would leave the short stages padded out. Measured
+        // rather than hand-fitted per stage: the hand-fitted numbers were right
+        // when written and silently wrong once the copy changed, which is how
+        // the intro's explanation came to be cut off at "It d…".
+        .contentSizedDetent(min: 300)
+        .presentationDragIndicator(isRecording ? .hidden : .visible)
         .interactiveDismissDisabled(isRecording)
         .onDisappear { teardownAudio() }
     }
@@ -72,86 +93,117 @@ struct MicCalibrationView: View {
         return false
     }
 
+    /// The accent-circle glyph these sheets open with.
+    private func sheetIcon(_ systemImage: String, tint: Color = .batAccent) -> some View {
+        Image(systemName: systemImage)
+            .font(.system(size: 26, weight: .semibold))
+            .foregroundStyle(tint)
+            .frame(width: 72, height: 72)
+            .background(tint.opacity(0.15), in: Circle())
+    }
+
     @ViewBuilder private var introContent: some View {
-        Spacer()
-        Image(systemName: "tuningfork")
-            .font(.system(size: 56))
-            .foregroundStyle(Color.batAccent)
-        Text("Calibrate \(audio.diagnostics.inputName)")
-            .font(.title2.bold())
-            .multilineTextAlignment(.center)
-        Text("Find a quiet spot — no bat calls, minimal wind or traffic noise — and we'll measure your microphone's natural response for about 30 seconds. This flattens the spectrogram's noise floor and sharpens frequency measurements. It doesn't change or upload any recording.")
-            .font(.body)
-            .foregroundStyle(.secondary)
-            .multilineTextAlignment(.center)
-            .padding(.horizontal, 8)
-        Spacer()
-        Button("Start") { start() }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .frame(maxWidth: .infinity)
+        VStack(spacing: 10) {
+            sheetIcon("tuningfork")
+            Text("Calibrate \(audio.diagnostics.micDisplayName)")
+                .font(.title2.weight(.semibold))
+                .multilineTextAlignment(.center)
+                .wrapsFully()
+            Text("Find a quiet spot — no bat calls, minimal wind or traffic noise — and we'll measure your microphone's natural response for about 15 seconds. This flattens the spectrogram's noise floor and sharpens frequency measurements. It doesn't change or upload any recording.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .wrapsFully()
+        }
+        .frame(maxWidth: .infinity)
+
+        Spacer(minLength: 0)
+
+        sheetPrimaryButton("Start") { start() }
+
+        Button("Not Now", role: .cancel) { cancel() }
+            .padding(.top, 4)
     }
 
     @ViewBuilder private var recordingContent: some View {
-        Spacer()
-        ZStack {
-            Circle()
-                .stroke(Color.secondary.opacity(0.2), lineWidth: 8)
-            Circle()
-                .trim(from: 0, to: min(1, elapsed / Self.captureSeconds))
-                .stroke(Color.batAccent, style: StrokeStyle(lineWidth: 8, lineCap: .round))
-                .rotationEffect(.degrees(-90))
-                .animation(.linear(duration: 0.2), value: elapsed)
-            Text("\(max(0, Int((Self.captureSeconds - elapsed).rounded(.up))))")
-                .font(.system(size: 40, weight: .semibold, design: .rounded))
-                .monospacedDigit()
+        VStack(spacing: 16) {
+            ZStack {
+                Circle()
+                    .stroke(Color.secondary.opacity(0.2), lineWidth: 8)
+                Circle()
+                    .trim(from: 0, to: min(1, elapsed / Self.captureSeconds))
+                    .stroke(Color.batAccent, style: StrokeStyle(lineWidth: 8, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                    .animation(.linear(duration: 0.2), value: elapsed)
+                Text("\(max(0, Int((Self.captureSeconds - elapsed).rounded(.up))))")
+                    .font(.system(size: 40, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+            }
+            .frame(width: 128, height: 128)
+            Text("Recording — find somewhere quiet")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            MicLevelMeterView(audio: audio, baselineDB: baselineDB)
         }
-        .frame(width: 140, height: 140)
-        Text("Recording — find somewhere quiet")
-            .font(.headline)
-        MicLevelMeterView(audio: audio, baselineDB: baselineDB)
-        Spacer()
-        Button("Cancel") { cancel() }
-            .font(.footnote)
-            .foregroundStyle(.secondary)
+        .frame(maxWidth: .infinity)
+
+        Spacer(minLength: 0)
+
+        Button("Cancel", role: .cancel) { cancel() }
+            .padding(.top, 4)
     }
 
     @ViewBuilder
     private func resultContent(_ result: MicCalibrator.Result) -> some View {
-        Spacer()
         switch result {
         case .success:
-            Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 56))
-                .foregroundStyle(.green)
-            Text("Calibration saved for \(audio.diagnostics.inputName)")
-                .font(.title3.bold())
-                .multilineTextAlignment(.center)
-            Spacer()
-            Button("Done") { finish(saving: result) }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .frame(maxWidth: .infinity)
-        case .failure(let reason):
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 56))
-                .foregroundStyle(.orange)
-            Text(reason)
-                .font(.body)
-                .multilineTextAlignment(.center)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 8)
-            Spacer()
-            VStack(spacing: 12) {
-                Button("Try Again") { start() }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-                    .frame(maxWidth: .infinity)
-                Button("Cancel") { finish(saving: result) }
-                    .font(.footnote)
+            VStack(spacing: 10) {
+                sheetIcon("checkmark.circle.fill", tint: .green)
+                Text("Calibration saved")
+                    .font(.title2.weight(.semibold))
+                Text(audio.diagnostics.micDisplayName)
+                    .font(.subheadline)
                     .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .wrapsFully()
             }
+            .frame(maxWidth: .infinity)
+
+            Spacer(minLength: 0)
+
+            sheetPrimaryButton("Done") { finish(saving: result) }
+
+        case .failure(let reason):
+            VStack(spacing: 10) {
+                sheetIcon("exclamationmark.triangle.fill", tint: .orange)
+                Text("Calibration didn't work")
+                    .font(.title2.weight(.semibold))
+                Text(reason)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                .wrapsFully()
+            }
+            .frame(maxWidth: .infinity)
+
+            Spacer(minLength: 0)
+
+            sheetPrimaryButton("Try Again") { start() }
+
+            Button("Cancel", role: .cancel) { finish(saving: result) }
+                .padding(.top, 4)
         }
+    }
+
+    private func sheetPrimaryButton(_ title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.headline)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 6)
+        }
+        .buttonStyle(.borderedProminent)
+        .tint(.batAccent)
     }
 
     // MARK: Flow
@@ -181,10 +233,26 @@ struct MicCalibrationView: View {
             }
             let step = 0.2
             var t = 0.0
+            // Buffer count at the moment capture began. If it hasn't moved by
+            // `deadInputCheckSeconds` no audio is arriving at all, and the run
+            // is already lost — the old behaviour counted down the full fifteen
+            // seconds, told the user it was "nice and quiet" throughout, and
+            // only then admitted failure.
+            //
+            // Deliberately counts BUFFERS, not level. A dead input and a genuinely
+            // silent room look identical on a level meter, and failing someone
+            // for finding somewhere quiet enough would be precisely backwards.
+            let buffersAtStart = audio.diagnostics.bufferCount
             while t < Self.captureSeconds, !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(step))
                 t += step
                 elapsed = t
+                if t >= Self.deadInputCheckSeconds,
+                   audio.diagnostics.bufferCount == buffersAtStart {
+                    teardownAudio()
+                    stage = .result(.failure(reason: "No audio is reaching OpenBat from \(audio.diagnostics.micDisplayName). Check it's firmly connected, then try again."))
+                    return
+                }
             }
             guard !Task.isCancelled else { return }
             // Read now, not at the top of this function: `diagnostics.
@@ -235,7 +303,7 @@ struct MicCalibrationView: View {
 /// `MicCalibrationView.body` itself, and `@Observable`'s whole-property
 /// invalidation would re-render the entire sheet (including the toolbar
 /// Cancel button) on every level update, risking dropped taps during the
-/// 30-second capture. See Context.md §13.
+/// 15-second capture. See Context.md §13.
 private struct BaselineTracker: View {
     let audio: AudioEngineController
     @Binding var baselineDB: Float?

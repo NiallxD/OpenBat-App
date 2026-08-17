@@ -2,190 +2,254 @@
 //  GBIFRangeMapView.swift
 //  OpenBat
 //
-//  Interactive GBIF occurrence range map for the species detail page. Renders
-//  a species' occurrence points (see GBIFService.fetchOccurrencePoints),
-//  binned on-device into H3 hexagons (github.com/uber/h3, via the SwiftyH3
-//  package), as native SwiftUI `Map` content — one hexagon per H3 cell,
-//  rather than a GBIF-hosted raster tile overlay. See GBIFService.swift's
-//  file header for why raster tiles were dropped: three iterations of
-//  tile-overlay fixes each ran into a different symptom of the same root
-//  problem (GBIF's point tiles draw fixed-PIXEL-size markers that don't scale
-//  with zoom).
+//  Range map for the species detail page. Draws the species' presence grid —
+//  the same bundled `SpeciesPresenceData.json` the classifier uses to decide
+//  which species are plausible near the user — as filled cells on a fixed,
+//  non-interactive `Map`.
 //
-//  H3 over a flat lat/lon grid: a fixed-degree grid distorts cell area badly
-//  away from the equator (a 1°×1° cell near a pole covers a fraction of the
-//  area it does at the equator) and has no notion of zoom — H3's hexagons
-//  are near-uniform in area globally, and its resolution hierarchy lets the
-//  displayed grid get coarser or finer as the user zooms, binned fresh
-//  on-device from the same cached raw points each time (no re-fetch).
+//  WHAT THIS REPLACED, AND WHY (2026-08-16)
+//  ----------------------------------------
+//  Previously: fetch up to 3000 raw occurrence points per species (from a
+//  committed snapshot when it had them, otherwise a live GBIF call), bin them
+//  into H3 hexagons on-device, and re-bin at a finer resolution every time the
+//  user zoomed. Three things were wrong with it.
+//
+//  1. It needed the network. The point snapshot deliberately had no bundled
+//     tier, so a cold install fell through to a live per-species fetch and a
+//     spinner — and offline, to "Distribution unavailable".
+//  2. It only covered species the guide has pages for. The presence data covers
+//     every species the classifiers can name, which is a much larger set.
+//  3. Zooming was fiddly and, per Niall, not informative — and the re-binning
+//     machinery existed only to serve it.
+//
+//  It also quietly showed the wrong thing. Occurrence points are where people
+//  went looking and filed a record; a well-surveyed county outshines a
+//  well-populated one. The presence grid is closer to where the bat lives: it
+//  aggregates every record GBIF holds rather than a sample, and drops isolated
+//  one-off records that are usually misidentifications or specimens catalogued
+//  at the museum holding them. (It is still built from occurrence data, so the
+//  caveat in the info popover stays — it is honest, not modelled range.)
+//
+//  Cells are merged into horizontal runs before drawing: a widespread species
+//  covers ~1100 one-degree cells, and MapKit does not need 1100 polygons to
+//  draw what is mostly a handful of solid blocks.
 //
 
 import SwiftUI
 import MapKit
-import SwiftyH3
 
-/// Card shown on the species detail page — resolves the taxon key, fetches
-/// its occurrence points, then shows the map, a loading spinner, or an
-/// "unavailable" state.
+/// Card shown on the species detail page — a fixed view of where this species
+/// lives, or an explanation when there is no range data for it.
 struct GBIFDistributionCard: View {
     let species: GuideSpecies
-    /// Committed/versioned snapshot of species range points — checked first,
-    /// before any live GBIF network call. See SpeciesRangeStore's header for
-    /// why this has no bundled tier (unlike SpeciesGuideStore): a cold install
-    /// with no cache and no network yet just falls through to the live
-    /// per-species fetch below, same as before this store existed.
-    let rangeStore: SpeciesRangeStore
-    /// Height of the map/placeholder area. Callers own this rather than the
-    /// card hardcoding one, so the same card can sit at a fixed height in the
-    /// normal stacked layout or be squared off next to the overview text on
-    /// iPad landscape (see SpeciesDetailView).
+    /// Bundled presence grid. Ships in the app, so this card has no loading
+    /// state and no network path — see SpeciesPresenceStore's header.
+    let presenceStore: SpeciesPresenceStore
+    /// Height of the map area. Callers own this rather than the card hardcoding
+    /// one, so the same card can sit at a fixed height in the normal stacked
+    /// layout or be squared off next to the overview text on iPad landscape
+    /// (see SpeciesDetailView).
     var mapHeight: CGFloat = 220
 
-    private enum LoadState {
-        case loading
-        case loaded([GBIFService.GBIFOccurrencePoint])
-        case noData
-        case error
-    }
-
-    /// One H3 cell in the currently-displayed grid and how many occurrence
-    /// points fell inside it — recomputed (cheaply, on-device) whenever
-    /// `resolution` changes, not on every camera-drag frame.
-    private struct H3BinnedCell: Identifiable {
-        let cell: H3Cell
-        let count: Int
-        var id: UInt64 { cell.id }
-    }
-
-    @State private var state: LoadState = .loading
     @State private var showInfoPopover = false
+    /// Re-framed from the map's REAL size rather than set once up front.
+    /// `initialPosition` is evaluated before the final layout width is known, and
+    /// is never re-applied when it changes — so the camera ends up framed for a
+    /// width the view never had, and the range clips.
     @State private var camera: MapCameraPosition = .automatic
-    @State private var resolution: H3Cell.Resolution = .res2
-    @State private var binnedCells: [H3BinnedCell] = []
-    /// Bumped by the "Try Again" button on the error state to force `.task(id:)`
-    /// to re-run — a network error is never written into `resolvedCache` (see
-    /// below), so without this the view would just sit on `.error` forever
-    /// since `species.id` alone doesn't change on retry.
-    @State private var retryToken = 0
-    /// Whether the currently-shown points came from the committed
-    /// SpeciesRangeStore snapshot rather than a live per-species GBIF fetch —
-    /// only the snapshot has a meaningful dataVersion/date to show next to
-    /// the attribution footer.
-    @State private var usedSnapshot = false
+    @State private var mapSize: CGSize = .zero
 
-    /// In-memory cache of the resolved state per species, keyed by scientific
-    /// name — same reasoning as the identical pattern in GBIFDistributionCard's
-    /// previous version: a List row scrolled off-screen and back on gets its
-    /// `@State` reset and `.task(id:)` re-fired from scratch, and without this
-    /// that would re-decode (though not re-fetch, thanks to the on-device
-    /// cache in GBIFService) and flash the loading spinner every time.
-    private static var resolvedCache: [String: (state: LoadState, usedSnapshot: Bool)] = [:]
+    /// Tallest the map is allowed to grow. Past this a very tall range is better
+    /// slightly cropped than turned into a column that pushes the rest of the
+    /// species page off-screen.
+    private static let maxMapHeight: CGFloat = 340
 
-    /// Density scaling shared by a cell's opacity: a cell with
-    /// `densityReferenceCount` or more sampled records renders at full
-    /// opacity; below that it scales down smoothly. Square-root keeps a
-    /// handful of very densely-sampled cells (recording effort, not
-    /// necessarily true abundance) from making every lightly-sampled cell
-    /// look negligible by comparison.
-    private static let densityReferenceCount = 20.0
+    /// One drawn block: a run of horizontally adjacent cells in a single row.
+    private struct RangeBlock: Identifiable {
+        let id: Int
+        let coordinates: [CLLocationCoordinate2D]
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Group {
-                switch state {
-                case .loaded:
-                    Map(position: $camera) {
-                        ForEach(binnedCells) { bin in
-                            bin.cell
-                                .foregroundStyle(Color.purple.opacity(opacity(for: bin)))
+                if let range = resolvedRange {
+                    Map(position: $camera, interactionModes: []) {
+                        ForEach(range.blocks) { block in
+                            MapPolygon(coordinates: block.coordinates)
+                                .foregroundStyle(Color.purple.opacity(0.55))
+                                .stroke(Color.purple.opacity(0.75), lineWidth: 0.5)
                         }
                     }
-                    .onMapCameraChange(frequency: .onEnd) { context in
-                        resolution = Self.resolution(forSpanDegrees: context.region.span.latitudeDelta)
+                    .frame(height: height(for: range.rect))
+                    .onGeometryChange(for: CGSize.self) { $0.size } action: { size in
+                        // Converges in a pass or two: the height depends on the
+                        // width, the width doesn't depend on the height.
+                        guard size.width > 0, size != mapSize else { return }
+                        mapSize = size
+                        camera = .rect(range.rect)
                     }
-                    .frame(height: mapHeight)
-                case .noData:
+                    .onChange(of: species.id) {
+                        if let rect = resolvedRange?.rect { camera = .rect(rect) }
+                    }
+                } else {
                     ContentUnavailableView("No distribution data",
                                            systemImage: "globe.desk",
-                                           description: Text("GBIF has no recorded occurrences for this species."))
+                                           description: Text(unavailableReason))
                         .frame(height: mapHeight)
                         .frame(maxWidth: .infinity)
-                case .error:
-                    ContentUnavailableView {
-                        Label("Distribution unavailable", systemImage: "globe.desk")
-                    } description: {
-                        Text("Couldn't reach GBIF for this species.")
-                    } actions: {
-                        Button("Try Again") { retryToken += 1 }
-                    }
-                        .frame(height: mapHeight)
-                        .frame(maxWidth: .infinity)
-                case .loading:
-                    loadingPlaceholder
                 }
             }
-            .overlay(alignment: .topTrailing) {
-                infoButton
-            }
+            .overlay(alignment: .topTrailing) { infoButton }
             attributionFooter
         }
-        .task(id: "\(species.id)#\(retryToken)") {
-            if let cached = Self.resolvedCache[species.scientificName] {
-                state = cached.state
-                usedSnapshot = cached.usedSnapshot
-                if case .loaded(let points) = cached.state {
-                    if let region = GBIFService.region(for: points) {
-                        camera = .region(region)
-                        resolution = Self.resolution(forSpanDegrees: region.span.latitudeDelta)
-                    }
-                    binnedCells = Self.bin(points, at: resolution)
-                }
-                return
-            }
-            // Committed/versioned snapshot (SpeciesRangeStore) wins over a live
-            // fetch when it has this species — instant, offline, no GBIF call.
-            if let points = rangeStore.ranges[species.scientificName] {
-                if let region = GBIFService.region(for: points) {
-                    camera = .region(region)
-                    resolution = Self.resolution(forSpanDegrees: region.span.latitudeDelta)
-                }
-                binnedCells = Self.bin(points, at: resolution)
-                state = points.isEmpty ? .noData : .loaded(points)
-                usedSnapshot = true
-                Self.resolvedCache[species.scientificName] = (state, usedSnapshot)
-                return
-            }
-
-            usedSnapshot = false
-            state = .loading
-            guard let key = await GBIFService.fetchTaxonKey(for: species.scientificName) else {
-                state = .error
-                return
-            }
-            switch await GBIFService.fetchOccurrencePoints(taxonKey: key) {
-            case .success(let points):
-                if let region = GBIFService.region(for: points) {
-                    camera = .region(region)
-                    resolution = Self.resolution(forSpanDegrees: region.span.latitudeDelta)
-                }
-                binnedCells = Self.bin(points, at: resolution)
-                state = .loaded(points)
-                Self.resolvedCache[species.scientificName] = (state, usedSnapshot)
-            case .noData:
-                state = .noData
-                Self.resolvedCache[species.scientificName] = (state, usedSnapshot)
-            case .networkError:
-                // Deliberately not cached: a flaky-network failure shouldn't
-                // permanently wedge this species' map for the rest of the app
-                // session. Falling through re-fetches next visit / on retry.
-                state = .error
-            }
-        }
-        .onChange(of: resolution) { _, newResolution in
-            guard case .loaded(let points) = state else { return }
-            binnedCells = Self.bin(points, at: newResolution)
-        }
     }
+
+    /// Why there is no map, said precisely — "we have no data for this bat" and
+    /// "no classifier names this bat" are different facts, and the second is a
+    /// gap in coverage rather than a gap in knowledge.
+    private var unavailableReason: String {
+        guard presenceStore.isLoaded else {
+            return "Range data hasn't loaded yet."
+        }
+        guard SpeciesGuide.code(forScientificName: species.scientificName) != nil else {
+            return "This species isn't covered by any of the identification models yet, so there's no range data for it."
+        }
+        return "There aren't enough records of this species to map where it lives."
+    }
+
+    /// How tall the map has to be to show `rect` without cropping it.
+    ///
+    /// A map cannot display more than one world-width of longitude. Fitting a
+    /// rect into a view means matching their aspect ratios, so a range that is
+    /// tall relative to its width forces the map to show more longitude than
+    /// exists — MapKit clamps the zoom there and crops the latitude instead.
+    /// Padding cannot fix that; only a taller frame can.
+    ///
+    /// Measured against the real data: in a 3.5:1 card, five of the 47 species
+    /// are un-fittable — hoary bat would need 1.30 world-widths, eastern red
+    /// 1.26, Mexican free-tailed 1.12. Since the required width is
+    /// `rectHeight × aspect`, the height that makes it fit is simply the rect's
+    /// share of the world's height times the view's width.
+    private func height(for rect: MKMapRect) -> CGFloat {
+        guard mapSize.width > 0 else { return mapHeight }
+        let heightFraction = rect.height / MKMapRect.world.height
+        let needed = heightFraction * mapSize.width
+        return min(Self.maxMapHeight, max(mapHeight, needed))
+    }
+
+    private var resolvedRange: (rect: MKMapRect, blocks: [RangeBlock])? {
+        guard let code = SpeciesGuide.code(forScientificName: species.scientificName),
+              let cells = presenceStore.presence[code], !cells.isEmpty else { return nil }
+        let degrees = presenceStore.cellDegrees
+        let blocks = Self.blocks(for: Set(cells.keys), cellDegrees: degrees)
+        guard let rect = Self.mapRect(for: Set(cells.keys), cellDegrees: degrees) else { return nil }
+        return (rect, blocks)
+    }
+
+    // MARK: - Grid geometry
+
+    /// Cell index back to its south-west corner, matching
+    /// `SpeciesPresenceStore.cellIndex` and the generator's `cell_index`.
+    private static func corner(of index: Int, cellDegrees: Double) -> (lat: Double, lon: Double) {
+        let cols = Int((360 / cellDegrees).rounded())
+        let (row, col) = index.quotientAndRemainder(dividingBy: cols)
+        return (Double(row) * cellDegrees - 90, Double(col) * cellDegrees - 180)
+    }
+
+    /// Merges cells into horizontal runs, one polygon per run.
+    ///
+    /// Purely a drawing optimisation — the shape is identical, there are just
+    /// far fewer polygons. Runs are not merged vertically as well: the extra
+    /// bookkeeping buys little once the horizontal pass has collapsed the big
+    /// solid regions, and rectangles are what MapPolygon wants anyway.
+    private static func blocks(for indices: Set<Int>, cellDegrees: Double) -> [RangeBlock] {
+        let cols = Int((360 / cellDegrees).rounded())
+        var byRow: [Int: [Int]] = [:]
+        for index in indices {
+            let (row, col) = index.quotientAndRemainder(dividingBy: cols)
+            byRow[row, default: []].append(col)
+        }
+
+        var blocks: [RangeBlock] = []
+        for (row, columns) in byRow {
+            var run: [Int] = []
+            for col in columns.sorted() {
+                if let last = run.last, col != last + 1 {
+                    blocks.append(block(row: row, from: run[0], to: last, cellDegrees: cellDegrees))
+                    run = []
+                }
+                run.append(col)
+            }
+            if let first = run.first, let last = run.last {
+                blocks.append(block(row: row, from: first, to: last, cellDegrees: cellDegrees))
+            }
+        }
+        return blocks
+    }
+
+    private static func block(row: Int, from startCol: Int, to endCol: Int,
+                              cellDegrees: Double) -> RangeBlock {
+        let south = Double(row) * cellDegrees - 90
+        let north = south + cellDegrees
+        let west = Double(startCol) * cellDegrees - 180
+        let east = Double(endCol + 1) * cellDegrees - 180
+        let cols = Int((360 / cellDegrees).rounded())
+        return RangeBlock(
+            id: row * cols + startCol,
+            coordinates: [
+                CLLocationCoordinate2D(latitude: south, longitude: west),
+                CLLocationCoordinate2D(latitude: north, longitude: west),
+                CLLocationCoordinate2D(latitude: north, longitude: east),
+                CLLocationCoordinate2D(latitude: south, longitude: east),
+            ])
+    }
+
+    /// A fixed frame around the whole range, with a margin so the outermost
+    /// cells aren't flush against the edge.
+    ///
+    /// WHY THIS WORKS IN MAP POINTS AND NOT DEGREES
+    /// Two earlier versions of this padded in degrees, via `MKCoordinateRegion`,
+    /// and both clipped. Degrees of latitude are not a constant height on screen
+    /// — Mercator stretches them towards the poles — so a span expressed in
+    /// degrees does not translate to the area MapKit actually shows. For a
+    /// species spanning most of the Americas the error is enormous, and the
+    /// range ran off the top, bottom and sides at once.
+    ///
+    /// `MKMapRect` is the projected space the map is actually drawn in, so a
+    /// rect that contains the cells keeps containing them, and an inset of N%
+    /// is N% of what the viewer sees. `Map` fits the rect by expanding whichever
+    /// axis the aspect ratio needs, and expanding only ever adds margin.
+    ///
+    /// Species spanning the antimeridian would need the union computed the long
+    /// way round; none of the 47 species the models name does, and a
+    /// wrong-but-visible world view is a better failure than a crash, so this
+    /// takes the simple union deliberately.
+    private static func mapRect(for indices: Set<Int>, cellDegrees: Double) -> MKMapRect? {
+        var union: MKMapRect?
+        for index in indices {
+            let (lat, lon) = corner(of: index, cellDegrees: cellDegrees)
+            // Latitude clamps just inside the Mercator limit: MKMapPoint is
+            // undefined beyond it, and no bat is up there anyway.
+            let south = max(-85, lat)
+            let north = min(85, lat + cellDegrees)
+            let a = MKMapPoint(CLLocationCoordinate2D(latitude: north, longitude: lon))
+            let b = MKMapPoint(CLLocationCoordinate2D(latitude: south,
+                                                      longitude: min(180, lon + cellDegrees)))
+            let cell = MKMapRect(x: min(a.x, b.x), y: min(a.y, b.y),
+                                 width: abs(b.x - a.x), height: abs(b.y - a.y))
+            union = union.map { $0.union(cell) } ?? cell
+        }
+        guard var rect = union, rect.width > 0, rect.height > 0 else { return nil }
+
+        // 8% of the larger dimension on every side, so the margin reads the same
+        // whether the range is tall or wide.
+        let padding = max(rect.width, rect.height) * 0.08
+        rect = rect.insetBy(dx: -padding, dy: -padding)
+        return rect.intersects(.world) ? rect.intersection(.world) : rect
+    }
+
+    // MARK: - Chrome
 
     private static let updatedAtFormatter: DateFormatter = {
         let f = DateFormatter()
@@ -193,11 +257,10 @@ struct GBIFDistributionCard: View {
         return f
     }()
 
-    /// Explains what the hexagon shading actually represents — occurrence
-    /// records reported to GBIF, not a modeled range — since a dense-looking
-    /// map otherwise reads as "the species lives here" rather than "the
-    /// species was seen and logged here", and recording effort varies wildly
-    /// by region (well-surveyed countries look artificially "denser").
+    /// Explains what the shading actually represents — occurrence records
+    /// reported to GBIF, aggregated, not a modelled range — since a filled map
+    /// otherwise reads as an authoritative range boundary, and recording effort
+    /// varies wildly by region.
     private var infoButton: some View {
         Button {
             showInfoPopover = true
@@ -214,7 +277,7 @@ struct GBIFDistributionCard: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text("About this map")
                     .font(.headline)
-                Text("This map shows where this species has been seen and reported to biodiversity databases (GBIF) — not a modeled range. Sparse or empty areas may still have the species present; they may simply be under-surveyed.")
+                Text("This map is built from records reported to biodiversity databases (GBIF), grouped into blocks of roughly 100 km. It shows where the species has been recorded, not a modelled range — under-surveyed areas may still have the species present. It's the same data OpenBat uses to decide which species to expect near you.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -231,15 +294,15 @@ struct GBIFDistributionCard: View {
         }
     }
 
-    /// GBIF credit, plus the range snapshot's version/date when the map is
-    /// showing the committed SpeciesRangeStore data rather than a live
-    /// per-species fetch — a live fetch has no meaningful "version".
+    /// GBIF credit — required, and still accurate: the presence grid is derived
+    /// from their occurrence records. Version and date come from the presence
+    /// data so a user can see how stale the map is.
     private var attributionFooter: some View {
         HStack(spacing: 4) {
             Text("Distribution data via GBIF.org")
-            if usedSnapshot {
-                Text("· v\(rangeStore.dataVersion)")
-                if let updated = rangeStore.updatedDate {
+            if presenceStore.isLoaded {
+                Text("· v\(presenceStore.dataVersion)")
+                if let updated = presenceStore.updatedDate {
                     Text("· \(Self.updatedAtFormatter.string(from: updated))")
                 }
             }
@@ -248,68 +311,5 @@ struct GBIFDistributionCard: View {
         .foregroundStyle(.secondary)
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
-    }
-
-    /// A faded, non-interactive world map behind the spinner — reads as "a map
-    /// is coming" rather than a flat grey box while the taxon key resolves and
-    /// the occurrence sample downloads.
-    private var loadingPlaceholder: some View {
-        ZStack {
-            Map(initialPosition: .automatic)
-                .disabled(true)
-                .allowsHitTesting(false)
-                .opacity(0.3)
-            VStack(spacing: 8) {
-                ProgressView()
-                Text("Loading distribution data…")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            .padding(12)
-            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 10))
-        }
-        .frame(height: mapHeight)
-        .frame(maxWidth: .infinity)
-        .clipped()
-    }
-
-    /// Bins raw occurrence points into H3 cells at `resolution`, counting
-    /// records per cell. Cheap enough to re-run on every resolution change —
-    /// occurrence samples here are at most a few thousand points, and
-    /// `latLngToCell` is an O(1) C call per point.
-    private static func bin(_ points: [GBIFService.GBIFOccurrencePoint],
-                            at resolution: H3Cell.Resolution) -> [H3BinnedCell] {
-        var counts: [H3Cell: Int] = [:]
-        for point in points {
-            let latLng = H3LatLng(latitudeDegs: point.lat, longitudeDegs: point.lon)
-            guard let cell = try? latLng.cell(at: resolution) else { continue }
-            counts[cell, default: 0] += 1
-        }
-        return counts.map { H3BinnedCell(cell: $0.key, count: $0.value) }
-    }
-
-    /// Maps the map's current latitude span (degrees) to an H3 resolution —
-    /// coarser hexagons zoomed out (world/continent scale), finer ones zoomed
-    /// in, so the grid always reads as a sensible density of cells rather
-    /// than either a handful of huge hexagons or thousands of invisible ones.
-    /// Thresholds are chosen against H3's average hexagon edge length per
-    /// resolution (res1 ≈ 418 km, res2 ≈ 158 km, res3 ≈ 60 km, res4 ≈ 23 km,
-    /// res5 ≈ 8.5 km).
-    private static func resolution(forSpanDegrees latitudeDelta: Double) -> H3Cell.Resolution {
-        switch latitudeDelta {
-        case ..<3:   return .res5
-        case ..<10:  return .res4
-        case ..<30:  return .res3
-        case ..<80:  return .res2
-        default:     return .res1
-        }
-    }
-
-    private func density(for bin: H3BinnedCell) -> Double {
-        min(1.0, sqrt(Double(bin.count) / Self.densityReferenceCount))
-    }
-
-    private func opacity(for bin: H3BinnedCell) -> Double {
-        0.35 + 0.45 * density(for: bin)
     }
 }

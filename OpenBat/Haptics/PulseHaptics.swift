@@ -55,6 +55,7 @@
 import CoreHaptics
 import Foundation
 import Observation
+import UIKit   // UIApplication.didBecomeActiveNotification — see `activate()`
 
 @MainActor
 @Observable
@@ -287,17 +288,75 @@ final class PulseHaptics {
         buzzHangover = v(Key.buzzHangover, Self.defaultBuzzHangover)
         minTapInterval = v(Key.minTapInterval, Self.defaultMinTapInterval)
 
-        NotificationCenter.default.addObserver(
+        // NOTHING with a cost or a side effect here — no observers, no engine.
+        // This type is built as a SwiftUI `@State` default expression, which
+        // SwiftUI may evaluate any number of times per view identity, keeping
+        // the first result and discarding the rest. Registering observers here
+        // leaked one per evaluation (the notification center retains the block
+        // itself, so they outlive the object that made them), and starting a
+        // CHHapticEngine here started one per evaluation too — several engines
+        // contending for one actuator, all but one of them owned by an object
+        // already thrown away. Setup lives in `activate()` now, called once
+        // from the owning view. This is the same rule, and the same failure,
+        // AudioEngineController documents — see Context.md §6.
+    }
+
+    private var isActivated = false
+
+    /// Registers the power-state observer and starts the engine if the feature
+    /// is on. Call once, from the owning view's `.onAppear`/`.task` — never from
+    /// an initializer, for the reason `init` gives. Idempotent.
+    func activate() {
+        guard !isActivated else { return }
+        isActivated = true
+
+        cleanup.tokens.append(NotificationCenter.default.addObserver(
             forName: .NSProcessInfoPowerStateDidChange, object: nil, queue: .main
         ) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
                 self.isLowPowerMode = ProcessInfo.processInfo.isLowPowerModeEnabled
+                // Leaving Low Power Mode does not restart Core Haptics by
+                // itself: the engine was stopped (or refused to start) while it
+                // was on, and without this the feature stayed dead for the rest
+                // of the run even though `unavailableReason` had gone back to
+                // nil — the settings screen said it was working and it was not.
+                if !self.isLowPowerMode, self.isEnabled { self.startEngine() }
             }
-        }
+        })
+
+        // iOS stops an app's haptic engine when the app is backgrounded, and
+        // `stoppedHandler` is not guaranteed to have run by the time the first
+        // pulse of the next pass arrives. Restarting on foreground is cheap
+        // (`startEngine` returns immediately when an engine already exists) and
+        // removes a whole class of "it stopped buzzing at some point tonight".
+        cleanup.tokens.append(NotificationCenter.default.addObserver(
+            forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.isEnabled else { return }
+                self.startEngine()
+            }
+        })
 
         if isEnabled { startEngine() }
     }
+
+    /// Observer tokens, parked in a separate object for the same reason
+    /// `AudioEngineController.Cleanup` exists: `deinit` on a `@MainActor` class
+    /// is nonisolated and cannot touch this object's isolated stored properties,
+    /// and the notification center retains a block-based observer until it is
+    /// explicitly removed.
+    private final class Cleanup: @unchecked Sendable {
+        var tokens: [any NSObjectProtocol] = []
+        deinit {
+            let tokens = self.tokens
+            DispatchQueue.main.async {
+                tokens.forEach { NotificationCenter.default.removeObserver($0) }
+            }
+        }
+    }
+    private let cleanup = Cleanup()
 
     // MARK: Engine lifecycle
 

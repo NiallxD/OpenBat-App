@@ -6,7 +6,23 @@
 //  Revert can put it all back. One flat struct rather than per-tab snapshots
 //  is deliberate — a knob added to a tab and not added here fails silently
 //  under Revert, so there is exactly one place to remember it. See
-//  Context.md §13. Plain value type, not `@Observable`; no threading contract
+//  Context.md §13.
+//
+//  ⚠️ That design did NOT hold on its own. An audit on 2026-08-15 found EIGHT
+//  knobs the overlay exposes and this struct never captured: all five Slow
+//  Replay sliders, the output routing picker, the trigger-mode picker and the
+//  palette picker. Revert silently left every one of them where the user had
+//  dragged it, and because the replay sliders also commit to UserDefaults, a
+//  Revert the user believed had worked had in fact changed persisted settings
+//  for good. "One place to remember it" is only a convention; nothing enforces
+//  it. The check is mechanical, so do it rather than trusting the comment:
+//
+//      grep -c 'onLive:' Tuning/LiveTuningTabs.swift   # every slider
+//      grep -n  'Picker(' Tuning/LiveTuningTabs.swift  # every picker
+//
+//  and confirm each one has a field here, in `capture`, and in `restore`.
+//  Pickers are what slipped through last time — a sweep that only looks for
+//  sliders will miss them again. Plain value type, not `@Observable`; no threading contract
 //  of its own, since `capture`/`restore` both run on the main actor via the
 //  main-actor-isolated objects they read and write.
 //
@@ -46,15 +62,34 @@ struct LiveTuningSnapshot {
     var pulseNoiseFloor: Float
     var spectrogramNoiseFloor: Float
 
+    // Slow replay (D240x snippet expansion). Unlike every other group here these
+    // have a PERSISTED counterpart as well as a live one: the tab's sliders write
+    // the processor on drag and `SnippetExpansionSettings` (→ UserDefaults) on
+    // release. So Revert has to put both back, or a revert the user believes
+    // worked leaves the persisted value permanently changed. These were missing
+    // from this struct entirely until 2026-08-15 — see the type doc.
+    var snippetExpansion: Double
+    var snippetMemorySeconds: Double
+    var snippetHissReductionDB: Double
+    var snippetFadeMS: Double
+    var snippetGain: Float
+    var snippetRouting: SnippetOutputRouting
+
+    // Pulse detector, continued: which trigger the detector is using. A picker,
+    // not a slider, which is how it escaped the original sweep.
+    var triggerMode: PulseDetector.TriggerMode
+
     // Display
     var bandLow: Double
     var bandHigh: Double
     var timeWindowSeconds: Double
+    var displayPalette: Palette
 
     /// Reads the current value of every tunable from its live source of truth.
     static func capture(audio: AudioEngineController,
                         pulse: PulseDetector,
                         haptics: PulseHaptics,
+                        snippet: SnippetExpansionSettings,
                         bandLow: Double,
                         bandHigh: Double,
                         timeWindowSeconds: Double) -> LiveTuningSnapshot {
@@ -80,9 +115,19 @@ struct LiveTuningSnapshot {
             displayWindowMs: pulse.displayWindowMs,
             pulseNoiseFloor: pulse.pulseNoiseFloor,
             spectrogramNoiseFloor: pulse.spectrogramNoiseFloor,
+            // Read from the SETTINGS object, not the processor: settings is what
+            // survives a restart, and the two agree except mid-drag.
+            snippetExpansion: snippet.expansion,
+            snippetMemorySeconds: snippet.memorySeconds,
+            snippetHissReductionDB: snippet.hissReductionDB,
+            snippetFadeMS: snippet.fadeMS,
+            snippetGain: snippet.gain,
+            snippetRouting: snippet.routing,
+            triggerMode: pulse.triggerMode,
             bandLow: bandLow,
             bandHigh: bandHigh,
-            timeWindowSeconds: timeWindowSeconds
+            timeWindowSeconds: timeWindowSeconds,
+            displayPalette: pulse.displayPalette
         )
     }
 
@@ -92,6 +137,7 @@ struct LiveTuningSnapshot {
     func restore(audio: AudioEngineController,
                  pulse: PulseDetector,
                  haptics: PulseHaptics,
+                 snippet: SnippetExpansionSettings,
                  bandLow: inout Double,
                  bandHigh: inout Double,
                  timeWindowSeconds: inout Double) {
@@ -119,6 +165,22 @@ struct LiveTuningSnapshot {
         pulse.displayWindowMs = displayWindowMs
         pulse.pulseNoiseFloor = pulseNoiseFloor
         pulse.spectrogramNoiseFloor = spectrogramNoiseFloor
+        pulse.triggerMode = triggerMode
+        pulse.displayPalette = displayPalette
+
+        // Both halves, in this order: the settings object persists the value, and
+        // `apply(to:)` pushes the whole set into the live processor so the change
+        // is audible on the next replay rather than after a restart.
+        snippet.expansion = snippetExpansion
+        snippet.memorySeconds = snippetMemorySeconds
+        snippet.hissReductionDB = snippetHissReductionDB
+        snippet.fadeMS = snippetFadeMS
+        snippet.gain = snippetGain
+        snippet.apply(to: audio.snippetExpansion)
+        // Routing lives in an atomic on the controller, not on the processor, so
+        // `apply(to:)` doesn't carry it — it needs its own write.
+        snippet.routing = snippetRouting
+        audio.setSnippetRouting(snippetRouting)
 
         bandLow = self.bandLow
         bandHigh = self.bandHigh

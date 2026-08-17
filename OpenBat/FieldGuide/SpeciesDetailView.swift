@@ -16,7 +16,7 @@ import UIKit
 struct SpeciesDetailView: View {
     let species: GuideSpecies
     let store: SpeciesGuideStore
-    let rangeStore: SpeciesRangeStore
+    let presenceStore: SpeciesPresenceStore
 
     @State private var showContributors = false
     @State private var photo: WikipediaSpeciesImageService.Photo?
@@ -104,7 +104,7 @@ struct SpeciesDetailView: View {
                         }
                     }
                     GuideCard(title: "Distribution") {
-                        GBIFDistributionCard(species: species, rangeStore: rangeStore, mapHeight: 200)
+                        GBIFDistributionCard(species: species, presenceStore: presenceStore, mapHeight: 200)
                             .clipShape(RoundedRectangle(cornerRadius: 12))
                     }
                     if species.measurements != nil || species.morphology != nil {
@@ -742,16 +742,26 @@ private struct SizeComparisonCard: View {
 
 /// IUCN Red List status pill — shown in the page header (when present) and
 /// again in the Conservation Status card, below the free-text local status.
+/// The short IUCN code, colour-coded, or nothing at all.
+///
+/// Was `Text(status)` in an orange capsule — showing the guide's raw status
+/// string. That reads fine for "Least Concern" and badly for the entries that
+/// carry a qualifier, one of which runs to a full sentence about federally
+/// endangered US subspecies and would have set that whole sentence in a badge.
+/// The long form belongs on the Conservation card below, where it already is;
+/// the header wants the two-letter code.
 private struct IUCNBadge: View {
     let status: String
 
     var body: some View {
-        Text(status)
-            .font(.caption.weight(.semibold))
-            .padding(.horizontal, 10)
-            .padding(.vertical, 4)
-            .background(Color.orange.opacity(0.18), in: Capsule())
-            .foregroundStyle(.orange)
+        if let badge = IUCNStatusStyle.forStatus(status) {
+            Text(badge.text)
+                .font(.caption.weight(.semibold))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .background(badge.color.opacity(0.18), in: Capsule())
+                .foregroundStyle(badge.color)
+        }
     }
 }
 

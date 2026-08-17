@@ -90,7 +90,7 @@ struct BatDetectorAttributes: ActivityAttributes {
         ///
         /// Deliberately a *separate* clock from `isIDStale`, mirroring the split in the
         /// app: `PulseStatValues` ages the last-pulse stats off `lastDetectionDate` while
-        /// `SpeciesStatCellContent` ages the ID off `lastPassDate`. Collapsing them would
+        /// the species feed ages each ID off its own pass date. Collapsing them would
         /// blank live stats during a stretch of pulses that never clear the pass
         /// confidence gates — captures are happening, there's just no ID to show.
         var isPulseStale: Bool

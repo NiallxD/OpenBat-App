@@ -66,7 +66,6 @@ struct ContentView: View {
     // how the reference is held, so this still updates the view.
     private let consent = ConsentStore.shared
     @Environment(\.scenePhase) private var scenePhase
-    @State private var showStartPrompt = false
     @State private var showMicDeniedAlert = false
     // Easter eggs on the footer version number, both on the same tap counter:
     // 10 taps within the rolling window sends a swarm of bats across the screen
@@ -114,7 +113,16 @@ struct ContentView: View {
     /// pause the render loop and the processor, which is the one thing the
     /// overlay exists to avoid.
     @State private var showTuningOverlay = false
-    @State private var landscapePulseVisible = true
+    /// The vertical transport menu hanging off the session button — record,
+    /// listen mode, end session. Only openable while a session is running; see
+    /// `handleSessionButtonTap`. Deliberately absent from `menuIsOpen`: it is
+    /// used mid-session, with a bat overhead, and pausing the render loop
+    /// underneath it would stop the very thing it is controlling.
+    @State private var showTransportMenu = false
+    /// Where the system actually drew the session button. Everything anchored
+    /// to that button reads it — see `SessionButtonLocator` for why none of
+    /// this can be a constant.
+    @State private var sessionButtonLocator = SessionButtonLocator()
     @State private var timeWindowSeconds: Double = 0.5
     @AppStorage("display.bandLow") private var bandLow = 0.0
     @AppStorage("display.bandHigh") private var bandHigh = 1.0
@@ -132,8 +140,6 @@ struct ContentView: View {
     @State private var showNotRecordingNudge = false
     @State private var notRecordingNudgeShown = false
     @AppStorage("nudge.notRecording.suppressed") private var suppressNotRecordingNudge = false
-    // .compact vertical size class == iPhone landscape → use the wide layout.
-    @Environment(\.verticalSizeClass) private var vSizeClass
     @AppStorage("recording.autoRecordOnSessionStart") private var autoRecordOnSessionStart = true
     // Toggled from each panel's own config popover (bandButton / pulseViewButton).
     @AppStorage("display.spectrogramShowsSpeciesID") private var spectrogramShowsSpeciesID = false
@@ -141,25 +147,27 @@ struct ContentView: View {
     /// Independent of the pulse view's own toggle (`display.pulseLogFrequency`,
     /// declared in PulseSettingsView) — set from the spectrogram's frequency-band popover.
     @AppStorage("display.spectrogramLogFrequency") private var spectrogramLogFrequency = false
+    /// Hides the readouts and controls that only mean something to someone who
+    /// already reads calls — see `SimplifiedView` for the list and for why some
+    /// of what it changes is an override and some a one-time default.
+    @AppStorage(SimplifiedView.key) private var simplifiedMode = true
+    @AppStorage(SimplifiedView.defaultsAppliedKey) private var simplifiedDefaultsApplied = false
 
-    /// Top-level sections, switched from the leading toolbar menu (replaces the old
-    /// bottom tab bar). The audio pipeline keeps running across switches.
-    private enum AppSection: String, CaseIterable {
-        case detector  = "Detector"
-        case sessions  = "Sessions"
-        case playback  = "Playback"
-        case species   = "Species"
-        var icon: String {
-            switch self {
-            case .detector:  "waveform"
-            case .sessions:  "square.stack.3d.up"
-            case .playback:  "play.circle"
-            case .species:   "book.closed"
-            }
-        }
+    /// Which view each panel shows, once simplified view has had its say. In
+    /// simplified view the toggles that would change these are hidden, so the
+    /// stored values are deliberately ignored rather than written over — the
+    /// user's own choices are still there when they switch back.
+    private var effectivePulseShowsSpeciesID: Bool {
+        simplifiedMode ? true : pulseShowsSpeciesID
     }
+    private var effectiveSpectrogramShowsSpeciesID: Bool {
+        simplifiedMode ? false : spectrogramShowsSpeciesID
+    }
+
     // "-startSection Species" launch argument jumps straight to a section —
     // lets automated runs exercise non-default sections without UI scripting.
+    // `AppSection` itself now lives in AppTabBar.swift, with the bar that
+    // presents it.
     @State private var section: AppSection =
         UserDefaults.standard.string(forKey: "startSection").flatMap(AppSection.init) ?? .detector
     /// Field-guide data (bundled → cached → GitHub). `init()` itself is cheap —
@@ -172,61 +180,35 @@ struct ContentView: View {
     /// `JSONDecoder` pass could land on the main thread at any of those points,
     /// not just once at launch.
     @State private var speciesGuide = SpeciesGuideStore()
-    @State private var speciesRange = SpeciesRangeStore()
+    @State private var speciesPresence = SpeciesPresenceStore()
 
     var body: some View {
-        NavigationStack {
-            sectionContent
-                // Keyed on the session start, so it re-arms for each new listening
-                // run and cancels automatically if the user stops before 60 s.
-                // A sleep beats polling here: there is exactly one deadline.
-                .task(id: feedSessionStart) {
-                    notRecordingNudgeShown = false
-                    guard feedSessionStart != nil else { return }
-                    try? await Task.sleep(for: .seconds(60))
-                    guard !Task.isCancelled else { return }
-                    checkNotRecordingNudge()
-                }
-                .navigationTitle(section.rawValue)
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .topBarLeading) { sectionMenu }
-                    if section == .detector {
-                        ToolbarItem(placement: .topBarTrailing) { optionsMenu }
-                    }
-                }
-                // Pin the nav bar to a fully OPAQUE background instead of Liquid
-                // Glass's default adaptive-on-scroll material. `.toolbarBackground(
-                // .visible, for:)` alone (the boolean visibility API) only forces the
-                // system's glass material to always render — that material is still
-                // translucent, so the leading/trailing toolbar buttons kept sampling
-                // through it, and any perpetually-animating content sitting near the
-                // bar (e.g. MicStatusPill's repeatForever breathe/flash in statsStrip,
-                // which sits right under the bar in portraitLayout) still shimmered
-                // through the glass. An explicit solid Color background (the
-                // ShapeStyle overload) blocks that sampling outright. Same root cause
-                // the tour dim overlay hit below.
-                .toolbarBackground(Color.black, for: .navigationBar)
-                // Hidden during the tour: even with a fixed toolbar background, the
-                // dim overlay's cutout ring sits directly under the bar and its own
-                // animation still reads as motion to the buttons. They're not usable
-                // mid-tour anyway; the bar returns when the tour ends.
-                //
-                // The reveal must NOT be animated: finish() flips tourActive
-                // inside a 0.25 s withAnimation so the dim overlay can fade out,
-                // and if the toolbar's .hidden→.visible rode along in that same
-                // transaction, the buttons would fade back in while the busy dim
-                // backdrop was still animating underneath them — re-triggering the
-                // same pulsing, except this time it got stuck oscillating instead of
-                // settling. Snapping the toolbar in instantly (no shared animation
-                // with the dim fade) keeps the buttons still while any backdrop
-                // motion is happening.
-                .toolbar(tourActive ? .hidden : .visible, for: .navigationBar)
-                .animation(nil, value: tourActive)
+        tabHost
+            // Keyed on the session start, so it re-arms for each new listening
+            // run and cancels automatically if the user stops before 60 s.
+            // A sleep beats polling here: there is exactly one deadline.
+            .task(id: feedSessionStart) {
+                notRecordingNudgeShown = false
+                guard feedSessionStart != nil else { return }
+                try? await Task.sleep(for: .seconds(60))
+                guard !Task.isCancelled else { return }
+                checkNotRecordingNudge()
+            }
+            // Finds the system's session button so the glow and the tap
+            // catcher can be placed on it rather than near it.
+            .locatesSessionButton(sessionButtonLocator)
+            // Swallows the tap before the system bar can act on it — see
+            // `sessionButtonTapCatcher`. Above the bar, below the menu.
+            .overlay(alignment: transportMenuAlignment) { sessionButtonTapCatcher }
+            // The transport menu, drawn over the bar rather than inside it —
+            // see `transportMenuOverlay` for why it can't be a popover.
+            .overlay(alignment: transportMenuAlignment) { transportMenuOverlay }
+            .overlay(alignment: transportMenuAlignment) { notRecordingNudgeOverlay }
                 .sheet(isPresented: $showDiagnostics) {
                     DiagnosticsView(audio: audio, recorder: recorder, classStore: classStore,
                                     onStartDemo: startDemo, onEndDemo: endDemo,
-                                    onOpenTuning: { showTuningOverlay = true })
+                                    onOpenTuning: { showTuningOverlay = true },
+                                    onDumpSettings: dumpSettings)
                 }
                 .sheet(isPresented: $showHelp) {
                     SafariView(url: PrivacyLinks.helpURL)
@@ -296,7 +278,6 @@ struct ContentView: View {
                 }) {
                     AppInfoView(startTour: { tourPending = true })
                 }
-        }
         // Collects the `.tourTarget` anchors from the controls below and, while the
         // tour is active, resolves them to on-screen rects for the spotlight overlay.
         .overlayPreferenceValue(TourTargetKey.self) { anchors in
@@ -304,7 +285,7 @@ struct ContentView: View {
                 if tourActive {
                     TourOverlay(targets: anchors.mapValues { proxy[$0] },
                                 index: $tourIndex,
-                                steps: TourScript.steps,
+                                steps: TourScript.steps(simplified: simplifiedMode),
                                 finish: {
                                     withAnimation(.easeInOut(duration: 0.25)) { tourActive = false }
                                     if tourWillPromptStart {
@@ -328,7 +309,7 @@ struct ContentView: View {
                                                suggested.id != autoIDSettings.activeModelID {
                                                 suggestedModelToOffer = suggested
                                             } else {
-                                                showStartPrompt = true
+                                                startDetecting()
                                             }
                                         }
                                     }
@@ -351,11 +332,22 @@ struct ContentView: View {
         // happen in the `@State` initializer), then checks GitHub once per
         // launch for a newer dataVersion. Offline → the remote check no-ops.
         .task { await speciesGuide.loadLocal(); await speciesGuide.refreshFromRemote() }
-        // Same pattern for the committed GBIF range snapshot — no bundled
-        // fallback here, so offline-with-no-cache just leaves
-        // `speciesRange.ranges` empty and GBIFDistributionCard falls back to
-        // its live per-species GBIF fetch.
-        .task { await speciesRange.loadLocal(); await speciesRange.refreshFromRemote() }
+        // Same pattern for the species presence grid, except this one DOES ship
+        // a bundled copy: it decides which species the classifier considers
+        // plausible, so a cold offline install must not be left with no opinion.
+        // The remote check only ever upgrades it.
+        .task {
+            await speciesPresence.loadLocal()
+            // Derive priors as soon as there is data to derive them from. The
+            // location fix and this load race, and `refreshPriors` deliberately
+            // does nothing (and records nothing) when the grid hasn't loaded —
+            // so whichever finishes second has to be the one that triggers it,
+            // or a launch where the fix wins leaves every species unresolved.
+            if let coordinate = location.currentCoordinate {
+                await autoIDSettings.refreshPriors(at: coordinate, using: speciesPresence)
+            }
+            await speciesPresence.refreshFromRemote()
+        }
         // Classification history: three JSON files, decoded off the main thread.
         // Same reason as the two above — see `ClassificationStore.load()`.
         .task { await classStore.load() }
@@ -367,7 +359,14 @@ struct ContentView: View {
             // there). This is where they actually populate, exactly once.
             // `activeModelID` and the pass gates read further down depend on it.
             autoIDSettings.loadPersisted()
+            // Before the first frame settles, so a fresh install in simplified
+            // view opens already showing the 15–90 kHz band rather than
+            // visibly snapping to it.
+            applySimplifiedDefaultsIfNeeded()
             audio.activate()
+            // Same contract as `audio.activate()` above, and for the same
+            // reason — see PulseHaptics.init.
+            haptics.activate()
 
             RecordingUploader.shared.activate()
             RecordingUploader.shared.classStore = classStore
@@ -477,12 +476,6 @@ struct ContentView: View {
                 }
             }
         }
-        .sheet(isPresented: $showStartPrompt) {
-            StartDetectingSheet(
-                onNewSession: { startDetecting(newSession: true) },
-                onJustListening: { startDetecting(newSession: false) }
-            )
-        }
         // Shown once, right after an onboarding-triggered tour finishes, if the
         // user's location suggests a model that isn't already active — see
         // `finish` below. Standalone: dismissing it (either "Use" or "Not Now")
@@ -516,6 +509,7 @@ struct ContentView: View {
         .onChange(of: menuIsOpen) { _, open in
             processor.suspended = open
         }
+        .onChange(of: simplifiedMode) { _, _ in applySimplifiedDefaultsIfNeeded() }
         .onChange(of: bandLow)  { _, _ in applyBand() }
         .onChange(of: bandHigh) { _, _ in applyBand() }
         .onChange(of: autoIDSettings.activeModelID) { _, id in
@@ -534,7 +528,28 @@ struct ContentView: View {
                 // audio stopped (user stop, interruption, listen-mode restart, etc.).
                 pulseDetector.finalizePass()
                 recorder.audioStopped()
-                if recorder.isArmed { recorder.setArmed(false) }
+                // Disarm only when the *session* is over, for the reason spelled
+                // out below. Keyed to `running`, this fired on every listening
+                // mode change too — the engine restart looked exactly like a
+                // stop — so cycling the mode mid-pass silently stopped
+                // recording, with nothing but `startDetecting` able to re-arm
+                // it. Armed is an intent about the session, not a fact about
+                // the engine, and it should survive an interruption the session
+                // itself survives.
+                if !audio.isActive, recorder.isArmed { recorder.setArmed(false) }
+                // The menu only makes sense over a live session, and something
+                // that ends one without going through the End button would
+                // otherwise leave it open over nothing.
+                //
+                // `isActive`, not the `running` flag this block is keyed to.
+                // Cycling listening mode across "off" stops and restarts the
+                // engine, so `isRunning` dips false mid-session and this used to
+                // shut the menu on every pass through the cycle — the one
+                // control in it you are *meant* to tap repeatedly. The session
+                // is what the menu belongs to, and `isActive` is the flag that
+                // tracks the session rather than the engine. Same distinction,
+                // same reason, as `handleSessionButtonTap`.
+                if !audio.isActive { showTransportMenu = false }
                 // Nothing to drain once the engine is down, and a timer left running in
                 // the background is pure battery cost. Covers the interruption path too,
                 // which deliberately doesn't go through stopDetecting().
@@ -543,16 +558,21 @@ struct ContentView: View {
                 // by stopDetecting(), which is only called on a deliberate user stop.
                 // This preserves the session across transient audio interruptions
                 // (phone call, Siri) and listen-mode engine restarts.
+            } else {
+                // The session button lives in the tab bar, so a run can now be
+                // started from any tab — including one where nothing is drawing
+                // and the pump has to take the columns.
+                updateColumnDrainOwner()
             }
         }
         // CLLocationCoordinate2D isn't Equatable; key onChange off a derived string.
         .onChange(of: location.currentCoordinate.map { "\($0.latitude),\($0.longitude)" }) { _, _ in
             recorder.setCoordinate(location.currentCoordinate.map { ($0.latitude, $0.longitude) })
             // No-ops unless this is the first fix ever or the user has moved far
-            // enough since the last one — see refreshPriorsFromGBIFIfNeeded's doc
-            // comment. Safe to call on every fix rather than gating the call site.
+            // enough since the last one — see refreshPriors' doc comment. Safe to
+            // call on every fix rather than gating the call site.
             if let coordinate = location.currentCoordinate {
-                Task { await autoIDSettings.refreshPriorsFromGBIFIfNeeded(coordinate: coordinate) }
+                Task { await autoIDSettings.refreshPriors(at: coordinate, using: speciesPresence) }
             }
         }
         // ContentView.onAppear only fires once per process lifetime (SwiftUI doesn't
@@ -563,16 +583,22 @@ struct ContentView: View {
         // mean "every time the app opens", not just the very first cold launch.
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { location.requestRegionFix() }
-            // Hand draining between the Metal render loop and the background pump. Exactly
-            // one of them owns it: `draw(in:)` only runs while active, the pump only while
-            // not. Without the pump, backgrounding (or just locking the screen) silently
-            // stops pulse detection even though audio keeps flowing — see
-            // BackgroundDetectionPump for the full reasoning.
-            if phase == .active {
-                detectionPump.stop()
-            } else if audio.isRunning {
-                detectionPump.start(processor: processor, detector: pulseDetector)
-            }
+            updateColumnDrainOwner()
+        }
+        // Switching tabs is now a second way for the render loop to stop
+        // drawing — see `updateColumnDrainOwner`.
+        .onChange(of: section) { _, _ in updateColumnDrainOwner() }
+        // Opening the transport menu is how the tour shows the Record and Listen
+        // controls, which otherwise only exist while it's open. Closed again for
+        // every other step, so the menu isn't sitting over the panes the earlier
+        // steps are pointing at.
+        .onChange(of: tourIndex) { _, index in
+            guard tourActive else { return }
+            let steps = TourScript.steps(simplified: simplifiedMode)
+            showTransportMenu = steps.indices.contains(index) && steps[index].opensTransportMenu
+        }
+        .onChange(of: tourActive) { _, active in
+            if !active { showTransportMenu = false }
         }
         .onDisappear {
             UIApplication.shared.isIdleTimerDisabled = false
@@ -591,7 +617,7 @@ struct ContentView: View {
     // MARK: Adaptive layout
 
     /// Wraps whichever concrete layout applies so the tuning overlay floats over
-    /// all of them — portrait, landscape and both iPad variants — from one place.
+    /// both of them — portrait and iPad landscape — from one place.
     @ViewBuilder private var detectorLayout: some View {
         ZStack {
             detectorLayoutBody
@@ -612,10 +638,14 @@ struct ContentView: View {
         }
     }
 
+    /// iPhone is portrait-only now (the supported orientations are set per-idiom
+    /// in the build settings), so the only landscape left to serve is the iPad's
+    /// — which has the width for its own two-panel arrangement. The old
+    /// iPhone-landscape layout and its whole family of `landscape*` panels are
+    /// gone: they cost a bottom bar the vertical space it needed, and they had
+    /// never once been run against real bats.
     @ViewBuilder private var detectorLayoutBody: some View {
-        if vSizeClass == .compact {
-            landscapeLayout
-        } else if UIDevice.current.userInterfaceIdiom == .pad {
+        if UIDevice.current.userInterfaceIdiom == .pad {
             // iPad landscape gets its own dedicated 2-panel layout (below); iPad
             // portrait falls through to the same stacked layout iPhone uses.
             GeometryReader { geo in
@@ -635,13 +665,14 @@ struct ContentView: View {
     /// where the pulse-view card is split 50/50 with a permanently-visible Species ID
     /// list alongside it, instead of the pulse card's own species-ID toggle.
     private var ipadLandscapeLayout: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 10) {
+            // Same arrangement as portrait — see its comment for why the
+            // GeometryReader sits below the content-sized stats card.
+            statsBlock
             GeometryReader { geo in
                 let spacing: CGFloat = 10
-                let statsHeight: CGFloat = 126
-                let flex = max(120, geo.size.height - statsHeight - spacing * 2)
+                let flex = max(120, geo.size.height - spacing)
                 VStack(spacing: spacing) {
-                    statsBlock.frame(height: statsHeight)
                     HStack(spacing: spacing) {
                         pulseBlock
                         speciesListBlock
@@ -650,7 +681,6 @@ struct ContentView: View {
                     spectrogramBlock.frame(height: flex * 0.58)
                 }
             }
-            controlBar
             appFooter
         }
         .padding(.horizontal)
@@ -666,64 +696,530 @@ struct ContentView: View {
                 .padding(.horizontal, 8)
                 .padding(.top, 8)
                 .padding(.bottom, 4)
-            SpeciesFeedView(store: classStore, activeSessionID: classStore.activeSessionID, sessionStart: feedSessionStart, autoIDActive: autoIDSettings.activeModelID != nil)
+            SpeciesFeedView(store: classStore, guide: speciesGuide, presenceStore: speciesPresence, activeSessionID: classStore.activeSessionID, sessionStart: feedSessionStart, autoIDActive: autoIDSettings.activeModelID != nil)
         }
         .panelCard()
     }
 
-    /// The active section's content. The audio pipeline lives on the enclosing
-    /// NavigationStack, so switching to Sessions doesn't stop detection.
-    @ViewBuilder private var sectionContent: some View {
-        switch section {
-        case .detector:  detectorLayout
-        case .sessions:  SessionsView(store: classStore, settings: autoIDSettings, consent: consent)
-        case .playback:  PlaybackListView(store: classStore, micCalSettings: micCalSettings, consent: consent)
-        case .species:   SpeciesExplorerView(store: speciesGuide, rangeStore: speciesRange, userCoordinate: location.currentCoordinate)
+    // MARK: The bar
+
+    /// Real system tab bar on iOS 26, hand-built floating one below it. See
+    /// AppTabBar.swift for why both exist and what each gives up.
+    @ViewBuilder private var tabHost: some View {
+        if #available(iOS 26.0, *) {
+            systemTabs
+        } else {
+            legacyTabs
         }
     }
 
-    /// Leading-toolbar switcher between Detector and Sessions (replaces the bottom tabs).
+    /// Each section's screen. Each owns its own `NavigationStack` — the
+    /// section views already set their own titles and toolbar items and assume
+    /// they are inside one, and a tab bar wants a stack per tab so a push in
+    /// Sessions doesn't unwind when you visit Species.
+    @ViewBuilder private func sectionScreen(_ s: AppSection) -> some View {
+        NavigationStack {
+            Group {
+                switch s {
+                case .detector: detectorScreen
+                case .sessions: SessionsView(store: classStore, settings: autoIDSettings, consent: consent,
+                                            micCalSettings: micCalSettings)
+                case .species:  SpeciesExplorerView(store: speciesGuide, presenceStore: speciesPresence, userCoordinate: location.currentCoordinate)
+                }
+            }
+            // Reserves the height of the hand-built bar, so the last row of a
+            // list isn't sitting underneath it. Zero from iOS 26, where the real
+            // tab bar contributes its own height to the safe area and adding
+            // this on top would reserve the space twice — see
+            // `SessionButtonMetrics.clearance`. Applied inside the stack, not
+            // around it: a `NavigationStack` does not forward a safe-area inset
+            // applied outside it down to the content within.
+            .safeAreaInset(edge: .bottom) {
+                Color.clear.frame(height: SessionButtonMetrics.clearance)
+            }
+        }
+    }
+
+    /// The detector, plus the nav-bar chrome that used to be written inline on
+    /// the app's single shared stack.
+    private var detectorScreen: some View {
+        detectorLayout
+            .navigationTitle("Detector")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                // The slot the logo menu used to fill, before the bottom bar
+                // took its job. A sun clock earns a permanent place there:
+                // bats are busiest in the hours after sunset and before
+                // sunrise, and this says which of those you are standing in.
+                ToolbarItem(placement: .topBarLeading) {
+                    SunWindowPill(coordinate: location.currentCoordinate)
+                }
+                ToolbarItem(placement: .topBarTrailing) { optionsMenu }
+            }
+            // Pin the nav bar to a fully OPAQUE background instead of Liquid
+            // Glass's default adaptive-on-scroll material. `.toolbarBackground(
+            // .visible, for:)` alone (the boolean visibility API) only forces the
+            // system's glass material to always render — that material is still
+            // translucent, so the toolbar buttons kept sampling through it, and
+            // any perpetually-animating content sitting near the bar (e.g.
+            // MicStatusPill's repeatForever breathe/flash in statsStrip, which
+            // sits right under the bar in portraitLayout) still shimmered through
+            // the glass. An explicit solid Color background (the ShapeStyle
+            // overload) blocks that sampling outright. Same root cause the tour
+            // dim overlay hit.
+            .toolbarBackground(Color.black, for: .navigationBar)
+            // Hidden during the tour: even with a fixed toolbar background, the
+            // dim overlay's cutout ring sits directly under the bar and its own
+            // animation still reads as motion to the buttons. They're not usable
+            // mid-tour anyway; the bar returns when the tour ends.
+            //
+            // The reveal must NOT be animated: finish() flips tourActive
+            // inside a 0.25 s withAnimation so the dim overlay can fade out,
+            // and if the toolbar's .hidden→.visible rode along in that same
+            // transaction, the buttons would fade back in while the busy dim
+            // backdrop was still animating underneath them — re-triggering the
+            // same pulsing, except this time it got stuck oscillating instead of
+            // settling. Snapping the toolbar in instantly (no shared animation
+            // with the dim fade) keeps the buttons still while any backdrop
+            // motion is happening.
+            .toolbar(tourActive ? .hidden : .visible, for: .navigationBar)
+            .animation(nil, value: tourActive)
+    }
+
+    /// The real system tab bar.
     ///
-    /// Same iOS 26 FixedMenu workaround as `optionsMenu`/`paletteButton`: without the
-    /// `GlassEffectContainer` + `.glassEffect(.identity)` wrapping, Liquid Glass hides
-    /// this Menu's label for the whole time it's open and then visibly fades/pulses it
-    /// back in seconds after dismissal.
-    private var sectionMenu: some View {
-        Group {
-            if #available(iOS 26.0, *) {
-                GlassEffectContainer {
-                    sectionMenuContent {
-                        Image(systemName: section.icon).glassEffect(.identity)
-                    }
-                    .clipped()
+    /// The session button is the reason this looked impossible: the design needs
+    /// a control detached to the trailing side of the bar, which is not something
+    /// you can add to a `TabView`. But it is something the system already does —
+    /// `Tab(role: .search)` is rendered as its own separate circle beside the bar
+    /// rather than as another item inside it. That is the App Store's
+    /// arrangement, and it is a real tab, so the bar stays entirely the system's.
+    ///
+    /// The session button is still not a destination: selecting it is intercepted
+    /// in `tabSelection` below, so the selection never moves off the section you
+    /// were on.
+    @available(iOS 26.0, *)
+    private var systemTabs: some View {
+        TabView(selection: tabSelection) {
+            ForEach(AppSection.allCases, id: \.self) { s in
+                // A `Label` rather than `systemImage:`, because Species' glyph is
+                // drawn artwork from the asset catalog rather than a symbol. The
+                // system bar sizes and tints a `Tab` label itself, so the icon is
+                // handed over bare — no `sized(_:)` here, unlike the legacy bar.
+                Tab(value: TabSelection.section(s)) {
+                    // The recording glow rides on the *screen*, not on the tab
+                    // host, and that placement is the point: everything drawn
+                    // here is under the bar, so the bar's glass ends up over the
+                    // glow and occludes and refracts it for us. Hung off every
+                    // section rather than the detector alone, because the
+                    // session button is on every tab and so is what it says.
+                    //
+                    // The overlay is anchored to the screen's bottom edge, which
+                    // stops above the bar — the glow reaches down past it
+                    // because SwiftUI doesn't clip overlays to their parent's
+                    // bounds. See `recordingGlowOverlay` for the offsets.
+                    sectionScreen(s)
+                        .overlay(alignment: transportMenuAlignment) { recordingGlowOverlay }
+                } label: {
+                    Label { Text(s.rawValue) } icon: { s.iconImage }
                 }
-            } else {
-                sectionMenuContent { Image(systemName: section.icon) }
+            }
+            // Never actually selected, so its content is never shown — the role
+            // is being used for the *button* it produces, not for a screen.
+            // `Color.clear` rather than `EmptyView()` because a tab with no
+            // content is not a tab the system will lay out.
+            Tab(value: TabSelection.sessionControl, role: .search) {
+                Color.clear
+            } label: {
+                sessionTabLabel
             }
         }
-        // Belt-and-braces against the inherited-animation bug documented on
-        // `recordPulseAnimation`: this button has no animated state of its own (the
-        // icon swap on a section change is meant to be instant), so clearing the
-        // transaction's animation here means it can never ride along with an ambient
-        // animation set by an unrelated `withAnimation` elsewhere in the same update
-        // — which is what left it slowly throbbing during detection.
-        .transaction { $0.animation = nil }
-        .accessibilityLabel("Switch view")
     }
 
-    private func sectionMenuContent(@ViewBuilder label: () -> some View) -> some View {
-        Menu {
-            Picker("View", selection: $section) {
-                ForEach(AppSection.allCases, id: \.self) { s in
-                    Label(s.rawValue, systemImage: s.icon).tag(s)
+    /// Label for the system bar's detached circle. The system draws the glass
+    /// and the circle; this is only what goes inside it.
+    ///
+    /// The listening-ear animation the old play/stop button used can't come
+    /// along here — a `Tab`'s label is rendered by the bar, outside the normal
+    /// view tree, so a Lottie view in it is not something to rely on. The glyph
+    /// carries the state instead, which is what the VoiceOver label has always
+    /// had to do anyway.
+    private var sessionTabLabel: some View {
+        Label {
+            Text(audio.isActive ? "Session controls" : "Start session")
+        } icon: {
+            Image(uiImage: sessionGlyph)
+                .renderingMode(.original)
+                .tourTarget(.start)
+        }
+        // How `SessionButtonLocator` finds this button in the view hierarchy.
+        // Both of these are load-bearing, not decoration: the identifier is the
+        // exact match, and the label is the fallback for when the bar rebuilds
+        // the item as its own view and carries only the accessibility text
+        // across. Changing either string without changing the locator's copy
+        // leaves the glow and the tap catcher with nothing to attach to.
+        .accessibilityIdentifier(SessionButtonLocator.accessibilityIdentifier)
+    }
+
+    /// The session button's glyph, drawn into a bitmap rather than handed over
+    /// as a `systemImage`.
+    ///
+    /// **Everything SwiftUI offers for styling a `Tab` label is ignored by the
+    /// bar**, and each of these was tried and measured before this existed:
+    /// `.imageScale` and `.font(.system(size:))` do not change its size;
+    /// `.monochrome` is repainted white whatever colour it is given; a bare
+    /// glyph with no enclosing circle loses a palette override and comes back
+    /// white; and `.symbolEffect` never animates, because the bar renders the
+    /// label as a still image.
+    ///
+    /// Baking the symbol into a `UIImage` with `.alwaysOriginal` settles all of
+    /// them at once: the colour is in the pixels, so there is nothing left for
+    /// the bar to override, and the point size is ours. It is also what lets
+    /// the live state be bare waveform bars — with a `systemImage` the only way
+    /// to hold a colour was to keep a circle behind the glyph, which made the
+    /// bars small and put a disc around them.
+    /// Sized per symbol, and sized *small*, because nothing downstream will
+    /// rein this in: a baked bitmap is drawn at exactly the size it was made,
+    /// so a point size that looks reasonable in isolation lands as a glyph
+    /// filling most of the button. The reference is the system-drawn glyph
+    /// this replaced, which measured **23pt across** in a 58pt circle. These
+    /// numbers put all three marks within a couple of points of that.
+    ///
+    /// A point size is roughly the glyph's cap height, not its width, so they
+    /// are not interchangeable between symbols: the same value gives a wide
+    /// play triangle and a narrow set of waveform bars very different presence.
+    private var sessionGlyph: UIImage {
+        let pointSize: CGFloat = switch sessionSymbol {
+        case "waveform": 21
+        case "play.fill": 19
+        default: 18
+        }
+        // The waveform is drawn heavier than the others on purpose. Its bars are
+        // thin enough at this size that anti-aliasing eats their colour — at
+        // semibold they came out a muddy half-strength orange rather than the
+        // accent, measured at 45% of the intended value.
+        let weight: UIImage.SymbolWeight = sessionSymbol == "waveform" ? .bold : .semibold
+        let config = UIImage.SymbolConfiguration(pointSize: pointSize, weight: weight)
+        return UIImage(systemName: sessionSymbol, withConfiguration: config)?
+            .withTintColor(UIColor(sessionSymbolTint), renderingMode: .alwaysOriginal)
+            ?? UIImage()
+    }
+
+    /// A play triangle when idle, waveform bars while live, a cross when its
+    /// menu is open. All three are bare glyphs — no `.circle` enclosure — which
+    /// only works because `sessionGlyph` bakes the colour in.
+    private var sessionSymbol: String {
+        if showTransportMenu { return "xmark" }
+        return audio.isActive ? "waveform" : "play.fill"
+    }
+
+    /// Orange while a session runs, white when idle. Idle is deliberately the
+    /// same white as the tab glyphs beside it: nothing is happening, so the
+    /// button has nothing to shout about, and orange then means "live" and only
+    /// that.
+    ///
+    /// This was `.primary` until 2026-08-16 and rendered near-black — a
+    /// semantic colour is resolved in the *bar's* environment, not ours, and
+    /// the bar resolves it as though its glass were light, which the app's
+    /// `.preferredColorScheme(.dark)` does not reach into. It no longer matters
+    /// now the glyph is a baked bitmap, but the rule is worth keeping: concrete
+    /// colours only anywhere near this bar.
+    private var sessionSymbolTint: Color {
+        audio.isActive ? .batAccent : .white
+    }
+
+    /// Turns a tap on the session button into either starting a session or
+    /// opening the transport menu, and lets every other tab select normally.
+    ///
+    /// Writing the selection is the only hook the system bar gives us, and it is
+    /// enough: because `.sessionControl` is never stored, the bar keeps showing
+    /// the tab you were on, which is the correct state — you did not go anywhere.
+    private var tabSelection: Binding<TabSelection> {
+        Binding(
+            get: { .section(section) },
+            set: { selected in
+                switch selected {
+                case .sessionControl:  handleSessionButtonTap()
+                case .section(let s):
+                    section = s
+                    // Any tab change is a decision to look at something else;
+                    // leaving the menu hanging over the new screen would be a
+                    // control pointing at a session you've navigated away from.
+                    showTransportMenu = false
                 }
             }
-            Divider()
-            Button { showInfo = true } label: {
-                Label("Info & Tour", systemImage: "info.circle")
+        )
+    }
+
+    /// The pre-26 bar: every section kept alive at once, with a hand-built
+    /// floating bar over them.
+    ///
+    /// A `ZStack` of every screen rather than a `switch` because every tab's
+    /// view has to stay alive across switches — most of all the detector, whose
+    /// `SpectrogramView` owns a Metal view and a live render loop that must not
+    /// be torn down and rebuilt every time you glance at Sessions. Hidden screens
+    /// are also removed from hit testing and from accessibility, so they can
+    /// neither be tapped through nor read out.
+    private var legacyTabs: some View {
+        ZStack {
+            ForEach(AppSection.allCases, id: \.self) { s in
+                let isSelected = section == s
+                sectionScreen(s)
+                    .opacity(isSelected ? 1 : 0)
+                    .allowsHitTesting(isSelected)
+                    .accessibilityHidden(!isSelected)
             }
-        } label: {
-            label()
+        }
+        // Before the bar, so it lands underneath it — same arrangement as the
+        // iOS 26 path, where the glow goes on the screen and the bar's glass
+        // covers it.
+        .overlay(alignment: transportMenuAlignment) { recordingGlowOverlay }
+        .overlay(alignment: .bottom) { legacyFloatingBar }
+    }
+
+    /// Two separate glass objects, side by side, and deliberately NOT in a shared
+    /// `GlassEffectContainer` — a container unions the glass of everything inside
+    /// it into a single shape, and over the spectrogram that union reads as one
+    /// wide slab behind both rather than a bar and a detached round button.
+    private var legacyFloatingBar: some View {
+        HStack(spacing: SessionButtonMetrics.gap) {
+            LegacyTabBar(selection: Binding(
+                get: { section },
+                set: { section = $0; showTransportMenu = false }
+            ))
+            sessionButton
+        }
+        .padding(.horizontal, SessionButtonMetrics.horizontalPadding)
+        .padding(.bottom, SessionButtonMetrics.bottomPadding)
+        // The tour hides the nav bar for the same reason (see `detectorScreen`);
+        // the bottom bar sits just as close to the dim overlay's cutout.
+        .opacity(tourActive ? 0 : 1)
+        .animation(nil, value: tourActive)
+    }
+
+    private var sessionButton: some View {
+        SessionButton(isSessionActive: audio.isActive,
+                      isMenuOpen: showTransportMenu,
+                      action: handleSessionButtonTap)
+    }
+
+    // MARK: Transport menu
+
+    /// First tap starts a session — the same action the old play button had, so
+    /// whether the recorder arms itself is still the auto-record setting's call.
+    /// Once one is running, the button is how you reach the controls that used to
+    /// sit in the control bar.
+    private func handleSessionButtonTap() {
+        // `isActive`, not `isRunning` — a listen-mode change that crosses "off"
+        // stops and restarts the engine, so `isRunning` flickers false for a
+        // moment. Reading it here would let a tap in that window start a second
+        // run on top of the live one. This is the same distinction the old
+        // play/stop button drew for its icon. See AudioEngineController.isActive.
+        if audio.isActive {
+            withAnimation(.bouncy(duration: 0.35)) { showTransportMenu.toggle() }
+        } else {
+            startDetecting()
+        }
+    }
+
+    /// Where the menu grows from. The system puts the tab bar at the bottom of
+    /// the window on iPhone and at the top on iPad, so the menu has to hang off
+    /// the correct end of the screen or it opens off the edge.
+    private var transportMenuIsBelowBar: Bool {
+        if #available(iOS 26.0, *) {
+            return UIDevice.current.userInterfaceIdiom == .pad
+        }
+        // The legacy bar is hand-placed at the bottom on every idiom.
+        return false
+    }
+
+    private var transportMenuAlignment: Alignment {
+        transportMenuIsBelowBar ? .topTrailing : .bottomTrailing
+    }
+
+    /// Drawn as an overlay on the whole tab host rather than as a `.popover`:
+    /// a popover on iPhone adapts into a sheet unless told not to, and brings
+    /// its own arrow and chrome.
+    ///
+    /// It hangs off the button's *measured* frame (`SessionButtonAttached`), so
+    /// it grows out of the button on every device. It was pinned to the
+    /// window's trailing edge with the bar's own metrics until 2026-08-16,
+    /// which is near enough on iPhone and plainly wrong on iPad, where the
+    /// button sits in the middle of a pill at the top and the menu appeared
+    /// over at the screen's edge with nothing above it.
+    @ViewBuilder private var transportMenuOverlay: some View {
+        if showTransportMenu {
+            ZStack {
+                // Tap-anywhere-else to dismiss. Behind the menu, and deliberately
+                // not dimming: the spectrogram underneath is live, and this menu
+                // is opened mid-pass to change what you're hearing.
+                Color.clear
+                    .contentShape(.rect)
+                    .onTapGesture {
+                        withAnimation(.bouncy(duration: 0.35)) { showTransportMenu = false }
+                    }
+
+                SessionButtonAttached(locator: sessionButtonLocator,
+                                      placement: transportMenuIsBelowBar ? .below : .above,
+                                      gap: TransportMenuMetrics.gap) { buttonWidth in
+                    TransportMenu(
+                        recorder: recorder,
+                        // Matched to the button it grows out of, so the two read
+                        // as one object opening rather than a panel that happens
+                        // to be nearby. Floored, because the button is only ~36pt
+                        // on iPad and the captions have to survive.
+                        width: max(buttonWidth, TransportMenuMetrics.minimumWidth),
+                        listenIcon: listenIcon,
+                        listenName: listenModeName,
+                        isListening: audio.isListening,
+                        // Arming is a single decision, so the menu gets out of the
+                        // way and hands the screen back. Listening mode is the
+                        // opposite: it is a cycle of four, found by ear, and
+                        // reopening the menu between each tap would make choosing
+                        // between them four times the work — so that one leaves the
+                        // menu standing.
+                        onToggleRecord: {
+                            withAnimation(.bouncy(duration: 0.35)) { showTransportMenu = false }
+                            toggleRecording()
+                        },
+                        onCycleListen: advanceListenMode,
+                        onEndSession: {
+                            withAnimation(.bouncy(duration: 0.35)) { showTransportMenu = false }
+                            stopDetecting()
+                        }
+                    )
+                    .transition(.scale(scale: 0.6, anchor: transportMenuIsBelowBar ? .top : .bottom)
+                        .combined(with: .opacity))
+                }
+            }
+            .ignoresSafeArea(.keyboard)
+        }
+    }
+
+    /// The one-shot "you're not recording" nudge. It used to be a popover on the
+    /// record button in the control bar; with that button now living inside a
+    /// menu that is usually closed, there is nothing to hang a popover on, so it
+    /// is drawn against the bar in the same place the transport menu appears —
+    /// which is where it is pointing anyway.
+    @ViewBuilder private var notRecordingNudgeOverlay: some View {
+        if showNotRecordingNudge {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Just so you know, you're not recording.")
+                    .font(.subheadline.weight(.semibold))
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("Tap the session button and arm Record.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack {
+                    Button("Don't remind me") {
+                        suppressNotRecordingNudge = true
+                        showNotRecordingNudge = false
+                    }
+                    .font(.caption)
+                    Spacer()
+                    Button("Close") { showNotRecordingNudge = false }
+                        .font(.caption.weight(.semibold))
+                }
+            }
+            .padding(14)
+            .frame(width: 260, alignment: .leading)
+            .liquidGlass(in: .rect(cornerRadius: 16))
+            .overlay {
+                RoundedRectangle(cornerRadius: 16)
+                    .strokeBorder(.white.opacity(0.12), lineWidth: 1)
+            }
+            .padding(.horizontal, SessionButtonMetrics.horizontalPadding)
+            .padding(transportMenuIsBelowBar ? .top : .bottom, transportMenuInset)
+            .transition(.opacity.combined(with: .scale(scale: 0.9)))
+        }
+    }
+
+    /// An invisible disc sitting exactly over the system's session button,
+    /// taking the tap before the bar ever sees it.
+    ///
+    /// **This is what stops the Detector indicator blinking.** The button is a
+    /// `Tab`, and the only hook a `TabView` gives us is its selection binding —
+    /// so the bar would move its own indicator onto the tapped tab, we would
+    /// refuse to store that selection, and it would animate back. Off and on,
+    /// every time you opened the transport menu. Refusing the selection was
+    /// always going to be too late; the fix is for the touch never to reach the
+    /// bar.
+    ///
+    /// Sized to the button, and positioned from the button's *measured* frame
+    /// rather than from our metrics — see `SessionButtonLocator`. Until that
+    /// frame is known it draws nothing at all, deliberately: an invisible tap
+    /// target in a guessed position is the worst thing on this screen, and on
+    /// iPad the guess landed on the Settings gear.
+    ///
+    /// The `.sessionControl` case in `tabSelection` stays as the fallback: this
+    /// catcher is a plain tap gesture, so VoiceOver and keyboard activation
+    /// still go through the real tab, and so does any tap this misses.
+    @ViewBuilder private var sessionButtonTapCatcher: some View {
+        if #available(iOS 26.0, *) {
+            SessionButtonAnchored(locator: sessionButtonLocator) { size in
+                Circle()
+                    .fill(sessionTapCatcherTint)
+                    // The button's own measured size, never padded outwards.
+                    // It sits next to a real tab item, and a catcher that
+                    // overhangs would swallow taps meant for that instead —
+                    // far worse than the blink this exists to stop.
+                    .frame(width: size.width, height: size.height)
+                    .contentShape(.circle)
+                    .onTapGesture { handleSessionButtonTap() }
+                    // The real tab underneath carries the label and the traits;
+                    // announcing this as well would read the control out twice.
+                    .accessibilityHidden(true)
+            }
+        }
+    }
+
+    /// Normally clear. Flip to a visible colour to check the catcher is landing
+    /// on the button — it cannot be verified by tapping in a simulator, but a
+    /// coloured disc that covers the button exactly is the same proof.
+    private var sessionTapCatcherTint: Color { .clear }
+
+    /// The pulsing light behind the session button while recording, placed on
+    /// the button's measured frame. Drawn on the *screen* rather than the tab
+    /// host so it lands under the bar and the glass lights it — see
+    /// `SessionGlow`.
+    @ViewBuilder private var recordingGlowOverlay: some View {
+        if recorder.isArmed {
+            SessionButtonAnchored(locator: sessionButtonLocator) { size in
+                SessionGlow(recorder: recorder, buttonSize: size)
+                    // Fades in and out with arming rather than snapping — the
+                    // glow appearing at full strength the instant a bat trips
+                    // the recorder reads as a glitch rather than a state change.
+                    .transition(.opacity)
+                    .animation(.easeInOut(duration: 0.3), value: recorder.isArmed)
+            }
+        }
+    }
+
+    /// Clears the bar and the session button, so the menu starts where the
+    /// button ends. On iOS 26 the system owns the bar's exact inset, so this is
+    /// the closest honest approximation of it — worth checking on device.
+    private var transportMenuInset: CGFloat {
+        SessionButtonMetrics.bottomPadding
+            + SessionButtonMetrics.diameter
+            + TransportMenuMetrics.gap
+    }
+
+    /// Exactly one owner drains FFT columns at a time (Context.md §7): the Metal
+    /// render loop while the detector is actually on screen and the app is
+    /// active, the background pump in every other case.
+    ///
+    /// The tab bar added a second way for the render loop to stop drawing. Before
+    /// it, leaving the detector destroyed the spectrogram outright and nothing
+    /// took over the draining, so a run kept capturing audio while quietly
+    /// detecting nothing for as long as you were reading Sessions.
+    private func updateColumnDrainOwner() {
+        if scenePhase == .active && section == .detector {
+            detectionPump.stop()
+        } else if audio.isRunning {
+            detectionPump.start(processor: processor, detector: pulseDetector)
+        } else {
+            detectionPump.stop()
         }
     }
 
@@ -747,7 +1243,12 @@ struct ContentView: View {
                 optionsMenuContent { Image(systemName: "gearshape") }
             }
         }
-        // See sectionMenu — same guard, same reason.
+        // Belt-and-braces against the inherited-animation bug documented on
+        // `recordPulseAnimation`: this button has no animated state of its own,
+        // so clearing the transaction's animation here means it can never ride
+        // along with an ambient animation set by an unrelated `withAnimation`
+        // elsewhere in the same update — which is what left it slowly throbbing
+        // during detection.
         .transaction { $0.animation = nil }
         .accessibilityLabel("Menu")
     }
@@ -756,6 +1257,12 @@ struct ContentView: View {
         Menu {
             Button { showSettings = true } label: {
                 Label("Settings", systemImage: "gearshape")
+            }
+            // Moved here from the leading section menu, which the tab bar
+            // replaced. It was the only thing in that menu that wasn't
+            // navigation, so there was nothing left to keep it company.
+            Button { showInfo = true } label: {
+                Label("Info & Tour", systemImage: "info.circle")
             }
             Button { showHelp = true } label: {
                 Label("Help", systemImage: "questionmark.circle")
@@ -773,68 +1280,40 @@ struct ContentView: View {
         }
     }
 
-    /// Portrait: stacked panels with a fixed stats slot and the control bar below.
+    /// Portrait: stacked panels with a fixed stats slot.
+    ///
+    /// The transport controls that used to sit in a row below the panes are now
+    /// the session button in the tab bar and the menu it opens — which is close
+    /// to a wash on vertical space, since the bar costs about what the control
+    /// bar gave back.
     private var portraitLayout: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 10) {
+            // The stats card takes whatever height it needs (see `statsStrip`),
+            // and the two panes split what's left 42/58. The split has to be
+            // measured against the space that actually remains, which is why
+            // the GeometryReader is nested *below* the card rather than wrapped
+            // around all three — wrapping it meant subtracting a guess at the
+            // card's height, and that guess is exactly what used to crop it.
+            statsBlock
             GeometryReader { geo in
                 let spacing: CGFloat = 10
-                let statsHeight: CGFloat = 126
-                let flex = max(120, geo.size.height - statsHeight - spacing * 2)
+                let flex = max(120, geo.size.height - spacing)
                 VStack(spacing: spacing) {
-                    statsBlock.frame(height: statsHeight)
                     pulseBlock.frame(height: flex * 0.42)
                     spectrogramBlock.frame(height: flex * 0.58)
                 }
             }
-            controlBar
             appFooter
         }
         .padding(.horizontal)
         .padding(.top, 6)
     }
 
-    /// Landscape: three columns.
-    ///   Left  — narrow stats sidebar: stat cells stacked vertically, amplitude
-    ///           meter running down the right edge of the sidebar.
-    ///   Centre — spectrogram fills all remaining width.
-    ///   Right  — single-row transport bar on top, pulse zoom below.
-    ///            Hidden via the hamburger menu → slides off trailing edge; controls
-    ///            then float over the top-right corner of the spectrogram.
-    private var landscapeLayout: some View {
-        GeometryReader { geo in
-            let pad: CGFloat = 8
-            let spacing: CGFloat = 8
-            let w = geo.size.width  - pad * 2
-            let h = geo.size.height - pad * 2
-            let rightColW = w * 0.26
-            HStack(spacing: spacing) {
-                landscapeStatsSidePanel
-                    .frame(width: w * 0.15)
-
-                // In full screen (landscapePulseVisible == false) the transport
-                // controls move into the spectrogram's own header as a third pill
-                // (see spectrogramHeaderTrailing) instead of floating here — one
-                // less thing overlaid on the view, same controls.
-                VStack(spacing: spacing) {
-                    landscapeStatusPillRow
-                    landscapeSpectrogramBlock
-                }
-
-                if landscapePulseVisible {
-                    VStack(spacing: spacing) {
-                        landscapePulseBlock
-                        landscapeControlsPanel
-                            .frame(height: 52)
-                    }
-                    .frame(width: rightColW)
-                    .transition(.move(edge: .trailing))
-                }
-            }
-            .frame(width: w, height: h)
-            .padding(pad)
-            .clipped()
-        }
-    }
+    // The iPhone-landscape layout stood here: a three-column arrangement with a
+    // narrow stats sidebar, a vertical amplitude meter, its own status-pill row
+    // and a floating transport panel, plus a full-screen mode that moved the
+    // transport controls into the spectrogram's header. All of it is gone with
+    // the decision to make iPhone portrait-only — see `detectorLayoutBody`.
 
     // MARK: Reusable panel blocks
 
@@ -842,6 +1321,7 @@ struct ContentView: View {
         statsStrip
             .tourTarget(.stats)
     }
+
 
     /// Shared card scaffold for the pulse/spectrogram panel blocks: header row
     /// inside the card, then the panel body, wrapped in the hairline `panelCard`
@@ -863,7 +1343,7 @@ struct ContentView: View {
     }
 
     private var pulseBlock: some View {
-        panel(pulseShowsSpeciesID ? "Species ID" : "Pulse View", tour: .pulseView) {
+        panel(effectivePulseShowsSpeciesID ? "Species ID" : "Pulse View", tour: .pulseView) {
             pulseHeaderTrailing
         } content: {
             pulsePanelContent
@@ -871,30 +1351,10 @@ struct ContentView: View {
     }
 
     private var spectrogramBlock: some View {
-        panel(spectrogramShowsSpeciesID ? "Species ID" : "Spectrogram", tour: .spectrogram) {
-            spectrogramHeaderTrailing(showFullScreen: false)
+        panel(effectiveSpectrogramShowsSpeciesID ? "Species ID" : "Spectrogram", tour: .spectrogram) {
+            spectrogramHeaderTrailing
         } content: {
-            spectrogramPanelContent()
-        }
-    }
-
-    /// Landscape spectrogram panel with its header inside the card. Gets the extra
-    /// full-screen button the portrait header doesn't need (portrait has no
-    /// sidebar-hiding concept — the panels are already stacked full-width).
-    private var landscapeSpectrogramBlock: some View {
-        panel(spectrogramShowsSpeciesID ? "Species ID" : "Spectrogram", tour: .spectrogram) {
-            spectrogramHeaderTrailing(showFullScreen: true)
-        } content: {
-            spectrogramPanelContent(showTunedOverlay: false)
-        }
-    }
-
-    /// Landscape pulse panel with its header inside the card.
-    private var landscapePulseBlock: some View {
-        panel(pulseShowsSpeciesID ? "Species ID" : "Pulse View", tour: .pulseView) {
-            pulseHeaderTrailing
-        } content: {
-            pulsePanelContent
+            spectrogramPanelContent
         }
     }
 
@@ -906,10 +1366,12 @@ struct ContentView: View {
     /// which froze it (and the Metal draw loop) whenever the sibling panel's toggle
     /// forced this ViewBuilder to re-evaluate.
     ///
-    /// `showTunedOverlay` is false in landscape: the heterodyne tuning pill moves
-    /// into `landscapeStatusPillRow` above the panel there instead of floating over
-    /// the spectrogram's own corner — see that row's doc comment.
-    private func spectrogramPanelContent(showTunedOverlay: Bool = true) -> some View {
+    /// `isPaused` now also covers being on another tab. With a tab bar the
+    /// detector stays mounted when you leave it (which is what keeps the Metal
+    /// view alive), so without this the render loop would keep drawing a screen
+    /// nobody is looking at. `updateColumnDrainOwner` hands the column draining
+    /// to the background pump at the same moment, so detection carries on.
+    private var spectrogramPanelContent: some View {
         ZStack {
             SpectrogramView(processor: processor,
                             maxFrequency: nyquist,
@@ -917,24 +1379,25 @@ struct ContentView: View {
                             bandHigh: bandHigh,
                             timeWindowSeconds: timeWindowSeconds,
                             pulseDetector: pulseDetector,
-                            isPaused: menuIsOpen,
-                            logFrequency: spectrogramLogFrequency)
-                .overlay(alignment: .topTrailing) { if showTunedOverlay { tunedPillOverlay } }
+                            isPaused: menuIsOpen || section != .detector,
+                            logFrequency: spectrogramLogFrequency,
+                            scrollEnabled: !simplifiedMode)
+                .overlay(alignment: .topTrailing) { tunedPillOverlay }
                 .overlay(alignment: .bottomTrailing) {
                     // Recording state only. `SnippetStatusPill` used to sit here
                     // beside it and now lives with the other status indicators in
-                    // the STATS card header (`statsStrip`) / `landscapeStatusPillRow`
-                    // — it reports which listening mode is doing what, which is a
-                    // status, not a recording fact, and next to "Not recording" its
-                    // idle ear read as a claim about the recorder.
+                    // the STATS card header (`statsStrip`) — it reports which
+                    // listening mode is doing what, which is a status, not a
+                    // recording fact, and next to "Not recording" its idle ear
+                    // read as a claim about the recorder.
                     RecordingStatusBadge(recorder: recorder, tourDemo: tourActive)
                         .padding(8)
                 }
-                .opacity(spectrogramShowsSpeciesID ? 0 : 1)
-                .allowsHitTesting(!spectrogramShowsSpeciesID)
+                .opacity(effectiveSpectrogramShowsSpeciesID ? 0 : 1)
+                .allowsHitTesting(!effectiveSpectrogramShowsSpeciesID)
 
-            if spectrogramShowsSpeciesID {
-                SpeciesFeedView(store: classStore, activeSessionID: classStore.activeSessionID, sessionStart: feedSessionStart, autoIDActive: autoIDSettings.activeModelID != nil)
+            if effectiveSpectrogramShowsSpeciesID {
+                SpeciesFeedView(store: classStore, guide: speciesGuide, presenceStore: speciesPresence, activeSessionID: classStore.activeSessionID, sessionStart: feedSessionStart, autoIDActive: autoIDSettings.activeModelID != nil)
             }
         }
     }
@@ -944,56 +1407,24 @@ struct ContentView: View {
     private var pulsePanelContent: some View {
         ZStack {
             PulseZoomView(pulseDetector: pulseDetector)
-                .opacity(pulseShowsSpeciesID ? 0 : 1)
-                .allowsHitTesting(!pulseShowsSpeciesID)
+                .opacity(effectivePulseShowsSpeciesID ? 0 : 1)
+                .allowsHitTesting(!effectivePulseShowsSpeciesID)
 
-            if pulseShowsSpeciesID {
-                // No pulse thumbnail here — this panel's landscape column is too
-                // narrow, and the live pulse view already shows the same image.
-                SpeciesFeedView(store: classStore, activeSessionID: classStore.activeSessionID, sessionStart: feedSessionStart, showsThumbnail: false, autoIDActive: autoIDSettings.activeModelID != nil)
+            if effectivePulseShowsSpeciesID {
+                // Thumbnails only in simplified view. In advanced view the pulse
+                // close-up is one tap away and shows the same image larger, so
+                // repeating it in the list is clutter — but simplified view has
+                // no close-up anywhere, which makes this the only place the
+                // shape of the call is ever visible. That pairing (this shape,
+                // that species) is most of what teaches someone to read a call.
+                SpeciesFeedView(store: classStore, guide: speciesGuide, presenceStore: speciesPresence, activeSessionID: classStore.activeSessionID, sessionStart: feedSessionStart, showsThumbnail: simplifiedMode, autoIDActive: autoIDSettings.activeModelID != nil)
             }
         }
     }
 
-    /// Landscape top-right: single-row transport bar. Pulse-view visibility lives
-    /// as a "full screen" button in the spectrogram panel's own header instead of
-    /// here — same underlying toggle, but framed as "make the spectrogram full
-    /// screen" rather than "hide the pulse view", which reads more clearly.
-    private var landscapeControlsPanel: some View {
-        RoundedRectangle(cornerRadius: 10)
-            .fill(.ultraThinMaterial)
-            .overlay {
-                HStack(spacing: 0) {
-                    Spacer()
-                    playStopButton
-                    Spacer()
-                    // Always present (not conditional) — see controlBar's matching
-                    // comment: a listen-mode change that crosses "off" restarts the
-                    // engine, so `isRunning` flickers false→true, and a
-                    // conditionally-shown button with a slide/fade transition
-                    // animated that flicker as a visible glitch. Disabled instead of
-                    // hidden while detection isn't running — same information, no
-                    // layout churn. `isActive` covers the restart window itself.
-                    recordButton
-                        .disabled(!audio.isActive)
-                    Spacer()
-                    // One control, one width, in all four listen states — the
-                    // heterodyne-with-replay toggle that used to hang off this
-                    // button's trailing edge (and get clipped by this panel's
-                    // 26 % width) is now a step in the cycle itself.
-                    listenModeCycleButton
-                        .geometryGroup()
-                    Spacer()
-                }
-                .controlSize(.regular)
-                .padding(.horizontal, 12)
-            }
-            .clipShape(RoundedRectangle(cornerRadius: 10))
-    }
-
     // MARK: Panels
 
-    /// The horizontal row of stat readouts used in portrait. A standalone View
+    /// The horizontal row of stat readouts. A standalone View
     /// struct (not a computed property) — `pulseDetector.pulseCount`/`pulseRateHz`
     /// update on essentially every detected pulse, sometimes many times a second
     /// during an active pass, so reading them inline in ContentView.body invalidated
@@ -1001,116 +1432,52 @@ struct ContentView: View {
     /// meter's 15 Hz churn did before that was fixed. Scoping it here keeps updates
     /// confined to this small view.
     private var statCellsRow: some View {
-        PulseStatsRow(pulseDetector: pulseDetector, guide: speciesGuide,
-                      rangeStore: speciesRange, tourDemo: tourActive)
+        PulseStatsRow(pulseDetector: pulseDetector)
     }
 
+    /// The card sizes to its own content — deliberately, and this is not a
+    /// detail to undo.
+    ///
+    /// It used to be a `RoundedRectangle` with the readouts in an `.overlay`,
+    /// poured into a hard-coded 126 pt frame. An overlay takes its host's size,
+    /// so the moment the content needed more than 126 pt it overflowed and the
+    /// `.clipShape` cut it off — and because an overlay is centred, it cut off
+    /// the top and the bottom at once, which reads as the card being cropped
+    /// rather than as content not fitting. Advanced view had quietly crossed
+    /// that line when the species readout was given its own full-width row.
+    ///
+    /// Content-sized, there is no number left to be wrong: the pills, stat
+    /// cells, species row and meter all have natural heights, so the card is as
+    /// tall as whatever it is actually showing. That is also what makes
+    /// simplified view work without a second magic number, and what stops
+    /// Dynamic Type clipping the card the same way.
     private var statsStrip: some View {
-        RoundedRectangle(cornerRadius: 10)
-            .fill(.ultraThinMaterial)
-            .overlay {
-                VStack(spacing: 4) {
-                    HStack {
-                        Text("STATS")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                        HStack(spacing: 8) {
-                            snippetStatusPill
-                            speakerFeedbackWarning
-                            sessionStatusPill
-                            micStatusPill
-                            resetButton
-                        }
-                    }
-                    statCellsRow
-                    amplitudeMeter
-                    Spacer(minLength: 0)
+        VStack(spacing: 4) {
+            HStack {
+                Text("STATS")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                HStack(spacing: 8) {
+                    snippetStatusPill
+                    speakerFeedbackWarning
+                    sessionStatusPill
+                    micStatusPill
+                    resetButton
                 }
-                .padding(.horizontal, 10)
-                .padding(.top, 4)
-                .padding(.bottom, 4)
             }
-            .clipShape(RoundedRectangle(cornerRadius: 10))
-    }
-
-    /// Landscape-only status row above the spectrogram panel: the session-status
-    /// (Off/Listening/Session) pill, the speaker-feedback warning, the
-    /// time-expansion drain/missed-pulse pill, the heterodyne tuning pill, and the
-    /// mic-connection pill — moved out of the narrow stats sidebar header (see
-    /// `landscapeStatsSidePanelBody`), which had no room for them once the mic pill
-    /// needed a landscape home too. Sits in its own row rather than overlaid on the
-    /// spectrogram (the tuning pill's old spot) so nothing crowds the spectrogram's
-    /// own header controls. Same top edge as the sidebar's header row — both start
-    /// at y=0 in `landscapeLayout`'s HStack.
-    private var landscapeStatusPillRow: some View {
-        HStack(spacing: 8) {
-            sessionStatusPill
-            snippetStatusPill
-            speakerFeedbackWarning
-            if audio.listenMode == .heterodyne {
-                TunedPillView(audio: audio, nyquist: nyquist)
-            }
-            Spacer()
-            micStatusPill
+            if !simplifiedMode { statCellsRow }
+            amplitudeMeter
         }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
     }
 
-    /// Landscape left sidebar: stat cells stacked vertically with the amplitude
-    /// meter running as a vertical bar on the right edge. Header lives inside the card.
-    private var landscapeStatsSidePanel: some View {
-        landscapeStatsSidePanelBody
-            .tourTarget(.stats)
-    }
-
-    private var landscapeStatsSidePanelBody: some View {
-        RoundedRectangle(cornerRadius: 10)
-            .fill(.ultraThinMaterial)
-            .overlay {
-                VStack(spacing: 0) {
-                    HStack {
-                        Text("STATS")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                        resetButton
-                    }
-                    .padding(.horizontal, 8)
-                    .padding(.top, 6)
-                    .padding(.bottom, 2)
-
-                    HStack(spacing: 4) {
-                        statCellsColumn
-                            .frame(maxWidth: .infinity)
-                        Divider()
-                        verticalAmplitudeMeter
-                            .frame(width: 22)
-                    }
-                    .padding(6)
-                }
-            }
-            .clipShape(RoundedRectangle(cornerRadius: 10))
-    }
-
-    /// Stat cells arranged in a vertical column for the landscape sidebar. Same
-    /// scoping rationale as `statCellsRow`.
-    private var statCellsColumn: some View {
-        PulseStatsColumn(pulseDetector: pulseDetector, guide: speciesGuide,
-                         rangeStore: speciesRange, tourDemo: tourActive)
-    }
-
-    /// Vertical amplitude meter for the landscape sidebar. A standalone View struct
-    /// (not a computed property) so its 15 Hz `currentLevelDB` read is tracked as its
-    /// own body's dependency, not ContentView.body's — see PeakHoldTracker.
-    private var verticalAmplitudeMeter: some View {
-        VerticalAmplitudeMeterView(audio: audio, peakHold: peakHold, detector: pulseDetector)
-    }
-
-    /// Mic-connection pill: the portrait stats header, and `landscapeStatusPillRow`
-    /// above the spectrogram in landscape (the stats sidebar itself is still too
-    /// narrow for it). A standalone View struct because it reads
-    /// `audio.diagnostics`, which mutates at the 15 Hz stats flush — same scoping
-    /// rationale as the amplitude meters.
+    /// Mic-connection pill, in the stats header. A standalone View struct because
+    /// it reads `audio.diagnostics`, which mutates at the 15 Hz stats flush — same
+    /// scoping rationale as the amplitude meters.
     private var micStatusPill: some View {
         MicStatusPill(audio: audio)
             .tourTarget(.micStatus)
@@ -1207,6 +1574,36 @@ struct ContentView: View {
         audio.heterodyne.setBand(low: bandLow, high: bandHigh)
     }
 
+    /// The one-time half of simplified view — see `SimplifiedView`'s header for
+    /// why the frequency band is written once here rather than overridden on
+    /// every read like the species-ID toggles are.
+    ///
+    /// Called from `onAppear` as well as on the toggle changing, because a fresh
+    /// install that simply leaves onboarding's switch alone never fires an
+    /// `onChange` at all. `simplifiedDefaultsApplied` is what stops it running
+    /// twice, and clearing it on the way out is what lets a later return to
+    /// simplified view set the band up again.
+    private func applySimplifiedDefaultsIfNeeded() {
+        guard simplifiedMode else {
+            simplifiedDefaultsApplied = false
+            return
+        }
+        guard !simplifiedDefaultsApplied else { return }
+        simplifiedDefaultsApplied = true
+        // Fractions of Nyquist, which is what bandLow/bandHigh store. `nyquist`
+        // falls back to 192 kHz before the engine has reported a rate, which is
+        // the Griff's own — and applyBand runs again on every rate change
+        // regardless, so a different mic corrects itself.
+        if nyquist > 0 {
+            bandLow  = min(1, SimplifiedView.bandLowHz / nyquist)
+            bandHigh = min(1, SimplifiedView.bandHighHz / nyquist)
+        }
+        // The compress-timeline button is hidden in simplified view, so the
+        // mode has to start off — otherwise a user who left it on in advanced
+        // view is stuck with a gap-dropped timeline and nothing to turn it off.
+        pulseDetector.triggeredDisplayMode = false
+    }
+
     // MARK: Panel headers + per-panel setting buttons
 
     private func panelHeader(_ title: String, @ViewBuilder trailing: () -> some View) -> some View {
@@ -1233,18 +1630,21 @@ struct ContentView: View {
     }
 
     /// Pulse-view header trailing content: one toggle (species ID) pill, one menu
-    /// (settings popover) pill.
+    /// (settings popover) pill. Both are advanced-only — in simplified view this
+    /// panel is the species feed and nothing else, so there is no view to toggle
+    /// between and no pulse-render settings to reach.
     private var pulseHeaderTrailing: some View {
         HStack(spacing: 8) {
             iconPill { pulseSpeciesIDButton }
+                .advancedOnly(simplifiedMode)
             iconPill { pulseViewButton }
+                .advancedOnly(simplifiedMode)
         }
     }
 
     /// Spectrogram header trailing content: toggles pill (species ID, compress
-    /// timeline, bat range, and — landscape only — full screen) + menu pill
-    /// (palette, frequency-range settings).
-    private func spectrogramHeaderTrailing(showFullScreen: Bool) -> some View {
+    /// timeline, bat range) + menu pill (palette, frequency-range settings).
+    private var spectrogramHeaderTrailing: some View {
         HStack(spacing: 8) {
             // Elapsed-time pill for the active listening/session, sitting to the
             // left of the control pills. Renders nothing when not detecting.
@@ -1252,30 +1652,23 @@ struct ContentView: View {
             // which is normally taken before detection has ever been started.
             SessionTimerPill(start: feedSessionStart, tourDemo: tourActive)
                 .tourTarget(.sessionTimer)
-            // Full-screen landscape only: transport controls (play/record/listen)
-            // morph into a third pill here instead of floating over the
-            // spectrogram — same icons and colors as landscapeControlsPanel,
-            // just relocated so everything lives in one row.
-            if showFullScreen && !landscapePulseVisible {
-                iconPill {
-                    playStopButtonCompact
-                    // Always present, disabled rather than hidden while not running —
-                    // see controlBar's matching comment for why (setListenMode's
-                    // stop+restart across the "off" boundary flickers isRunning).
-                    recordButtonCompact
-                        .disabled(!audio.isActive)
-                    listenModeCycleButtonCompact
-                        .geometryGroup()
-                }
-                .transition(.opacity.combined(with: .move(edge: .leading)))
-            }
+            // Every toggle in this pill is advanced-only, so the pill itself
+            // goes with them rather than sitting there empty.
             iconPill {
                 spectrogramSpeciesIDButton
                 compressTimelineButton
                 batRangeButton
-                if showFullScreen { fullScreenSpectrogramButton }
             }
-            iconPill { paletteButton; bandButton }
+            .advancedOnly(simplifiedMode)
+            // The band settings survive into simplified view on their own —
+            // which frequencies are shown is the one thing on this screen a
+            // beginner may genuinely need to change, and with the bat-range
+            // preset button hidden this is the only way left to do it.
+            iconPill {
+                paletteButton
+                    .advancedOnly(simplifiedMode)
+                bandButton
+            }
         }
     }
 
@@ -1434,34 +1827,6 @@ struct ContentView: View {
         }
     }
 
-    /// Landscape-only: makes the spectrogram fill the screen by hiding the pulse
-    /// sidebar (`landscapePulseVisible`) — same underlying state as before, but
-    /// framed here as "full screen spectrogram" rather than "hide pulse view",
-    /// which is what it actually accomplishes from the user's point of view.
-    private var fullScreenSpectrogramButton: some View {
-        Button {
-            withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
-                landscapePulseVisible.toggle()
-            }
-        } label: {
-            Image(systemName: landscapePulseVisible
-                  ? "arrow.up.left.and.arrow.down.right"
-                  : "arrow.down.right.and.arrow.up.left")
-                .font(.callout)
-                // The layout's own spring (the pulse column sliding away) comes
-                // from the withAnimation() above; without this, that SAME
-                // transaction also implicitly cross-fades this icon's SF Symbol
-                // swap and tint change, on a different effective timing than the
-                // layout slide — that mismatch was the "icon fades in place while
-                // the UI slides" glitch. Suppressing animation on just this view
-                // for this value keeps the icon swap instant while the
-                // surrounding layout still springs normally.
-                .animation(nil, value: landscapePulseVisible)
-        }
-        .tint(landscapePulseVisible ? .toggleOff : .toggleOn)
-        .accessibilityLabel(landscapePulseVisible ? "Full screen spectrogram" : "Show pulse view")
-    }
-
     private var bandButton: some View {
         Button { showBand.toggle() } label: {
             Image(systemName: "slider.horizontal.3").font(.callout)
@@ -1490,40 +1855,7 @@ struct ContentView: View {
         }
     }
 
-    // MARK: Control bar
-
-    private var controlBar: some View {
-        HStack(spacing: 0) {
-            Spacer()
-            playStopButton
-            Spacer()
-            // Recording only makes sense once detection is actually running, but the
-            // button is always present (not conditionally shown) — see
-            // landscapeControlsPanel's matching comment: a listen-mode change across
-            // the "off" boundary restarts the engine, so `audio.isRunning` flickers
-            // false→true, and a conditionally-shown button with a slide/fade
-            // transition animated that flicker as a glitch. Disabled instead of
-            // hidden — same information, no layout churn, and the tour's Record
-            // step always has something to point at. Switching BETWEEN two listening
-            // modes no longer restarts anything (AudioEngineController.setListenMode).
-            recordButton
-                .disabled(!audio.isActive)
-            Spacer()
-            listenModeCycleButton
-                // Without this, the listen button's icon animated its own geometry
-                // independently of its button chrome during the Spacer reflow above —
-                // the glyph visibly lagged/shrank in place while the chrome had
-                // already slid to its new position. `.geometryGroup()` (iOS 17+)
-                // makes the button's whole subtree move as one rigid unit instead of
-                // each descendant computing its own interpolation.
-                .geometryGroup()
-            Spacer()
-        }
-        .controlSize(.regular)
-        .padding(.vertical, 6)
-    }
-
-    /// Credit + version/build line under the control bar. Version/build come straight
+    /// Credit + version/build line under the panels. Version/build come straight
     /// from the app's Info.plist (CFBundleShortVersionString / CFBundleVersion), which
     /// Xcode stamps from the target's Marketing Version / Current Project Version at
     /// build time — no manual syncing needed.
@@ -1602,49 +1934,29 @@ struct ContentView: View {
         }
     }
 
-    private var playStopButton: some View {
-        Button {
-            toggleDetecting()
-        } label: {
-            // Running shows the animation, not a stop square. A red button with
-            // a square in it read as "recording" to users who were only
-            // listening — the two are separate actions in this app and the icon
-            // was actively teaching the wrong thing.
-            // `isActive`, not `isRunning`: a listen-mode change that crosses "off"
-            // stops and restarts the engine, and reading isRunning made this snap
-            // back to the idle ear and then re-animate — reporting a stop the user
-            // never asked for. See AudioEngineController.isActive.
-            ListeningEarIcon(isListening: audio.isActive)
-                .controlIcon()
-        }
-        .buttonStyle(.borderedProminent)
-        .tint(audio.isActive ? .orange : .accentColor)
-        .accessibilityLabel(audio.isActive ? "Stop" : "Start")
-        .tourTarget(.start)
-    }
-
-    /// Same action, sized to match the other panel-header pill icons (plain
-    /// `.callout`, no bordered chrome) instead of the control bar's larger
-    /// `.controlIcon()` buttons — used only in the full-screen transport pill.
-    private var playStopButtonCompact: some View {
-        Button {
-            toggleDetecting()
-        } label: {
-            ListeningEarIcon(isListening: audio.isActive, size: 17)
-        }
-        .tint(audio.isActive ? .orange : .accentColor)
-        .accessibilityLabel(audio.isActive ? "Stop" : "Start")
-        .tourTarget(.start)
-    }
-
-    /// Shared action for both play/stop button variants. A demo skips the
-    /// session/listening chooser — there's nothing to log, and `startDetecting`
-    /// refuses to open a session while demo mode is armed anyway — so Start just
-    /// resumes the file feed.
-    private func toggleDetecting() {
-        if audio.isRunning { stopDetecting() }
-        else if audio.isDemoMode { startDetecting(newSession: false) }
-        else { showStartPrompt = true }
+    /// Captures every live tunable and persisted setting to a JSON file and
+    /// returns its URL, for the Debug sheet's "Dump Settings to File". Lives here
+    /// rather than in `DiagnosticsView` because this is the only place that holds
+    /// every processor, the band/window bindings and `autoIDSettings` at once —
+    /// and it reuses `LiveTuningSnapshot.capture` so the overlay's register of
+    /// knobs stays the single list to keep up to date.
+    private func dumpSettings() -> URL? {
+        let snapshot = LiveTuningSnapshot.capture(
+            audio: audio,
+            pulse: pulseDetector,
+            haptics: haptics,
+            snippet: snippetSettings,
+            bandLow: bandLow,
+            bandHigh: bandHigh,
+            timeWindowSeconds: timeWindowSeconds
+        )
+        let info = Bundle.main.infoDictionary
+        let short = info?["CFBundleShortVersionString"] as? String ?? "?"
+        let build = info?["CFBundleVersion"] as? String ?? "?"
+        let json = SettingsDump.makeJSON(tuning: snapshot,
+                                         autoID: autoIDSettings,
+                                         appVersion: "\(short) (\(build))")
+        return SettingsDump.write(json)
     }
 
     /// Stop detection and tear down the active session. Called only on explicit user
@@ -1664,9 +1976,8 @@ struct ContentView: View {
         feedSessionStart = nil
         if classStore.activeSessionID != nil {
             classStore.endSession()
-            location.stopTracking()
             pulseDetector.activeSessionID = nil
-            recorder.setActiveSession(id: nil, startDate: nil, label: "Listening only")
+            recorder.setActiveSession(id: nil, startDate: nil, label: "Not detecting")
         }
     }
 
@@ -1699,8 +2010,17 @@ struct ContentView: View {
         feedSessionStart = nil
     }
 
-    /// Begin detection, optionally inside a new located session (GPS track + map pins).
-    private func startDetecting(newSession: Bool) {
+    /// Begin detection inside a new session (logged IDs + map pins). Also the
+    /// session button's first-tap action — see `handleSessionButtonTap`.
+    private func startDetecting() {
+        // Before resetStats(), which discards the accumulator: a pass can still be
+        // open here, because an unexpected audio stop (interruption, route error)
+        // stops `feed()` being called and so the silence timeout that normally
+        // closes a pass never runs — the same case the session cleanup below
+        // exists for. Without this the evidence is dropped silently, against the
+        // "NoID is recorded, not dropped" rule in Context.md §9. `stopDetecting`
+        // and `endDemo` both already do this; this path was the odd one out.
+        pulseDetector.finalizePass()
         pulseDetector.resetStats()
         recorder.setInputName(audio.diagnostics.inputName)
         feedSessionStart = Date()
@@ -1708,24 +2028,25 @@ struct ContentView: View {
         // route error) — the user is deliberately starting a new run.
         if classStore.activeSessionID != nil {
             classStore.endSession()
-            location.stopTracking()
             pulseDetector.activeSessionID = nil
         }
-        // Demo mode never opens a session: no GPS track, no Session row, nothing
-        // in Sessions afterwards. Combined with the recorder block set in
-        // `startDemo`, a demo leaves no trace in the user's data.
-        if newSession && !audio.isDemoMode {
+        // Demo mode is the one run that never opens a session: no Session row,
+        // nothing in Sessions afterwards. Combined with the recorder block set
+        // in `startDemo`, a demo leaves no trace in the user's data.
+        if !audio.isDemoMode {
             let id = classStore.startSession()
             let session = classStore.sessions.first(where: { $0.id == id })
             let label = session?.title ?? "Session"
             pulseDetector.activeSessionID = id
             recorder.setActiveSession(id: id, startDate: session?.startDate ?? Date(), label: label)
-            location.startTracking(geocodeSessionID: id)
+            // Names the session after where it happened, from the region fix
+            // the app already takes. No continuous tracking is involved.
+            location.geocodeNextFix(into: id)
             if autoRecordOnSessionStart {
                 recorder.setArmed(true)
             }
         } else {
-            recorder.setActiveSession(id: nil, startDate: nil, label: "Listening only")
+            recorder.setActiveSession(id: nil, startDate: nil, label: "Demo")
         }
         // Title matches what the recorder was just handed, so the lock screen names the
         // run the same way Sessions will.
@@ -1733,7 +2054,7 @@ struct ContentView: View {
             sessionTitle: audio.isDemoMode
                 ? "Demo"
                 : (classStore.sessions.first(where: { $0.id == classStore.activeSessionID })?.title
-                   ?? "Listening only"),
+                   ?? "Session"),
             isDemo: audio.isDemoMode,
             startDate: feedSessionStart ?? Date()
         )
@@ -1744,34 +2065,6 @@ struct ContentView: View {
         snippetSettings.apply(to: audio.snippetExpansion)
         audio.setSnippetRouting(snippetSettings.routing)
         Task { await audio.start() }
-    }
-
-    private var recordButton: some View {
-        RecordButton(recorder: recorder, action: toggleRecording)
-            .popover(isPresented: $showNotRecordingNudge) {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Just so you know, you're not recording.")
-                        .font(.subheadline.weight(.semibold))
-                        .fixedSize(horizontal: false, vertical: true)
-                    Text("You have to manually arm recording when you start.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    HStack {
-                        Button("Don't remind me") {
-                            suppressNotRecordingNudge = true
-                            showNotRecordingNudge = false
-                        }
-                        .font(.caption)
-                        Spacer()
-                        Button("Close") { showNotRecordingNudge = false }
-                            .font(.caption.weight(.semibold))
-                    }
-                }
-                .padding(14)
-                .frame(width: 260, alignment: .leading)
-                .presentationCompactAdaptation(.popover)
-            }
     }
 
     /// Fires once per run, 60 s into a listening session in which recording was
@@ -1791,57 +2084,12 @@ struct ContentView: View {
         showNotRecordingNudge = true
     }
 
-    /// Compact variant for the full-screen transport pill — see
-    /// `playStopButtonCompact`.
-    private var recordButtonCompact: some View {
-        RecordButtonCompact(recorder: recorder, action: toggleRecording)
-    }
-
     /// Record button arms/disarms the triggered WAV recorder. No-op while demo
     /// mode blocks recording — the buttons are disabled too, this is the
     /// backstop for any other path that reaches here.
     private func toggleRecording() {
         guard !recorder.isBlocked else { return }
         recorder.setArmed(!recorder.isArmed)
-    }
-
-    /// Cycles off → heterodyne → adaptive time expansion → off on tap, icon
-    /// changing with it — replaces
-    /// the old Menu-based picker, which buried listen mode two taps deep and read
-    /// as unresponsive (open menu, then tap an item) even once the underlying
-    /// engine restart got faster.
-    private var listenModeCycleButton: some View {
-        Button {
-            advanceListenMode()
-        } label: {
-            Image(systemName: listenIcon).controlIcon()
-        }
-        .buttonStyle(.bordered)
-        // Off = grey, matching recordButton's non-recording state — listen mode's
-        // "off" isn't a configurable preset like the other orange toggles, it's
-        // just inactive, same as the record button when not recording.
-        .tint(audio.isListening ? .toggleOn : .toggleOff)
-        .accessibilityLabel("Listening mode: \(listenModeName)")
-        .tourTarget(.listen)
-    }
-
-    // The separate "heterodyne alongside slow replay" antenna toggle that used to
-    // live here (in a regular and a compact variant, both hung off the listen
-    // button as trailing overlays) is gone: `advanceListenMode` folds that routing
-    // choice into the mode cycle itself. See its doc comment for why, and for what
-    // that costs the tuning overlay's Output control.
-
-    /// Compact variant for the full-screen transport pill — see
-    /// `playStopButtonCompact`.
-    private var listenModeCycleButtonCompact: some View {
-        Button {
-            advanceListenMode()
-        } label: {
-            Image(systemName: listenIcon).font(.callout)
-        }
-        .tint(audio.isListening ? .toggleOn : .toggleOff)
-        .accessibilityLabel("Listening mode: \(listenModeName)")
-        .tourTarget(.listen)
     }
 
     /// One tap advances live listening through four states:
@@ -1896,10 +2144,6 @@ struct ContentView: View {
         audio.setSnippetRouting(routing)
     }
 
-    /// True when the button is showing one of the two slow-replay states, i.e.
-    /// when `routing` is part of what the glyph is reporting.
-    private var listenModeIsReplay: Bool { audio.listenMode == .snippetExpansion }
-
     // Spelled out because this string is the VoiceOver label on the listen-mode
     // button, whose only visible cue is an icon — and with four states behind one
     // glyph, that label is now the only unambiguous statement of which one is on.
@@ -1933,198 +2177,10 @@ struct ContentView: View {
 
 }
 
-/// Ring/dot color math shared by `RecordButton`/`RecordButtonCompact`. The two
-/// layers of the `record.circle` glyph (outer ring, inner dot — palette-rendered,
-/// not the single flat tint the plain glyph gets by default) swap which one is
-/// "faded" depending on state: armed-and-waiting pulses the ring between faded
-/// and full red (using the dot's own resting color as the pulse's peak), so the
-/// static dot reads as the reference tone the ring is breathing towards. Once a
-/// detection actually opens a WAV segment, the ring settles solid at that same
-/// full red and the dot flips to faded instead, for contrast against the now-
-/// solid ring. Disarmed uses `.secondary` for both, indistinguishable from the
-/// old flat-tint icon.
-private enum RecordButtonTone {
-    static let faded = Color.red.opacity(0.35)
-
-    static func ring(armed: Bool, writing: Bool, pulseBright: Bool) -> Color {
-        guard armed else { return .secondary }
-        if writing { return .red }
-        return pulseBright ? .red : faded
-    }
-
-    static func dot(armed: Bool, writing: Bool) -> Color {
-        guard armed else { return .secondary }
-        return writing ? faded : .red
-    }
-}
-
-/// Starts/stops the ring's breathing pulse to match armed/writing state — active
-/// only while armed and waiting (not yet writing); frozen (no visible jump, since
-/// `RecordButtonTone.ring` ignores `pulseBright` whenever `writing` is true) once
-/// a segment opens, and restarts when it closes but the recorder is still armed.
-///
-/// Sets the flag with NO animation of its own. The repeating animation is attached
-/// to the glyph itself via `.animation(_:value:)` (see `recordPulseAnimation`) —
-/// it must NOT be started with `withAnimation`, for the reason documented there.
-private func syncRecordPulse(armed: Bool, writing: Bool, pulseBright: Binding<Bool>) {
-    pulseBright.wrappedValue = armed && !writing
-}
-
-/// The pulse's animation, applied to the record glyph's own subtree.
-///
-/// This deliberately isn't a `withAnimation(.repeatForever(autoreverses: true))`
-/// wrapped around the state change. `withAnimation` installs its animation on the
-/// WHOLE current transaction, so every other view that happens to change in that
-/// same update cycle inherits it too — and an inherited `repeatForever` +
-/// `autoreverses` has nothing to end it, so whatever caught it oscillates for the
-/// rest of the run. That's what put the leading/trailing nav-bar Menu buttons into
-/// a permanent slow throb while detecting: `syncRecordPulse` fires on every
-/// `isArmed`/`isWriting` flip, i.e. on every WAV pass opened by a passing bat, and
-/// the toolbar's Liquid Glass chrome re-lays-out constantly, so sooner or later a
-/// toolbar update lands in the same transaction as one of those flips and latches
-/// the repeat. Scoping the animation here means the transaction never carries it,
-/// so there is nothing for the toolbar to inherit.
-private func recordPulseAnimation(armed: Bool, writing: Bool) -> Animation {
-    armed && !writing
-        ? .easeInOut(duration: 0.9).repeatForever(autoreverses: true)
-        : .easeInOut(duration: 0.2)
-}
-
-/// The main record toggle: arms/disarms the triggered WAV recorder. A standalone
-/// `View` struct, not a computed property on `ContentView` — see Context.md
-/// §13. `recorder.isWriting` flips on every WAV pass open/close
-/// during active detection; reading it directly in a `ContentView.body` computed
-/// property invalidated the whole screen at that rate, dropping taps on the transport
-/// buttons and both toolbar menus mid-tap.
-struct RecordButton: View {
-    let recorder: AudioRecorder
-    let action: () -> Void
-    @State private var pulseBright = false
-
-    var body: some View {
-        Button(action: action) {
-            Image(systemName: "record.circle")
-                .symbolRenderingMode(.palette)
-                .foregroundStyle(
-                    RecordButtonTone.ring(armed: recorder.isArmed, writing: recorder.isWriting, pulseBright: pulseBright),
-                    RecordButtonTone.dot(armed: recorder.isArmed, writing: recorder.isWriting)
-                )
-                .controlIcon()
-                .animation(recordPulseAnimation(armed: recorder.isArmed, writing: recorder.isWriting),
-                           value: pulseBright)
-        }
-        .buttonStyle(.bordered)
-        .tint(recorder.isArmed ? .red : .secondary)
-        .disabled(recorder.isBlocked)
-        .accessibilityLabel(recorder.isArmed ? "Stop recording" : "Record")
-        .accessibilityHint(recorder.isBlocked ? "Unavailable during a demo" : "")
-        .tourTarget(.record)
-        .onAppear { syncRecordPulse(armed: recorder.isArmed, writing: recorder.isWriting, pulseBright: $pulseBright) }
-        .onChange(of: recorder.isArmed) { _, armed in
-            syncRecordPulse(armed: armed, writing: recorder.isWriting, pulseBright: $pulseBright)
-        }
-        .onChange(of: recorder.isWriting) { _, writing in
-            syncRecordPulse(armed: recorder.isArmed, writing: writing, pulseBright: $pulseBright)
-        }
-    }
-}
-
-/// Compact variant for the full-screen transport pill — see `RecordButton`.
-struct RecordButtonCompact: View {
-    let recorder: AudioRecorder
-    let action: () -> Void
-    @State private var pulseBright = false
-
-    var body: some View {
-        Button(action: action) {
-            Image(systemName: "record.circle")
-                .symbolRenderingMode(.palette)
-                .foregroundStyle(
-                    RecordButtonTone.ring(armed: recorder.isArmed, writing: recorder.isWriting, pulseBright: pulseBright),
-                    RecordButtonTone.dot(armed: recorder.isArmed, writing: recorder.isWriting)
-                )
-                .font(.callout)
-                .animation(recordPulseAnimation(armed: recorder.isArmed, writing: recorder.isWriting),
-                           value: pulseBright)
-        }
-        .tint(recorder.isArmed ? .red : .secondary)
-        .disabled(recorder.isBlocked)
-        .accessibilityLabel(recorder.isArmed ? "Stop recording" : "Record")
-        .accessibilityHint(recorder.isBlocked ? "Unavailable during a demo" : "")
-        .tourTarget(.record)
-        .onAppear { syncRecordPulse(armed: recorder.isArmed, writing: recorder.isWriting, pulseBright: $pulseBright) }
-        .onChange(of: recorder.isArmed) { _, armed in
-            syncRecordPulse(armed: armed, writing: recorder.isWriting, pulseBright: $pulseBright)
-        }
-        .onChange(of: recorder.isWriting) { _, writing in
-            syncRecordPulse(armed: recorder.isArmed, writing: writing, pulseBright: $pulseBright)
-        }
-    }
-}
-
-/// Start-detecting chooser, replacing a plain `.confirmationDialog` with a wider
-/// custom sheet — two circular icon buttons side by side read faster than a
-/// stacked list of text rows, and give "New Session" and "Just Listening" equal
-/// visual weight instead of implying one is the default/primary action.
-private struct StartDetectingSheet: View {
-    let onNewSession: () -> Void
-    let onJustListening: () -> Void
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        VStack(spacing: 24) {
-            VStack(spacing: 6) {
-                Text("Start Detection")
-                    .font(.title2.weight(.semibold))
-                Text("Sessions group your recordings together and plot detections on a map. Just listening still tracks location but doesn't group the data.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-            }
-            .frame(maxWidth: .infinity)
-
-            HStack(spacing: 32) {
-                startOption(icon: "point.bottomleft.forward.to.point.topright.scurvepath.fill",
-                            title: "New Session", action: onNewSession)
-                startOption(icon: "person.spatialaudio.stereo.fill",
-                            title: "Just Listening", action: onJustListening)
-            }
-
-            Button("Cancel", role: .cancel) { dismiss() }
-                .padding(.top, 4)
-        }
-        .padding(.horizontal, 24)
-        .padding(.top, 28)
-        .padding(.bottom, 20)
-        .frame(maxWidth: .infinity)
-        .presentationDetents([.height(300)])
-        .presentationDragIndicator(.visible)
-    }
-
-    private func startOption(icon: String, title: String, action: @escaping () -> Void) -> some View {
-        Button {
-            dismiss()
-            action()
-        } label: {
-            VStack(spacing: 10) {
-                Image(systemName: icon)
-                    .font(.system(size: 26, weight: .semibold))
-                    .foregroundStyle(Color.accentColor)
-                    .frame(width: 72, height: 72)
-                    .background(Color.accentColor.opacity(0.15), in: Circle())
-                Text(title)
-                    .font(.footnote.weight(.medium))
-                    .foregroundStyle(.primary)
-            }
-        }
-        .buttonStyle(.plain)
-    }
-}
-
 /// Shown once, right after an onboarding-triggered tour finishes, when the
 /// user's location suggests a model that isn't already active — see
 /// ContentView's `finish` closure. Same compact-sheet visual language as
-/// StartDetectingSheet (centered title/subtitle, accent circle, drag
+/// `SuggestedModelSheet` (centered title/subtitle, accent circle, drag
 /// indicator) but its own sheet rather than folded into that one, so each can
 /// be dismissed independently and chained via `onDismiss`.
 private struct SuggestedModelSheet: View {
@@ -2145,6 +2201,7 @@ private struct SuggestedModelSheet: View {
                 Text("\(model.displayName) covers your area (\(model.region)). Activate it to start identifying species here.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
+                    .wrapsFully()
                     .multilineTextAlignment(.center)
             }
             .frame(maxWidth: .infinity)
@@ -2168,19 +2225,12 @@ private struct SuggestedModelSheet: View {
         .padding(.top, 28)
         .padding(.bottom, 20)
         .frame(maxWidth: .infinity)
-        .presentationDetents([.height(320)])
+        .contentSizedDetent()
         .presentationDragIndicator(.visible)
     }
 }
 
 private extension View {
-    /// Fixed-size control-bar icon: keeps every button the same width and stops it
-    /// resizing when the SF Symbol swaps (play↔stop, the listen-mode icons, etc.).
-    func controlIcon() -> some View {
-        font(.body)
-            .frame(width: 24, height: 22)
-    }
-
     /// See the call site in `ContentView.body` for why this is a single extension
     /// call rather than inline `.onChange`/`.alert` modifiers.
     func micPermissionAlert(status: String, isPresented: Binding<Bool>) -> some View {

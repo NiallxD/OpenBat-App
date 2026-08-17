@@ -7,7 +7,6 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		691EB6C0300AE8530043F41A /* SwiftyH3 in Frameworks */ = {isa = PBXBuildFile; productRef = B1FAA001F836B3A1D8340D8A /* SwiftyH3 */; };
 		69AE272B302686CB0072DDEC /* WidgetKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 69AE272A302686CB0072DDEC /* WidgetKit.framework */; };
 		69AE272D302686CB0072DDEC /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 69AE272C302686CB0072DDEC /* SwiftUI.framework */; };
 		69AE273C302686CD0072DDEC /* OpenBatWigetExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 69AE2728302686CB0072DDEC /* OpenBatWigetExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
@@ -102,7 +101,6 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				691EB6C0300AE8530043F41A /* SwiftyH3 in Frameworks */,
 				83990F19EE26D85694EDAD50 /* FLAC in Frameworks */,
 				88E2E1B3B334756115E32E3E /* ogg in Frameworks */,
 				C0FFEE0000000000AAAAAA03 /* Lottie in Frameworks */,
@@ -180,7 +178,6 @@
 			);
 			name = OpenBat;
 			packageProductDependencies = (
-				B1FAA001F836B3A1D8340D8A /* SwiftyH3 */,
 				9D3BD284CDD75E44CCD9CC0F /* FLAC */,
 				9A57C2A7819815BD0CB67EDD /* ogg */,
 				C0FFEE0000000000AAAAAA02 /* Lottie */,
@@ -266,7 +263,6 @@
 			mainGroup = 693CA9402FF0506B002CD4C1;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
-				729E44F3671ED067CCCA43EA /* XCRemoteSwiftPackageReference "SwiftyH3" */,
 				506664C410FD4FF2166C1F89 /* XCRemoteSwiftPackageReference "flac-binary-xcframework" */,
 				6B5E4A071775BAEC2965DFB7 /* XCRemoteSwiftPackageReference "ogg-binary-xcframework" */,
 				C0FFEE0000000000AAAAAA01 /* XCRemoteSwiftPackageReference "lottie-spm" */,
@@ -474,7 +470,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = OpenBat/OpenBat.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 80;
+				CURRENT_PROJECT_VERSION = 89;
 				DEVELOPMENT_TEAM = 57P8LD6GWD;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -488,7 +484,8 @@
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UIFileSharingEnabled = NO;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = UIInterfaceOrientationPortrait;
 				INFOPLIST_KEY_UISupportsDocumentBrowser = NO;
 				INFOPLIST_KEY_UIUserInterfaceStyle = Dark;
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
@@ -496,7 +493,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.8.0;
+				MARKETING_VERSION = 0.8.9;
 				PRODUCT_BUNDLE_IDENTIFIER = Niall.OpenBat;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -516,7 +513,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = OpenBat/OpenBat.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 80;
+				CURRENT_PROJECT_VERSION = 89;
 				DEVELOPMENT_TEAM = 57P8LD6GWD;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -530,7 +527,8 @@
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UIFileSharingEnabled = NO;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = UIInterfaceOrientationPortrait;
 				INFOPLIST_KEY_UISupportsDocumentBrowser = NO;
 				INFOPLIST_KEY_UIUserInterfaceStyle = Dark;
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
@@ -538,7 +536,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.8.0;
+				MARKETING_VERSION = 0.8.9;
 				PRODUCT_BUNDLE_IDENTIFIER = Niall.OpenBat;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -721,14 +719,6 @@
 				minimumVersion = 0.1.3;
 			};
 		};
-		729E44F3671ED067CCCA43EA /* XCRemoteSwiftPackageReference "SwiftyH3" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/pawelmajcher/SwiftyH3.git";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 0.5.0;
-			};
-		};
 		C0FFEE0000000000AAAAAA01 /* XCRemoteSwiftPackageReference "lottie-spm" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/airbnb/lottie-spm.git";
@@ -749,11 +739,6 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 506664C410FD4FF2166C1F89 /* XCRemoteSwiftPackageReference "flac-binary-xcframework" */;
 			productName = FLAC;
-		};
-		B1FAA001F836B3A1D8340D8A /* SwiftyH3 */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 729E44F3671ED067CCCA43EA /* XCRemoteSwiftPackageReference "SwiftyH3" */;
-			productName = SwiftyH3;
 		};
 		C0FFEE0000000000AAAAAA02 /* Lottie */ = {
 			isa = XCSwiftPackageProductDependency;

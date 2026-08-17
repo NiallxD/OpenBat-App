@@ -17,6 +17,35 @@ final class AutoIDSettings {
     struct SpeciesState: Codable {
         var enabled: Bool
         var prior: Float   // 0.01–1.0, used only when enabled = true
+        /// Whether this state came from actual range data, or is just the
+        /// factory default nobody has confirmed.
+        ///
+        /// This distinction is the whole point of the 2026-08-16 rework. Before
+        /// it, a species the app had never successfully looked up was
+        /// indistinguishable from one it had confirmed was underfoot: both sat
+        /// at `enabled, 1.0`. Roughly half of every location refresh failed
+        /// silently, so a Tennessee cave bat read as a maximum-confidence
+        /// candidate in California. "I don't know" must never render as "I'm
+        /// certain" — see Context.md §9.
+        var resolved: Bool
+
+        init(enabled: Bool, prior: Float, resolved: Bool) {
+            self.enabled = enabled
+            self.prior = prior
+            self.resolved = resolved
+        }
+
+        /// Hand-written so settings saved before `resolved` existed decode as
+        /// UNRESOLVED rather than failing or claiming confirmation they never
+        /// had. Those old values came from the GBIF record-count path this
+        /// replaced, so treating them as unconfirmed is not just safe, it is
+        /// accurate — and the first location fix re-derives them anyway.
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            enabled = try c.decode(Bool.self, forKey: .enabled)
+            prior = try c.decode(Float.self, forKey: .prior)
+            resolved = try c.decodeIfPresent(Bool.self, forKey: .resolved) ?? false
+        }
     }
 
     /// All settings for one model. Everything is per-model (decision: 2026-06-29).
@@ -84,9 +113,9 @@ final class AutoIDSettings {
         pendingChangeSummary = nil
     }
 
-    /// True while a GBIF prior refresh is in flight — surfaced so a settings
-    /// screen can show a spinner instead of looking like nothing happened.
-    /// Only ever written on the main actor (see `refreshPriorsFromGBIFIfNeeded`)
+    /// True while a prior refresh is in flight — surfaced so a settings screen
+    /// can show a spinner instead of looking like nothing happened.
+    /// Only ever written on the main actor (see `refreshPriors`)
     /// so `@Observable`'s change tracking stays on the isolation SwiftUI expects;
     /// the ACTUAL re-entrancy gate is `refreshInFlight` below, a plain
     /// (non-Observable) Bool fully owned by `priorRefreshLock`.
@@ -94,11 +123,16 @@ final class AutoIDSettings {
     private let priorRefreshLock = NSLock()
     private var refreshInFlight = false
 
-    /// How far (km) the user needs to have moved since the last refresh before
-    /// another one runs. Small enough to catch a real move to a different
-    /// bioregion (e.g. Squamish → California), large enough that everyday
-    /// movement around one town doesn't re-query GBIF on every launch.
-    private static let priorRefreshDistanceKm: Double = 100
+    /// How far (km) the user needs to have moved before the priors are
+    /// re-derived.
+    ///
+    /// Was 100 km, because each refresh cost ~50 GBIF requests and throttling
+    /// them was the point. Reading the bundled presence grid costs a dictionary
+    /// lookup, so the throttle now exists only to avoid pointless churn, and it
+    /// can be tight enough to catch crossing a real range boundary — which at
+    /// 100 km it could not. A user driving one county over to a different
+    /// habitat now gets the right species list.
+    private static let priorRefreshDistanceKm: Double = 10
 
     private static let keyLastPriorCoordinate = "AutoIDSettings_lastPriorCoordinate"
 
@@ -119,21 +153,33 @@ final class AutoIDSettings {
         }
     }
 
-    /// Refreshes every registered model's species priors from GBIF occurrence
-    /// data near `coordinate` — but only if this is the first fix ever, or the
-    /// user has moved at least `priorRefreshDistanceKm` since the last refresh.
-    /// Call this whenever a fresh location fix comes in (see
-    /// `LocationProvider.requestRegionFix`); it no-ops harmlessly otherwise, so
-    /// it's safe to call on every fix rather than needing its own trigger logic
-    /// at each call site.
+    /// Re-derives every registered model's species priors from the bundled
+    /// presence grid for `coordinate` — but only on the first fix, or once the
+    /// user has moved `priorRefreshDistanceKm`. Call it on every fresh location
+    /// fix (see `LocationProvider.requestRegionFix`); it no-ops harmlessly
+    /// otherwise, so call sites need no trigger logic of their own.
+    ///
+    /// WHAT THIS REPLACED (2026-08-16)
+    /// It used to ask GBIF, live, how many occurrence records each species had
+    /// within 100 km — around fifty requests fired at once, per location change.
+    /// Three things were wrong with that, and the third was shipping:
+    ///
+    ///   1. Record counts measure recording effort, not bats.
+    ///   2. Roughly half the requests were throttled and failed. A failed
+    ///      lookup left the species untouched, and untouched meant the factory
+    ///      default of `enabled, 1.0` — so "couldn't reach the internet" was
+    ///      indistinguishable from "definitely here". A Tennessee cave bat read
+    ///      as a maximum-confidence San Francisco candidate.
+    ///   3. It queried by scientific name at runtime, which was wrong in both
+    ///      directions: too old a name for the western red bat (0 records in
+    ///      California under `Lasiurus blossevillii`, 90 under `frantzii`) and
+    ///      too new a name for the serotine (`Cnephaeus serotinus` matches only
+    ///      a GENUS in GBIF, so it returned 0 everywhere and the serotine was
+    ///      switched off in southern England). Taxonomy is now resolved once, at
+    ///      data-generation time, where a human reads the report.
     ///
     /// Refreshes ALL models, not just the active one, so switching models later
-    /// already has location-appropriate priors instead of the neutral default.
-    /// Runs one model after another (not concurrently) — each one is already
-    /// internally parallel (see GBIFService.suggestPriors), and the total
-    /// species count across both bundled models today is small enough that
-    /// serial-by-model isn't meaningfully slower, while keeping memory/network
-    /// pressure lower than firing every model's every species query at once.
+    /// already has location-appropriate priors instead of a neutral default.
     ///
     /// `AutoIDSettings` isn't actor-isolated (PulseDetector's capture queue reads
     /// its properties synchronously off the main thread — see Context.md §13), so this
@@ -144,7 +190,17 @@ final class AutoIDSettings {
     /// `isRefreshingPriors` is a real TOCTOU race between them. `perModel`/
     /// `lastPriorCheckCoordinate` drive SwiftUI, so the actual write-back is hopped
     /// onto the main actor regardless of which thread the awaits above resume on.
-    func refreshPriorsFromGBIFIfNeeded(coordinate: CLLocationCoordinate2D) async {
+    ///
+    /// Still `async` and still locked despite the lookup now being local and
+    /// instant: the call sites and the re-entrancy hazard are unchanged, and the
+    /// presence store may not have finished loading when the first fix lands.
+    func refreshPriors(at coordinate: CLLocationCoordinate2D,
+                       using presence: SpeciesPresenceStore) async {
+        // Nothing to derive from yet. Deliberately does NOT record the
+        // coordinate, so the next fix retries rather than leaving every species
+        // on its unresolved default until the user travels 10 km.
+        guard await MainActor.run(body: { presence.isLoaded }) else { return }
+
         priorRefreshLock.lock()
         guard !refreshInFlight else { priorRefreshLock.unlock(); return }
         if let last = lastPriorCheckCoordinate {
@@ -165,11 +221,12 @@ final class AutoIDSettings {
         var updated = perModel
         for descriptor in ModelRegistry.all {
             guard !descriptor.scientificNames.isEmpty else { continue }
-            let suggestions = await GBIFService.suggestPriors(scientificNames: descriptor.scientificNames,
-                                                               near: coordinate)
             guard var settings = updated[descriptor.id] else { continue }
-            for (code, suggestion) in suggestions {
-                settings.species[code] = SpeciesState(enabled: suggestion.enabled, prior: suggestion.prior)
+            for code in descriptor.scientificNames.keys {
+                let state = await MainActor.run {
+                    presence.presence(forCode: code, at: coordinate)
+                }
+                settings.species[code] = Self.speciesState(for: state)
             }
             updated[descriptor.id] = settings
         }
@@ -245,6 +302,26 @@ final class AutoIDSettings {
 
     var activeModel: ModelSettings? { activeModelID.flatMap { perModel[$0] } }
 
+    /// The three states the presence grid can report, turned into a weight.
+    ///
+    /// `unknown` is the case that matters. It means the grid has no range for
+    /// this species at all — too few records to draw one, or a taxon that
+    /// couldn't be resolved. It must not read as "definitely here" (the bug this
+    /// replaced) and it must not read as "definitely absent" either, which would
+    /// silently stop the app naming a bat purely because nobody has mapped it.
+    /// So it stays enabled at half weight and, crucially, `resolved: false` — so
+    /// the settings screen can say plainly that it doesn't know.
+    private static func speciesState(for presence: SpeciesPresenceStore.Presence) -> SpeciesState {
+        switch presence {
+        case .present:
+            return SpeciesState(enabled: true, prior: 1.0, resolved: true)
+        case .absent:
+            return SpeciesState(enabled: false, prior: 0.01, resolved: true)
+        case .unknown:
+            return SpeciesState(enabled: true, prior: 0.5, resolved: false)
+        }
+    }
+
     /// Prior to apply during classification. Disabled species are suppressed to 0.01.
     func effectivePrior(for code: String) -> Float {
         guard let s = activeModel?.species[code], s.enabled else { return 0.01 }
@@ -276,7 +353,7 @@ final class AutoIDSettings {
     static func defaultSettings(for d: ModelDescriptor) -> ModelSettings {
         var species: [String: SpeciesState] = [:]
         for code in d.classNames {
-            species[code] = SpeciesState(enabled: true, prior: 1.0)
+            species[code] = SpeciesState(enabled: true, prior: 1.0, resolved: false)
         }
         return ModelSettings(species: species,
                              passTimeoutSeconds: 2.0,

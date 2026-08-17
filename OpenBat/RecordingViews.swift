@@ -4,11 +4,12 @@
 //
 //  UI for `Recording` — the WAV-backed unit AudioRecorder's bout-based trigger
 //  produces (see Context.md §10). Shown two places:
-//    • the Listening tab's list (SessionsView.listeningContent)
+//    • the Recordings tab's list (SessionsView.listeningContent)
 //    • a session's recordings list (SessionsView.SessionDetailView)
-//  Both open the same RecordingDetailView — a whole-file spectrogram plus the
+//  Both open the same destination — WavPlayerView, the player — and the
 //  finer-grained per-pulse IDs (PassRecord/PulseRecord, PulseDetector's own
-//  "one run of pulses" grouping) that happened during the recording's time span.
+//  "one run of pulses" grouping) that happened during the recording's time span
+//  are a sheet over it: RecordingPulsesSheet, below.
 //
 
 import SwiftUI
@@ -42,10 +43,6 @@ enum RecordingThumbnailLoader {
     /// actually gets sampled at @3x — 512 is that, rounded, and ~1/64th the
     /// pixels of the stored 4096-wide original.
     static let rowMaxPixelSize: CGFloat = 512
-    /// The detail page shows the overview at 180 pt tall, scrolling horizontally
-    /// at its native aspect — 2048 covers that at @3x without carrying the full
-    /// 4096 × 1024 bitmap around.
-    static let detailMaxPixelSize: CGFloat = 2048
 
     @MainActor
     static func load(_ recording: Recording, store: ClassificationStore,
@@ -204,14 +201,24 @@ struct RecordingRow: View {
     }
 }
 
-// MARK: - Detail
+// MARK: - Pulses sheet
 
-struct RecordingDetailView: View {
+/// The per-pulse ID evidence behind one recording, presented as a sheet from the
+/// player's "Pulses" button (see WavPlayerView.fileInfoBlock).
+///
+/// This used to be a pushed page of its own (RecordingDetailView) that a
+/// recording row opened INSTEAD of the player — so listening to a recording and
+/// seeing what was ID'd in it were two different destinations, and the one you
+/// landed on depended on which list you tapped from. A recording row now always
+/// opens the player, and this is a sheet over it. The whole-file spectrogram
+/// that used to head this page is gone with the push: the player draws the same
+/// thing, zoomable, right behind this sheet.
+struct RecordingPulsesSheet: View {
     let recording: Recording
     @Bindable var store: ClassificationStore
-    /// Shared with SessionsView/PlaybackListView via the same UserDefaults key.
+    /// Shared with SessionsView via the same UserDefaults key.
     @AppStorage("display.showNoID") private var showNoID = false
-    @State private var image: UIImage?
+    @Environment(\.dismiss) private var dismiss
 
     /// Every pass whose pulses fall inside this recording's time span — the
     /// per-pulse ID detail, same rows/detail screen the rest of the app uses.
@@ -223,73 +230,59 @@ struct RecordingDetailView: View {
     }
 
     var body: some View {
-        List {
-            Section("Spectrogram") {
-                spectrogramSection
-                    .listRowInsets(EdgeInsets())
-            }
-
-            Section {
-                LabeledContent("Species") { Text("\(recording.species) · \(recording.commonName)") }
-                if let confidence = recording.confidence {
-                    LabeledContent("Confidence") {
-                        Text(String(format: "%.0f%%", confidence * 100))
+        // Its own stack: a pass row still pushes PassDetailView, and this is
+        // presented over a player that is itself inside the Sessions stack.
+        NavigationStack {
+            List {
+                Section {
+                    LabeledContent("Species") { Text("\(recording.species) · \(recording.commonName)") }
+                    if let confidence = recording.confidence {
+                        LabeledContent("Confidence") {
+                            Text(String(format: "%.0f%%", confidence * 100))
+                        }
                     }
+                    LabeledContent("Duration") { Text(RecordingRow.durationString(recording.durationSeconds)) }
+                    LabeledContent("Recorded") { Text(Self.fullTimestamp(recording.date)) }
                 }
-                LabeledContent("Duration") { Text(Self.durationString(recording.durationSeconds)) }
-                LabeledContent("Recorded") { Text(Self.fullTimestamp(recording.date)) }
-            }
 
-            Section("Pulses & IDs") {
-                if recordingPasses.isEmpty {
-                    Text(store.passes(forRecording: recording).isEmpty
-                         ? "No classified pulses in this recording."
-                         : "Every pulse here is unclassified (NoID) — enable \"Show unclassified\" in the list to see them.")
-                        .foregroundStyle(.secondary)
-                } else {
-                    ForEach(recordingPasses) { pass in
-                        NavigationLink {
-                            PassDetailView(pass: pass, store: store)
-                        } label: {
-                            PassRow(pass: pass, store: store)
+                Section("Pulses & IDs") {
+                    if recordingPasses.isEmpty {
+                        Text(store.passes(forRecording: recording).isEmpty
+                             ? "No classified pulses in this recording."
+                             : "Every pulse here is unclassified (NoID) — tap the filter icon to show them.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(recordingPasses) { pass in
+                            NavigationLink {
+                                PassDetailView(pass: pass, store: store)
+                            } label: {
+                                PassRow(pass: pass, store: store)
+                            }
                         }
                     }
                 }
             }
-        }
-        .navigationTitle(recording.commonName)
-        .navigationBarTitleDisplayMode(.inline)
-        .task(id: recording.id) {
-            image = await RecordingThumbnailLoader.load(
-                recording, store: store,
-                maxPixelSize: RecordingThumbnailLoader.detailMaxPixelSize)
-        }
-    }
-
-    @ViewBuilder private var spectrogramSection: some View {
-        if let image {
-            // Fixed display height, native aspect ratio — a long bout renders a wide
-            // image, so it scrolls horizontally rather than being squashed to fit.
-            let aspect = image.size.width / max(image.size.height, 1)
-            ScrollView(.horizontal, showsIndicators: true) {
-                Image(uiImage: image)
-                    .resizable()
-                    .interpolation(.high)
-                    .frame(width: 180 * aspect, height: 180)
-            }
-        } else {
-            RoundedRectangle(cornerRadius: 8)
-                .fill(.quaternary)
-                .frame(height: 120)
-                .overlay {
-                    Text("Spectrogram unavailable")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+            .navigationTitle("Pulses")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                // The same filter the recording lists carry, on the same shared
+                // key — without it, a recording whose passes are all NoID opens
+                // an empty sheet with the only remedy two screens away.
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        showNoID.toggle()
+                    } label: {
+                        Image(systemName: showNoID ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
+                            .foregroundStyle(showNoID ? .blue : .primary)
+                    }
+                    .accessibilityLabel(showNoID ? "Hide unclassified pulses" : "Show unclassified pulses")
                 }
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Done") { dismiss() }
+                }
+            }
         }
     }
-
-    static func durationString(_ seconds: Double) -> String { RecordingRow.durationString(seconds) }
 
     private static func fullTimestamp(_ d: Date) -> String {
         RecordingDateFormatters.dateTimeMedium.string(from: d)

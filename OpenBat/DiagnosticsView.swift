@@ -21,9 +21,18 @@ struct DiagnosticsView: View {
     /// this sheet on the way — the card is useless behind a sheet, which also
     /// pauses the render loop it needs running.
     let onOpenTuning: () -> Void
+    /// Captures every live tunable + persisted setting and writes it to a file,
+    /// returning the URL. Owned by ContentView, which is the only place holding
+    /// all the processors and the AutoID settings at once — see `dumpSettings`
+    /// there.
+    let onDumpSettings: () -> URL?
     @Environment(\.dismiss) private var dismiss
     @State private var logCleared = false
     @State private var showDemoPicker = false
+    /// Last file written by the dump button, so it can be shared without
+    /// re-capturing (a second capture would be a different moment in time).
+    @State private var dumpedFile: URL?
+    @State private var dumpFailed = false
 
     var body: some View {
         NavigationStack {
@@ -41,6 +50,7 @@ struct DiagnosticsView: View {
                     DiagnosticsMicQualityCard(audio: audio)
                     demoSection
                     tuningSection
+                    settingsDumpSection
                     logSection
                 }
                 .padding()
@@ -139,6 +149,55 @@ struct DiagnosticsView: View {
             Text("A floating panel of live controls over the detector. The spectrogram and audio keep running, so changes are heard and seen as you make them. Drag it out of the way; close it from its own ✕.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding()
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    /// Writes the current value of every slider, toggle and per-species prior to
+    /// a JSON file so a tuning session can be turned into code defaults without
+    /// transcribing knob positions by hand. Deliberately captures on tap rather
+    /// than continuously — the file is meant to be a dated record of one
+    /// configuration, not a live mirror.
+    private var settingsDumpSection: some View {
+        VStack(spacing: 12) {
+            HStack {
+                Text("Settings Snapshot")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+
+            Button {
+                dumpFailed = false
+                if let url = onDumpSettings() {
+                    dumpedFile = url
+                } else {
+                    dumpedFile = nil
+                    dumpFailed = true
+                }
+            } label: {
+                Label("Dump Settings to File", systemImage: "square.and.arrow.down.on.square")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+
+            if let dumpedFile {
+                ShareLink(item: dumpedFile) {
+                    Label(dumpedFile.lastPathComponent, systemImage: "square.and.arrow.up")
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+            }
+
+            Text(dumpFailed
+                 ? "Couldn't write the file."
+                 : "Every tuning slider, display preference and per-species prior, as JSON in Documents. Tap again for a fresh, separately-timestamped capture.")
+                .font(.caption2)
+                .foregroundStyle(dumpFailed ? .red : .secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding()

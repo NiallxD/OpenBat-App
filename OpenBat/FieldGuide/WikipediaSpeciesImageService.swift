@@ -54,15 +54,14 @@ enum WikipediaSpeciesImageService {
     /// photo found" (distinct from "not yet checked", which has no entry at
     /// all) so a species with no Wikipedia photo isn't re-queried every time
     /// its row scrolls back on screen. Backed by disk (see `cacheURL`) so this
-    /// survives app relaunches — same on-disk convention as `SpeciesGuideStore`
-    /// and `GBIFService`'s caches, rather than a session-only lookup.
+    /// survives app relaunches — same on-disk convention as `SpeciesGuideStore`,
+    /// rather than a session-only lookup.
     private static var cache: [String: Photo?] = loadCache()
 
     /// Guards `cache`'s read-modify-write in `fetchImageURL` — several species
     /// cards can resolve concurrently (each a separate SwiftUI `.task`), and an
     /// unguarded mutation of the same dictionary from multiple threads is
-    /// undefined behavior, not just a lost update. Same pattern as
-    /// `GBIFService.taxonKeyCacheLock`.
+    /// undefined behavior, not just a lost update.
     private static let cacheLock = NSLock()
 
     private static let cacheURL: URL = {

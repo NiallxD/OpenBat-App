@@ -229,18 +229,31 @@ enum PulseImageRenderer {
         let pixelCount = wideOutFrames * renderBins * 4
         var pixels = Self.pixelScratch; Self.pixelScratch = []
         if pixels.count < pixelCount { pixels = [UInt8](repeating: 255, count: pixelCount) }
-        for bin in renderMin...renderMax {
-            let yFlipped = renderMax - bin     // row 0 = top = high freq
-            let base = bin * nFrames
-            for j in 0..<wideOutFrames {
-                let srcFrame = wideSrcStart + j
-                let v: Float = (srcFrame >= 0 && srcFrame < nFrames) ? norm[base + srcFrame] : 0
-                let (r, g, b) = DisplayColormap.rgb(gate(v), palette: palette)
-                let idx = (yFlipped * wideOutFrames + j) * 4
-                pixels[idx]     = r
-                pixels[idx + 1] = g
-                pixels[idx + 2] = b
-                pixels[idx + 3] = 255
+        // 256-entry table built once, O(1) lookup per pixel, instead of the
+        // dictionary lookup + linear stop-search `DisplayColormap.rgb` does per
+        // call. See `DisplayColormap.makeLUT`'s doc comment for the measurement
+        // that motivated it: the same change took the offline recording renderer's
+        // loop from 1.6–5.3 SECONDS to low tens of ms. Every other bulk pixel loop
+        // in the app (RecordingSpectrogramRenderer, WavSpectrogramEngine) was
+        // converted then; this one was missed, and it is on the hotter path — it
+        // runs on every captured pulse, live, while detection continues.
+        let lut = DisplayColormap.makeLUT(palette: palette)
+        let lutMax = lut.count - 1
+        let lutScale = Float(lutMax)
+        lut.withUnsafeBufferPointer { lutBuf in
+            for bin in renderMin...renderMax {
+                let yFlipped = renderMax - bin     // row 0 = top = high freq
+                let base = bin * nFrames
+                for j in 0..<wideOutFrames {
+                    let srcFrame = wideSrcStart + j
+                    let v: Float = (srcFrame >= 0 && srcFrame < nFrames) ? norm[base + srcFrame] : 0
+                    let (r, g, b) = lutBuf[min(lutMax, max(0, Int(gate(v) * lutScale)))]
+                    let idx = (yFlipped * wideOutFrames + j) * 4
+                    pixels[idx]     = r
+                    pixels[idx + 1] = g
+                    pixels[idx + 2] = b
+                    pixels[idx + 3] = 255
+                }
             }
         }
 

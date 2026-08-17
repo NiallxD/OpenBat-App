@@ -63,6 +63,7 @@ final class SpeciesGuideStore {
             Self.loadFromDisk()
         }).value else { return }
         guide = result.guide
+        SpeciesInfo.adoptNames(from: guide)
         source = result.source
     }
 
@@ -138,6 +139,7 @@ final class SpeciesGuideStore {
             guard remote.dataVersion > guide.dataVersion else { return }
             try data.write(to: Self.cacheURL, options: .atomic)
             guide = remote
+            SpeciesInfo.adoptNames(from: guide)
             source = .cached
         } catch {
             lastRefreshError = error.localizedDescription

@@ -19,24 +19,41 @@ import CoreLocation
 
 // MARK: - Persisted records
 
-/// One breadcrumb on a session's GPS course.
-struct TrackPoint: Codable {
-    let lat: Double
-    let lon: Double
-    let t: Date
-    var coordinate: CLLocationCoordinate2D { .init(latitude: lat, longitude: lon) }
-}
-
-/// A field outing: a dated, located container that owns its passes (linked by
-/// `sessionID`) and a recorded GPS course. "Just Listening" passes have a nil
-/// `sessionID` and live in the Listening bucket instead of a session.
+/// A field outing: a dated, located container owning the passes and recordings
+/// made during it (linked by `sessionID`).
+///
+/// Every run of the detector is one of these as of 2026-08-16. There used to be
+/// a choice on the way in — "New Session" or "Just Listening" — where listening
+/// produced passes with a nil `sessionID` that no screen ever showed. The choice
+/// really decided whether a GPS track was recorded, which is a question about
+/// privacy and battery wearing the costume of a question about filing, and it
+/// had to be answered before the user had heard a single bat. Tracks are gone
+/// (see LocationProvider), so the question went with them.
 struct RecordingSession: Codable, Identifiable {
     let id: UUID
     var title: String            // "29 Jun 2026 · Mendip Hills" — place filled in async
     var notes: String
     let startDate: Date
     var endDate: Date?
-    var track: [TrackPoint]
+
+    /// Sessions saved before tracks were removed carry one; it is decoded and
+    /// discarded rather than rejected, so an existing library still opens.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        title = try c.decode(String.self, forKey: .title)
+        notes = try c.decode(String.self, forKey: .notes)
+        startDate = try c.decode(Date.self, forKey: .startDate)
+        endDate = try c.decodeIfPresent(Date.self, forKey: .endDate)
+    }
+
+    init(id: UUID, title: String, notes: String, startDate: Date, endDate: Date?) {
+        self.id = id
+        self.title = title
+        self.notes = notes
+        self.startDate = startDate
+        self.endDate = endDate
+    }
 }
 
 struct ScoreEntry: Codable, Identifiable {
@@ -70,7 +87,7 @@ struct PassRecord: Codable, Identifiable, NoIDFilterable {
     let confidence: Float        // mean posterior of the winner across pulses
     let pulseCount: Int          // pulses that contributed to the ID
     let pulses: [PulseRecord]
-    var sessionID: UUID?         // owning session; nil = Listening bucket
+    var sessionID: UUID?         // owning session; nil only for pre-2026-08-16 records, adopted on load
     var latitude: Double?        // where the pass was heard (session passes only)
     var longitude: Double?
     /// Second-place species (by mean posterior) across the pass's pulses, and its
@@ -146,7 +163,7 @@ struct Recording: Codable, Identifiable, NoIDFilterable {
     var commonName: String
     let confidence: Float?          // nil for a NoID recording
     let pulseCount: Int
-    var sessionID: UUID?            // nil = Listening bucket
+    var sessionID: UUID?            // nil = recorded outside a session (legacy, or demo)
     var latitude: Double?
     var longitude: Double?
     /// Path to the WAV, relative to the Documents directory — never store an absolute
@@ -202,7 +219,7 @@ final class ClassificationStore {
     private let sessionsURL: URL
     private let recordingsURL: URL
     private let io = DispatchQueue(label: "bat.ClassificationStore.io", qos: .utility)
-    /// Throttle full sessions.json rewrites while a track streams in points.
+    /// Throttle full sessions.json rewrites.
     private var lastSessionPersist: Date = .distantPast
     /// Guards `load()` against running more than once — see its doc comment.
     private var hasLoaded = false
@@ -237,11 +254,34 @@ final class ClassificationStore {
 
     // MARK: Sessions
 
-    /// Begin a new outing and mark it active. New passes attach to it until `endSession`.
+    /// How long a just-ended session stays resumable. Stopping and restarting
+    /// inside this window continues the same outing instead of starting another.
+    ///
+    /// Every run became a session on 2026-08-16, which removed a decision the
+    /// user shouldn't have had to make — but it also meant a stop and a start
+    /// now cost a whole extra row. Someone pausing to move to a better spot, or
+    /// to check a setting, would otherwise litter one evening with a dozen
+    /// near-empty sessions. A session should be an outing, not a tap.
+    private static let sessionResumeWindow: TimeInterval = 15 * 60
+
+    /// Begin an outing and mark it active, resuming the previous one if it ended
+    /// only moments ago. New passes attach to it until `endSession`.
     @discardableResult
     func startSession(startDate: Date = Date()) -> UUID {
+        if let last = sessions.first, let ended = last.endDate,
+           startDate.timeIntervalSince(ended) <= Self.sessionResumeWindow,
+           startDate >= ended {
+            // Reopening: clear the end stamp so the row reads as one continuous
+            // outing rather than showing when the user happened to pause.
+            if let i = sessions.firstIndex(where: { $0.id == last.id }) {
+                sessions[i].endDate = nil
+            }
+            activeSessionID = last.id
+            persistSessions()
+            return last.id
+        }
         let session = RecordingSession(id: UUID(), title: Self.defaultTitle(startDate),
-                                       notes: "", startDate: startDate, endDate: nil, track: [])
+                                       notes: "", startDate: startDate, endDate: nil)
         sessions.insert(session, at: 0)
         activeSessionID = session.id
         persistSessions()
@@ -274,13 +314,6 @@ final class ClassificationStore {
         guard let i = sessions.firstIndex(where: { $0.id == id }) else { return }
         sessions[i].title = "\(Self.defaultTitle(sessions[i].startDate)) · \(name)"
         persistSessions(force: true)
-    }
-
-    /// Append a GPS breadcrumb to the active session (called by LocationProvider).
-    func appendTrackPoint(_ point: TrackPoint) {
-        guard let id = activeSessionID, let i = sessions.firstIndex(where: { $0.id == id }) else { return }
-        sessions[i].track.append(point)
-        persistSessions()
     }
 
     func passes(inSession id: UUID) -> [PassRecord] { passes.filter { $0.sessionID == id } }
@@ -771,7 +804,7 @@ final class ClassificationStore {
         }
     }
 
-    /// Persist sessions, throttled so a streaming GPS track doesn't rewrite on every
+    /// Persist sessions, throttled so a burst of changes doesn't rewrite on every
     /// breadcrumb. `force` bypasses the throttle (session start/end, edits, deletes).
     private func persistSessions(force: Bool = false) {
         if !force, Date().timeIntervalSince(lastSessionPersist) < 5 { return }
@@ -806,6 +839,51 @@ final class ClassificationStore {
         if let p = decoded.passes,     passes.isEmpty     { passes = p }
         if let s = decoded.sessions,   sessions.isEmpty   { sessions = s }
         if let r = decoded.recordings, recordings.isEmpty { recordings = r }
+        adoptOrphanedListeningPasses()
+    }
+
+    /// Gathers pre-2026-08-16 "Just Listening" detections into sessions, one per
+    /// night, so they stop being invisible.
+    ///
+    /// Those passes were saved with a nil `sessionID` and no screen ever showed
+    /// them — the review that started this work ran the detector for twenty
+    /// minutes, logged 1,450 pulses, and then found "No sessions yet". The data
+    /// was there the whole time with nowhere to appear. Now that every run is a
+    /// session, the old ones need somewhere to live too, or upgrading would
+    /// silently discard a user's history.
+    ///
+    /// Grouped by night rather than by day: a session that starts at 21:00 and
+    /// runs past midnight is one outing, and splitting it at midnight would be
+    /// wrong for exactly the users who did the most listening.
+    private func adoptOrphanedListeningPasses() {
+        let orphans = passes.filter { $0.sessionID == nil }
+        guard !orphans.isEmpty else { return }
+
+        var calendar = Calendar.current
+        calendar.timeZone = .current
+        let grouped = Dictionary(grouping: orphans) { pass -> Date in
+            // Anything before midday belongs to the previous evening's outing.
+            let shifted = calendar.date(byAdding: .hour, value: -12, to: pass.date) ?? pass.date
+            return calendar.startOfDay(for: shifted)
+        }
+
+        for (night, group) in grouped {
+            let start = group.map(\.date).min() ?? night
+            let end = group.map(\.date).max()
+            let session = RecordingSession(id: UUID(),
+                                           title: Self.defaultTitle(start),
+                                           notes: "",
+                                           startDate: start,
+                                           endDate: end)
+            sessions.append(session)
+            for index in passes.indices where passes[index].sessionID == nil
+                && group.contains(where: { $0.id == passes[index].id }) {
+                passes[index].sessionID = session.id
+            }
+        }
+        sessions.sort { $0.startDate > $1.startDate }
+        persistSessions(force: true)
+        persist()
     }
 
     nonisolated private static func decode<T: Decodable>(_ type: T.Type, from url: URL) -> T? {
@@ -817,7 +895,47 @@ final class ClassificationStore {
 // MARK: - Species names (shared)
 
 enum SpeciesInfo {
-    static let commonName: [String: String] = [
+
+    /// Common names, with the field guide winning wherever it has an entry.
+    ///
+    /// The app used to hold two independent name lists and they disagreed in
+    /// public: the classifier called TABR the "Brazilian Free-tailed Bat" while
+    /// the field guide called the same animal the "Mexican Free-tailed Bat",
+    /// which reads to a new user as two species. The guide is the right
+    /// authority — it is community-edited, correctable without shipping an app
+    /// update, and it is where anyone goes to read about the bat — so it now
+    /// overrides the table below rather than sitting beside it.
+    ///
+    /// Kept as a subscript so all ~13 call sites (several outside SwiftUI, in
+    /// the store and the Live Activity controller) read exactly as before,
+    /// rather than each having to be handed a guide reference.
+    struct NameTable {
+        subscript(code: String) -> String? {
+            SpeciesInfo.guideNames[code] ?? SpeciesInfo.bundledNames[code]
+        }
+    }
+
+    static let commonName = NameTable()
+
+    /// Populated by `SpeciesGuideStore` whenever it loads or refreshes.
+    private(set) static var guideNames: [String: String] = [:]
+
+    /// Adopt the guide's names for every code a model can produce.
+    ///
+    /// Joined on scientific name, the same way `SpeciesGuide.species(forCode:)`
+    /// does — the guide deliberately knows nothing about classifier codes.
+    static func adoptNames(from guide: SpeciesGuide) {
+        var names: [String: String] = [:]
+        for entry in guide.species {
+            guard let code = SpeciesGuide.code(forScientificName: entry.scientificName) else { continue }
+            names[code] = entry.commonName
+        }
+        guideNames = names
+    }
+
+    /// Fallback for codes the guide has no page for — which is most of them:
+    /// the models name 47 species and the guide describes far fewer.
+    static let bundledNames: [String: String] = [
         // BatDetect2 (UK/Europe), 6-letter codes — see
         // BatDetect2Classifier.classNames/scientificNames.
         "MYOMYS": "Whiskered Bat",

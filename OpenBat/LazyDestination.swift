@@ -11,7 +11,8 @@
 //  that's merely wasteful. For an expensive one it is the difference between a
 //  screen that opens instantly and one that visibly hangs.
 //
-//  This bit hard in `PlaybackListView`: every row's destination is a
+//  This bit hard in the recording lists (`SessionsView`, and the Playback list
+//  that preceded it): every row's destination is a
 //  `WavPlayerView`, whose `@State private var engine = PlaybackEngine()` default
 //  expression constructs a `SpectrogramProcessor` — which allocates and
 //  zero-fills a 3,840,000-element Float PCM ring (~15 MB) and builds a vDSP FFT

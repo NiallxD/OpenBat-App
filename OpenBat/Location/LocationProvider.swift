@@ -2,13 +2,18 @@
 //  LocationProvider.swift
 //  OpenBat
 //
-//  CoreLocation wrapper that drives a session's GPS course. While a "New Session" is
-//  detecting, it streams fixes into the active session's track (throttled to ~5 m /
-//  ~3 s breadcrumbs) and reverse-geocodes the first fix into the session title.
+//  CoreLocation wrapper providing occasional one-shot fixes: which classifier
+//  model suits the user's region, which species are plausible there, the
+//  coordinate stamped on each detection, and a place name for a session title.
 //
-//  Background capable: tracking escalates to "Always" authorization and enables
-//  background location updates so the course keeps recording with the phone locked
-//  (requires the `location` UIBackgroundMode — set in the target's Info.plist keys).
+//  NO CONTINUOUS TRACKING, and never "Always" authorization (2026-08-16).
+//  Sessions used to record a GPS course — continuous background updates,
+//  breadcrumbs every ~5 m, escalating to Always so it kept running with the
+//  phone locked. It was removed rather than made optional: every detection
+//  already carries a coordinate and a timestamp, so a track can be reconstructed
+//  from the exported points by any GIS tool. Keeping a second, denser copy of
+//  the user's movements cost battery and privacy to duplicate data the app
+//  already had.
 //
 
 import CoreLocation
@@ -31,8 +36,6 @@ final class LocationProvider: NSObject, CLLocationManagerDelegate {
 
     @ObservationIgnored private let manager = CLLocationManager()
     @ObservationIgnored private let geocoder = CLGeocoder()
-    @ObservationIgnored private var tracking = false
-    @ObservationIgnored private var lastTrackPoint: CLLocation?
     @ObservationIgnored private var pendingGeocodeSessionID: UUID?
     @ObservationIgnored private var pendingRegionFix = false
     @ObservationIgnored private var authorizationContinuation: CheckedContinuation<CLAuthorizationStatus, Never>?
@@ -83,13 +86,10 @@ final class LocationProvider: NSObject, CLLocationManagerDelegate {
     }
 
     /// One-shot fix for region-based feature suggestions (e.g. "a model is available for
-    /// your area") — deliberately lighter weight than `startTracking`: only requests
-    /// when-in-use authorization (never escalates to Always) and asks for a single fix
-    /// rather than continuous updates. Safe to call repeatedly; a no-op once denied.
-    /// No-ops while `tracking`, since continuous updates are already feeding
-    /// `currentCoordinate` at that point.
+    /// your area"), and to tag detections. Only ever requests when-in-use
+    /// authorization — never Always — and asks for a single fix rather than
+    /// continuous updates. Safe to call repeatedly; a no-op once denied.
     func requestRegionFix() {
-        guard !tracking else { return }
         switch manager.authorizationStatus {
         case .notDetermined:
             pendingRegionFix = true
@@ -107,60 +107,31 @@ final class LocationProvider: NSObject, CLLocationManagerDelegate {
     /// default set for tracking), `requestLocation()` can sit for tens of seconds
     /// waiting for a GPS-grade fix even though a region-fix decision only needs
     /// ~100 km precision. Dropping it to kilometre-scale here lets CoreLocation
-    /// return its first cheap cell/wifi estimate immediately; `beginUpdates()` puts
-    /// it back to `.best` before a tracked session's continuous updates begin.
+    /// return its first cheap cell/wifi estimate immediately; Nothing puts it back:
+    /// every fix this class takes is a region fix now.
     private func requestCoarseLocation() {
         manager.desiredAccuracy = kCLLocationAccuracyThreeKilometers
         manager.requestLocation()
     }
 
-    /// Begin recording a course for the active session. Escalates to Always so the
-    /// track keeps recording with the phone locked, and geocodes the first fix.
-    func startTracking(geocodeSessionID sessionID: UUID?) {
-        tracking = true
-        lastTrackPoint = nil
+    /// Reverse-geocode the next good fix into `sessionID`'s title, so a session is
+    /// named for where it happened rather than only when.
+    ///
+    /// Sessions used to get this from the first breadcrumb of a continuous GPS
+    /// track. Tracking is gone (2026-08-16 — see the type's header), so the
+    /// single region fix does the job instead: one fix, one geocode, no
+    /// background location.
+    func geocodeNextFix(into sessionID: UUID) {
         pendingGeocodeSessionID = sessionID
-        requestAndStart()
-    }
-
-    func stopTracking() {
-        tracking = false
-        manager.stopUpdatingLocation()
-        manager.allowsBackgroundLocationUpdates = false
-    }
-
-    private func requestAndStart() {
-        switch manager.authorizationStatus {
-        case .notDetermined:
-            manager.requestWhenInUseAuthorization()   // fixes begin once granted (delegate below)
-        case .authorizedWhenInUse:
-            manager.requestAlwaysAuthorization()
-            beginUpdates()
-        case .authorizedAlways:
-            beginUpdates()
-        default:
-            break                                      // denied/restricted — no track
+        requestRegionFix()
+        // A fix from the last few minutes is already good enough to name a
+        // place, and asking for a fresh one would leave the session untitled
+        // until CoreLocation felt like answering.
+        if let coordinate = currentCoordinate {
+            geocodeTitleIfNeeded(CLLocation(latitude: coordinate.latitude,
+                                            longitude: coordinate.longitude))
         }
     }
-
-    private func beginUpdates() {
-        // Undo requestCoarseLocation()'s kilometre-scale relaxation — a tracked
-        // session's breadcrumbs need the strict accuracy floor in didUpdateLocations.
-        manager.desiredAccuracy = kCLLocationAccuracyBest
-        // `allowsBackgroundLocationUpdates = true` THROWS unless UIBackgroundModes contains
-        // "location"; only enable background updates when that mode is actually declared, so
-        // a misconfigured build degrades to foreground tracking instead of crashing.
-        if Self.hasLocationBackgroundMode {
-            manager.allowsBackgroundLocationUpdates = true
-            manager.pausesLocationUpdatesAutomatically = false
-        }
-        manager.startUpdatingLocation()
-    }
-
-    private static let hasLocationBackgroundMode: Bool = {
-        let modes = Bundle.main.object(forInfoDictionaryKey: "UIBackgroundModes") as? [String]
-        return modes?.contains("location") ?? false
-    }()
 
     // MARK: CLLocationManagerDelegate
 
@@ -174,67 +145,31 @@ final class LocationProvider: NSObject, CLLocationManagerDelegate {
             default: break
             }
         }
-        guard tracking else { return }
-        switch manager.authorizationStatus {
-        case .authorizedWhenInUse:
-            manager.requestAlwaysAuthorization()
-            beginUpdates()
-        case .authorizedAlways:
-            beginUpdates()
-        default:
-            break
-        }
     }
 
-    /// Fixes worse than this (metres) are rejected outright — a negative or very
-    /// large `horizontalAccuracy` is common on the first fix or two right after
-    /// `startUpdatingLocation()`, before GPS has locked past a coarse cell/wifi
-    /// estimate. Accepting those made `currentCoordinate` (and everything it feeds:
-    /// GUANO tagging, session pins, breadcrumbs, reverse-geocoded titles) noticeably
-    /// inaccurate right at the start of a session.
-    private let maxAcceptableAccuracyMeters: Double = 50
-
-    /// Looser bar used only when not `tracking` — i.e. a one-shot `requestRegionFix()`
-    /// for model/prior suggestions, which only ever need country/region-scale (~100 km)
-    /// precision. Requiring the strict 50 m bar here made `currentCoordinate` sit nil
-    /// for ~30 s after granting permission, waiting for GPS to lock past the first
-    /// coarse cell/wifi fix, even though that first fix was already far more precise
-    /// than a 100 km-radius decision needs.
+    /// Fixes worse than this (metres) are rejected outright. Deliberately loose:
+    /// every fix taken here is single-shot, and its jobs — which model suits this
+    /// region, which species are plausible (a 1-degree grid), a place name for a
+    /// title, a coordinate on a detection — need region-scale precision, not
+    /// GPS-grade. The strict 50 m bar this replaced belonged to continuous
+    /// tracking, and applying it to a one-shot fix left `currentCoordinate` nil
+    /// for ~30 s after permission was granted, waiting for a lock the app had no
+    /// use for.
     private let maxAcceptableRegionAccuracyMeters: Double = 5000
 
-    /// CoreLocation can hand back a cached fix from well before this call — good
-    /// accuracy doesn't mean fresh. Rejecting a stale one during tracking just waits
-    /// for the next continuous update; a tracked session's breadcrumbs, GUANO tags,
-    /// and map pins would otherwise get a plausible-looking but wrong "current"
-    /// location if the phone had a strong old fix cached from, say, indoors an hour
-    /// earlier.
-    private let maxAcceptableAgeSeconds: TimeInterval = 30
-
-    /// Looser than `maxAcceptableAgeSeconds` for the same reason
-    /// `maxAcceptableRegionAccuracyMeters` is looser than `maxAcceptableAccuracyMeters`:
-    /// `requestLocation()` is single-shot with no retry, and a region/prior suggestion
-    /// only needs country-scale precision, so a somewhat-old cached fix is still
-    /// useful rather than worth discarding outright.
+    /// CoreLocation can hand back a fix cached from well before this call — good
+    /// accuracy doesn't mean fresh. With no continuous updates to fall back on,
+    /// rejecting a slightly stale fix means having none at all, and a fifteen-
+    /// minute-old position is still the right answer to every question asked of
+    /// it here.
     private let maxAcceptableRegionAgeSeconds: TimeInterval = 900
 
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
         guard let loc = locations.last else { return }
-        let accuracyThreshold = tracking ? maxAcceptableAccuracyMeters : maxAcceptableRegionAccuracyMeters
-        guard loc.horizontalAccuracy > 0, loc.horizontalAccuracy <= accuracyThreshold else { return }
-        let ageThreshold = tracking ? maxAcceptableAgeSeconds : maxAcceptableRegionAgeSeconds
-        guard -loc.timestamp.timeIntervalSinceNow <= ageThreshold else { return }
+        guard loc.horizontalAccuracy > 0,
+              loc.horizontalAccuracy <= maxAcceptableRegionAccuracyMeters else { return }
+        guard -loc.timestamp.timeIntervalSinceNow <= maxAcceptableRegionAgeSeconds else { return }
         currentCoordinate = loc.coordinate
-        guard tracking else { return }
-
-        // Throttle: a breadcrumb only after ~5 m moved or ~3 s elapsed.
-        if let last = lastTrackPoint {
-            let moved = loc.distance(from: last)
-            let elapsed = loc.timestamp.timeIntervalSince(last.timestamp)
-            guard moved >= 5 || elapsed >= 3 else { return }
-        }
-        lastTrackPoint = loc
-        store?.appendTrackPoint(TrackPoint(lat: loc.coordinate.latitude,
-                                           lon: loc.coordinate.longitude, t: loc.timestamp))
         geocodeTitleIfNeeded(loc)
     }
 

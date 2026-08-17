@@ -145,6 +145,13 @@ nonisolated final class SpectrogramProcessor: @unchecked Sendable {
     private var realp: [Float]
     private var imagp: [Float]
     private var magnitudes: [Float]
+    /// Detection-scale column, reused like every other buffer above. It was a
+    /// fresh `[Float](repeating:0, count: binCount)` per hop — ~1500 allocations
+    /// a second at 384 kHz, ~6 MB/s of churn, on the realtime audio thread that
+    /// the rest of this file goes out of its way to keep allocation-free. It
+    /// never escapes `makeColumn` (unlike `displayColumn`, which is handed to the
+    /// renderer and so must be fresh each time), so reusing it is safe.
+    private var triggerColumn: [Float]
 
     // Renderer hand-off.
     private let lock = NSLock()
@@ -190,6 +197,7 @@ nonisolated final class SpectrogramProcessor: @unchecked Sendable {
         self.realp = [Float](repeating: 0, count: fftSize / 2)
         self.imagp = [Float](repeating: 0, count: fftSize / 2)
         self.magnitudes = [Float](repeating: 0, count: fftSize / 2)
+        self.triggerColumn = [Float](repeating: 0, count: fftSize / 2)
         accumulator.reserveCapacity(fftSize * 4)
     }
 
@@ -363,7 +371,6 @@ nonisolated final class SpectrogramProcessor: @unchecked Sendable {
         // (db − minDB) / range with db = 20·log10(x) collapses to one affine map:
         //   out = log10(x) · (20/range) + (−minDB/range), then clamp to 0…1.
         let range = max(maxDB - minDB, 1)
-        var triggerColumn = [Float](repeating: 0, count: binCount)
         var mul: Float = 20 / range
         var add: Float = -minDB / range
         vDSP_vsmsa(magnitudes, 1, &mul, &add, &triggerColumn, 1, n)

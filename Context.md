@@ -59,6 +59,14 @@ Reconstructed from git history. Dates are commit dates.
 | 2026-08-07 | Sampler mode shipped behind a setting; live tuning overlay; demo mode; Live Activity spectrogram built and then dropped. |
 | 2026-08-08 | Variable time distortion (VTD) replaced adaptive time expansion as the live mode: rate ramping instead of gating, so nothing is discarded. Tuned by ear against the demo clip. |
 | 2026-08-09 | **VTD withdrawn from the build** on patent proximity — quarantined to `Quarantine/VariableTimeDistortion/`, outside any target. Live listening is heterodyne only. See §3 and §5. |
+| 2026-08-16 | Acceptance-review follow-up: bundled species presence grid replaces live GBIF lookups, every outing is a session, GPS tracks removed. |
+| 2026-08-16 | **Bottom tab bar** replaces the leading logo menu; the transport controls move into a menu hanging off a session button beside it. iPhone is now portrait-only and the whole iPhone-landscape layout is deleted. See §7 and §14. |
+| 2026-08-16 | **Simplified view** ships as the default, asked during onboarding and switchable in Settings; Settings itself folds from five tabs to three. See §7. |
+| 2026-08-16 | **Detector-wide 1 Hz stutter** traced to a `TimelineView` in a `ToolbarItem` (the sun pill) and fixed; sun-time computation memoised and tab-icon resolution cached. See §7. |
+| 2026-08-16 | **Tab glyphs** changed: Detector and Species are drawn artwork (bat-with-calls, bat-over-book), Sessions is `waveform.path.ecg.text.clipboard`. See §7. |
+| 2026-08-16 | **Screen cleanup pass** on Niall's review notes: simplified view stops the spectrogram scrolling; the field guide's version card becomes a toolbar popover and its search field a glass pill; Sessions loses its filter button and the map's threshold caption; a session opens on its charts, now including detections-over-time. See §7. |
+| 2026-08-16 | **Sun clock** in the detector's leading nav-bar slot: sunset time, then time since sunset, then sunrise time, then a countdown to sunrise. The two counting windows are each 15% of the night, not fixed hours. See §7. |
+| 2026-08-16 | **Playback folds into Sessions.** The Playback tab and the recording detail page are both gone: a recording opens the player wherever you tap it, and its per-pulse IDs are a sheet over the player. Sessions loses its Sessions/Recordings segmented picker. See §7. |
 
 ---
 
@@ -558,6 +566,29 @@ looks like a free budget, but it only fires once the run has ended and it would
 couple haptic behaviour to a detection knob the user can retune. Works in demo
 mode and while backgrounded — both paths feed the same detector.
 
+**Setup moved out of `init()` on 2026-08-15, and this is unfinished business.**
+Reported symptom: haptics don't fire at all in the current build. Nothing yet
+confirms a cause — the detector callback wiring is intact and the mapping is
+unchanged — but `PulseHaptics` was violating the same rule §6 states for
+`AudioEngineController`: it registered a notification observer *and started a
+CHHapticEngine* in `init()`, and it is built as a SwiftUI `@State` default
+expression, which SwiftUI may evaluate any number of times per view identity.
+That was one leaked observer and one live engine per evaluation, all but one of
+them owned by an object already discarded — several engines contending for one
+actuator. Setup now lives in `activate()`, called once from ContentView's
+`onAppear` beside `audio.activate()`, plus two restarts that were missing: on
+leaving Low Power Mode (which had left the feature dead for the rest of the run
+while `unavailableReason` reported it healthy) and on returning to the
+foreground (iOS stops the engine when the app is backgrounded and
+`stoppedHandler` is not guaranteed to have run before the next pulse).
+
+**None of that is confirmed to be the reported failure**, and it wants checking
+on a device before it is written off. If it still doesn't buzz, the next things
+to check are whether `pulse()` is reached at all (the settings screen's live
+`eventCount` answers that without needing a bat), and whether the
+`.playAndRecord`/`.measurement` session is muting haptics despite
+`playsHapticsOnly = true`.
+
 **Known failure modes, all handled explicitly:**
 - **Low Power Mode disables Core Haptics outright and silently.** A long night
   session will reach it. Untreated, this reads as "no bats tonight" to exactly
@@ -679,6 +710,32 @@ moves first.
   are only delivered while the session is active. Polling avoids activating the
   session while idle, which would prompt for permission and interrupt other
   apps' audio.
+- **`.measurement` also attenuates the OUTPUT, and that is why live listening
+  was quiet.** Reported 2026-08-15: live listening was near-inaudible at maximum
+  system volume while file playback through the same speaker at the same volume
+  was loud. The two paths differ in exactly one relevant way —
+  `PlaybackEngine` runs the session as `.playback`/`.default`, live listening as
+  `.playAndRecord`/`.measurement` — and disabling signal processing includes a
+  substantial, non-adjustable cut to the output path. Dropping `.measurement`
+  is barred (see the first bullet), so the compensation is digital and lives on
+  the output side only: `AudioEngineController.listenOutputMakeupGain`, +12 dB
+  with a quadratic soft knee from 0.7, applied once to whatever the listen mode
+  produced. It cannot reach capture, the recorder, detection or calibration.
+  The processors' own gains (heterodyne 6×, replay 4×) are unchanged and remain
+  the per-bat knobs; this is a fixed correction for a fixed attenuation, and the
+  figure is an estimate — it wants checking by ear against playback on a device.
+- **A changed delivered rate has to hold before it is published.** Plugging the
+  Griff in tears the engine down and rebuilds it, and while iOS renegotiates the
+  route the input node hands out 48 kHz buffers for a few hundred ms before the
+  native stream settles — more than once if the device enumerates more than
+  once. Published straight through, that flicked the mic pill between a red
+  "48 kHz" and a green "384 kHz" while the user watched, which reads as "the mic
+  doesn't work" at the exact moment it started to.
+  `AudioEngineController.publishDeliveredRate` debounces it asymmetrically: a
+  rate at or above the current one is believed in ~0.33 s, a DROP below it — the
+  alarming claim, and the one a transient produces — has to survive ~1.5 s. The
+  first rate of a capture is still adopted immediately, since there is nothing
+  on screen yet for it to flicker against.
 - **Acoustic feedback has no software fix.** Listening audio played out the
   built-in speaker gets picked back up by the mic and reprocessed as a spurious
   low-pitch "call" layered on the real one. Full echo cancellation risks
@@ -720,6 +777,40 @@ Two things this does not change, and one hazard:
   in-place switch it must be called *before* the new mode is published, while
   the audio thread still isn't touching that processor. The other order is a
   use-after-free, not a glitch.
+
+### 2026-08-15 audit: a listening mode that goes deaf, and a recorder that lied
+
+Both found by a full-codebase sweep, both fixed the same day.
+
+- **`.heterodyneOnly` routing parked slow replay in `.replaying` forever.** The
+  snippet phase machine's only route back to `.recording` is the tail of
+  `SnippetExpansionProcessor.render`, and `process()` refuses to capture while
+  the phase is `.replaying`. The `.heterodyneOnly` branch of the output node
+  rendered heterodyne and never called `snippet.render` at all — so the first
+  trigger after choosing that routing stopped capture permanently, silently,
+  until the user changed routing again. The comment on that branch claimed it
+  avoided a restart; it caused an indefinite freeze instead, which is worse. Now
+  the branch renders the snippet into the mixing scratch and discards the audio,
+  and the `.both` path's `n > mixCapacity` bail-out does the same rather than
+  skipping the call. **The rule this leaves behind: a state machine driven from a
+  render callback must be advanced on every path that callback can take, including
+  the ones where nothing is audible.**
+- **Failed PCM writes were still counted in the WAV's declared length.**
+  `write()` used `try?` and advanced `dataBytes` regardless, so a disk that
+  filled mid-bout produced a header claiming more PCM than existed, a GUANO
+  chunk written past real EOF, and a `Recording` handed to the store as if it
+  had saved normally. This is review item 5.5 in §15, which the table records as
+  fixed and which was not — worth remembering when reading that table. Writes
+  now advance the counter only on success, one failure condemns the segment, and
+  the reason surfaces through `AudioRecorder.lastWriteError` rather than the
+  recording simply never appearing.
+- **`AudioRecorder.append` allocated on the realtime thread.** It copied each
+  capture buffer into a fresh `Array` before handing it to the recorder queue —
+  ~187 allocations a second at 384 kHz, on the thread this project bans
+  allocation on, while every sibling DSP type already used a preallocated ring.
+  It now writes into a lock-free SPSC ring (`captureRing`) and the queue drains
+  it; `handle`/`write` take an `UnsafeBufferPointer` so the drain can coalesce
+  several buffers into one pass.
 
 ### Demo mode
 
@@ -776,12 +867,584 @@ Two things this does not change, and one hazard:
   (~30 ms latency) so scrolling doesn't stutter as audio arrives in lumps.
 - **History snapshots are copy-on-write and O(1)**, so starting a scroll-back
   drag doesn't memcpy 90 MB.
+- **The WAV player's GUANO card is collapsed by default** (2026-08-15,
+  `display.wavPlayerShowFileInfo`). It is reference material consulted
+  occasionally, not while reading a call, and it was taking a fifth of a small
+  phone's screen permanently. The spectrogram is the only
+  `frame(maxHeight: .infinity)` element in either layout's stack, so the space
+  the card gives up goes to it directly and nothing else can absorb it — which
+  is what makes closing the card fill the screen with spectrogram rather than
+  leaving a gap.
 - **Columns are batched before upload** — 1–2 `MTLTexture.replace()` calls per
   frame instead of 12–25.
 - **The colormap is defined twice** (Metal shader for GPU, `DisplayPalette` for
   CPU-rendered images) and must be kept in sync by hand.
 - **NABat's magma colormap is fixed and unrelated** to the user-selectable
   display palette — it has to match what the model was trained on.
+
+### The species readout left the stats card (2026-08-16)
+
+It had its own full-width row there, added earlier the same day so the code
+wasn't rendering as "MY…" in a 60 pt cell. Once the pulse panel became a species
+feed — permanently in simplified view, and by a toggle in advanced — the same
+identification was on screen twice: once in a cell with no room for it, and once
+in a pane with room for the common name, the pulse thumbnail and the runners-up.
+The stats card is back to one row of five measurement cells (and, in simplified
+view, no row at all).
+
+`SpeciesStatCell`/`SpeciesStatCellContent` went with it, ~138 lines. The book
+icon that opened a species' field-guide page without leaving the detector went
+with them and was **immediately reinstated on the species feed's own rows**,
+which is the better home for it: that row already *is* the species. It is a
+separate tap target from the row, deliberately — the row opens the pass detail
+(the evidence behind this identification) and the book opens the profile (the
+animal itself), and one tap cannot serve both questions. The button is absent
+when the guide has no page for the code, which is the common case: the models
+name far more bats than the community guide describes, and a link to a page that
+doesn't exist is worse than no link. `SpeciesGuide.species(forCode:)` is the
+lookup, joined on scientific name — see `SpeciesGuideLookup.swift`.
+
+### The stats card sizes to its content (2026-08-16)
+
+It was a `RoundedRectangle` with the readouts in an `.overlay`, given a
+hard-coded 126 pt frame. An overlay takes its host's size, so once the content
+needed more than 126 pt it overflowed and the `.clipShape` cut it — and because
+an overlay is *centred*, it cut the top and bottom at once, which reads as the
+card being cropped rather than as content that doesn't fit. Advanced view had
+quietly crossed the line when the species readout was given its own full-width
+row earlier the same day; the tab-bar work is only what made it visible.
+
+The card is now a `VStack` with a `.background`, so it is as tall as what it is
+showing, and the 42/58 pane split is measured by a `GeometryReader` nested
+*below* it rather than one wrapped around all three panes subtracting a guess at
+the card's height. **Don't reintroduce a fixed height here**: every element in
+the card (pills, stat cells, species row, meter) has a natural height, the
+simplified/advanced difference then costs nothing, and Dynamic Type stops being
+able to clip it.
+
+### Navigation, and iPhone going portrait-only (2026-08-16)
+
+- **A bottom tab bar replaced the leading logo menu.** Detector, Sessions,
+  Species and Playback (Playback has since been folded into Sessions — see
+  below) were two taps deep behind a menu whose icon was the
+  current section — discoverable only if you already knew it was a menu. This is
+  the change deferred at the acceptance review; it landed together with the
+  landscape decision below, which is why the two are one entry.
+- **The tab glyphs, and why two are not symbols** (2026-08-16). Detector and
+  Species are **drawn artwork** (`batCall`, `batBook`) — a bat with call waves, and
+  a solid book with a bat knocked out of it. Neither has an SF Symbol that says the
+  right thing: `book.closed` says only "book", and Detector's previous glyphs said
+  less each time (the generic `waveform`, which is *also* what the session button
+  wears while a session is live so the bar carried one shape twice; then
+  `wave.3.up`, ultrasound with no bat in it). Sessions stays a symbol —
+  `waveform.path.ecg.text.clipboard`, a trace on a clipboard: a logged outing.
+  - `AppSection.icon` therefore returns an `Icon` enum rather than a symbol name,
+    resolved through `AppSection.iconImage` / `iconSized(_:)`. The two kinds size by
+    *different means* and neither works on the other: a symbol takes its size from
+    `font` and ignores a frame (overflowing it — `frame` does not clip), an asset
+    carries pixel dimensions and ignores `font`.
+  - **The two assets have opposite orientations**, so `iconSized` normalises on
+    HEIGHT with the width derived from each image's own aspect ratio. Fitting a
+    landscape glyph into a square box binds it on width, which drew the bat call
+    around three-quarters the height of everything beside it.
+  - **Resolving a glyph is cached, and has to be.** Deciding what to draw costs a
+    `UIImage(named:)` or a `ProcessInfo.isOperatingSystemAtLeast`, and it first ran
+    inside `body` — three image lookups per glyph per layout, on chrome present on
+    every tab that re-lays out with the live audio stats. Nothing about the answer
+    can change while the app runs.
+  - **`waveform.path.ecg.text.clipboard` is iOS 18.1 and the deployment target is
+    18.0**, hence `Icon.symbol`'s `fallback`/`since`. `Image(systemName:)` does not
+    fail loudly for a symbol the running system has never heard of — it draws
+    nothing — so without the fallback that tab would silently lose its glyph on an
+    un-updated phone.
+  - **`.asset` carries a fallback symbol for the same class of silent failure:** an
+    imageset whose files are missing is only a build *warning*, and it renders a
+    blank tab.
+  - **Regenerating the artwork:** the masters (`bat_book.png`, `bat_call.png`,
+    white-on-transparent) live **one level ABOVE the repo root**, beside
+    `Quarantine/` — so they are untracked, absent from a fresh clone, and only the
+    downsampled imageset PNGs travel with the repo. Both **bleed to all four canvas
+    edges**. An SF Symbol carries optical padding inside its own box, so the export
+    bakes in a 7% transparent margin and `iconSized(_:)` then uses the *same* box as
+    a symbol's point size, not a larger one. Skip either half of that and the
+    artwork renders visibly heavier than the symbol beside it. Exported to a fixed
+    30 pt HEIGHT (30/60/90 px) — never a fixed width, see the note above —
+    template rendering intent, so both bars tint it like a symbol.
+- **Two implementations, split on iOS 26.** Above it, a real `TabView`: the
+  glass, the travelling indicator, minimize-on-scroll and the way the bar hands
+  its height to each screen's safe area are all the system's, and none of it is
+  reproducible from outside. Below it there is no Liquid Glass to adopt and the
+  stock bar is an opaque slab, so a hand-built floating bar is genuinely better
+  there. Written once in `AppTabBar.swift`.
+- **The session button is a tab that is never selected.** The design needs a
+  control detached to the trailing side of the bar, which is not something you
+  can add to a `TabView` — but `Tab(role: .search)` is rendered as its own
+  circle beside the bar, which is exactly the arrangement. Selecting it is
+  intercepted in `ContentView.tabSelection` and turned into an action, so the
+  selection never moves off the section you were on.
+- **That tab is painted by the bar, and it costs two things. Both measured in
+  the simulator on 2026-08-16, both worth knowing before anyone tries to
+  "improve" the button.**
+  1. **The bar ignores every SwiftUI modifier on that label, so the glyph is a
+     baked bitmap.** `Image(uiImage:)` built with an explicit
+     `UIImage.SymbolConfiguration` and `.withTintColor(_, .alwaysOriginal)`:
+     the colour is in the pixels and the point size is ours, so there is
+     nothing left for the bar to override. It is a white play triangle when
+     idle, orange waveform bars while live, a white cross when the menu is
+     open — all bare glyphs, sized per symbol.
+
+     What was tried first, and what each attempt proved, because every one of
+     them looks like it should work:
+     - A semantic colour (`.primary`) resolves in the *bar's* environment, which
+       behaves as though its glass were light — it rendered near-black, leaving
+       the button all but invisible on launch. `.preferredColorScheme(.dark)`
+       does not reach inside the bar.
+     - `.monochrome` is repainted white whatever concrete colour it is given.
+     - `.palette` does hold a colour, but only for a symbol with a solid layer
+       of its own: a bare `waveform` comes back white. Keeping the circle and
+       painting it `.clear` works, at the price of a much smaller glyph, since
+       the bars are inset inside an enclosure that is no longer visible.
+     - Naming one palette layer leaves the others washed out.
+     - `.imageScale` and `.font(.system(size:))` both do nothing at all.
+  2. **Nothing inside that button can animate.** The bar renders a `Tab`'s label
+     as a still image. `.symbolEffect(.variableColor)` on the live waveform —
+     the obvious way to make "we are listening" read across a dark field, and
+     what the pre-26 button gets from its Lottie ear — does nothing at all. The
+     one route left is a timer that swaps the symbol or the tint on a tick,
+     since a *value change* does re-render the label; it was judged not worth
+     permanently invalidating system chrome for. So the live state rests on
+     colour and shape — **and anything that has to move goes outside the
+     button**, which is what the recording glow below is.
+  3. **The recording glow is drawn by us, in our own view tree, and so it can
+     animate.** A tight blurred ring hugging the button's edge while the
+     recorder is armed: breathing while armed and waiting, steady once a
+     segment is open — the same two states, from the same helpers, as the
+     record glyph in the transport menu, so the two can't drift apart. In the
+     session accent, matching the waveform glyph inside the button, so the two
+     read as one object breathing rather than a light of one colour behind a
+     glyph of another. Only its opacity animates: a `repeatForever` picks up any
+     later change to its view's geometry (§13), and an opacity-only pulse gives
+     it nothing to catch hold of.
+
+     **It goes in the content layer, and the glass does the rest.** The glow is
+     an overlay on each tab's *screen*, not on the tab host — everything drawn
+     there is under the floating bar, so the bar's Liquid Glass ends up over the
+     glow and occludes it, refracts it and picks up its colour, exactly as it
+     does the spectrogram scrolling beneath it. What you see is the button
+     itself lit from within. The element is a plain soft disc: no mask, no ring,
+     no cut-out, sized to the button, because the glass spreads whatever is
+     under it and anything larger reads as a cloud behind the bar rather than a
+     glowing button.
+
+     The first version was an overlay *on top* of the bar with the button's
+     footprint punched out to fake the occlusion, and every problem it had came
+     from re-implementing by hand what the glass gives for free: a square halo
+     where the mask clipped the blur (a blur spreads past its view's frame, so a
+     mask shape that merely fills that frame slices the spread off), and a
+     bright crescent wherever the punched hole missed the button's real position
+     by a point or two. It read as a ring stuck to the screen. **If something
+     needs to appear behind system chrome, put it under the chrome rather than
+     drawing a picture of being under it.**
+  4. **Where the system puts that button is asked at runtime, never assumed —
+     `SessionButtonLocator`.** It finds the button in the view hierarchy by the
+     accessibility identifier the Tab's label sets, falling back to that label's
+     text, and publishes its frame in window coordinates; the glow and the tap
+     catcher position themselves on it, and draw *nothing* until it is found. No
+     private view classes are involved, so the next OS release can rearrange the
+     bar's internals without breaking this.
+
+     **This replaced three hand-measured constants, and the constants were not
+     merely imprecise — they were unfixable.** What they cost, recorded so
+     nobody reaches for them again:
+     - Two attempts to derive the iPhone offset from the home-indicator inset
+       were wrong in *opposite* directions, one pushing the glow off the bottom
+       of the screen. The value is anchor-dependent: a tab page is inset by the
+       bar's height, so it differs depending on whether the drawing hangs off
+       the page or off the tab host.
+     - **iPad has no detached button at all.** iPadOS 26 draws the bar as a
+       centred floating pill at the *top* and renders the search-role tab as the
+       last item **inside** it, at a position depending on the pill's width and
+       so on the tab titles and the language. No constant can describe that.
+       Positioned by the iPhone numbers the invisible tap catcher landed on the
+       Settings gear, where it would have silently eaten every tap on it.
+     - The button is **62pt on iPhone and 36pt on iPad**, not the 58pt the
+       metrics assumed. Both the glow and the catcher now take their size from
+       the measurement, which is why they fit on both.
+
+     Verified on both simulators by rendering the catcher in a visible colour —
+     `sessionTapCatcherTint` is left in place for exactly that, since a tap
+     target cannot be checked by tapping in a simulator but a coloured disc that
+     covers the button is the same proof.
+
+     **The transport menu now hangs off the located frame too**, growing
+     directly out of the button — above it on iPhone, below it on iPad. It was
+     pinned to the window's trailing edge, which on iPad left it over at the
+     screen's edge with nothing above it while the button sat in the middle of
+     the pill. Its width matches the button rather than being a fixed 78pt,
+     floored at `TransportMenuMetrics.minimumWidth` because the button is only
+     ~36pt on iPad and the captions have to survive — they are not decoration,
+     four listening states hide behind one glyph.
+
+     **The "you're not recording" nudge is the last thing still positioned from
+     the metrics**, so it is misplaced on iPad — it points at the session button
+     while appearing at the top-trailing corner. Left alone rather than changed
+     unasked; anchoring it needs clamping too, since it is a wide box and the
+     button is near a screen edge.
+  3. **The Detector indicator blinked off and back on every tap of the session
+     button — fixed by taking the tap before the bar sees it.** The bar moves
+     its own indicator to the tapped tab, our binding refuses to store the
+     selection, and it animates back when the next read returns the section
+     unchanged. Refusing the selection is always too late: intercepting it is
+     the only hook a `TabView` gives us, and by the time the hook runs the
+     indicator has already moved.
+
+     The fix is an invisible disc laid over the system's button, taking the tap
+     with a plain gesture and calling the same handler, so the touch never
+     reaches the bar. It is sized to the button **exactly**, not generously: it
+     sits next to the last tab (Playback at the time, Species now), and a
+     catcher that overhangs would swallow
+     taps meant for it, which is far worse than the blink. Erring small means a
+     tap near the rim occasionally slips through and blinks, which is only what
+     used to happen anyway. The `.sessionControl` case in `tabSelection` stays
+     as the fallback for VoiceOver, keyboard activation, and anything the disc
+     misses.
+
+     Diagnosis note, since the obvious suspect was wrong: **it was never the
+     transport menu.** With the menu opened programmatically, bypassing the tab
+     entirely, the indicator holds a constant value for a whole capture — so the
+     `repeatForever` pulse inside the menu (§13) is not leaking again.
+
+  **How to measure any of this, because the obvious way silently lies.**
+  `xcrun simctl io … screenshot` returns a byte-identical frame every time on a
+  screen that is demonstrably animating: the transport menu's record pulse,
+  which is unquestionably running, showed *zero* variation across a dozen
+  screenshots. Any conclusion of the form "the animation isn't running" drawn
+  that way is worthless, and one was drawn that way here before the control was
+  run. Use `simctl io … recordVideo`, split it with `ffmpeg -vf fps=10`, and
+  keep a known-animating region in frame as a control — the record pulse shows
+  its full 1.8 s cycle that way, which is what makes the session button's
+  stillness in the same capture mean something.
+- **The transport controls moved into a menu on that button.** Start is the
+  first tap; once a run is going, the second tap opens a vertical menu with
+  Record, Listen and End. The control bar under the panes is gone. Roughly a
+  wash on vertical space — the bar costs about what the control bar gave back —
+  and it puts starting a session under the thumb rather than in a row of three
+  equal-weight buttons where it read as no more important than the others.
+- **Two of the three menu items dismiss it, and Listen does not.** Arming the
+  recorder and ending the session are each a single decision, so the menu gets
+  out of the way and hands the screen back. Listening mode is a cycle of four
+  found by ear, and making the user reopen the menu between taps would be four
+  times the work to choose between them, in the dark, mid-pass.
+- **⚠️ `isRunning` is the engine, `isActive` is the session, and confusing them
+  cost two bugs in one `onChange` block (2026-08-16).** Cycling listening mode
+  across "off" stops and restarts the engine, so `isRunning` dips false
+  *mid-session*. The block keyed to it treated that dip as "audio stopped" and
+  did two things it should not have: it closed the transport menu — on the one
+  control in it you are meant to tap repeatedly — and it **disarmed the
+  recorder**, silently ending recording with nothing but `startDetecting` able
+  to re-arm it. Both now test `audio.isActive`. Anything in that block that
+  represents an intent about the *session* rather than bookkeeping about the
+  *engine* belongs behind the same test; finalizing the open pass and stopping
+  the drain pump correctly stay keyed to the engine.
+- **The menu is deliberately NOT in `menuIsOpen`.** Same reasoning as the tuning
+  overlay: it is opened mid-pass, with a bat overhead, to change what you are
+  hearing. Pausing the render loop underneath it would stop the thing it exists
+  to control.
+- **iPhone is portrait-only; iPad keeps every orientation.** Set per-idiom in the
+  build settings (see §14). The whole iPhone-landscape family — the three-column
+  layout, the stats sidebar, `PulseStatsColumn`, `VerticalAmplitudeMeterView`,
+  the floating transport panel and the full-screen-spectrogram mode — is
+  deleted, not disabled. Niall's call, on two grounds: a bottom bar costs the
+  vertical space landscape is shortest on, and that layout had never once been
+  run against real bats, so there was no evidence it was worth keeping. iPad
+  landscape is untouched — it has the width for its own two-panel arrangement.
+  **If iPhone landscape is ever wanted back, it is a rebuild, not a revert:**
+  the honest version is a rail along the device's bottom edge (so the bar keeps
+  its position under the user's hands through a rotation), which means
+  hand-building the bar on iOS 26 too and giving up the system one.
+
+### The sun clock in the nav bar (2026-08-16)
+
+The tab bar left the detector's leading nav-bar slot empty (the logo menu that
+used to be there became the bar). It now holds a **sun pill**, because the single
+most useful thing the app can tell someone standing outside with a detector is
+whether they are in one of the two windows bats are actually busiest in: the few
+hours after sunset, and the hours before sunrise.
+
+- **Four states.** Daylight shows when the sun sets. Inside the first 15% of the
+  night it counts *up* from sunset ("+1h 45m"). Through the middle it shows the
+  sunrise *time*. Inside the last 15% it counts *down* to sunrise ("in 1h 45m").
+  `SunWindow.Phase`.
+- **The two windows are fractions of the night, not fixed hours** — Niall's
+  revision within the hour of the first cut, and it is the better model. The first
+  version counted up until *local midnight* and down for a fixed *two hours*.
+  Midnight was doing the job badly, because it is a calendar accident rather than
+  a fact about the night:
+  - On a long midwinter night (16h 10m in London) the count-up ran from 15:54 to
+    midnight — **eight hours** of "you are in the emergence window", which is
+    simply false for most of it. It now stops at 18:20.
+  - On a short midsummer night the same rule was the reason 00:30 fell into
+    neither window while only three hours past sunset. That is now principled
+    rather than accidental: it is the quiet middle, because the evening window
+    closed at 22:28.
+  - `activityWindowFraction = 0.15` lands close to the two hours it replaced where
+    it matters most — 1h 46m at the equinox, 1h 24m in mid-August, 1h 06m at
+    midsummer. Midwinter's 2h 25m is the outlier, and UK bats are hibernating
+    then anyway.
+  - **It also removed the calendar from the problem entirely.** No `Calendar`, no
+    time zone and no DST question anywhere in `SunWindow` now — every boundary is
+    a position within one measured night. The time-zone handling did not get
+    better, it stopped being needed.
+- **Orange sun glyph, white readout, and no background of its own** (Niall, same
+  day, replacing a first pass that used the in-panel status pills' accent-vs-
+  secondary colouring). Two things follow from it:
+  - An `ultraThinMaterial` capsule — right for a pill sitting on the spectrogram,
+    which is where every other status pill lives — composites over the nav bar's
+    own material and reads as a **grey slab inside the glass**. A pill in the bar
+    draws no background at all; the bar is the background.
+  - Colour no longer separates an activity window from a reference state, so that
+    signal rests entirely on the **filled-vs-hollow glyph** (the same
+    active/inactive distinction SF Symbols uses system-wide). `SunWindowPill.icon`
+    composes the fill from `Phase.isActivityWindow` rather than spelling it out
+    per case, so the two cannot drift apart. The number stays white because it is
+    the value being read, in the dark, at a glance.
+- The clock states read "at 20:24" rather than a bare time, which beside a
+  sunrise glyph is ambiguous about whether it has already happened.
+- **Day and night are decided by which sun event happened most recently, never by
+  clock hour.** And `SunTimes` resolves which solar day it means from the *UTC*
+  date handed to it, so asking it for "today" gives the wrong night anywhere far
+  from UTC — an evening in New York read as daylight. `SunWindow` reads a
+  three-day window and picks the events bracketing *now* instead. There is a test
+  for exactly that.
+- **The open question the fraction does not settle:** whether an activity window
+  *should* scale with the night at all. Emergence is triggered by light level, so
+  a bat leaves the roost at roughly a fixed offset after sunset whatever the
+  season — which argues for a fixed lead. The fraction is nonetheless the better
+  of the two available rules, because the fixed lead it replaced was not that
+  either (it was "until midnight", which scales the wrong way — longest window on
+  the longest night). If this is ever revisited with real field observations, the
+  shape to try is a fixed lead *capped* by a fraction of short nights.
+- **Tapping it opens an explainer popover** (Niall's ask, same day). The pill on
+  its own is a number beside a sun and never says why a *bat detector* is showing
+  a sun clock; the popover answers that. It leads with tonight's real sunset and
+  sunrise, then the reason those hours matter, because the times are the part a
+  user acts on tonight. It also names the window length in minutes rather than as
+  "15%" — the fraction is the implementation, and what the user wants is how long
+  they have got.
+  - `SunWindow.night(at:coordinate:)` exists for this: `phase` only ever carries
+    the one event it is measuring against, and the popover shows the pair. It
+    picks events the same way `phase` does, and a test pins the two to the same
+    night from both sides of sunset — the one way they could drift.
+- **Shown in simplified view too.** It is not instrumentation — knowing to go out
+  at dusk is more use to a beginner than to anyone else.
+- **No `tourDemo` stand-in**, unlike every other status pill: the detector's whole
+  nav bar is hidden while the tour runs, so a forced phase would have nothing to
+  appear in.
+- Renders nothing at all with no location fix — there is no sensible default
+  sunset.
+- **⚠️ Never put a `TimelineView` in a `ToolbarItem`. This one did, and it broke
+  the whole Detector screen.** Everything on that screen — the Metal spectrogram,
+  the recording glow, the session button's glyph — dropped to roughly one update a
+  second, while every other screen stayed perfectly smooth. A `TimelineView` in
+  toolbar content pulls the navigation bar into its update cycle, and the nav bar
+  is chrome the whole screen is laid out against.
+  - **The symptom that identified it:** dragging the spectrogram also only redrew
+    once a second. No amount of *work* inside a pill can throttle a gesture, so
+    the fault had to be the update mechanism rather than its cost. Cost was the
+    first thing suspected and it was the wrong tree entirely. The other half of the
+    diagnosis was the scope — the pill is the only thing that exists on the
+    Detector and nowhere else, which matched the boundary exactly.
+  - **The shape that works:** plain `@State`, written by a `.task` loop that sleeps
+    to the next wall-clock minute. A `@State` write invalidates the pill and
+    nothing above it, which is the property a toolbar needs; the digits still turn
+    over on the minute. `Detector`'s panel-header pills (`SessionTimerPill`,
+    `MicStatusPill`) may keep their `TimelineView`s — they are in the *content*,
+    not the bar.
+  - The `.task` lives on a `Group` wrapping the whole body rather than inside the
+    `if let`: a `ToolbarItem` hosts one view, and the task has to stay mounted
+    while there is nothing to draw, or the first location fix never gets picked up.
+- **`SunWindow.phase` is memoised, and that is not an optimisation.** It is what
+  makes it safe to call from a body at all: it ran three passes of the sunrise
+  equation, and under them `SunTimes` was constructing a `Calendar` — an ICU setup
+  — three times per call. The calendar is now a static built once, and the solar
+  events are cached per day and per ~1 km of position. A `TimelineView` re-runs its
+  content whenever its *parent* invalidates, not only when its schedule fires, so
+  "once a minute" was never the real call rate even before the rewrite above.
+
+`SunTimes` itself (the sunrise equation, and why it is on-device rather than
+WeatherKit) came from separate work; it did not compile as delivered — the
+`times(for:on:zenith:)` parameter named `date` shadowed the static
+`date(fromJulianDay:)` helper, so both return values failed to resolve. Fixed by
+qualifying with `Self.`.
+
+### Screen cleanup pass: Species and Sessions (2026-08-16)
+
+A round of Niall's own review notes, after the tab bar shook out what each screen
+was actually carrying. Each item is small; the theme is that permanent chrome was
+explaining the app's internals in the app's smallest type.
+
+**Species tab.**
+- **The guide's version/source/updated card is now an "i" popover in the toolbar.**
+  It was a footer floating at the bottom of the globe and it was *colliding with
+  the tab bar*: the globe carries `ignoresSafeArea(edges: .bottom)` for its
+  imagery, and the footer overlay was applied BEFORE that modifier, so it expanded
+  along with the map and sat under the bar. **Order matters there** — ignore the
+  safe area first, overlay afterwards. Only the "Tap a region to explore its
+  species" hint stays on the globe, since that is instruction rather than
+  reference.
+- The Sources sheet moved to the view root with it. It had been attached inside
+  the footer, which only exists on the globe branch — so typing a search
+  destroyed its presenter mid-flight.
+- **Opening that sheet from the popover has to be deferred a beat.** Presenting a
+  sheet while the popover it was tapped in is still dismissing gets silently
+  dropped by SwiftUI, and the link read as completely dead. Same failure and same
+  fix as the import-error alert being swallowed by the file importer's own
+  dismissal (`SessionsView.reportImport`) — that is twice now, hence the rule in
+  `CLAUDE.md`.
+- **The search field is a Liquid Glass capsule floating over the globe**, not a
+  bare `TextField` in a black strip above it. The strip was pushing the globe down
+  the screen for nothing. A `.onTapGesture` hands the whole capsule to the field:
+  the glass shape is the hit target, but a `TextField` only takes focus from a tap
+  landing on the field itself, so the padding around it would otherwise be dead.
+  The *results* branch keeps a solid strip — a list scrolling under a floating
+  pill is unreadable.
+
+**Sessions.**
+- **No unclassified-recordings filter in the toolbar.** It is a list of outings,
+  not of classifications. The filter still exists inside a session, where the
+  recordings are.
+- **Which forced a real decision:** with no control on that screen, the "Not in a
+  session" section must not filter either, or a recording could be hidden with
+  nothing to tap to bring it back. It now shows everything. The old
+  reveal-the-filter-on-NoID-import hack went too — an import lands in that
+  unfiltered section, so flipping the setting would only have changed a filter
+  somewhere the file never appears.
+- **The "N pinned of M IDs (≥ 60% · ≥ 3 pulses)" caption under the map is gone.**
+  It explained the map's own thresholds, in the language of the settings that
+  cause them, to answer a question nobody had asked.
+- **A session opens on its summary, then its files.** Species chart, then a new
+  detections-over-time chart, then recordings — the two charts used to sit *below*
+  the recordings list, which put the file list where the summary belongs.
+- **Detections over time** is the new chart: one bar per slice of the session, time
+  on the x axis. It answers a question the species chart cannot — a hundred IDs
+  spread over four hours and the same hundred in one twenty-minute burst are an
+  identical species chart and completely different nights.
+  - Hand-built from `Capsule`s, not Swift Charts: the app has one visual idiom for
+    a bar (`SessionSpeciesSummary`, `ScoreBar`, the pulse stats) and two would be
+    worse than free axes are good.
+  - Bucketing lives apart from the view in `SessionActivity` and **is tested**,
+    because a chart cannot show that it dropped a detection — a bar one shorter
+    than it should be looks exactly like a correct one. Width comes from a fixed
+    list that divides an hour, so edges land on round clock times; empty stretches
+    are zero-height bars, never missing ones, or the axis silently compresses and
+    misstates the shape of the night; and detections outside the session's own
+    recorded bounds still count, since a running session has no end date.
+- **Both charts carry an "i" popover.** The species one earns it: those bars count
+  *detections*, not individual bats — one bat circling a pond is logged many times,
+  two overhead at once may be logged as one. No bar chart can say that, and the
+  honest version is a paragraph, not a longer label. `SessionChartHeader` owns its
+  own presentation state so each popover anchors to its own button; hoisting that
+  state into `SessionDetailView` anchors both to the whole List and points the
+  arrow at the middle of the screen.
+
+### Playback folded into Sessions (2026-08-16)
+
+Niall's call, a few hours after the tab bar landed. The bar made an existing
+duplication impossible to ignore: **Playback and Sessions were listing the same
+recordings, in the same session buckets, one tab apart.**
+
+- **A recording had two different destinations, and which one you got depended on
+  where you tapped it.** From Playback it opened the player — the zoomable
+  spectrogram, transport, listening modes, call analysis. From Sessions it opened
+  a static detail page: a stretched thumbnail of the same spectrogram, four
+  labelled fields, and the per-pulse IDs. Neither screen could reach the other,
+  so hearing a call and reading its evidence were two navigations from the list,
+  not one from the other.
+- **Now: every recording row opens the player, and the IDs are a sheet over it.**
+  A plain "Pulses" text button sits beside the GUANO Metadata disclosure row.
+  Both live in the same card because they are the same kind of thing — reference
+  material consulted about the file you are listening to — but the IDs are a
+  sheet rather than a second disclosure: the card's whole reason to collapse is
+  to give the spectrogram its height back, and a list that pushes its own detail
+  screens would take more of it than the metadata ever did.
+- **The Sessions/Recordings segmented picker is gone too.** Every outing has been
+  a session since the acceptance-review follow-up, so that second tab was showing
+  an empty list to almost everyone, permanently, in exchange for a control at the
+  top of the screen. Session-less recordings still exist — an import deliberately
+  lands outside every session, and pre-sessions installs have leftovers — so they
+  are a "Not in a session" section at the bottom of the one list, present only
+  when there is something in it. The WAV importer moved to the Sessions toolbar
+  with them.
+- **What was lost, deliberately:** the recording detail page's stretched
+  whole-file thumbnail. The player draws the same spectrogram, zoomable, behind
+  the sheet that replaced the page.
+
+### Simplified view (2026-08-16)
+
+The last of the three items deferred at the acceptance review. The detector
+carries a lot of instrumentation and most of it is only legible to someone who
+already reads calls, so **simplified view is the default** and the full set is
+one switch away.
+
+- **What it hides.** The row of five measurement cells in the stats card
+  (Fpeak, Bndwth, Dur, Rate, Pulses); the pulse panel's species-ID and settings
+  buttons; and the spectrogram header's species-ID, compress-timeline, bat-range
+  and palette buttons. **What stays:** the status pills along the top of the
+  stats card, the level meter, and the spectrogram's frequency-band settings
+  button — that last one deliberately, because which frequencies are shown is
+  the one thing on that screen a beginner may genuinely need to change. So the
+  simplified stats card is the pill row and the meter, nothing else.
+- **It also disables drag-to-scroll on the live spectrogram** (Niall,
+  2026-08-16). Scrolling back into the history buffer is a review gesture, and in
+  simplified view it is only ever reached by accident: a finger resting on the
+  spectrogram silently freezes the live feed, and the way out is a "Return to
+  live" button that exists *because* you are already lost. A third mechanism
+  beyond the two below, and deliberately the simplest one — the gesture is
+  removed rather than overridden or defaulted, because there is no control to
+  hide and no state to be stranded in. Passed as `SpectrogramView.scrollEnabled`
+  and attached as `nil` rather than a disabled gesture: an attached-but-disabled
+  `DragGesture` still claims the touch sequence and would swallow taps meant for
+  the pills sitting over the spectrogram.
+- **Two mechanisms, and the rule that picks between them.** Some of what the
+  mode changes is a permanent override while it is on, some a default applied
+  once on the way in. **The test is whether the control that would change it
+  back is still visible.** The species-ID toggles are overridden (their buttons
+  are hidden, so honouring the stored value could strand a user in a view with
+  no exit); the 15–90 kHz band is applied once (its settings button IS still
+  shown, so an override would fight the user every time they adjusted it).
+  Getting this backwards either strands the user or makes a visible control
+  inert. See `SimplifiedView.swift`, which is where both live.
+- **Nothing is written over.** The override reads the stored value only in
+  advanced mode, so a user's own choices survive being in simplified view and
+  come back on switching. This is the answer to the question Niall flagged when
+  deferring the feature — what happens to someone who has already changed an
+  advanced value.
+- **`simplifiedDefaultsApplied` is load-bearing.** Without it the band is either
+  never applied (a fresh install that leaves onboarding's switch untouched fires
+  no `onChange`) or re-applied on every launch, reverting the user's own tweak
+  from the one settings button the mode still shows. It is cleared on the way
+  out so a later return re-applies.
+- **Existing installs get simplified too**, on Niall's call — one rule for
+  everyone rather than grandfathering. They open to the reduced layout with the
+  switch in Settings to get the rest back.
+- **The session button reports a live session on its glyph, not only its
+  colour.** On the pre-26 bar we draw the circle, so its tint is ours outright:
+  red idle, orange running. On iOS 26 the circle is the system's, and a tab bar
+  colours its own items — selected in the tint, everything else in a secondary
+  grey — while this button is a `Tab(role: .search)` that is never selected. The
+  tint is therefore *attempted* (`.symbolRenderingMode(.palette)` plus a
+  `foregroundStyle`, which is the override's best chance) but the state is
+  carried by the symbol swapping from an outline `record.circle` to a filled
+  `waveform.circle.fill`. Shape is the half the system cannot overrule, and not
+  resting state on colour alone is the accessible way round regardless.
+- **The tour shortens with it.** `TourScript.steps(simplified:)` drops the six
+  steps whose controls the mode hides and rewords the stats, pulse-pane and
+  reset steps for what is actually on screen. A spotlight step explaining a
+  button that isn't there is worse than no step.
+- **Settings folded from five tabs to three** (General / AutoID / Audio) in the
+  same change. Location, Storage and Privacy were a tab each and none filled
+  one; five segments were also too wide for a phone, which is why "Recordings"
+  had already been shortened to "Storage" to stop it truncating.
 
 ---
 
@@ -864,8 +1527,61 @@ Two things this does not change, and one hazard:
 - **`LABL` (Lasiurus blossevillii)** isn't in NABat's current code sheet — it's
   been superseded there, but is independently confirmed as the classifier's own
   code for the western red bat.
-- **Priors start neutral.** No model ships with baked-in priors; real ones are
-  suggested from GBIF occurrence data near the user's location.
+- **Priors start neutral**, and are then derived from a bundled presence grid —
+  see below. They were suggested from live GBIF record counts until 2026-08-16.
+
+### Species priors: from live record counts to a bundled range grid (2026-08-16)
+
+Prompted by an acceptance review. The old path asked GBIF, at each new location,
+how many occurrence records each species had within 100 km. **Three independent
+faults, all shipping:**
+
+1. **Record counts measure recording effort, not bats.** Museum specimens, old
+   taxonomy and university field courses all count.
+2. **Failure was indistinguishable from certainty.** ~50 requests fired at once;
+   roughly half were throttled. A failed lookup left the species untouched, and
+   untouched meant the factory default `enabled, prior 1.0`. Verified in San
+   Francisco: the gray bat (Tennessee/Alabama caves), evening bat and
+   southeastern myotis all sat at maximum weight with **zero** nearby records,
+   alongside Yuma myotis with 515. Fifteen of the UK model's seventeen species
+   sat at 1.0 in California.
+3. **Name-based queries were wrong in both directions.** Measured, not inferred:
+   `Lasiurus blossevillii` returns **0** records near San Francisco while
+   `Lasiurus frantzii` — where western red bat records now sit — returns **90**,
+   so a resident was switched off. And `Cnephaeus serotinus`, the newer
+   combination the UK model uses, matches **only the genus** in GBIF, returning
+   0 everywhere: the serotine was switched off near London, where
+   `Eptesicus serotinus` has 1,684 records.
+
+**Now:** `SpeciesPresenceData.json`, generated offline from the classifiers' own
+species lists (not the guide's — the guide covers 19 species, the models name
+47), bundled in the app and refreshable from the field guide repo. Taxonomy is
+resolved once at generation time against an explicit alias table, and a match
+that resolves to a genus is a hard error rather than a warning — that check is
+what catches the serotine.
+
+**Three states, not two.** `present` / `absent` / `unknown`, where unknown means
+no range data exists for that species. Unknown stays enabled at half weight and
+carries `resolved: false` so the settings screen says so. Conflating unknown
+with certain was fault 2; conflating it with absent would silence a bat purely
+because nobody has mapped it.
+
+**Things learned building it, all of which cost time:**
+
+- **GBIF's `/occurrence/search` does not guarantee ordering**, so paging the
+  "first N" records is a biased sample, not a subset. The density tile endpoint
+  aggregates every record server-side instead: ~50 requests total rather than
+  ~700, about a minute rather than an hour, and no sampling question.
+- **The density endpoint accepts `month=` and silently ignores it.** January and
+  July return byte-identical tiles. Per-cell seasonality is therefore not
+  available this way; the month masks ship as zero, meaning "no information".
+- **Raw occurrence data needs outlier filtering.** Unfiltered, the gray bat
+  claims a cell in Alaska on one record out of 283. The floor is absolute, not
+  proportional: 0.5% of the common pipistrelle's 3.2 million records is 16,000,
+  which would erase most of its real European range.
+- **The refresh distance dropped from 100 km to 10 km.** The old figure existed
+  to throttle network calls; a local lookup has no such cost, and 100 km was far
+  too coarse to catch crossing a range boundary.
 
 ---
 
@@ -942,6 +1658,46 @@ transfer stuck at "0%" reads as broken.
 ---
 
 ## 11. Privacy, consent and upload
+
+**What location is used for, in full** — the list every privacy document has to
+match, and which has been wrong in both directions before: choosing which
+classifier model suits the region, deciding which species are plausible nearby
+(against the bundled presence grid, not a network call), stamping a coordinate on
+each detection, naming a session after the place it happened, and computing local
+sunset/sunrise for the detector's sun clock (§7). All on-device, all from
+occasional one-shot fixes. Nothing sends a coordinate anywhere except a
+deliberately-tapped contribution, which fuzzes it.
+
+### GPS tracking removed, every run is a session (2026-08-16)
+
+**No continuous location, and never "Always" authorization.** A "New Session"
+used to record a GPS course: continuous updates, breadcrumbs every ~5 m / ~3 s,
+escalating to Always so it kept recording with the phone locked, backed by the
+`location` UIBackgroundMode. All of it is gone — provider, stored track, map
+polyline, background mode, and the Info.plist entry.
+
+**Why removed rather than made optional.** Niall's call, and the right one: every
+detection already carries a coordinate and a timestamp, so a track can be
+reconstructed from the exported points by any GIS tool. The track was a second,
+much denser recording of the user's movements that duplicated data the app
+already had, and cost battery and an Always-authorization prompt to collect.
+
+**The start-up choice went with it.** "New Session" vs "Just Listening" was
+presented as a filing decision, but the only thing it actually decided was
+whether to record that track — a privacy and battery question, asked before the
+user had heard a single bat. Worse, its own explanation was wrong ("Just
+listening still tracks location but doesn't group the data" — listening never
+tracked), and the "Just Listening" branch wrote passes with a nil `sessionID`
+that **no screen in the app ever displayed**. The 2026-08-15 review ran the
+detector twenty minutes, logged 1,450 pulses, opened Sessions and read "No
+sessions yet". Every run is a session now; Start just starts.
+
+**Two consequences that needed handling.** Old listening passes are adopted into
+one session per night on first load (`adoptOrphanedListeningPasses`) — grouped
+by night, not by calendar day, so an outing crossing midnight stays one session.
+And since a stop/start now costs a whole row, a session restarted within 15
+minutes resumes the previous one rather than creating another: a session is an
+outing, not a tap.
 
 - **Anonymisation spread across four files is anonymisation nobody can audit.**
   It used to be four pieces — a coordinate helper in the conversion pipeline, a
@@ -1102,6 +1858,16 @@ exactly one observable representation — `ConsentStore.shared`.
   most a few columns going to one owner instead of the other — never a
   double-feed. The pump also stops on `audio.isRunning` changing, which covers
   the interruption path that deliberately bypasses `stopDetecting()`.
+- **Being on another tab counts as "not drawing" (2026-08-16).** The bottom tab
+  bar made leaving the detector a second way for the render loop to stop, and
+  one the old scene-phase test did not catch: the app is still foreground and
+  active, so nothing handed the columns over, and a run kept capturing audio
+  while quietly detecting nothing for as long as the user was reading Sessions.
+  The condition is now "foreground **and** on the detector" — see
+  `ContentView.updateColumnDrainOwner`, which is the single place that decides,
+  and is called from the scene-phase change, the section change and
+  `audio.isRunning` alike. The spectrogram's own `isPaused` takes the same
+  condition, so the loop stops drawing at the moment the pump takes over.
 - **The pump's `feed()` call is duplicated from `draw(in:)` on purpose**, rather
   than factored into a shared helper, because the render path also batches
   magnitudes for the ring upload and merging them would put Metal bookkeeping on
@@ -1149,6 +1915,75 @@ exactly one observable representation — `ConsentStore.shared`.
   its destination eagerly**, not on tap — which meant every row in a list
   allocated the WAV player's ~15 MB PCM ring up front.
 
+### 2026-08-15 audit: the rest
+
+- **Async work that outlives a reset needs a generation token, not just cleared
+  state.** `PulseDetector.resetStats` cleared the accumulators but left
+  `isCapturing`/`pendingCapture`/`pendingClassifications` and the pending
+  absolute sample indices alone. A CoreML classification is slow enough (cold
+  model load on a busy device) that a stop→start lands the previous run's pulse
+  in the NEW session's `passAggPulses`, carrying the new session's ID and
+  coordinate. `captureGeneration` is now snapshotted in `scheduleCapture` and
+  checked in both completions — including around the `pendingClassifications`
+  decrement, since a stale decrement against a zeroed counter drives it negative
+  and the `== 0` pass-finalize gate then never opens again.
+- **`startDetecting` was missing the `finalizePass()` its siblings had.**
+  `stopDetecting` and `endDemo` both finalize before tearing down; `startDetecting`
+  called `resetStats()` alone, so a pass orphaned by an audio interruption — the
+  exact case its own next comment handles for sessions — was discarded instead of
+  recorded as NoID, against §9. Three call sites, one of them different, and the
+  odd one out was the one nobody had a reason to look at.
+- **The tuning overlay's revert snapshot missed eight knobs.** All five Slow
+  Replay sliders, the output routing picker, the trigger-mode picker and the
+  palette picker. The replay sliders also commit to `UserDefaults`, so Revert
+  appeared to work while having permanently changed persisted settings. The flat
+  struct was chosen precisely so this couldn't happen and it happened anyway —
+  the convention isn't enforced by anything. `LiveTuningSnapshot`'s header now
+  carries the two greps that check it, and notes that **pickers are what slipped
+  through**: a sweep looking only for sliders misses them.
+- **Hide-silence translated the viewport's centre but not its span.** Real and
+  virtual samples aren't 1:1, so `recentered` reusing `viewport.sampleSpan`
+  across the domain switch reinterpreted the zoom level; the compressed timeline
+  being shorter meant turning hide-silence on threw the user's zoom away. The
+  span is now re-derived by mapping BOTH edges. General form: when translating
+  between the two domains, translate every quantity that has units of samples,
+  not just positions.
+- **`?? array[0]` after `max(by:)` is a crash, not a fallback** — `max(by:)`
+  returns nil exactly when the array is empty. Two sites had it. `?? .first`.
+
+### A `repeatForever` animation needs BOTH containments, not one
+
+This has now been diagnosed three times on three different views, so it is
+written down as a rule rather than a comment.
+
+An autoreversing `repeatForever` animation leaks in two independent ways, and
+fixing one leaves the other:
+
+1. **Through the transaction.** Started with `withAnimation`, it is installed on
+   the whole current update, and any unrelated view that happens to change in
+   the same cycle inherits it. An inherited `repeatForever(autoreverses:)` has
+   nothing to end it, so whatever caught it oscillates for the rest of the run.
+   *Fix:* flip the flag with no animation and attach the animation to the glyph
+   itself with `.animation(_:value:)`.
+2. **Through geometry, on the view it was correctly scoped to.** A scoped
+   `.animation(_:value:)` carrying a repeat stays ACTIVE forever once started —
+   it does not only animate the `value:` it was keyed to. Every later change to
+   that view's resolved position is picked up by the repeat too, so a neighbour
+   relaying out (a timer label changing width once a second is enough) makes the
+   new position one end of a never-ending interpolation. *Fix:* `.geometryGroup()`
+   on the same leaf, so it takes its position from the parent's unanimated
+   transaction as a rigid unit and the repeat can only reach color/opacity.
+
+Both are needed. Fixing only (1) produced the mic pill's rate label sliding out
+of its capsule, and later the record button zipping diagonally out of the
+transport row and back — same bug, found six days apart, because the record
+button had been given the transaction fix alone.
+
+The app has exactly two `repeatForever` animations (`MicStatusPillContent`'s two
+pill elements, and the record glyph's breathe). A third was tried on
+`RecordingStatusBadge` and deleted rather than contained. Keep it that way:
+adding one is adding a permanent source of this bug.
+
 ---
 
 ## 14. Target and build wiring
@@ -1172,9 +2007,18 @@ OpenBat/
   LiveActivity/     lock-screen card (app side)
   Tuning/           live tuning overlay
   Onboarding/       first-run flow
+  AppTabBar.swift   the bottom bar, the session button and its transport menu
+  SimplifiedView.swift  what simplified view hides, and the defaults it applies
+  GlassStyle.swift  Liquid Glass helpers with pre-26 fallbacks
   ContentView.swift the detector screen; wires every subsystem together
 OpenBatWiget/       widget extension target (note the missing 'd' — see below)
 ```
+
+**Supported orientations are set per-idiom**, not globally:
+`INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone` is portrait alone, while
+the `_iPad` key keeps all four. Setting the plain, idiom-less key instead — which
+is what the project had before 2026-08-16 — silently re-enables iPhone landscape,
+for which no layout exists any more. See §7.
 
 `OpenBat/OpenBat/` is a `PBXFileSystemSynchronizedRootGroup`: **any .swift file
 placed inside it is compiled into the app.** That is why the VTD quarantine is a
@@ -1269,6 +2113,7 @@ leads to check, not as confirmed regressions.
 | 3.5 Family colour tint not stable across launches | `SpeciesExplorerView.GuideSpeciesThumbnail.tint` still uses `family.hashValue % palette.count`, and comments it as deterministic. Swift randomises `hashValue` per process, so it isn't. |
 | 3.4 No antimeridian handling in the GBIF bounding box | `GBIFService.region(for:)` still takes a plain `.min()`/`.max()` over longitudes, so a range straddling ±180° yields a near-global box. |
 | 3.1 Species range store pointed at the wrong repo | **Fixed 2026-08-15.** `SpeciesRangeStore.remoteURL` now points at `NiallxD/OpenBat-FieldGuide`, matching `SpeciesGuideStore` and the field guide README's promise to contributors. It had pointed at `NiallxD/OpenBat`, so range edits made in the field guide repo were a silent no-op. Both files were byte-identical at the time of the change, so no behaviour changed. `tools/generate_species_range_data.py` writes guide and range JSON side by side in one directory, which is what settles the field guide repo as the canonical home for both. |
+| 5.5 Failed writes still counted in the WAV's declared length | **Was still unfixed; fixed 2026-08-15.** The table above records this as fixed and it was not — `write()` used `try?` and advanced `dataBytes` regardless of the result. See §6. |
 | 5.2 Silent GPS failure with no user-facing signal | `LocationProvider.locationManager(_:didFailWithError:)` is still an empty body. |
 | 3.2 Wikipedia photo carousel | The concurrency half (cache lock) is done. The "load several images and let the user swipe" half doesn't appear to exist — `fetchPhoto` still resolves a single `Photo`. |
 
@@ -1276,6 +2121,42 @@ leads to check, not as confirmed regressions.
 
 ## 16. Open questions
 
+- **IUCN Red List range polygons — ruled out on licensing, 2026-08-16.** Worth
+  recording so nobody researches it twice. Their expert-drawn mammal maps carry
+  exactly the attributes this app wants — `presence`, `origin` (including
+  *vagrant*, which would settle the eastern red bat near San Francisco) and
+  `seasonal` (which would answer the migration question outright). But the
+  Red List Terms of Use prohibit redistribution "in their original format,
+  either whole or in part, alone or combined with other data, **including
+  within Derivative Works**", without prior written permission. Rasterising
+  their polygons into a shipped presence grid is squarely that. Niall's call
+  was to steer clear. Two routes remain if it ever matters enough: request a
+  formal waiver from IUCN (free non-commercial conservation use is a
+  sympathetic case), or use the data locally as a *check* on our GBIF-derived
+  grid without shipping anything derived from it — the line being that finding
+  our errors with it is fine, encoding their boundaries is not.
+- **Migration timeline in the species guide — built and scrapped, 2026-08-16.**
+  Niall's idea earlier the same day: show each species' seasonal movement as a
+  timeline on its guide page — when it migrates, when it hibernates, when you
+  can expect to hear it. It was built (a twelve-month bar, phases as explicit
+  month spans so sedentary and tropical species could say so, all 19 bundled
+  species populated) and then removed the same day, unshipped. **Niall's reason,
+  which is the part to keep:** for most species it is not reliably known *when*
+  they move, or *where* they go, and a bar drawn month by month asserts a
+  precision the underlying knowledge doesn't have. Prose can say "largely
+  sedentary, with some short-distance movement between summer and winter
+  roosts" and be exactly as vague as the evidence is; a coloured band starting
+  in March cannot. So migration stays where it was — alluded to in the
+  `habits.migration` text, and nowhere else.
+
+  Worth knowing before anyone revisits it: seasonality here was never blocked on
+  the GBIF `month=` dead end (§9). That parameter is silently ignored, so
+  per-cell month masks ship as zeroes, but a guide timeline needs per-species
+  editorial content rather than per-cell data. The blocker was the content
+  itself, not the data pipeline. Occurrence months *are* available per record
+  from `/occurrence/search` if a data-driven version is ever wanted, and that —
+  showing observed records by month, with their own sample size visible —
+  would answer the objection above in a way a hand-written timeline can't.
 - **Freedom to operate on live ATE.** Wants a patent attorney's opinion covering
   the existing mode, not just sampler mode. See §5.
 - **What is still wrong with candidate `G`.** It was the closest ATE tuning
@@ -1300,6 +2181,30 @@ leads to check, not as confirmed regressions.
   `actualSampleRate`.
 - **BatDetect2's NoID threshold** needs verifying against labelled field data.
 - **Upload quality-gate thresholds** are placeholders and need real data.
+
+### Orphaned by the presence-grid change — resolved 2026-08-16
+
+The species map and the classifier both moved to the bundled presence grid,
+which left the entire "ask GBIF at runtime" design with no consumer. **All
+deleted**, on Niall's call:
+
+- **`GBIFService.swift`** (321 lines) — taxon-key lookup, occurrence-point
+  fetching, `suggestPriors` and its helpers. Its last consumer was
+  `SpeciesRangeStore`, which was orphaned too: the two referenced only each
+  other. **The app now makes no GBIF network request at any point**, which is
+  why the privacy pages no longer say an approximate position is sent there.
+- **`SpeciesRangeStore.swift`** (149 lines), its `SpeciesRangeData.json`, and
+  `tools/generate_species_range_data.py` (154 lines) — the occurrence-point
+  pipeline behind the old zoomable species map.
+- **The SwiftyH3 package** — H3 hexagon binning went with that map. Removed
+  from the project file, along with its licence row in `AppInfoView` and the
+  Apache-2.0 notice text that only that row used.
+
+Roughly 620 lines of Swift, a Python generator, and one third-party dependency.
+
+If a fine-grained species map is ever wanted, note that the presence grid is
+deliberately coarse (~100 km cells) and occurrence points are what would come
+back — as a fresh fetch, not as this code.
 
 ### Orphaned code — resolved 2026-08-15
 
