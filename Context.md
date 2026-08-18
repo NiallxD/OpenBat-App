@@ -1645,6 +1645,25 @@ exactly this failure (a `scaledToFill` photo reporting ~500pt wide, which
 `.clipped()` does not fix because it clips drawing, not layout). Over-wide
 content is now clipped rather than scrollable.
 
+### A URL interpolated into a `Text` markdown link is not a link (2026-08-17)
+
+Both field-guide empty states offered "get started here" / "contribute range
+data here" pointing at the guide repo, written as
+`Text("… [get started here](\(fieldGuideRepoURL)).")`. Neither was tappable —
+the `[label](…)` rendered as literal characters, brackets and all.
+
+A string literal handed to `Text` is a `LocalizedStringKey`, and its
+interpolations become substitution placeholders in a format string. Markdown is
+parsed from that format string **before** the values are substituted back, so
+the parser sees a link destination that is a placeholder rather than a URL and
+never forms a link. The constant was fine; the interpolation was the bug.
+
+Fixed by parsing an `AttributedString` from the markdown instead
+(`markdownText` in `SpeciesExplorerView.swift`), where the URL is already in
+the string before markdown is applied. Anything else that wants a link with a
+non-literal destination needs the same treatment — a hardcoded destination in
+the literal works, an interpolated one silently does not.
+
 ### Spotlighting anything the tab bar draws
 
 `.tourTarget` does not work inside a `Tab` label: on iOS 26 the bar renders the

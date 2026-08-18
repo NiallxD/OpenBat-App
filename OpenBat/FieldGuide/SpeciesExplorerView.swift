@@ -162,7 +162,7 @@ struct SpeciesExplorerView: View {
                     title: region.name,
                     species: store.guide.species(in: region),
                     countSuffix: "in region",
-                    emptyStateDescription: Text("This region has no entries in the guide yet! As a community-sourced guide, contributions are always welcome — [get started here](\(fieldGuideRepoURL)).")
+                    emptyStateDescription: markdownText("This region has no entries in the guide yet! As a community-sourced guide, contributions are always welcome — [get started here](\(fieldGuideRepoURL)).")
                 )
             case .species(let species):
                 SpeciesDetailView(species: species, store: store, presenceStore: presenceStore)
@@ -171,7 +171,7 @@ struct SpeciesExplorerView: View {
                     title: "Bats Near You",
                     species: nearbySpecies,
                     countSuffix: "near you",
-                    emptyStateDescription: Text("We don't have range data covering your exact location yet — try exploring a region on the globe instead, or [contribute range data here](\(fieldGuideRepoURL)).")
+                    emptyStateDescription: markdownText("We don't have range data covering your exact location yet — try exploring a region on the globe instead, or [contribute range data here](\(fieldGuideRepoURL)).")
                 )
             }
         }
@@ -761,6 +761,25 @@ struct GuideSpeciesRow: View {
 /// empty-state messages, built at the call sites below, point contributors
 /// there.
 private let fieldGuideRepoURL = "https://github.com/NiallxD/OpenBat-FieldGuide"
+
+/// Builds a `Text` from markdown, for the contribution links below.
+///
+/// **`Text("[label](\(url))")` does not produce a tappable link**, which is how
+/// both empty states shipped. A string literal passed to `Text` is a
+/// `LocalizedStringKey`, and its interpolations become substitution
+/// placeholders in a format string that markdown is parsed from *before* the
+/// values are put back — so the parser sees a link destination that is a
+/// placeholder rather than a URL, fails to form a link, and the whole
+/// `[label](…)` renders as literal characters. Nothing is tappable and the raw
+/// brackets are visible.
+///
+/// Parsing an `AttributedString` sidesteps the format string entirely: the URL
+/// is already in the string by the time markdown is applied. Falls back to the
+/// unparsed text rather than trapping — a broken link in an empty state is not
+/// worth a crash, and these strings are literals a compile would catch anyway.
+private func markdownText(_ markdown: String) -> Text {
+    Text((try? AttributedString(markdown: markdown)) ?? AttributedString(markdown))
+}
 
 /// A species list grouped by family — the region page and, since
 /// 2026-08-17, the "bats near you" page (see `SpeciesExplorerView.nearbySpecies`
