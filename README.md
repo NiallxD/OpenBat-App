@@ -49,31 +49,27 @@ connection with bats, and a bit more respect for them too.
 
 - iPhone running **iOS 18** or later.
 - A **compatible ultrasonic USB microphone**. The app is developed against the
-  Griff (384 kHz sample rate, 192 kHz Nyquist).
-- A USB-C connection to the phone.
+  [Griff Mini](https://www.pippyg.com/griff.html) (384 kHz sample rate, 192 kHz Nyquist).
+- A USB-C connection to the phone (OTA adapters do work).
 
 ## Getting started
 
 Connect the microphone, press Start, and point it at the sky. Detected passes
-are logged with their species, confidence, and a spectrogram of the pulses.
-Start a Session to also record a GPS track and map where each pass was heard.
-
-No microphone to hand? The app bundles a demo clip and can run against it, which
-also makes it usable in the simulator.
+are logged with their species, confidence, and a spectrogram of the pulses. Each
+has a GPS record logged and is plotted on the session's map.
 
 ## Privacy
 
 - **Recordings stay on your device.** They are yours; nothing is uploaded in the
-  background, and identification never leaves the phone.
+  background, and identification never leaves the phone unless you share it.
 - **Location** is used to tag recordings, to suggest the right species model for
-  where you are, and — during a Session — to record the session's GPS track. An
-  approximate location is also sent to GBIF to look up which species occur near
-  you; nothing identifying goes with it.
+  where you are, pinpoint your location on the species map, and in the field guide,
+  identify species you can find nearby.
 
 ## Species field guide
 
-The app downloads and displays the field guide — a single community-editable
-JSON file — in its Species section. **The data and the guide to contributing to
+The app downloads and displays the field guide, a single community-editable
+JSON file, in its Species section. **The data and the guide to contributing to
 it live in [OpenBat-FieldGuide](https://github.com/NiallxD/OpenBat-FieldGuide),
 including the schema, an example entry, and the versioning rules.** Open PRs
 against that repo, not this one. Adding or editing a species needs no app code
