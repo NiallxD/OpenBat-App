@@ -201,8 +201,8 @@ struct SessionTimerPill: View {
 /// the playback back up acoustically and reprocesses it as a spurious low-pitch
 /// "call" layered on the real one (confirmed fixed by wearing headphones — there's
 /// no clean software fix for the acoustic coupling itself). Only shown while
-/// actually listening on the speaker, so it doesn't nag when detection is silent
-/// or headphones are already in. Same standalone-View-struct scoping as the other
+/// audio is actually running out of the speaker, so it doesn't nag when capture
+/// is stopped or headphones are already in. Same standalone-View-struct scoping as the other
 /// status pills (`audio.isOutputOnSpeaker`/`listenMode` are on the churning
 /// AudioEngineController).
 struct SpeakerFeedbackWarningPill: View {
@@ -214,7 +214,13 @@ struct SpeakerFeedbackWarningPill: View {
     @State private var showExplainer = false
 
     var body: some View {
-        if tourDemo || (audio.isListening && audio.isOutputOnSpeaker) {
+        // `isRunning` matters as much as the other two: `listenMode` defaults to
+        // `.heterodyne`, so `isListening` is true from construction, and the
+        // speaker is the route on any phone without headphones in. Without this
+        // the warning was up the moment the Detector appeared — before capture
+        // had started and before a sample had been played — which is the state
+        // the app now sits in on launch.
+        if tourDemo || (audio.isRunning && audio.isListening && audio.isOutputOnSpeaker) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(.yellow)
