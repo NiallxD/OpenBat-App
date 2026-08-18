@@ -1609,6 +1609,27 @@ it is never more than one world-width — for any range that can exist. Hence
 `mapHeight` now sizes only the "no data" placeholder. `mapSize` survives purely
 as a re-frame guard; there is no longer a size → height → size loop to converge.
 
+### Distribution maps are drawn as outlines, not cells (2026-08-17)
+
+Every version that drew the presence cells themselves showed seams inside the
+range — first one polygon per cell, then merged into horizontal runs, and the
+runs still striped at every row boundary. **The cause is anti-aliasing, not
+strokes** (removing the stroke didn't fix it): MapKit anti-aliases each
+polygon's edge independently, so a shared edge lands as two half-covered pixels
+instead of one full one, and half-covered translucent fill is lighter than
+full. Inflating each run by 6% of a cell so neighbours overlapped traded that
+for the opposite artefact — two translucent fills stacked read *darker* — which
+is what Niall saw as bars. No inflation fixes both; abutting is too light and
+overlapping too dark.
+
+So the interior edges are never drawn. The occupied region's boundary is traced
+instead — keep a cell edge only where the cell across it is absent, chain the
+survivors into closed rings — giving one polygon per connected area with holes
+as `interiorPolygons`. Winding each cell anticlockwise makes outer rings come
+out positive-area and holes negative, so a ring's sign classifies it and
+containment is only needed to pair a hole with the smallest ring around it.
+Fewer polygons than the run merging it replaced, and no internal edges at all.
+
 ### The species page could be dragged sideways (2026-08-17)
 
 A vertical `ScrollView` is backed by a `UIScrollView` whose `contentSize` is the

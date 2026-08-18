@@ -30,9 +30,10 @@
 //  at the museum holding them. (It is still built from occurrence data, so the
 //  caveat in the info popover stays — it is honest, not modelled range.)
 //
-//  Cells are merged into horizontal runs before drawing: a widespread species
-//  covers ~1100 one-degree cells, and MapKit does not need 1100 polygons to
-//  draw what is mostly a handful of solid blocks.
+//  The grid is drawn as its own outline rather than as cells: the boundary of
+//  the occupied region is traced, giving one polygon per connected landmass
+//  (holes included), so a widespread species covering ~1100 one-degree cells
+//  becomes a handful of shapes with no internal edges at all.
 //
 
 import SwiftUI
@@ -84,10 +85,11 @@ struct GBIFDistributionCard: View {
     /// clipped no matter how it is tuned.
     private static let aspect: CGFloat = 1
 
-    /// One drawn block: a run of horizontally adjacent cells in a single row.
-    private struct RangeBlock: Identifiable {
+    /// One drawn shape: a connected region of the presence grid, outlined —
+    /// with its holes, if it has any.
+    private struct RangeShape: Identifiable {
         let id: Int
-        let coordinates: [CLLocationCoordinate2D]
+        let polygon: MKPolygon
     }
 
     var body: some View {
@@ -95,13 +97,12 @@ struct GBIFDistributionCard: View {
             Group {
                 if let range = resolvedRange {
                     Map(position: $camera, interactionModes: []) {
-                        ForEach(range.blocks) { block in
-                            // No stroke: blocks are only merged into runs
-                            // horizontally (see `blocks(for:cellDegrees:)`), so
-                            // a bordered row reads as a stripe at every row
-                            // boundary even where the range is one solid mass
-                            // top to bottom. Fill-only reads as a single shape.
-                            MapPolygon(coordinates: block.coordinates)
+                        ForEach(range.shapes) { shape in
+                            // No stroke, and no overlapping neighbours to
+                            // stroke between — each shape is one region's
+                            // whole outline, so the fill is uniform across it
+                            // however many cells it was built from.
+                            MapPolygon(shape.polygon)
                                 .foregroundStyle(Color.purple.opacity(0.55))
                         }
                     }
@@ -145,13 +146,13 @@ struct GBIFDistributionCard: View {
         return "There aren't enough records of this species to map where it lives."
     }
 
-    private var resolvedRange: (rect: MKMapRect, blocks: [RangeBlock])? {
+    private var resolvedRange: (rect: MKMapRect, shapes: [RangeShape])? {
         guard let code = species.presenceCode,
               let cells = presenceStore.presence[code], !cells.isEmpty else { return nil }
         let degrees = presenceStore.cellDegrees
-        let blocks = Self.blocks(for: Set(cells.keys), cellDegrees: degrees)
+        let shapes = Self.shapes(for: Set(cells.keys), cellDegrees: degrees)
         guard let rect = Self.mapRect(for: Set(cells.keys), cellDegrees: degrees) else { return nil }
-        return (rect, blocks)
+        return (rect, shapes)
     }
 
     // MARK: - Grid geometry
@@ -164,67 +165,153 @@ struct GBIFDistributionCard: View {
         return (Double(row) * cellDegrees - 90, Double(col) * cellDegrees - 180)
     }
 
-    /// Merges cells into horizontal runs, one polygon per run.
-    ///
-    /// Purely a drawing optimisation — the shape is identical, there are just
-    /// far fewer polygons. Runs are not merged vertically as well: the extra
-    /// bookkeeping buys little once the horizontal pass has collapsed the big
-    /// solid regions, and rectangles are what MapPolygon wants anyway.
-    private static func blocks(for indices: Set<Int>, cellDegrees: Double) -> [RangeBlock] {
-        let cols = Int((360 / cellDegrees).rounded())
-        var byRow: [Int: [Int]] = [:]
-        for index in indices {
-            let (row, col) = index.quotientAndRemainder(dividingBy: cols)
-            byRow[row, default: []].append(col)
-        }
-
-        var blocks: [RangeBlock] = []
-        for (row, columns) in byRow {
-            var run: [Int] = []
-            for col in columns.sorted() {
-                if let last = run.last, col != last + 1 {
-                    blocks.append(block(row: row, from: run[0], to: last, cellDegrees: cellDegrees))
-                    run = []
-                }
-                run.append(col)
-            }
-            if let first = run.first, let last = run.last {
-                blocks.append(block(row: row, from: first, to: last, cellDegrees: cellDegrees))
-            }
-        }
-        return blocks
+    /// A corner of the grid — a lattice point, in whole cells, x east and y
+    /// north. Integers, so two cells that meet always agree on the corner they
+    /// share, exactly, with no floating-point drift to leave a hairline gap.
+    private struct GridVertex: Hashable {
+        let x: Int
+        let y: Int
     }
 
-    /// Each block is expanded by this fraction of a cell on every side, so
-    /// adjacent blocks overlap slightly instead of exactly sharing an edge.
+    /// Traces the outline of the occupied region, one polygon per connected
+    /// area, holes carried as interior polygons.
     ///
-    /// MapKit anti-aliases every polygon's edge on its own: two translucent
-    /// fills that exactly abut each leave their shared edge pixel only
-    /// partly covered, and a partly-covered pixel of a translucent fill is
-    /// lighter than a fully-covered one — which is what still read as a
-    /// border between rows even after the explicit stroke was removed. A
-    /// small overlap covers that seam with full fill from both sides instead
-    /// of a partial one from each, and is small enough not to visibly round
-    /// off the range's true outer edge (which the 8% padding in `mapRect`
-    /// already keeps clear of anyway).
-    private static let blockOverlapFraction = 0.06
-
-    private static func block(row: Int, from startCol: Int, to endCol: Int,
-                              cellDegrees: Double) -> RangeBlock {
-        let overlap = cellDegrees * blockOverlapFraction
-        let south = Double(row) * cellDegrees - 90 - overlap
-        let north = south + cellDegrees + 2 * overlap
-        let west = Double(startCol) * cellDegrees - 180 - overlap
-        let east = Double(endCol + 1) * cellDegrees - 180 + overlap
+    /// WHY OUTLINES RATHER THAN CELLS (2026-08-17)
+    /// Every earlier version drew the cells themselves — first one polygon per
+    /// cell, then merged into horizontal runs — and every one of them showed
+    /// seams where two pieces met. MapKit anti-aliases each polygon's edge
+    /// independently, so a shared edge lands as two half-covered pixels rather
+    /// than one full one; against a translucent fill that reads as a pale line
+    /// at every row boundary. Inflating each run so neighbours overlapped
+    /// replaced the pale line with a dark one, because two translucent fills
+    /// stacked are darker than one. There is no inflation that fixes both:
+    /// abutting is too light, overlapping is too dark, and only *not having an
+    /// interior edge* is neither.
+    ///
+    /// So the interior edges are removed before drawing. An edge of a cell is
+    /// part of the outline only if the cell across it is absent; keeping those
+    /// and dropping the rest leaves closed loops, which chain into rings.
+    /// Wound as below (anticlockwise around each cell) outer rings come out
+    /// anticlockwise and holes clockwise, so the sign of a ring's area says
+    /// which it is — no containment test needed to classify them, only to pair
+    /// each hole with the ring it sits in.
+    private static func shapes(for indices: Set<Int>, cellDegrees: Double) -> [RangeShape] {
         let cols = Int((360 / cellDegrees).rounded())
-        return RangeBlock(
-            id: row * cols + startCol,
-            coordinates: [
-                CLLocationCoordinate2D(latitude: south, longitude: west),
-                CLLocationCoordinate2D(latitude: north, longitude: west),
-                CLLocationCoordinate2D(latitude: north, longitude: east),
-                CLLocationCoordinate2D(latitude: south, longitude: east),
-            ])
+        var cells: Set<GridVertex> = []
+        for index in indices {
+            let (row, col) = index.quotientAndRemainder(dividingBy: cols)
+            cells.insert(GridVertex(x: col, y: row))
+        }
+
+        // Boundary edges, directed, keyed by where each one starts.
+        var outgoing: [GridVertex: [GridVertex]] = [:]
+        func addEdge(_ from: GridVertex, _ to: GridVertex) {
+            outgoing[from, default: []].append(to)
+        }
+        for cell in cells {
+            let (x, y) = (cell.x, cell.y)
+            if !cells.contains(GridVertex(x: x, y: y - 1)) {
+                addEdge(GridVertex(x: x, y: y), GridVertex(x: x + 1, y: y))
+            }
+            if !cells.contains(GridVertex(x: x + 1, y: y)) {
+                addEdge(GridVertex(x: x + 1, y: y), GridVertex(x: x + 1, y: y + 1))
+            }
+            if !cells.contains(GridVertex(x: x, y: y + 1)) {
+                addEdge(GridVertex(x: x + 1, y: y + 1), GridVertex(x: x, y: y + 1))
+            }
+            if !cells.contains(GridVertex(x: x - 1, y: y)) {
+                addEdge(GridVertex(x: x, y: y + 1), GridVertex(x: x, y: y))
+            }
+        }
+
+        // Follow the edges into closed rings, consuming each exactly once. A
+        // vertex where two regions touch corner-to-corner has two ways out;
+        // either choice closes both rings, so take whichever is to hand.
+        var rings: [[GridVertex]] = []
+        while let start = outgoing.first(where: { !$0.value.isEmpty })?.key {
+            var ring: [GridVertex] = [start]
+            var current = start
+            while let next = outgoing[current]?.popLast() {
+                if outgoing[current]?.isEmpty == true { outgoing[current] = nil }
+                if next == start { break }
+                ring.append(next)
+                current = next
+            }
+            if ring.count >= 3 { rings.append(ring) }
+        }
+
+        // Anticlockwise (positive area) is an outer ring; clockwise is a hole.
+        var outers: [[GridVertex]] = []
+        var holes: [[GridVertex]] = []
+        for ring in rings {
+            if signedArea(ring) > 0 { outers.append(ring) } else { holes.append(ring) }
+        }
+
+        // Pair each hole with the smallest outer ring containing it — smallest
+        // because an island inside a lake inside a landmass is contained by
+        // both, and it belongs to the lake's.
+        var holesByOuter: [Int: [[GridVertex]]] = [:]
+        for hole in holes {
+            guard let probe = hole.first else { continue }
+            var best: Int?
+            var bestArea = Double.greatestFiniteMagnitude
+            for (i, outer) in outers.enumerated() where contains(outer, probe) {
+                let area = abs(signedArea(outer))
+                if area < bestArea { best = i; bestArea = area }
+            }
+            if let best { holesByOuter[best, default: []].append(hole) }
+        }
+
+        return outers.enumerated().map { index, outer in
+            let interiors = (holesByOuter[index] ?? []).map {
+                polygon(from: $0, cellDegrees: cellDegrees)
+            }
+            return RangeShape(
+                id: index,
+                polygon: polygon(from: outer, cellDegrees: cellDegrees,
+                                 interiorPolygons: interiors.isEmpty ? nil : interiors))
+        }
+    }
+
+    /// Twice the ring's signed area (shoelace) — only its sign and relative
+    /// magnitude are used, so the factor of two is left in.
+    private static func signedArea(_ ring: [GridVertex]) -> Double {
+        var total = 0.0
+        for i in ring.indices {
+            let a = ring[i]
+            let b = ring[(i + 1) % ring.count]
+            total += Double(a.x * b.y - b.x * a.y)
+        }
+        return total
+    }
+
+    /// Ray casting, on the integer lattice. Only ever asked about a point on a
+    /// *different* ring, so the boundary case doesn't arise.
+    private static func contains(_ ring: [GridVertex], _ point: GridVertex) -> Bool {
+        var inside = false
+        for i in ring.indices {
+            let a = ring[i]
+            let b = ring[(i + 1) % ring.count]
+            guard (a.y > point.y) != (b.y > point.y) else { continue }
+            let crossing = Double(b.x - a.x) * Double(point.y - a.y)
+                / Double(b.y - a.y) + Double(a.x)
+            if Double(point.x) < crossing { inside.toggle() }
+        }
+        return inside
+    }
+
+    private static func polygon(from ring: [GridVertex], cellDegrees: Double,
+                                interiorPolygons: [MKPolygon]? = nil) -> MKPolygon {
+        var coordinates = ring.map { vertex in
+            CLLocationCoordinate2D(
+                // Clamped just inside the Mercator limit for the same reason
+                // `mapRect` clamps: MKMapPoint is undefined beyond it. No bat
+                // is up there, so no real outline is moved by this.
+                latitude: min(85, max(-85, Double(vertex.y) * cellDegrees - 90)),
+                longitude: Double(vertex.x) * cellDegrees - 180)
+        }
+        return MKPolygon(coordinates: &coordinates, count: coordinates.count,
+                         interiorPolygons: interiorPolygons)
     }
 
     /// A fixed frame around the whole range, with a margin so the outermost
