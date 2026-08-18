@@ -26,6 +26,10 @@ struct DiagnosticsView: View {
     /// all the processors and the AutoID settings at once — see `dumpSettings`
     /// there.
     let onDumpSettings: () -> URL?
+    /// Locates the session button for the glow, the transport menu and the tap
+    /// catcher. Read here only for its failure dump — this panel is how that
+    /// dump gets off a device, which is the only place the failure happens.
+    let sessionButtonLocator: SessionButtonLocator
     @Environment(\.dismiss) private var dismiss
     @State private var logCleared = false
     @State private var showDemoPicker = false
@@ -51,6 +55,7 @@ struct DiagnosticsView: View {
                     demoSection
                     tuningSection
                     settingsDumpSection
+                    sessionButtonSection
                     logSection
                 }
                 .padding()
@@ -202,6 +207,86 @@ struct DiagnosticsView: View {
         }
         .padding()
         .background(.quaternary, in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    /// Says whether the session button has been located, and lets the view
+    /// hierarchy be shared off the device.
+    ///
+    /// **Why it reports success as loudly as failure.** Three things draw
+    /// nothing at all until the button is found: the recording glow, the
+    /// transport menu, and the invisible disc that takes the button's taps. All
+    /// three have been missing on a real iPad and present on every simulator,
+    /// and there are two quite different explanations — the button not being
+    /// found, or the button being found in a place nothing draws at. A card that
+    /// only appeared on failure could not tell them apart. This one states the
+    /// measured frame, which settles it in a glance.
+    ///
+    /// The dump is taken on demand rather than only after a failure, because on
+    /// hardware there is no console to read.
+    private var sessionButtonSection: some View {
+        VStack(spacing: 12) {
+            HStack {
+                Text("Session Button")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+
+            if let frame = sessionButtonLocator.frameInWindow {
+                Text(String(format: "Found at %.0f, %.0f — %.0f × %.0f",
+                            frame.minX, frame.minY, frame.width, frame.height))
+                    .font(.caption.monospaced())
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                // The tour's spotlight for the session button is this frame
+                // rebased through the overlay's own frame, so both numbers have
+                // to be right for the ring to land on the button. A tour host
+                // that isn't at 0,0 is the whole story when a ring is offset.
+                Text(sessionButtonLocator.tourHostFrameInGlobal.map {
+                    String(format: "Tour overlay at %.0f, %.0f — %.0f × %.0f",
+                           $0.minX, $0.minY, $0.width, $0.height)
+                } ?? "Tour overlay geometry not seen yet")
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text("The glow, the transport menu and the button's tap area are all placed on this frame. If they aren't appearing, the search is not the problem.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                Text("Not found")
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.orange)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text("The glow, the transport menu and the button's tap area all draw nothing until the button is found in the view hierarchy.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            ShareLink(item: hierarchyDump) {
+                Label("Share View Hierarchy", systemImage: "square.and.arrow.up")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+        }
+        .padding()
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    /// Captured when the card is built, so it describes the hierarchy with this
+    /// sheet already up — which is the same hierarchy plus one sheet, and the
+    /// bar we care about is still in it.
+    private var hierarchyDump: String {
+        var text = SessionButtonLocator.searchCriteria + "\n"
+        if let frame = sessionButtonLocator.frameInWindow {
+            text += "FOUND at \(frame).\n\n"
+        } else {
+            text += "NOT FOUND.\n\n"
+        }
+        if let failure = sessionButtonLocator.failureDump {
+            text += "── Dump taken when the retries gave up ──\n\(failure)\n\n"
+        }
+        return text + "── Dump taken now ──\n" + SessionButtonLocator.hierarchyDump()
     }
 
     private var logSection: some View {

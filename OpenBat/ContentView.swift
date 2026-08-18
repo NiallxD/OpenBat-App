@@ -193,6 +193,21 @@ struct ContentView: View {
         simplifiedMode ? false : spectrogramShowsSpeciesID
     }
 
+    /// iPad landscape only, where the Species ID list already has its own
+    /// permanent panel beside the pulse card. Simplified view's usual override
+    /// above forces the pulse card to species ID too, which there draws the same
+    /// list twice side by side — so this flips the override the other way and
+    /// the pulse card stays a pulse card.
+    ///
+    /// This does not break the rule in `SimplifiedView`. That rule exists so a
+    /// hidden toggle can never strand the user somewhere with no route to
+    /// species ID; here the route is the panel immediately next to it. Advanced
+    /// view is left alone, because its toggle is visible and overriding it would
+    /// make a shown control inert.
+    private var padLandscapePulseShowsSpeciesID: Bool {
+        simplifiedMode ? false : pulseShowsSpeciesID
+    }
+
     // "-startSection Species" launch argument jumps straight to a section —
     // lets automated runs exercise non-default sections without UI scripting.
     // `AppSection` itself now lives in AppTabBar.swift, with the bar that
@@ -237,7 +252,8 @@ struct ContentView: View {
                     DiagnosticsView(audio: audio, recorder: recorder, classStore: classStore,
                                     onStartDemo: startDemo, onEndDemo: endDemo,
                                     onOpenTuning: { showTuningOverlay = true },
-                                    onDumpSettings: dumpSettings)
+                                    onDumpSettings: dumpSettings,
+                                    sessionButtonLocator: sessionButtonLocator)
                 }
                 .sheet(isPresented: $showHelp) {
                     SafariView(url: PrivacyLinks.helpURL)
@@ -357,6 +373,12 @@ struct ContentView: View {
             // resolved in the safe-area-inset space — the cutout drew a full
             // status-bar-plus-nav-bar height above the ring.
             .ignoresSafeArea()
+            // Diagnostics only. The tab-bar targets are rebased from window
+            // coordinates through this frame, so when a spotlight lands in the
+            // wrong place this is half of the arithmetic to check.
+            .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: {
+                sessionButtonLocator.recordTourHostFrame($0)
+            }
         }
         // Loads the bundled/cached guide off the main thread (see
         // `SpeciesGuideStore.init()`'s doc comment for why this can't just
@@ -788,8 +810,14 @@ struct ContentView: View {
 
     /// iPad-landscape default: same stacked structure as `portraitLayout` (full-width
     /// stats bar on top, spectrogram on bottom) — the only change is the middle row,
-    /// where the pulse-view card is split 50/50 with a permanently-visible Species ID
-    /// list alongside it, instead of the pulse card's own species-ID toggle.
+    /// where a permanently-visible Species ID list is split 50/50 with the pulse-view
+    /// card, instead of the pulse card's own species-ID toggle.
+    ///
+    /// Species ID sits on the left and the pulse close-up on the right, fixed
+    /// (Niall's call, 2026-08-17). The pair used to be the other way round, and
+    /// in simplified view the pulse card was additionally forced to species ID —
+    /// so the row was the same list twice. `padLandscapePulseShowsSpeciesID` is
+    /// what stops that.
     private var ipadLandscapeLayout: some View {
         VStack(spacing: 10) {
             // Same arrangement as portrait — see its comment for why the
@@ -800,8 +828,8 @@ struct ContentView: View {
                 let flex = max(120, geo.size.height - spacing)
                 VStack(spacing: spacing) {
                     HStack(spacing: spacing) {
-                        pulseBlock
                         speciesListBlock
+                        pulseCard(showsSpeciesID: padLandscapePulseShowsSpeciesID)
                     }
                     .frame(height: flex * 0.42)
                     spectrogramBlock.frame(height: flex * 0.58)
@@ -813,9 +841,11 @@ struct ContentView: View {
         .padding(.top, 6)
     }
 
-    /// Permanently-visible Species ID panel, used alongside `pulseBlock` in
+    /// Permanently-visible Species ID panel, the left half of the middle row in
     /// `ipadLandscapeLayout` — not toggled like the pulse/spectrogram cards'
-    /// own species-ID views.
+    /// own species-ID views. No thumbnails here: the pulse close-up is the panel
+    /// right next to it, which is the condition the thumbnails in
+    /// `pulsePanelContent` exist to substitute for.
     private var speciesListBlock: some View {
         VStack(spacing: 0) {
             panelHeader("Species ID") { EmptyView() }
@@ -1306,13 +1336,29 @@ struct ContentView: View {
     /// An invisible disc sitting exactly over the system's session button,
     /// taking the tap before the bar ever sees it.
     ///
-    /// **This is what stops the Detector indicator blinking.** The button is a
-    /// `Tab`, and the only hook a `TabView` gives us is its selection binding —
-    /// so the bar would move its own indicator onto the tapped tab, we would
-    /// refuse to store that selection, and it would animate back. Off and on,
-    /// every time you opened the transport menu. Refusing the selection was
-    /// always going to be too late; the fix is for the touch never to reach the
-    /// bar.
+    /// **This was meant to stop the Detector indicator blinking, and it does
+    /// not. Don't spend an afternoon tuning it — it cannot work.** The button is
+    /// a `Tab`, and the only hook a `TabView` gives us is its selection binding,
+    /// so the bar moves its own indicator onto the tapped tab, we refuse to
+    /// store that selection, and it animates back. Off and on, every time you
+    /// open the transport menu.
+    ///
+    /// The idea was for the touch never to reach the bar. A SwiftUI overlay
+    /// cannot do that. A hierarchy dump from an iPad (2026-08-17) shows the
+    /// hosting view has three subviews — the locator's probe, the TabView's
+    /// host, and a dimming view — and nothing for this catcher, because SwiftUI
+    /// draws it into the hosting view's own layer rather than as a `UIView`.
+    /// UIKit hit-tests through real subviews, reaches the bar's item cell inside
+    /// the TabView's host, and gives it the touch. There is no view here to
+    /// block with, so position is beside the point.
+    ///
+    /// Left in place on Niall's call (2026-08-17): the blink is cosmetic, the
+    /// menu opens and the tab never changes. What would actually fix it is not
+    /// making the button a `Tab` at all — see `Context.md` §16. **If the
+    /// transport menu ever starts flicking open and shut on one tap, suspect
+    /// this**: the tap gesture here still fires alongside the bar's own
+    /// handling, which toggles the menu twice. Deleting this whole view is then
+    /// the fix.
     ///
     /// Sized to the button, and positioned from the button's *measured* frame
     /// rather than from our metrics — see `SessionButtonLocator`. Until that
@@ -1655,10 +1701,16 @@ struct ContentView: View {
     }
 
     private var pulseBlock: some View {
-        panel(effectivePulseShowsSpeciesID ? "Species ID" : "Pulse View", tour: .pulseView) {
+        pulseCard(showsSpeciesID: effectivePulseShowsSpeciesID)
+    }
+
+    /// Parameterised so the iPad-landscape layout can hand it a different answer
+    /// from `effectivePulseShowsSpeciesID` — see `padLandscapePulseShowsSpeciesID`.
+    private func pulseCard(showsSpeciesID: Bool) -> some View {
+        panel(showsSpeciesID ? "Species ID" : "Pulse View", tour: .pulseView) {
             pulseHeaderTrailing
         } content: {
-            pulsePanelContent
+            pulsePanelContent(showsSpeciesID: showsSpeciesID)
         }
     }
 
@@ -1716,13 +1768,13 @@ struct ContentView: View {
 
     /// Pulse-zoom panel body — same always-mounted-plus-overlay pattern as
     /// `spectrogramPanelContent`, for the pulse-view popover (pulseViewButton).
-    private var pulsePanelContent: some View {
+    private func pulsePanelContent(showsSpeciesID: Bool) -> some View {
         ZStack {
             PulseZoomView(pulseDetector: pulseDetector)
-                .opacity(effectivePulseShowsSpeciesID ? 0 : 1)
-                .allowsHitTesting(!effectivePulseShowsSpeciesID)
+                .opacity(showsSpeciesID ? 0 : 1)
+                .allowsHitTesting(!showsSpeciesID)
 
-            if effectivePulseShowsSpeciesID {
+            if showsSpeciesID {
                 // Thumbnails only in simplified view. In advanced view the pulse
                 // close-up is one tap away and shows the same image larger, so
                 // repeating it in the list is clutter — but simplified view has

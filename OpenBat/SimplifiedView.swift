@@ -34,6 +34,16 @@
 //  override on the band makes the visible slider inert, and a write-once on the
 //  species toggles strands the user in a view with no exit.
 //
+//  ## The one exception
+//
+//  iPad landscape shows the species list in a panel of its own, permanently.
+//  Forcing the pulse card to species ID there gave the user the same list twice,
+//  side by side — so in that layout the override runs the other way and the
+//  pulse card shows the pulse. The rule still holds: the reason for the override
+//  is that a hidden toggle must never leave the user with no route to species
+//  ID, and there the route is the panel next door. See
+//  `padLandscapePulseShowsSpeciesID` in `ContentView.swift`.
+//
 
 import SwiftUI
 

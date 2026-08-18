@@ -1049,12 +1049,51 @@ able to clip it.
      needs to appear behind system chrome, put it under the chrome rather than
      drawing a picture of being under it.**
   4. **Where the system puts that button is asked at runtime, never assumed —
-     `SessionButtonLocator`.** It finds the button in the view hierarchy by the
-     accessibility identifier the Tab's label sets, falling back to that label's
-     text, and publishes its frame in window coordinates; the glow and the tap
-     catcher position themselves on it, and draw *nothing* until it is found. No
-     private view classes are involved, so the next OS release can rearrange the
-     bar's internals without breaking this.
+     `SessionButtonLocator`.** It finds the button in the view hierarchy and
+     publishes its frame in window coordinates; the glow, the transport menu and
+     the tap catcher position themselves on it, and draw *nothing* until it is
+     found.
+
+     **How it identifies the button was wrong for a day, and the way it was
+     wrong is the lesson (2026-08-17).** It matched on the accessibility
+     identifier the Tab's label sets, falling back to that label's text —
+     public API, ours, no private class names, and it worked in every
+     simulator. It has never worked on a physical device. A hierarchy dump from
+     an iPad on 26.6 holds 465 views and **not one accessibility identifier or
+     label on any view**, including the ones the app sets them on: UIKit does
+     not materialise accessibility attributes until an assistive technology asks
+     for them, and a simulator has accessibility switched on for UI automation.
+     So the glow, the transport menu, the tap catcher *and* the guided tour's
+     tab spotlights were all correct in the simulator and all missing on
+     hardware, with no error anywhere.
+
+     Two things follow, and the second is the general one:
+     - **The bar is not a `UITabBar`.** On iOS 26 it is a `_UIFloatingTabBar`,
+       and `Tab(role: .search)` is not among the ordinary item cells — the bar
+       puts it in a pinned-items view of its own beside the collection holding
+       the rest. That is what now identifies it, by class *name*: introspection
+       only, nothing private is called, and it can stop matching on any OS
+       release. The accessibility match is kept ahead of it, for VoiceOver and
+       UI tests. The cost of this backstop is accepted knowingly; the failure
+       mode is the documented one, nothing found so nothing drawn.
+     - **A frame found once is not a frame that stays true.** The probe that
+       does the searching was a zero-sized background view, so its bounds never
+       changed and UIKit never called `layoutSubviews` on it — meaning rotating
+       an iPad never triggered a fresh look. The bar is centred, so a rotation
+       moves the button by half the change in screen width: 180 points on an
+       11-inch iPad, which is where the glow, the transport menu and the tour's
+       spotlight all drew. Diagnostics caught the locator holding 535 while the
+       live hierarchy said 715. The probe now fills its parent (a background
+       affects no layout at any size) and re-checks in a short burst after every
+       layout pass, because being told our own geometry changed does not mean the
+       bar has moved to its new place yet.
+     - **A simulator is not a device for anything that reads the view
+       hierarchy.** Accessibility is one difference; layout timing is another
+       (the search originally gave up after four tries in the first second,
+       which a Mac always wins and an iPad launching Metal and the audio engine
+       need not). Debug carries a **Session Button** card reporting the located
+       frame — or "Not found" — and sharing the whole tree, because on a device
+       there is no console to read.
 
      **This replaced three hand-measured constants, and the constants were not
      merely imprecise — they were unfixable.** What they cost, recorded so
@@ -1165,6 +1204,17 @@ able to clip it.
   the honest version is a rail along the device's bottom edge (so the bar keeps
   its position under the user's hands through a rotation), which means
   hand-building the bar on iOS 26 too and giving up the system one.
+- **iPad landscape's middle row is fixed: species list left, pulse close-up
+  right** (Niall's call, 2026-08-17). It used to be the other way round, and
+  simplified view's override — which forces the pulse card to show species ID,
+  because in the stacked layouts the toggle that would bring it back is hidden —
+  then applied there too, so the row was the same species list twice. iPad
+  landscape is the one place that override runs backwards: the pulse card shows
+  the pulse, because the list already has a panel of its own beside it. That
+  does not weaken the rule in `SimplifiedView`, whose whole point is that a
+  hidden toggle must never leave the user with no route to species ID — here the
+  route is the adjacent panel. Advanced view is untouched, since its toggle is
+  visible and overriding a visible control makes it inert.
 
 ### The sun clock in the nav bar (2026-08-16)
 
@@ -1672,6 +1722,12 @@ never arrives and the step silently degrades to a centred card. The tab and
 session-button steps take their rects from `SessionButtonLocator` instead —
 the same UIKit search that already places the recording glow — and ContentView
 merges them over the anchor-derived ones in `tabBarTargets(in:)`.
+
+On a physical device none of the accessibility matching below ever runs — there
+is no accessibility text on any view to match (see §7's `SessionButtonLocator`
+entry), so the tabs are found by their position among the bar's item cells
+instead. The rules below still govern the accessibility path, which is what runs
+under VoiceOver and in UI tests.
 
 - **Exclude `UILabel` and `UIImageView` when matching by accessibility label.**
   A `UILabel` derives its accessibility label from its own text, so the title
@@ -2374,6 +2430,33 @@ leads to check, not as confirmed regressions.
 
 ## 16. Open questions
 
+- **The tab bar's indicator blinks when you tap the session button, and the
+  fix for it does not work — left alone on Niall's call, 2026-08-17.** The
+  button is a `Tab`, so the bar moves its indicator there, the selection is
+  refused, and it animates back. The invisible tap catcher written to stop the
+  touch reaching the bar **cannot** do so: SwiftUI draws that overlay into the
+  hosting view's layer rather than as a `UIView`, and a device hierarchy dump
+  shows the hosting view's only subviews are the locator's probe, the TabView's
+  host and a dimming view — so UIKit hit-tests past it to the bar's item cell
+  every time. Nothing about the catcher's position or size changes that. It went
+  unnoticed for a day because it could not be tested: taps prove nothing in a
+  simulator, and on hardware the catcher was not being drawn at all (see §7).
+
+  Left as-is because the blink is cosmetic — the menu opens, the tab never
+  changes. The real fix is to stop the session button being a `Tab` and draw it
+  ourselves, as the pre-26 bar already does: no selection to refuse, no
+  indicator to move, no catcher. That trades away the system's glass rendering
+  and morph on that circle, and the button being a real tab for VoiceOver and
+  keyboard focus, which is why it wasn't taken. Note it would **not** remove the
+  view-hierarchy search entirely: on iPad our own button would still need the
+  bar's frame to sit beside that centred pill. It would make the failure mode
+  benign, though — a visible button parked slightly wrong, rather than an
+  invisible disc over a control.
+
+  One symptom to watch: the catcher's tap gesture still fires alongside the
+  bar's own handling, so if the transport menu ever starts flicking open and
+  shut on a single tap, that is two toggles racing and deleting the catcher is
+  the fix.
 - **IUCN Red List range polygons — ruled out on licensing, 2026-08-16.** Worth
   recording so nobody researches it twice. Their expert-drawn mammal maps carry
   exactly the attributes this app wants — `presence`, `origin` (including
