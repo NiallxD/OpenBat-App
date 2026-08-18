@@ -152,9 +152,18 @@ struct ContentView: View {
     /// to that button reads it — see `SessionButtonLocator` for why none of
     /// this can be a constant.
     @State private var sessionButtonLocator = SessionButtonLocator()
-    @State private var timeWindowSeconds: Double = 0.5
-    @AppStorage("display.bandLow") private var bandLow = 0.0
-    @AppStorage("display.bandHigh") private var bandHigh = 1.0
+    // The three display defaults below come from a field tuning session
+    // (2026-08-17 dump), rounded off the slider positions they were dragged to.
+    // The band is a fraction of Nyquist, so 0.02–0.45 is roughly 3.8–86 kHz at
+    // 384 kHz: it drops the phone's own low-frequency noise off the bottom and
+    // the empty top half off the top, which is most of what made a fresh
+    // install's spectrogram look like static. Note simplified view — the
+    // default mode — applies its own 15–90 kHz band once on entry
+    // (`SimplifiedView.bandLowHz`), so these two are what ADVANCED view starts
+    // at, not what most users see first.
+    @State private var timeWindowSeconds: Double = 0.75
+    @AppStorage("display.bandLow") private var bandLow = 0.02
+    @AppStorage("display.bandHigh") private var bandHigh = 0.45
     /// Pulse-view pinch-to-zoom + pan (both axes), reset on each new capture —
     /// see the "Pulse zoom/pan" section further down for the geometry.
     /// Peak-hold state for the amplitude meters. Owned by a separate @Observable object

@@ -185,7 +185,7 @@ nonisolated enum RecordingSpectrogramRenderer {
         } else {
             let hasStoredFloor = UserDefaults.standard.object(forKey: "display.playbackThumbnailNoiseFloor") != nil
             let storedFloor = UserDefaults.standard.double(forKey: "display.playbackThumbnailNoiseFloor")
-            floor = Float(min(max(hasStoredFloor ? storedFloor : 0.25, 0), 0.99))
+            floor = Float(min(max(hasStoredFloor ? storedFloor : 0.40, 0), 0.99))
         }
         let invSpan = 1 / max(0.01, 1 - floor)
         func gate(_ t: Float) -> Float { max(0, (t - floor) * invSpan) }

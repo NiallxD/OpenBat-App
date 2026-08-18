@@ -90,6 +90,11 @@ enum SettingsDump {
 
         // MARK: Persisted preferences outside the overlay
 
+        // ⚠️ The fallbacks below must match each key's real default at its
+        // declaration site — they stand in for a key that has never been
+        // written, so a stale one makes the dump report a value the app has
+        // never used, which is worse than reporting nothing.
+        //
         // Three concrete readers rather than one generic one. A generic
         // `stored<T>` assigned straight into a `[String: Any]` subscript infers
         // `T == Any?`, so a key that has never been written reads back as
@@ -120,12 +125,10 @@ enum SettingsDump {
                     "display.wavPlayerShowFileInfo"] {
             appStorage[key] = storedBool(key, false)
         }
-        appStorage["display.bandLow"] = storedDouble("display.bandLow", 0.0)
-        appStorage["display.bandHigh"] = storedDouble("display.bandHigh", 1.0)
+        appStorage["display.bandLow"] = storedDouble("display.bandLow", 0.02)
+        appStorage["display.bandHigh"] = storedDouble("display.bandHigh", 0.45)
         appStorage["display.playbackThumbnailNoiseFloor"] =
-            storedDouble("display.playbackThumbnailNoiseFloor", 0.25)
-        appStorage["display.cfTailFraction"] =
-            storedDouble("display.cfTailFraction", 0.25)
+            storedDouble("display.playbackThumbnailNoiseFloor", 0.40)
         appStorage["display.wavPlayerSilenceSensitivity"] =
             storedDouble("display.wavPlayerSilenceSensitivity", 0.5)
         appStorage["display.wavPlayerSilencePadding"] =

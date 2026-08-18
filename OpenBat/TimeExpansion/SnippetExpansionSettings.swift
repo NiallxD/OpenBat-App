@@ -69,11 +69,16 @@ final class SnippetExpansionSettings {
         didSet { UserDefaults.standard.set(fadeMS, forKey: Self.keyFade) }
     }
 
-    static let defaultExpansion: Double = 8
-    static let defaultMemorySeconds: Double = 1.5
+    // Field tuning session, 2026-08-17: 16x over a 0.5 s buffer. Deliberately
+    // NOT the 8x that costs no filtering — the pair is chosen for the product
+    // this type's own doc calls the number that matters. 16 x 0.5 s = 8 s of
+    // replay per trigger, where the old 8 x 1.5 s was 12 s, so the mode is deaf
+    // for a third less of the night while each call is slowed twice as far.
+    static let defaultExpansion: Double = 16
+    static let defaultMemorySeconds: Double = 0.5
     static let defaultGain: Float = 4
     static let defaultRouting: SnippetOutputRouting = .both
-    static let defaultHissReductionDB: Double = 18
+    static let defaultHissReductionDB: Double = 10
     static let defaultFadeMS: Double = 30
 
     /// How long a replay lasts at the current settings — shown next to the

@@ -232,7 +232,7 @@ struct HapticsTuningTab: View {
 
     private var inactive: String? {
         if !haptics.isSupported { return "This device has no Taptic Engine" }
-        if !haptics.isEnabled { return "Pulse haptics are switched off in Settings › Audio" }
+        if !haptics.isEnabled { return "Vibration is switched off in Settings › Detecting" }
         return haptics.unavailableReason
     }
 

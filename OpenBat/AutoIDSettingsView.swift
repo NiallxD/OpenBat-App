@@ -24,11 +24,36 @@ struct AutoIDSettingsView: View {
                     modelRow(model)
                 }
             } header: {
-                Text("Models")
+                CardHeader("Models", "Which set of species OpenBat tries to recognise.")
             } footer: {
-                Text("One model classifies at a time. Tap the circle to make a model active "
-                   + "(turning off any other); tap the row to configure its species, priors, "
-                   + "and detection thresholds.")
+                Text("One model identifies at a time. Tap the circle to switch to a model; "
+                   + "tap its name to see the species it knows and how sure it has to be.")
+            }
+
+            // Moved here from General (2026-08-18). It lived under a "Location"
+            // header there, which described where the setting came from rather
+            // than what it decides — these two numbers gate which identifications
+            // are good enough to become a pin, so they belong beside the thing
+            // making the identifications.
+            Section {
+                VStack(alignment: .leading) {
+                    HStack {
+                        Text("Minimum confidence")
+                        Spacer()
+                        Text("\(Int(settings.mapPinMinConfidence * 100))%").monospacedDigit()
+                            .foregroundStyle(.secondary)
+                    }
+                    Slider(value: Binding(get: { Double(settings.mapPinMinConfidence) },
+                                          set: { settings.mapPinMinConfidence = Float($0) }),
+                           in: 0.3...0.95, step: 0.05)
+                }
+                ControlNote("How certain the identification has to be.")
+                Stepper("Minimum calls: \(settings.mapPinMinPulseCount)",
+                        value: $settings.mapPinMinPulseCount, in: 1...20)
+                ControlNote("How many calls it has to be based on, so a single "
+                          + "chance detection doesn't become a pin.")
+            } header: {
+                CardHeader("Map pins", "Which of your identifications end up on the map.")
             }
         }
         .onAppear { location.requestRegionFix() }

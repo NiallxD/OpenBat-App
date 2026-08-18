@@ -92,7 +92,7 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
     /// it off — i.e. the silence gap that ends one activity "bout". Reset on every
     /// new pulse while the segment is open, so a bat giving several passes with
     /// gaps shorter than this all land in ONE file instead of fragmenting into many.
-    /// User-configurable in Settings (the Audio tab's recording section).
+    /// User-configurable in Settings (the Detecting tab, "Length of a recording").
     var postRollSeconds = 3.0
     var maxSegmentSeconds = 600.0   // safety cap so a very long continuous bout can't make one unbounded file
 

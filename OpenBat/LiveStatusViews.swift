@@ -297,10 +297,15 @@ private struct MicStatusPillContent: View {
         // `value:` of its own scoped `.animation` below — see the onAppear comment.
         let iconFaded = !demo && connected && slowPulse
         let rateFaded = rateBad && fastFlash
+        // What the icon is SAYING, as one value: demo / connected / no mic. Only
+        // here so the inner `.animation(nil, value:)` below has something to key
+        // on — see the comment under the HStack.
+        let iconState = demo ? 2 : (connected ? 1 : 0)
         HStack(spacing: 4) {
             Image(systemName: demo ? "waveform" : (connected ? "cable.connector" : "cable.connector.slash"))
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(demo ? Color.orange : (connected ? .green : .red))
+                .animation(nil, value: iconState)
                 .opacity(iconFaded ? 0.35 : 1)
                 .animation(.easeInOut(duration: 1.4).repeatForever(autoreverses: true), value: iconFaded)
                 .geometryGroup()
@@ -308,11 +313,27 @@ private struct MicStatusPillContent: View {
                 Text("\(Int((d.actualSampleRate / 1000).rounded())) kHz")
                     .font(.system(size: 9, weight: .semibold).monospacedDigit())
                     .foregroundStyle(rateBad ? Color.red : .secondary)
+                    .animation(nil, value: rateBad)
                     .opacity(rateFaded ? 0.25 : 1)
                     .animation(.easeInOut(duration: 0.4).repeatForever(autoreverses: true), value: rateFaded)
                     .geometryGroup()
             }
         }
+        // The two inner `.animation(nil, value:)`s above are the COLOUR half of
+        // the same containment, and the fix for the mic icon cycling red↔green
+        // for the rest of the run after the Griff was plugged in (2026-08-17).
+        // Cause is identical to the geometry bug below: the breathe animation is
+        // installed at `onAppear` and stays live on that view forever, so when
+        // `connected` later flips and the icon's foreground goes red→green, that
+        // colour change is picked up by the still-running autoreversing repeat
+        // and interpolates back and forth without end. `.geometryGroup()` doesn't
+        // help — it contains position, not colour. An innermost `.animation(nil,
+        // value:)` does: it wins over the outer repeat for changes driven by that
+        // value, so the state change lands instantly while the repeat keeps
+        // reaching `opacity`, which is all it was ever for. Same for the rate
+        // label's secondary→red on `rateBad`. Keep the nil animations BELOW the
+        // `.opacity` — above it they'd cancel the pulse itself.
+        //
         // The two `.geometryGroup()`s above are the fix for the rate label flying
         // left and right across the status row while flashing red. A scoped
         // `.animation(_:value:)` carrying `repeatForever(autoreverses:)` stays

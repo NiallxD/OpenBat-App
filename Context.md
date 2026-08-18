@@ -1714,6 +1714,107 @@ the string before markdown is applied. Anything else that wants a link with a
 non-literal destination needs the same treatment — a hardcoded destination in
 the literal works, an interpolated one silently does not.
 
+### Settings became cards, with a fixed shape (2026-08-18)
+
+The three tabs had grown by absorption — five tabs folded into three over two
+days — and every fold kept its sections' original headers and footers. The
+result read as a heap: headers naming the subsystem a setting came from
+("Playback thumbnails", "Activity bout", "Frequency gate"), and footers
+explaining the implementation rather than the effect. "Normalised peak magnitude
+(0–1)" and "above-threshold columns required before a pulse is accepted" are
+accurate and useless to the person holding the phone.
+
+Every card now follows one shape, enforced by two small views in `SettingsView`
+(`CardHeader`, `ControlNote`) so a card added later can't quietly reintroduce the
+old one: a short name in ordinary words, one line under it saying what the card
+is for, then each control as label-and-value, its one-sentence note, and the
+control itself. The note sits **above** the slider on purpose — read downwards you
+get the name, what it does, then the thing you drag, so the explanation arrives
+before you touch anything rather than after.
+
+The register is **plain, not simple**, a distinction worth holding because the
+first pass overshot into explaining-to-a-child and had to be pulled back. The
+reader is an adult using an ultrasonic bat detector, so ordinary technical words
+are fine: frequency, kHz, calibration, confidence. What is not fine is our own
+vocabulary leaking out — no unit the reader hasn't met (columns, magnitude,
+normalised), no internal noun (threshold, gate, floor, roll) unless the control
+genuinely is that idea, and describe what changes on screen or in the recording
+rather than in the maths. "Min duration: 3 columns" became "Shortest call: 2.0
+ms", computed from the live sample rate — same control, a unit a person can
+picture. Trigger modes are "Loudness" and "Loudness + pitch", not the "Loud" and
+"Loud and high" the first pass tried.
+
+Cards are still `Form`/`Section`. The native grouped inset styling already draws
+a card, and hand-rolling one would trade Dynamic Type, keyboard avoidance and the
+system's Liquid Glass for a rounded rectangle we would then own forever.
+
+Three structural changes came with it. The Audio tab is **Detecting** — it holds
+the mic, the taps, what counts as a call and what gets recorded, and only one of
+those is about sound; it is ordered as the signal travels. **Map pins moved to
+AutoID**, from a "Location" header that named where the setting came from rather
+than what it decides. And two knobs were **removed rather than reworded**: the
+playback-thumbnail noise floor (the WAV player has had its own live slider for it
+for a while, so Settings was the second and worse copy) and the CF tail fraction,
+a research parameter with no lay meaning and no calibration to tune it against.
+Neither had a sentence that could be written honestly for a general user. The CF
+tail is now a constant read rather than an `@AppStorage` — with no control left,
+a value some earlier build stored would otherwise go on shifting every Fc
+measurement with nothing on screen to reveal or reset it.
+
+**What simplified view hides here, and why only one card.** The first instinct
+was to gate every trigger card, which is wrong by `SimplifiedView`'s own
+precedent: the band button stays visible in simplified view because it genuinely
+needs tweaking in the field. Loudness and lowest pitch are the first things to
+reach for when nothing is triggering, and recording length is plain English, so
+all three stay. Only "Telling calls apart" (minimum duration, gap bridging,
+hold-off) is advanced-only — those need a spectrogram in front of you to set.
+Note this is a *third* mechanism alongside that file's override/apply-once pair,
+and it is the one the iPad exception already implies: hide the control, and let
+another route reach the state. The route is the Advanced switch at the top of the
+same sheet. Overriding would be actively wrong here, because these values decide
+what gets detected at all — substituting different ones in simplified mode would
+change what the app hears without saying so.
+
+`TriggerMode` gained a `label` separate from its `rawValue` ("Loud" / "Loud and
+high" against "Amplitude only" / "Frequency + Amplitude"). The raw value is the
+persisted key and appears in settings dumps; renaming it would silently reset
+every existing install to the default. The live tuning overlay keeps the jargon
+deliberately — different audience, and it is a developer tool.
+
+---
+
+### Mic calibration follows the recording, not the route (2026-08-18)
+
+The per-bin microphone correction (`MicCalibrationCurve`) is display-and-analysis
+only, and deliberately so: recorded PCM, classifier input and uploads all read
+raw samples and never see it, so it cannot change what is saved, identified or
+contributed. That part was right. How playback *found* a curve was not.
+
+`MicCalibrationSettings.activeCurve` returned the curve for whatever mic was
+plugged in at the moment you looked. Reviewing a recording is something you do
+indoors with nothing attached, so the current input was the built-in mic, no
+curve was stored for it, and the whole playback path — overview, detail tiles,
+and the FmaxE that `CallAnalysis` measures — silently corrected nothing. The
+same lookup would have applied a second mic's curve to the first mic's
+recordings had anyone owned two.
+
+The fix needed no new metadata, because the recorder already writes the
+capturing mic's name into GUANO `Make` (`AudioRecorder.makeGuanoChunk`), and
+curves are already stored per mic name. `WavPlayerView.load()` now reads that
+one field off the file and resolves the curve from it once per recording, before
+the overview render that bakes it into the grid. Consequences worth stating:
+calibrating a mic later applies retroactively to everything it ever recorded;
+a WAV imported from someone else's detector gets no correction at all, which is
+correct, since a curve measured on the Griff describes the Griff.
+
+Still uncorrected on purpose: the whole-file JPEG behind Sessions row thumbnails
+(`RecordingSpectrogramRenderer`). It is rendered once at save time and cached, so
+a correction baked into it could never be revised when the curve changed — the
+same "don't bake calibration into a stored artifact" rule the WAV itself follows.
+At 56 × 40 there is nothing in it a resonance band would misrepresent.
+
+---
+
 ### Spotlighting anything the tab bar draws
 
 `.tourTarget` does not work inside a `Tab` label: on iOS 26 the bar renders the
@@ -1750,6 +1851,29 @@ under VoiceOver and in UI tests.
   than half of a normal pass's calls, starving both the pulse-rate readout and
   the classifier. 50 ms passes typical spacing while still rejecting the closest
   echoes; amplitude does the rest, since echoes return much quieter.
+  Field tuning on 2026-08-17 took it further still, to **30 ms**.
+- **The shipped defaults were re-based on a field tuning session (2026-08-17).**
+  A night's tuning was dumped with the Debug sheet's "Dump Settings to File" and
+  the deltas folded into the code defaults, so a fresh install now starts where
+  that session finished rather than at the original engineering estimates. What
+  moved: the detector's amplitude threshold 0.5 → 0.3 and hold-off 50 → 30 ms;
+  the live spectrogram's noise floor 0.35 → 0.40 (the pulse crop stayed at 0.35
+  — the reverse of what that setting's own comment predicted); the display band
+  0–192 kHz → roughly 3.8–86 kHz and the time window 0.5 → 0.75 s; the playback
+  noise floor 0.25 → 0.30, and again to 0.40 on 2026-08-18 once the Settings
+  duplicate was gone and the player's own live slider was the only one; and
+  slow replay from 8× over a 1.5 s buffer to
+  **16× over 0.5 s**, which slows each call twice as far while cutting the deaf
+  window after a trigger from 12 s to 8 s, with hiss reduction 18 → 10 dB.
+  Everything else in the dump was already at its default: all eleven haptics
+  tunables, both heterodyne settings, and every AutoID pass/quality-gate
+  threshold. The per-species enable flags and priors were deliberately NOT
+  adopted — those are a function of where the phone is, and the app derives them
+  from location.
+  Two things to keep in mind when reading this list: a default only reaches an
+  install that has never written the key, so none of it changes an existing
+  device; and simplified view — the default mode — applies its own 15–90 kHz
+  band once on entry, so the new band defaults are what ADVANCED view starts at.
 - **`maxGapMs` (6 ms) bridges nulls inside one call.** FM sweeps have amplitude
   nulls; without bridging, one call yielded three fragmented captures.
 - **`minFrequencyHz` 15 kHz** rejects wind and handling noise without cutting off
@@ -2304,12 +2428,32 @@ fixing one leaves the other:
    relaying out (a timer label changing width once a second is enough) makes the
    new position one end of a never-ending interpolation. *Fix:* `.geometryGroup()`
    on the same leaf, so it takes its position from the parent's unanimated
-   transaction as a rigid unit and the repeat can only reach color/opacity.
+   transaction as a rigid unit.
+3. **Through colour, by the same mechanism.** `.geometryGroup()` contains
+   position and nothing else, so a still-live repeat goes on to capture the next
+   `foregroundStyle` change on that leaf. This is what made the mic pill's
+   connector icon cycle red↔green forever once the Griff was plugged in
+   (2026-08-17): the breathe starts at `onAppear` with no mic attached, and the
+   later red→green flip became one end of an autoreversing interpolation. It
+   only reproduces if the state changes *after* the view appears — connect the
+   mic before launch and the colour never changes, so nothing leaks, which is
+   most of why it survived several passes over this file. *Fix:* an innermost
+   `.animation(nil, value:)` keyed on the state that drives the colour, placed
+   BELOW the `.opacity` (above it, it cancels the pulse itself). It wins over
+   the outer repeat for changes driven by that value, so the state change lands
+   instantly and the repeat is left with opacity, which is all it was ever for.
 
-Both are needed. Fixing only (1) produced the mic pill's rate label sliding out
-of its capsule, and later the record button zipping diagonally out of the
+All three are needed. Fixing only (1) produced the mic pill's rate label sliding
+out of its capsule, and later the record button zipping diagonally out of the
 transport row and back — same bug, found six days apart, because the record
-button had been given the transaction fix alone.
+button had been given the transaction fix alone. Fixing (1) and (2) left the
+colour leak above.
+
+The general shape: a live `repeatForever` claims **every** animatable property
+of its leaf, not the one it was keyed to. Containing them one property at a time
+as each symptom shows up is why this has been diagnosed three times. When adding
+a repeat, ask what else on that leaf can change — position, colour, scale, blur
+— and contain all of it up front.
 
 The app has exactly two `repeatForever` animations (`MicStatusPillContent`'s two
 pill elements, and the record glyph's breathe). A third was tried on

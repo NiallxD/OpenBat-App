@@ -26,12 +26,23 @@ final class PulseDetector {
         case amplitude   = "Amplitude only"
         case ultrasonic  = "Frequency + Amplitude"
         var id: String { rawValue }
+
+        /// What the user sees. Separate from `rawValue`, which is the persisted
+        /// key (`pulse.triggerMode`) and appears in settings dumps — renaming
+        /// that would silently reset every existing install to the default.
+        var label: String {
+            switch self {
+            case .amplitude:  "Loudness"
+            case .ultrasonic: "Loudness + pitch"
+            }
+        }
+
         var description: String {
             switch self {
             case .amplitude:
-                "Fires on any loud sound in the analysis band — useful for testing but susceptible to wind and handling noise."
+                "Anything loud enough counts, whatever its pitch. Useful for testing, but wind and handling noise will set it off."
             case .ultrasonic:
-                "Requires both high amplitude AND a peak frequency above the minimum. Rejects low-frequency noise."
+                "A sound must be both loud enough and high-pitched enough. Normally the one to use — it ignores most everyday noise."
             }
         }
     }
@@ -42,8 +53,12 @@ final class PulseDetector {
     var triggerMode: TriggerMode = .ultrasonic {
         didSet { defaults.set(triggerMode.rawValue, forKey: Key.triggerMode) }
     }
-    /// Normalised peak magnitude (0–1). Matches spectrogram brightness — 0.5 = medium-bright.
-    var amplitudeThreshold: Float = 0.5 {
+    /// Normalised peak magnitude (0–1). Matches spectrogram brightness — 0.5 =
+    /// medium-bright. Lowered from 0.5 to 0.3 after a field tuning session
+    /// (2026-08-17 dump): 0.5 only triggered on close, loud passes, and the
+    /// frequency half of the default `.ultrasonic` trigger is what keeps the
+    /// lower threshold from firing on wind and handling noise.
+    var amplitudeThreshold: Float = 0.3 {
         didSet { defaults.set(amplitudeThreshold, forKey: Key.amplitudeThreshold) }
     }
     /// Minimum peak frequency (Hz) required in .ultrasonic mode. Default 15 kHz
@@ -59,7 +74,8 @@ final class PulseDetector {
     /// more than half of a normal pass's calls — starving both the pulse-rate readout
     /// and the classifier. 50 ms passes typical call spacing while still rejecting the
     /// closest echoes; amplitude does the rest (echoes return much quieter).
-    var holdOffSeconds: Double = 0.05 {
+    /// Field tuning took it further, to 30 ms (2026-08-17 dump).
+    var holdOffSeconds: Double = 0.03 {
         didSet { defaults.set(holdOffSeconds, forKey: Key.holdOffSeconds) }
     }
     /// Bridges brief amplitude dips *within* a single call (FM sweeps have nulls).
@@ -87,7 +103,12 @@ final class PulseDetector {
     /// sharing one setting across both views — the pulse zoom and the live view
     /// often want different amounts of noise stripped (a tight pulse crop can take
     /// a higher floor than the live view without losing context).
-    var spectrogramNoiseFloor: Float = 0.35 {
+    ///
+    /// Field tuning (2026-08-17 dump) landed the other way round — 0.40 live
+    /// against 0.35 for the crop — which is the reverse of what the sentence
+    /// above predicted. The two being independent is what matters; which one
+    /// ends up higher is a matter of taste and was settled by looking.
+    var spectrogramNoiseFloor: Float = 0.40 {
         didSet { defaults.set(spectrogramNoiseFloor, forKey: Key.spectrogramNoiseFloor) }
     }
     /// Display colormap, shared by the live spectrogram (GPU) and the pulse-view

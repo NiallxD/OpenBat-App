@@ -121,20 +121,39 @@ struct WavPlayerView: View {
     /// don't invalidate this body. See PlaybackFollowState's doc comment.
     @State private var followState = PlaybackFollowState()
 
+    /// Microphone response correction for THIS recording, resolved once in
+    /// `load()` from the mic its own GUANO names (`Make`) — not from whatever
+    /// is plugged in while you're reviewing it, which is usually nothing. Nil
+    /// until resolved, and nil for good on a recording made with a mic this
+    /// device has no curve for; see `MicCalibrationSettings.storedCurve`.
+    @State private var calibrationCurve: MicCalibrationCurve?
+
     /// Shared with every other palette/log-scale control in the app.
     @AppStorage("pulse.displayPalette") private var palette: Palette = .inferno
     /// Same frequency-band crop the live Heterodyne listening uses —
     /// kept in sync with `viewport.minFreqHz/maxFreqHz` (as fractions of
     /// Nyquist) by `scheduleBandSyncDebounced`/`syncBandFromViewport`.
-    @AppStorage("display.bandLow") private var bandLow = 0.0
-    @AppStorage("display.bandHigh") private var bandHigh = 1.0
+    /// Defaults must match `ContentView`'s for the same two keys — they are the
+    /// same stored setting, so a disagreement shows up as the player and the
+    /// detector cropping differently until whichever one is touched first
+    /// writes the key.
+    @AppStorage("display.bandLow") private var bandLow = 0.02
+    @AppStorage("display.bandHigh") private var bandHigh = 0.45
     /// Reused from the Playback/Sessions thumbnail tuning — same "gate faint
     /// background energy" role, just applied to detail tiles here too. Now
     /// also exposed as a live slider directly on this screen (below), not
     /// just buried in Settings, since it's most useful to adjust while
-    /// looking at the actual spectrogram.
-    @AppStorage("display.playbackThumbnailNoiseFloor") private var noiseFloor = 0.25
-    @AppStorage("display.cfTailFraction") private var cfTailFraction = CallAnalysis.defaultCFTailFraction
+    /// looking at the actual spectrogram. That live slider is now the ONLY
+    /// control for it — the duplicate in Settings was removed 2026-08-18.
+    @AppStorage("display.playbackThumbnailNoiseFloor") private var noiseFloor = 0.40
+    /// Fixed, not stored. This was an `@AppStorage` slider in Settings, removed
+    /// 2026-08-18 with the rest of that sheet's research parameters: it has no
+    /// meaning that can be stated plainly to a general user, and no calibration
+    /// exists to tune it against anyway (see `CallAnalysis`'s doc comment). Read
+    /// as a constant rather than left reading `display.cfTailFraction`, so a
+    /// value some earlier build stored can't go on silently shifting every Fc
+    /// measurement with nothing on screen to reveal or reset it.
+    private let cfTailFraction = CallAnalysis.defaultCFTailFraction
     /// Independent of the live Detector/pulse-view log toggles (their own
     /// `display.spectrogramLogFrequency`/`display.pulseLogFrequency`) — same
     /// "each spectrogram view owns its own toggle" pattern those follow.
@@ -520,7 +539,7 @@ struct WavPlayerView: View {
                 ZStack {
                     WavSpectrogramView(wavURL: store.wavURL(for: recording), sampleRate: displayOverview.sampleRate,
                                        overview: displayOverview, silenceMap: silenceMap,
-                                       calibrationCurve: micCalSettings.activeCurve,
+                                       calibrationCurve: calibrationCurve,
                                        viewport: $viewport,
                                        selection: $selection, annotations: annotations, isSelecting: isSelecting,
                                        palette: palette, noiseFloor: effectiveNoiseFloor,
@@ -676,7 +695,7 @@ struct WavPlayerView: View {
         downloadState = nil
 
         let pal = palette, floor = effectiveNoiseFloor
-        let calCurve = micCalSettings.activeCurve
+        calibrationCurve = nil          // belongs to the outgoing recording
         loadTask?.cancel()
         loadTask = Task { @MainActor in
             // Nothing may touch this file until its bytes are actually here.
@@ -714,6 +733,18 @@ struct WavPlayerView: View {
             engine.load(url: url)
             timeExpSettings.apply(to: engine.timeExpansion)
             applyBand()
+
+            // Before the overview render below, which bakes the correction into
+            // the grid it produces. Reading the GUANO chunk is a seek plus a few
+            // hundred bytes, but it is still file IO on a file that may have
+            // just come down from iCloud, so it goes off the main actor.
+            let settings = micCalSettings
+            let calCurve = await Task.detached(priority: .userInitiated) {
+                guard let make = GuanoMetadata.read(from: url)?["Make"] else { return nil as MicCalibrationCurve? }
+                return await settings.storedCurve(forMicName: make)
+            }.value
+            guard !Task.isCancelled else { return }
+            calibrationCurve = calCurve
 
             WavPlayerDebugLog.log("WavPlayer", "load: starting renderOverview for \(url.lastPathComponent)")
             let result = await Task.detached(priority: .userInitiated) {
@@ -901,7 +932,7 @@ struct WavPlayerView: View {
         let realStart = silenceMap?.virtualToReal(startSample) ?? startSample
         let realEnd = max(realStart + 1, silenceMap?.virtualToReal(endSample) ?? endSample)
         let startSample = realStart, endSample = realEnd
-        let calCurve = micCalSettings.activeCurve
+        let calCurve = calibrationCurve
         WavPlayerDebugLog.log("WavPlayer", "requestAnalysis: \(startSample)-\(endSample) (\(String(format: "%.1f", Double(endSample - startSample) / sr * 1000))ms), generation=\(myGeneration)")
         Task.detached(priority: .userInitiated) {
             let result = WavPlayerDebugLog.time("WavPlayer", "CallAnalysis.analyze") {

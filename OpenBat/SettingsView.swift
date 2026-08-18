@@ -2,16 +2,43 @@
 //  SettingsView.swift
 //  OpenBat
 //
-//  The Settings sheet: three tabs (General / AutoID / Audio) picked by a
+//  The Settings sheet: three tabs (General / AutoID / Detecting) picked by a
 //  segmented control rather than a `TabView`, so only the active tab's `Form`
 //  exists at a time.
 //
-//  Both General and Audio are composites, built from `@ViewBuilder` section
-//  groups rather than owning their sections directly — General absorbed the
-//  Location, Storage and Privacy tabs (2026-08-16, alongside the simplified-view
-//  switch it now leads with), and Audio absorbed the old Time Expansion, Pulse
-//  and Recording tabs before that. Section header text is kept from whichever
-//  tab it came from, so the sections still read as their original groups.
+//  **Every card here follows one shape** (2026-08-18, Niall's call — the tabs
+//  had grown into a heap of sections whose footers explained the implementation
+//  rather than the effect):
+//
+//    1. a short NAME, in ordinary words — what a person would call this thing;
+//    2. one line of DESCRIPTION under it saying what the card is for;
+//    3. each control as label-and-value, then its one-sentence note, then the
+//       control itself. The note sits ABOVE the slider deliberately (Niall,
+//       2026-08-18): read top to bottom you get the name, what it does, then the
+//       thing you drag — so the explanation arrives before you touch anything
+//       rather than after.
+//
+//  Use `CardHeader` for 1 and 2 and `ControlNote` for 3, so a card added later
+//  can't quietly reintroduce the old shape.
+//
+//  **Plain, not simple.** The reader is an adult using an ultrasonic bat
+//  detector, so ordinary technical words are fine — frequency, kHz, calibration,
+//  confidence. What is not fine is OUR vocabulary leaking out: no unit a reader
+//  hasn't met (columns, magnitude, normalised), no internal noun (threshold,
+//  gate, floor, roll) unless the control genuinely is that idea, and no
+//  explaining-to-a-child register. Say what changes on screen or in the
+//  recording rather than what changes in the maths.
+//
+//  Sections are `Form`/`Section`, which is what draws the cards — the native
+//  grouped inset styling already is a card, and hand-rolling one would give up
+//  Dynamic Type, the keyboard avoidance and the system's own Liquid Glass for a
+//  rounded rectangle we'd then own forever.
+//
+//  Two knobs were REMOVED here rather than reworded: the playback noise floor
+//  (the WAV player has had its own live slider for it for a while, so Settings
+//  was the second, worse copy — the default lives at that slider now) and the CF tail fraction (a research
+//  parameter with no lay meaning, now fixed at `CallAnalysis.defaultCFTailFraction`).
+//  Neither had a sentence that could be written honestly for a general user.
 //
 
 import SwiftUI
@@ -42,10 +69,14 @@ struct SettingsView: View {
                 // simplified-view switch belongs: it governs the whole app
                 // rather than any one tab, so it goes first, in the tab the
                 // sheet opens on.
+                //
+                // The third tab is "Detecting", not "Audio" — it holds the mic,
+                // the taps, what counts as a call and what gets recorded, and
+                // only one of those is about sound.
                 Picker("Section", selection: $selectedTab) {
                     Text("General").tag("general")
                     Text("AutoID").tag("autoID")
-                    Text("Audio").tag("audio")
+                    Text("Detecting").tag("audio")
                 }
                 .pickerStyle(.segmented)
                 .padding(.horizontal)
@@ -54,7 +85,7 @@ struct SettingsView: View {
 
                 switch selectedTab {
                 case "autoID":  AutoIDSettingsView(settings: settings, location: location)
-                case "audio":   audioTab
+                case "audio":   detectingTab
                 default:        generalTab
                 }
             }
@@ -72,29 +103,33 @@ struct SettingsView: View {
     }
 
     @AppStorage("recording.autoRecordOnSessionStart") private var autoRecordOnSessionStart = true
-    /// Read directly by RecordingSpectrogramRenderer (off-main, no live settings
-    /// reference) the same way it already reads `pulse.displayPalette`. 0.25 is a
-    /// starting default, not a settled value — surfaced here so it can be tuned
-    /// without a code change until a final number is picked.
-    @AppStorage("display.playbackThumbnailNoiseFloor") private var playbackThumbnailNoiseFloor = 0.25
-    /// Read directly by WavPlayerView/CallAnalysisPanel — the fraction of a
-    /// measured call's active duration averaged (median) to estimate
-    /// characteristic/knee frequency. No existing algorithm to calibrate
-    /// against; 0.25 is a starting default per CallAnalysis's own doc comment,
-    /// surfaced here (same treatment as the noise floor above) so it can be
-    /// tuned against real recordings without a code change.
-    @AppStorage("display.cfTailFraction") private var cfTailFraction = CallAnalysis.defaultCFTailFraction
-
-    // MARK: General tab
 
     /// The app-wide interface mode. `true` hides the readouts and controls that
     /// only mean something once you already know what they are — see
     /// `SimplifiedView` for the full list and the reasoning.
+    ///
+    /// It gates ONE card in this sheet — "Telling calls apart" — and the choice
+    /// of which follows `SimplifiedView`'s own precedent for the band button:
+    /// a control stays visible in simplified view when it genuinely needs
+    /// tweaking in the field. Loudness and lowest pitch are the first things to
+    /// reach for when nothing is triggering, and recording length is plain
+    /// English, so all three stay. Minimum duration / gap bridging / hold-off do
+    /// not — they need a spectrogram in front of you to set meaningfully, and
+    /// they are the definition of what that mode exists to hide.
+    ///
+    /// Hiding is safe here in the way `SimplifiedView` requires. Its rule is
+    /// that a hidden control's state must be OVERRIDDEN or the user is stranded;
+    /// the exception it already documents is a hidden control whose state has
+    /// another route back. That route here is the Advanced switch at the top of
+    /// this same sheet's first tab. Overriding would be actively wrong: these
+    /// values decide what gets detected at all, so silently substituting
+    /// different ones in simplified mode would change what the app hears without
+    /// saying so.
     @AppStorage(SimplifiedView.key) private var simplifiedMode = true
 
-    /// General: the interface mode, then what used to be the Location, Storage
-    /// and Privacy tabs, in that order — least destructive first, so the bulk
-    /// deletes stay well below the fold.
+    // MARK: - General
+
+    /// Least destructive first, so the bulk deletes stay well below the fold.
     private var generalTab: some View {
         Form {
             Section {
@@ -108,19 +143,18 @@ struct SettingsView: View {
                     set: { simplifiedMode = !$0 }
                 ))
             } header: {
-                Text("Interface")
+                CardHeader("Interface", "How much of the app you see at once.")
             } footer: {
-                // Says what it does in terms of what the user will SEE, and —
-                // the part that matters — that nothing is being thrown away.
-                // Someone who has tuned an advanced control and then turns this
-                // on needs to know their settings are still there, or the
-                // switch reads as destructive and they won't touch it.
+                // Says what the user will SEE, and — the part that matters —
+                // that nothing is being thrown away. Someone who has tuned an
+                // advanced control and then turns this on needs to know their
+                // settings are still there, or the switch reads as destructive
+                // and they won't touch it.
                 Text(simplifiedMode
-                     ? "Shows just the species ID, the level meter and the spectrogram. Turn this off for the full set of readouts and controls — pulse measurements, the pulse close-up, the timeline and palette controls. Nothing is deleted either way: your settings are kept and come back when you switch."
-                     : "Showing every readout and control. Turn this on for a simpler screen: just the species ID, the level meter and the spectrogram.")
+                     ? "You're seeing the simple screen: the species name, the level meter and the spectrogram. Turn this on to add the call close-up, the measurements, the timeline and palette controls, and a few finer detection settings. Nothing is deleted either way — whatever you've set is still there when you switch back."
+                     : "You're seeing everything. Turn this off for a plainer screen: just the species name, the level meter and the spectrogram.")
             }
 
-            locationSections
             storageSections
             privacySections
         }
@@ -142,11 +176,11 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: Storage sections
+    // MARK: Storage
 
     /// Changing this doesn't move anything immediately — the migration runs at
     /// next launch (see `CloudStorage.applyPendingStorageMigration`), so the
-    /// alert below tells the user that rather than leaving them to wonder.
+    /// alert above tells the user that rather than leaving them to wonder.
     @AppStorage(CloudStorage.keepInICloudKey) private var keepInICloud = true
     @State private var showRestartNeeded = false
 
@@ -159,15 +193,15 @@ struct SettingsView: View {
             Section {
                 Toggle("Keep recordings in iCloud", isOn: $keepInICloud)
             } header: {
-                Text("Storage")
+                CardHeader("Storage", "Where your recordings and session history are kept.")
             } footer: {
                 // Deliberately explicit about both the benefit and the cost:
                 // audio is ~768 KB/s at 384 kHz, so a busy night can run to
                 // several GB against the user's iCloud quota — and they'd
                 // otherwise have no way to connect that to OpenBat.
                 Text(keepInICloud
-                     ? "Recordings and session history are stored in your own iCloud, so they survive deleting the app and follow you to a new device. They stay in your iCloud account and aren't visible in the Files app. Audio is large: a busy night can use several GB of your iCloud storage."
-                     : "Recordings and session history are stored only on this device, and are permanently lost if you delete OpenBat. Nothing is stored in iCloud.")
+                     ? "They survive deleting the app and follow you to a new device. They stay in your own iCloud and don't appear in the Files app. Bat audio is large — a busy night can use several GB of your iCloud storage."
+                     : "They're on this device only, and are lost for good if you delete OpenBat. Nothing is kept in iCloud.")
             }
 
             if case .awaitingDownloads(let count) = CloudStorage.lastMigrationResult {
@@ -202,35 +236,36 @@ struct SettingsView: View {
             // is what NoID is for; anything finer is a judgement call that
             // belongs on the individual recording, where the swipe already is.
             //
-            // Ordered least destructive first, per this tab's rule.
+            // One card now rather than two, since they are the same job at two
+            // sizes; ordered least destructive first, per this tab's rule.
             Section {
                 Button("Delete NoID Recordings", role: .destructive) {
                     showDeleteNoIDConfirm = true
                 }
-            } footer: {
-                Text("Deletes every recording that couldn't be classified (NoID) — usually just noise triggers. Sessions and species IDs are unaffected.")
-            }
+                ControlNote("Everything that triggered but couldn't be identified — usually noise. Species IDs and sessions are untouched.")
 
-            Section {
                 Button("Delete All Sessions", role: .destructive) {
                     showDeleteAllSessionsConfirmation = true
                 }
-            } footer: {
-                Text("Permanently deletes every session on this device, with the species IDs and recordings each one holds. Anything under \"Not in a session\" is kept — delete those individually in Sessions.")
+                ControlNote("Every session on this device, with the IDs and recordings inside it. Recordings not in a session are kept — delete those individually in Sessions.")
+            } header: {
+                CardHeader("Deleting in bulk", "Neither of these can be undone.")
             }
         }
     }
 
-    // MARK: Privacy sections
+    // MARK: Community science
 
     @ViewBuilder
     private var privacySections: some View {
         Group {
             Section {
-                Toggle("Contribute recordings to the community science project", isOn: .constant(false))
+                Toggle("Contribute my recordings", isOn: .constant(false))
                     .disabled(true)
+            } header: {
+                CardHeader("Community science", "Sharing what you record with researchers.")
             } footer: {
-                Text("There are no community science projects currently active. Check back soon!")
+                Text("No project is running at the moment, so there's nothing to share with yet. Check back soon.")
             }
 
             // Device ID / consent erasure are hidden while contribution is
@@ -243,32 +278,16 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: Audio tab (formerly separate Time Expansion / Pulse / Audio tabs,
-    // merged into one Form — sections keep their original header text from each source tab)
+    // MARK: - Detecting
 
-    /// Why the calibration button is or isn't available, in that order of
-    /// precedence — "no mic attached" is the more fundamental blocker, and
-    /// telling someone to stop detecting when they have nothing to detect with
-    /// would send them round in a circle.
-    private var calibrationFooter: String {
-        if !audio.diagnostics.canCalibrate {
-            return "Connect your ultrasonic microphone to calibrate it. There's nothing to measure on the phone's built-in mic — it can't hear the frequencies bats call at."
-        }
-        if audio.isRunning {
-            return "Stop detecting first to calibrate."
-        }
-        return "Corrects for your microphone's own uneven frequency response, flattening the spectrogram's noise floor and sharpening frequency measurements. Takes about 15 seconds in a quiet spot; doesn't change or upload any recording."
-    }
-
-    private var pulseMinFreqKHz: Binding<Double> {
-        Binding(get: { pulseDetector.minFrequencyHz / 1000 },
-                set: { pulseDetector.minFrequencyHz = $0 * 1000 })
-    }
-
-    private var audioTab: some View {
+    /// Ordered as the signal travels: the microphone that hears it, the tap you
+    /// feel when it does, what has to be true before OpenBat calls it a bat, and
+    /// what ends up in a file.
+    private var detectingTab: some View {
         Form {
+            microphoneSection
             hapticSections
-            pulseSections
+            triggerSections
             recordingSections
         }
         .sheet(isPresented: $showMicCalibration) {
@@ -276,25 +295,64 @@ struct SettingsView: View {
         }
     }
 
-    /// Pulse haptics. Placed first in the Audio tab because for a user who
-    /// can't hear the listening modes this is the *only* live output the app
-    /// has, and burying it under the trigger thresholds would say otherwise.
+    // MARK: Microphone
+
+    /// Why the calibration button is or isn't available, in that order of
+    /// precedence — "no mic attached" is the more fundamental blocker, and
+    /// telling someone to stop detecting when they have nothing to detect with
+    /// would send them round in a circle.
+    private var calibrationFooter: String {
+        if !audio.diagnostics.canCalibrate {
+            return "Plug in your ultrasonic microphone to calibrate it. There's nothing to measure on the phone's own mic — it can't hear the frequencies bats call at."
+        }
+        if audio.isRunning {
+            return "Stop detecting first, then calibrate."
+        }
+        return "Every microphone hears some pitches louder than others, which shows up as faint horizontal stripes on the spectrogram and biases frequency measurements. Calibrating measures yours in a quiet spot — about 15 seconds — and corrects for it. This affects what you see and measure, never what gets recorded."
+    }
+
+    @ViewBuilder
+    private var microphoneSection: some View {
+        Section {
+            if let curve = micCalSettings.curve {
+                Toggle("Apply calibration", isOn: $micCalSettings.isEnabled)
+                LabeledContent("Measured for", value: curve.micName)
+                LabeledContent("Measured on", value: curve.capturedAt.formatted(date: .abbreviated, time: .shortened))
+            }
+            Button {
+                showMicCalibration = true
+            } label: {
+                Text(micCalSettings.curve == nil ? "Calibrate Microphone" : "Recalibrate Microphone")
+            }
+            .disabled(audio.isRunning || !audio.diagnostics.canCalibrate)
+        } header: {
+            CardHeader("Microphone", "The ultrasonic mic OpenBat is listening through.")
+        } footer: {
+            Text(calibrationFooter)
+        }
+    }
+
+    // MARK: Haptics
+
+    /// Placed high in this tab because for a user who can't hear the listening
+    /// modes this is the *only* live output the app has, and burying it under
+    /// the trigger controls would say otherwise.
     @ViewBuilder
     private var hapticSections: some View {
         // No Taptic Engine (iPad) — offer nothing rather than a dead switch.
         if haptics.isSupported {
             Section {
-                Toggle("Feel each bat pulse", isOn: $haptics.isEnabled)
+                Toggle("Tap for every call", isOn: $haptics.isEnabled)
 
                 if haptics.isEnabled {
-                    VStack(alignment: .leading, spacing: 2) {
-                        LabeledContent("Strength") {
-                            Text(String(format: "%.0f%%", haptics.strength * 100))
-                                .monospacedDigit()
-                        }
-                        Slider(value: $haptics.strength, in: 0.25...1.5, step: 0.05)
-                            .accessibilityLabel("Haptic strength")
+                    LabeledContent("Strength") {
+                        Text(String(format: "%.0f%%", haptics.strength * 100))
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
                     }
+                    ControlNote("Scales every tap. Raise it if you're wearing gloves or carrying the phone in a pocket.")
+                    Slider(value: $haptics.strength, in: 0.25...1.5, step: 0.05)
+                        .accessibilityLabel("Vibration strength")
 
                     Button("Play a sample") { haptics.playPreview() }
                         .disabled(haptics.unavailableReason != nil)
@@ -310,195 +368,188 @@ struct SettingsView: View {
                     }
                 }
             } header: {
-                Text("Haptics")
+                CardHeader("Vibration", "A tap you feel for each call, instead of one you hear.")
             } footer: {
-                Text("Every detected call becomes a tap you can feel: stronger for a closer bat, and sharper for a higher-pitched one. When calls come too fast to feel separately — a feeding buzz, when a bat is closing on an insect — the taps merge into one continuous buzz, so that moment feels different rather than just faster.\n\nWorks with the screen off and in demo mode, and doesn't need a listening mode switched on.")
+                Text("Stronger for a closer bat, sharper for a higher-pitched one. When calls come too fast to feel apart — a feeding buzz, as a bat closes on an insect — the taps run together into a hum, so that moment feels different rather than just quicker.\n\nWorks with the screen off, and doesn't need a listening mode switched on.")
             }
         }
     }
 
+    // MARK: What counts as a call
+
+    private var pulseMinFreqKHz: Binding<Double> {
+        Binding(get: { pulseDetector.minFrequencyHz / 1000 },
+                set: { pulseDetector.minFrequencyHz = $0 * 1000 })
+    }
+
+    /// Milliseconds one detector column covers, so "shortest call" can be shown
+    /// in a unit a person has met. 256 is `SpectrogramProcessor`'s default hop
+    /// and isn't reachable statically from here; this is a label, and nothing
+    /// computes anything from it.
+    private var columnMs: Double {
+        let rate = audio.activeSampleRate > 0 ? audio.activeSampleRate : 384_000
+        return 256 / rate * 1000
+    }
+
+    /// Shown beside the slider and read out by VoiceOver — one source, so the
+    /// two can't disagree.
+    private var shortestCallLabel: String {
+        String(format: "%.1f ms", Double(pulseDetector.minConsecutiveColumns) * columnMs)
+    }
+
     @ViewBuilder
-    private var pulseSections: some View {
+    private var triggerSections: some View {
         Group {
             Section {
                 Picker("Mode", selection: $pulseDetector.triggerMode) {
                     ForEach(PulseDetector.TriggerMode.allCases) { mode in
-                        Text(mode.rawValue).tag(mode)
+                        Text(mode.label).tag(mode)
                     }
                 }
                 .pickerStyle(.segmented)
-                Text(pulseDetector.triggerMode.description)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } header: {
-                Text("Trigger mode")
-            }
+                ControlNote(pulseDetector.triggerMode.description)
 
-            Section {
-                LabeledContent("Amplitude threshold") {
+                LabeledContent("Loudness") {
                     Text(String(format: "%.2f", pulseDetector.amplitudeThreshold))
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                 }
+                ControlNote("Matches the brightness scale on the spectrogram, so anything that looks brighter than this will trigger. Lower it for faint, distant bats — and more noise with them.")
                 Slider(value: $pulseDetector.amplitudeThreshold, in: 0.1...0.95, step: 0.05)
-                Text("Normalised peak magnitude (0–1). Matches spectrogram brightness — 0.5 is medium-bright.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } header: {
-                Text("Amplitude")
-            }
 
-            if pulseDetector.triggerMode == .ultrasonic {
-                Section {
-                    LabeledContent("Min frequency") {
+                if pulseDetector.triggerMode == .ultrasonic {
+                    LabeledContent("Lowest pitch") {
                         Text(String(format: "%.0f kHz", pulseDetector.minFrequencyHz / 1000))
                             .monospacedDigit()
                             .foregroundStyle(.secondary)
                     }
+                    ControlNote("Anything below this is ignored however loud it is. 15–20 kHz clears wind and handling noise; raise it to target only the higher-pitched species.")
                     Slider(value: pulseMinFreqKHz, in: 5...150, step: 5)
-                    Text("Peak frequency must be at or above this value. 15–20 kHz rejects wind and handling noise; raise to 30–40 kHz to target common pipistrelle ranges.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } header: {
-                    Text("Frequency gate")
                 }
+            } header: {
+                CardHeader("What counts as a call",
+                           "How loud, and how high, before OpenBat reacts.")
             }
 
             Section {
-                Stepper("Min duration: \(pulseDetector.minConsecutiveColumns) columns",
-                        value: $pulseDetector.minConsecutiveColumns, in: 1...10)
-                Text("Above-threshold columns required before a pulse is accepted. Increase to reject single-column spikes.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                LabeledContent("Shortest call") {
+                    Text(shortestCallLabel)
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                }
+                ControlNote("How long a sound must last to count as a call. Raise it to reject clicks and pops.")
+                // The detector counts whole analysis columns, but nobody thinks
+                // in columns, so the slider moves in columns (step 1, the only
+                // values that exist) while the readout is milliseconds. That
+                // split is why this one needs an explicit `accessibilityValue`:
+                // without it VoiceOver reads the raw "3" and disagrees with the
+                // label right beside it.
+                Slider(value: Binding(get: { Double(pulseDetector.minConsecutiveColumns) },
+                                      set: { pulseDetector.minConsecutiveColumns = Int($0.rounded()) }),
+                       in: 1...10, step: 1)
+                    .accessibilityLabel("Shortest call")
+                    .accessibilityValue(shortestCallLabel)
 
-                LabeledContent("Bridge gaps") {
+                LabeledContent("Join gaps up to") {
                     Text(String(format: "%.0f ms", pulseDetector.maxGapMs))
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                 }
+                ControlNote("A call can dip quiet partway through. Quiet patches shorter than this stay part of the same call — raise it if one call is being counted as several.")
                 Slider(value: $pulseDetector.maxGapMs, in: 0...30, step: 1)
-                Text("Brief dips below threshold this short are treated as part of the same call. Raise if calls are splitting into pieces.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
 
-                LabeledContent("Hold-off") {
+                LabeledContent("Wait after a call") {
                     Text(String(format: "%.0f ms", pulseDetector.holdOffSeconds * 1000))
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                 }
+                ControlNote("The shortest gap accepted between two separate calls. 30 ms keeps up with a feeding buzz; raise it if echoes are being counted as extra calls.")
                 Slider(value: $pulseDetector.holdOffSeconds, in: 0.02...1.0, step: 0.01)
-                Text("Minimum gap between detections. The 50 ms default matches typical call spacing so a normal pass isn't under-counted; raise it toward 150 ms only if close echoes are double-triggering, or lower it for fast feeding buzzes.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             } header: {
-                Text("Noise rejection")
+                CardHeader("Telling calls apart",
+                           "Stops one call being counted several times, and clicks being counted at all.")
             }
+            .advancedOnly(simplifiedMode)
         }
     }
 
-
-    // MARK: Location sections
-
-    /// Map-pin gates: only session IDs clearing both end up as species pins on the map.
-    @ViewBuilder
-    private var locationSections: some View {
-        Group {
-            Section {
-                VStack(alignment: .leading) {
-                    HStack {
-                        Text("Min confidence")
-                        Spacer()
-                        Text("\(Int(settings.mapPinMinConfidence * 100))%").monospacedDigit()
-                            .foregroundStyle(.secondary)
-                    }
-                    Slider(value: Binding(get: { Double(settings.mapPinMinConfidence) },
-                                          set: { settings.mapPinMinConfidence = Float($0) }),
-                           in: 0.3...0.95, step: 0.05)
-                }
-                Stepper("Min pulses: \(settings.mapPinMinPulseCount)",
-                        value: $settings.mapPinMinPulseCount, in: 1...20)
-            } header: {
-                Text("Map pins")
-            } footer: {
-                Text("A session ID drops a species pin on the map only when its confidence and pulse count both clear these gates — the best of the best.")
-            }
-        }
-    }
+    // MARK: Recording
 
     @ViewBuilder
     private var recordingSections: some View {
         Group {
             Section {
-                Toggle("Auto-record on session start", isOn: $autoRecordOnSessionStart)
+                Toggle("Record automatically", isOn: $autoRecordOnSessionStart)
+                ControlNote("Starting detection also arms the recorder, so a bat that passes while you aren't watching is still saved.")
             } header: {
-                Text("Recording")
-            } footer: {
-                Text("When on, starting detection automatically arms the triggered WAV recorder.")
+                CardHeader("Recording", "When OpenBat saves audio to a file.")
             }
 
             Section {
-                LabeledContent("Pre-roll") {
+                LabeledContent("Keep before a call") {
                     Text(String(format: "%.1f s", recorder.preRollSeconds))
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                 }
+                ControlNote("The recording reaches back this far before the first call, so the approach isn't lost.")
                 Slider(value: $recorder.preRollSeconds, in: 0.5...5.0, step: 0.5)
 
-                LabeledContent("Close after silence") {
+                LabeledContent("Stop after quiet for") {
                     Text(String(format: "%.1f s", recorder.postRollSeconds))
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                 }
+                ControlNote("Each new call extends the recording, so it closes only once nothing has been heard for this long.")
                 Slider(value: $recorder.postRollSeconds, in: 1.0...10.0, step: 0.5)
             } header: {
-                Text("Activity bout")
-            } footer: {
-                Text("Recording starts this many seconds before the first detected pulse. It keeps extending with every further pulse and only closes once nothing has triggered for the \"close after silence\" duration — so one bat giving several passes in a row lands in a single WAV instead of fragmenting into many.")
-            }
-
-            Section {
-                LabeledContent("Noise floor") {
-                    Text(String(format: "%.2f", playbackThumbnailNoiseFloor))
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                }
-                Slider(value: $playbackThumbnailNoiseFloor, in: 0...0.9, step: 0.05)
-            } header: {
-                Text("Playback thumbnails")
-            } footer: {
-                Text("Gates faint background energy out of the whole-recording spectrogram thumbnails shown in the Playback and Sessions lists, so a quiet recording reads as mostly black instead of speckled with low-level noise. Temporary while a final default is settled.")
-            }
-
-            Section {
-                LabeledContent("CF tail fraction") {
-                    Text(String(format: "%.0f%%", cfTailFraction * 100))
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                }
-                Slider(value: $cfTailFraction, in: 0.1...0.5, step: 0.05)
-            } header: {
-                Text("Call analysis")
-            } footer: {
-                Text("Characteristic/knee frequency is estimated as the median frequency over the last this-much of a measured call's duration, where FM sweeps typically flatten into a quasi-constant-frequency tail. No prior calibration exists for this — treat as a starting default until checked against real recordings.")
-            }
-
-            Section {
-                if let curve = micCalSettings.curve {
-                    Toggle("Apply correction", isOn: $micCalSettings.isEnabled)
-                    LabeledContent("Calibrated for", value: curve.micName)
-                    LabeledContent("Last calibrated", value: curve.capturedAt.formatted(date: .abbreviated, time: .shortened))
-                }
-                Button {
-                    showMicCalibration = true
-                } label: {
-                    Text(micCalSettings.curve == nil ? "Calibrate Microphone" : "Recalibrate Microphone")
-                }
-                .disabled(audio.isRunning || !audio.diagnostics.canCalibrate)
-            } header: {
-                Text("Microphone Calibration")
-            } footer: {
-                Text(calibrationFooter)
+                CardHeader("Length of a recording",
+                           "One bat passing several times should be one file, not many.")
             }
         }
+    }
+}
+
+// MARK: - Card furniture
+
+/// A settings card's name and its one-line description. See this file's header
+/// for the shape every card follows and why.
+///
+/// `.textCase(nil)` on the subtitle is load-bearing: a `Form` section header
+/// uppercases its content, which is right for the short name above and shouting
+/// for a sentence below it.
+struct CardHeader: View {
+    let title: String
+    let subtitle: String
+
+    init(_ title: String, _ subtitle: String) {
+        self.title = title
+        self.subtitle = subtitle
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title)
+            Text(subtitle)
+                .font(.caption)
+                .textCase(nil)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.bottom, 2)
+    }
+}
+
+/// One plain sentence under a control, saying what moving it does for the
+/// reader. Sits inside the card rather than in the section footer so it stays
+/// attached to its own control — a card with three sliders can't explain them
+/// all in one footer, which is how the old sections ended up with paragraphs.
+struct ControlNote: View {
+    let text: String
+
+    init(_ text: String) { self.text = text }
+
+    var body: some View {
+        Text(text)
+            .font(.caption)
+            .foregroundStyle(.secondary)
     }
 }

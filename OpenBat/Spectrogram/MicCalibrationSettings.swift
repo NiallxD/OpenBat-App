@@ -102,15 +102,31 @@ final class MicCalibrationSettings {
         return curve
     }
 
-    /// The curve already resolved for whichever mic is currently connected —
-    /// `ContentView` keeps `curve` current via `load(forMicName:)` every time
-    /// the input changes, so a consumer that isn't itself tracking live audio
-    /// (WavPlayer, reviewing a past recording) can just use this rather than
-    /// re-deriving a mic name it has no way to know. Recordings aren't
-    /// tagged with which mic captured them, so this is a deliberate
-    /// simplification: apply today's calibration to everything, not a
-    /// per-recording historical match.
-    var activeCurve: MicCalibrationCurve? {
-        isEnabled ? curve : nil
+    /// The stored curve for a mic named by something OTHER than the current
+    /// route — specifically a recording's own GUANO `Make`, which is the mic
+    /// that actually captured it (`AudioRecorder.makeGuanoChunk`). Reads
+    /// straight from storage and does NOT touch `curve`, which belongs to the
+    /// live capture path.
+    ///
+    /// This replaced an `activeCurve` that returned whatever mic was plugged in
+    /// right now, which was wrong in both directions: reviewing recordings with
+    /// the Griff unplugged (the normal case — you review indoors) resolved to
+    /// the built-in mic, found no curve, and silently corrected nothing; and
+    /// with a second mic attached it would have applied that mic's curve to a
+    /// recording made with the first. Keying on the recording removes both, and
+    /// makes calibrating later apply retroactively to everything that mic
+    /// recorded.
+    ///
+    /// Returns nil for a recording with no `Make` (pre-GUANO WAVs) or one made
+    /// on hardware this device has never calibrated — an imported file from
+    /// someone else's detector, most of all. No correction is the right answer
+    /// there: a curve measured on the Griff describes the Griff's resonances
+    /// and nothing else.
+    func storedCurve(forMicName micName: String) -> MicCalibrationCurve? {
+        guard isEnabled, !micName.isEmpty, micName != "—" else { return nil }
+        guard let data = UserDefaults.standard.data(forKey: Self.curveKey(forMicName: micName)),
+              let loaded = try? JSONDecoder().decode(MicCalibrationCurve.self, from: data)
+        else { return nil }
+        return loaded
     }
 }

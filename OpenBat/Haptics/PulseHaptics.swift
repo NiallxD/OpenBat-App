@@ -128,8 +128,11 @@ final class PulseHaptics {
     // All live, all persisted, all editable from the overlay's Haptics tab while
     // the detector runs (see `HapticsTuningTab`). The defaults below are
     // engineering estimates, NOT measurements — they were reasoned from the
-    // actuator's limits and `amplitudeThreshold`'s 0.5 default, and want
-    // checking by hand against the demo clip on a real device.
+    // actuator's limits and `amplitudeThreshold`'s then-0.5 default, and want
+    // checking by hand against the demo clip on a real device. That threshold
+    // is 0.3 now, so more and quieter pulses reach the actuator than these
+    // numbers were reasoned against — `levelFloor` is the one to revisit first
+    // if faint calls started feeling too strong.
 
     /// Peak level that maps to the weakest tap. `peakLevel` is the detector's
     /// normalised 0–1 column magnitude (the same scale as spectrogram
