@@ -1730,6 +1730,16 @@ merges them over the anchor-derived ones in `tabBarTargets(in:)`.
   code for the western red bat.
 - **Priors start neutral**, and are then derived from a bundled presence grid —
   see below. They were suggested from live GBIF record counts until 2026-08-16.
+- **BattyBirdNET was considered and rejected for licensing, not accuracy.** Its
+  weights carry a share-alike term, which would have required releasing any
+  model derived from it — the CoreML conversion included — under the same
+  licence, obliging OpenBat to let others redistribute it freely. BatDetect2's
+  CC BY-NC 4.0 is the opposite shape: non-commercial use only, but no
+  obligation to share the derived model back. That fits a source-available,
+  all-rights-reserved app; share-alike would not have. See `LICENSE` for what
+  CC BY-NC actually requires of OpenBat (attribution, and staying
+  non-commercial) — that constraint is why the app currently has no IAP or
+  subscription of any kind.
 
 ### Species priors: from live record counts to a bundled range grid (2026-08-16)
 
@@ -2212,7 +2222,7 @@ OpenBat/
   SimplifiedView.swift  what simplified view hides, and the defaults it applies
   GlassStyle.swift  Liquid Glass helpers with pre-26 fallbacks
   ContentView.swift the detector screen; wires every subsystem together
-OpenBatWiget/       widget extension target (note the missing 'd' — see below)
+OpenBatWidget/      widget extension target
 ```
 
 **Supported orientations are set per-idiom**, not globally:
@@ -2245,10 +2255,14 @@ moving a file "back where it belongs".
 
 Easy to get silently wrong:
 
-- **The widget target is named `OpenBatWigetExtension` and its folder is
-  `OpenBatWiget/`** — missing the `d`, a typo baked in when the target was
-  created. Cosmetic, but don't "correct" the path in the pbxproj without
-  renaming the folder to match.
+- **The widget target is `OpenBatWidgetExtension`, folder `OpenBatWidget/`.**
+  Renamed 2026-08-17 — it was `OpenBatWigetExtension`/`OpenBatWiget/` (missing
+  the `d`) from when the target was created until then. The bundle identifier
+  (`Niall.OpenBat.OpenBatWiget`) was deliberately **not** renamed to match, to
+  avoid invalidating the existing provisioning profile — so the identifier
+  still carries the old typo even though the folder, target name, product
+  name, and entitlements filename don't. Don't "fix" that mismatch without
+  also rolling a new provisioning profile.
 - **`BatDetectorAttributes.swift` and `BatActivityPalette.swift` live in the
   app's synchronized folder** and reach the widget target only through an
   explicit `PBXFileSystemSynchronizedBuildFileExceptionSet`. Moving or renaming

@@ -91,6 +91,30 @@ also makes it usable in the simulator.
   app. Earlier versions asked GBIF, at your location, which species occurred
   nearby; that network lookup is gone.
 
+## What the classifier can't do
+
+Species ID is a suggestion, not a record — treat it the way you'd treat a
+knowledgeable friend's guess, not a verified identification.
+
+- **Confidence is per-model, not comparable across models.** BatDetect2 and
+  NABat ML have very different score distributions (see `ModelRegistry.swift`
+  and `Context.md` §9), so a "70%" from one doesn't mean the same thing as a
+  "70%" from the other.
+- **Some species pairs are routinely confused, and the app says so.** Each
+  model's descriptor lists its known confusable groups — UK Myotis species,
+  common vs. soprano pipistrelle, Leisler's vs. noctule, brown vs. grey
+  long-eared, and several North American low-frequency and Myotis species —
+  and a runner-up within that group is flagged as an active ambiguity rather
+  than a confident call. See each species' page in-app for the specific note.
+- **Coverage is regional, not global.** BatDetect2 covers 17 UK species;
+  NABat ML covers North America. Outside those regions — or for a species
+  neither model was trained on — the app has nothing to say, and won't
+  pretend otherwise.
+- **Headline accuracy hides per-species variance.** NABat ML's own published
+  figures put overall accuracy around 92%, but that number is pulled down
+  hardest by cryptic groups, Myotis especially — the acoustic ID is genuinely
+  harder for those species, not just a model weakness.
+
 ## Species field guide
 
 The app downloads and displays the field guide — a single community-editable
@@ -109,12 +133,16 @@ bundled in `OpenBat/Classifier/`.
 Note that `OpenBat/OpenBat/` is a synchronized folder group: **any `.swift` file
 placed inside it is compiled into the app**, with no project-file edit required.
 
+The two bundled models carry different licences: **NABat ML** is CC BY 4.0;
+**BatDetect2** is **CC BY-NC 4.0 — non-commercial use only**. See
+[THIRD-PARTY.md](./THIRD-PARTY.md) for the full terms and citations.
+
 ## Repo layout
 
 ```
 OpenBat/          the app source, by subsystem (Audio, DSP, Classifier,
                   Spectrogram, FieldGuide, WavPlayer, Consent, Upload, …)
-OpenBatWiget/     widget / Live Activity extension
+OpenBatWidget/    widget / Live Activity extension
 OpenBatTests/     unit tests
 backend/          Cloudflare Worker for consent records and uploads
 tools/            offline scripts; not part of the app target

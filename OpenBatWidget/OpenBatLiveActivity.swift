@@ -1,6 +1,6 @@
 //
 //  OpenBatLiveActivity.swift
-//  OpenBatWigetExtension
+//  OpenBatWidgetExtension
 //
 //  The lock-screen card and Dynamic Island presentations.
 //

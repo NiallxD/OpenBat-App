@@ -8,14 +8,29 @@ No permission is granted to copy, modify, merge, publish, distribute,
 sublicense, or otherwise reuse this code, in whole or in part, for any purpose,
 without prior written permission from the copyright holder.
 
-Third-party components bundled with the app (FLAC, libogg, SwiftyH3, and
-others) remain under their own licenses — see the in-app "About" screen for
-attribution and license text for each.
+Third-party components bundled with the app — the FLAC and libogg libraries,
+and the NABat ML and BatDetect2 classifier models — remain under their own
+licenses. See [THIRD-PARTY.md](./THIRD-PARTY.md) for the full list with
+authors, licence text, and citations; the in-app "About" screen shows the same
+information.
+
+BatDetect2 is licensed **CC BY-NC 4.0 — non-commercial use only**, and
+forbids commercial use of the model, or of anything built on it, without the
+authors' permission. OpenBat is currently free, with no in-app purchase or
+subscription of any kind, which is what keeps its use of BatDetect2 within
+that term — introducing any form of monetisation requires resolving this
+first, either by clearing it with the authors or by removing the model.
 
 The OpenBat field guide's species and region data is maintained in a separate,
 community-contributed repository (NiallxD/OpenBat-FieldGuide) and is licensed
-under Creative Commons Attribution 4.0 International (CC BY 4.0) — this notice
-does not apply there, and that permission does not extend back to this code.
+under Creative Commons Attribution-NonCommercial 4.0 International
+(CC BY-NC 4.0) — this notice does not apply there, and that permission does
+not extend back to this code.
+
+Submitting a pull request or other contribution to this repository grants the
+copyright holder a perpetual, irrevocable licence to use, modify, and
+relicense that contribution as part of the project, under these terms or any
+future terms the project adopts.
 
 THIS SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
@@ -24,4 +39,4 @@ COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER
 IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM, OUT OF, OR IN
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-For licensing inquiries, contact privacy@openbat.app.
+For licensing or privacy inquiries, contact privacy@openbat.app.

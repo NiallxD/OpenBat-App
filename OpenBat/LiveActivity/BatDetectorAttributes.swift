@@ -4,11 +4,11 @@
 //
 //  The contract between the app and the Live Activity widget.
 //
-//  ⚠️ THIS FILE IS A MEMBER OF BOTH TARGETS (OpenBat + OpenBatWigetExtension).
+//  ⚠️ THIS FILE IS A MEMBER OF BOTH TARGETS (OpenBat + OpenBatWidgetExtension).
 //  It lives in the app's folder, and the project uses Xcode 16's
 //  `fileSystemSynchronizedGroups`, which assigns membership by folder — so the widget
 //  target only sees it via an explicit `PBXFileSystemSynchronizedBuildFileExceptionSet`
-//  in project.pbxproj ("Exceptions for OpenBat folder in OpenBatWigetExtension target").
+//  in project.pbxproj ("Exceptions for OpenBat folder in OpenBatWidgetExtension target").
 //  If you move or rename this file, update that list too, or the widget stops compiling
 //  with "cannot find type 'BatDetectorAttributes'".
 //

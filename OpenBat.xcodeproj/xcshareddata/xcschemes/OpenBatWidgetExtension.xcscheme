@@ -17,8 +17,8 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "69AE2727302686CB0072DDEC"
-               BuildableName = "OpenBatWigetExtension.appex"
-               BlueprintName = "OpenBatWigetExtension"
+               BuildableName = "OpenBatWidgetExtension.appex"
+               BlueprintName = "OpenBatWidgetExtension"
                ReferencedContainer = "container:OpenBat.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>

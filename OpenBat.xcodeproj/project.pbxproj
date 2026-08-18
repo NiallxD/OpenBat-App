@@ -9,7 +9,7 @@
 /* Begin PBXBuildFile section */
 		69AE272B302686CB0072DDEC /* WidgetKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 69AE272A302686CB0072DDEC /* WidgetKit.framework */; };
 		69AE272D302686CB0072DDEC /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 69AE272C302686CB0072DDEC /* SwiftUI.framework */; };
-		69AE273C302686CD0072DDEC /* OpenBatWigetExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 69AE2728302686CB0072DDEC /* OpenBatWigetExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		69AE273C302686CD0072DDEC /* OpenBatWidgetExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 69AE2728302686CB0072DDEC /* OpenBatWidgetExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		83990F19EE26D85694EDAD50 /* FLAC in Frameworks */ = {isa = PBXBuildFile; productRef = 9D3BD284CDD75E44CCD9CC0F /* FLAC */; };
 		88E2E1B3B334756115E32E3E /* ogg in Frameworks */ = {isa = PBXBuildFile; productRef = 9A57C2A7819815BD0CB67EDD /* ogg */; };
 		C0FFEE0000000000AAAAAA03 /* Lottie in Frameworks */ = {isa = PBXBuildFile; productRef = C0FFEE0000000000AAAAAA02 /* Lottie */; };
@@ -21,7 +21,7 @@
 			containerPortal = 693CA9412FF0506B002CD4C1 /* Project object */;
 			proxyType = 1;
 			remoteGlobalIDString = 69AE2727302686CB0072DDEC;
-			remoteInfo = OpenBatWigetExtension;
+			remoteInfo = OpenBatWidgetExtension;
 		};
 		AA0000000000000000000008 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -39,7 +39,7 @@
 			dstPath = "";
 			dstSubfolderSpec = 13;
 			files = (
-				69AE273C302686CD0072DDEC /* OpenBatWigetExtension.appex in Embed Foundation Extensions */,
+				69AE273C302686CD0072DDEC /* OpenBatWidgetExtension.appex in Embed Foundation Extensions */,
 			);
 			name = "Embed Foundation Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -48,27 +48,27 @@
 
 /* Begin PBXFileReference section */
 		693CA9492FF0506B002CD4C1 /* OpenBat.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = OpenBat.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		69AE2728302686CB0072DDEC /* OpenBatWigetExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = OpenBatWigetExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		69AE2728302686CB0072DDEC /* OpenBatWidgetExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = OpenBatWidgetExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		69AE272A302686CB0072DDEC /* WidgetKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WidgetKit.framework; path = System/Library/Frameworks/WidgetKit.framework; sourceTree = SDKROOT; };
 		69AE272C302686CB0072DDEC /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SwiftUI.framework; path = System/Library/Frameworks/SwiftUI.framework; sourceTree = SDKROOT; };
 		AA0000000000000000000002 /* OpenBatTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = OpenBatTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
-		69AE273D302686CD0072DDEC /* Exceptions for "OpenBatWiget" folder in "OpenBatWigetExtension" target */ = {
+		69AE273D302686CD0072DDEC /* Exceptions for "OpenBatWidget" folder in "OpenBatWidgetExtension" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				Info.plist,
 			);
-			target = 69AE2727302686CB0072DDEC /* OpenBatWigetExtension */;
+			target = 69AE2727302686CB0072DDEC /* OpenBatWidgetExtension */;
 		};
-		69AE27A0302686CD0072DDEC /* Exceptions for "OpenBat" folder in "OpenBatWigetExtension" target */ = {
+		69AE27A0302686CD0072DDEC /* Exceptions for "OpenBat" folder in "OpenBatWidgetExtension" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				LiveActivity/BatActivityPalette.swift,
 				LiveActivity/BatDetectorAttributes.swift,
 			);
-			target = 69AE2727302686CB0072DDEC /* OpenBatWigetExtension */;
+			target = 69AE2727302686CB0072DDEC /* OpenBatWidgetExtension */;
 		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
@@ -76,17 +76,17 @@
 		693CA94B2FF0506B002CD4C1 /* OpenBat */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
-				69AE27A0302686CD0072DDEC /* Exceptions for "OpenBat" folder in "OpenBatWigetExtension" target */,
+				69AE27A0302686CD0072DDEC /* Exceptions for "OpenBat" folder in "OpenBatWidgetExtension" target */,
 			);
 			path = OpenBat;
 			sourceTree = "<group>";
 		};
-		69AE272E302686CB0072DDEC /* OpenBatWiget */ = {
+		69AE272E302686CB0072DDEC /* OpenBatWidget */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
-				69AE273D302686CD0072DDEC /* Exceptions for "OpenBatWiget" folder in "OpenBatWigetExtension" target */,
+				69AE273D302686CD0072DDEC /* Exceptions for "OpenBatWidget" folder in "OpenBatWidgetExtension" target */,
 			);
-			path = OpenBatWiget;
+			path = OpenBatWidget;
 			sourceTree = "<group>";
 		};
 		AA0000000000000000000003 /* OpenBatTests */ = {
@@ -131,7 +131,7 @@
 			children = (
 				693CA94B2FF0506B002CD4C1 /* OpenBat */,
 				AA0000000000000000000003 /* OpenBatTests */,
-				69AE272E302686CB0072DDEC /* OpenBatWiget */,
+				69AE272E302686CB0072DDEC /* OpenBatWidget */,
 				69AE2729302686CB0072DDEC /* Frameworks */,
 				693CA94A2FF0506B002CD4C1 /* Products */,
 			);
@@ -142,7 +142,7 @@
 			children = (
 				693CA9492FF0506B002CD4C1 /* OpenBat.app */,
 				AA0000000000000000000002 /* OpenBatTests.xctest */,
-				69AE2728302686CB0072DDEC /* OpenBatWigetExtension.appex */,
+				69AE2728302686CB0072DDEC /* OpenBatWidgetExtension.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -186,9 +186,9 @@
 			productReference = 693CA9492FF0506B002CD4C1 /* OpenBat.app */;
 			productType = "com.apple.product-type.application";
 		};
-		69AE2727302686CB0072DDEC /* OpenBatWigetExtension */ = {
+		69AE2727302686CB0072DDEC /* OpenBatWidgetExtension */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 69AE273E302686CD0072DDEC /* Build configuration list for PBXNativeTarget "OpenBatWigetExtension" */;
+			buildConfigurationList = 69AE273E302686CD0072DDEC /* Build configuration list for PBXNativeTarget "OpenBatWidgetExtension" */;
 			buildPhases = (
 				69AE2724302686CB0072DDEC /* Sources */,
 				69AE2725302686CB0072DDEC /* Frameworks */,
@@ -199,13 +199,13 @@
 			dependencies = (
 			);
 			fileSystemSynchronizedGroups = (
-				69AE272E302686CB0072DDEC /* OpenBatWiget */,
+				69AE272E302686CB0072DDEC /* OpenBatWidget */,
 			);
-			name = OpenBatWigetExtension;
+			name = OpenBatWidgetExtension;
 			packageProductDependencies = (
 			);
-			productName = OpenBatWigetExtension;
-			productReference = 69AE2728302686CB0072DDEC /* OpenBatWigetExtension.appex */;
+			productName = OpenBatWidgetExtension;
+			productReference = 69AE2728302686CB0072DDEC /* OpenBatWidgetExtension.appex */;
 			productType = "com.apple.product-type.app-extension";
 		};
 		AA0000000000000000000001 /* OpenBatTests */ = {
@@ -275,7 +275,7 @@
 			targets = (
 				693CA9482FF0506B002CD4C1 /* OpenBat */,
 				AA0000000000000000000001 /* OpenBatTests */,
-				69AE2727302686CB0072DDEC /* OpenBatWigetExtension */,
+				69AE2727302686CB0072DDEC /* OpenBatWidgetExtension */,
 			);
 		};
 /* End PBXProject section */
@@ -331,7 +331,7 @@
 /* Begin PBXTargetDependency section */
 		69AE273B302686CD0072DDEC /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
-			target = 69AE2727302686CB0072DDEC /* OpenBatWigetExtension */;
+			target = 69AE2727302686CB0072DDEC /* OpenBatWidgetExtension */;
 			targetProxy = 69AE273A302686CD0072DDEC /* PBXContainerItemProxy */;
 		};
 		AA0000000000000000000007 /* PBXTargetDependency */ = {
@@ -470,7 +470,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = OpenBat/OpenBat.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 93;
+				CURRENT_PROJECT_VERSION = 96;
 				DEVELOPMENT_TEAM = 57P8LD6GWD;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -513,7 +513,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = OpenBat/OpenBat.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 93;
+				CURRENT_PROJECT_VERSION = 96;
 				DEVELOPMENT_TEAM = 57P8LD6GWD;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -554,13 +554,13 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_WIDGET_BACKGROUND_COLOR_NAME = WidgetBackground;
-				CODE_SIGN_ENTITLEMENTS = OpenBatWiget/OpenBatWiget.entitlements;
+				CODE_SIGN_ENTITLEMENTS = OpenBatWidget/OpenBatWidget.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 57P8LD6GWD;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = OpenBatWiget/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = OpenBatWiget;
+				INFOPLIST_FILE = OpenBatWidget/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = OpenBatWidget;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -586,13 +586,13 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_WIDGET_BACKGROUND_COLOR_NAME = WidgetBackground;
-				CODE_SIGN_ENTITLEMENTS = OpenBatWiget/OpenBatWiget.entitlements;
+				CODE_SIGN_ENTITLEMENTS = OpenBatWidget/OpenBatWidget.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 57P8LD6GWD;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = OpenBatWiget/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = OpenBatWiget;
+				INFOPLIST_FILE = OpenBatWidget/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = OpenBatWidget;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -674,7 +674,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		69AE273E302686CD0072DDEC /* Build configuration list for PBXNativeTarget "OpenBatWigetExtension" */ = {
+		69AE273E302686CD0072DDEC /* Build configuration list for PBXNativeTarget "OpenBatWidgetExtension" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				69AE273F302686CD0072DDEC /* Debug */,
