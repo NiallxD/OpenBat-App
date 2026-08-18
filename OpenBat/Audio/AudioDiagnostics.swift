@@ -154,9 +154,22 @@ nonisolated enum AudioLevel {
         var dcOffset: Float = 0
         vDSP_meanv(channel, 1, &dcOffset, vDSP_Length(frameCount))
 
+        // Clipped-sample count. The scalar loop is only entered when the peak
+        // magnitude already computed above says at least one sample COULD be
+        // clipped — which, on any capture that isn't actually clipping, is never.
+        // This runs on the realtime capture thread at 384 kHz, so skipping the
+        // pass in the ordinary case removes ~384 000 iterations a second for the
+        // cost of one comparison.
+        //
+        // Deliberately not `vDSP_vclipc` (which does return clip tallies): that
+        // needs an output buffer, and a reusable one would mean static mutable
+        // state on a stateless enum touched from a realtime thread — a worse
+        // trade than the loop it saves.
         var clipped = 0
-        for i in 0..<frameCount where abs(channel[i]) >= clipThreshold {
-            clipped += 1
+        if peakMagnitude >= clipThreshold {
+            for i in 0..<frameCount where abs(channel[i]) >= clipThreshold {
+                clipped += 1
+            }
         }
 
         return (peakDB, dcOffset, clipped, frameCount)

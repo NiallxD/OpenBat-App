@@ -62,6 +62,10 @@ struct SessionsView: View {
         .toolbarBackground(Color.black, for: .navigationBar)
         .flatTopScrollEdge()
         .toolbar { toolbarContent }
+        // AIFF and the generic `.audio` type are honest options because everything
+        // that isn't already the app's own WAV shape is converted on the way in
+        // (`RecordingImporter.normalizeIfNeeded`). Before that they were accepted
+        // and then read as noise.
         .fileImporter(isPresented: $showImporter,
                       allowedContentTypes: [.wav, .aiff, .audio],
                       allowsMultipleSelection: true) { result in
@@ -225,7 +229,24 @@ struct SessionsView: View {
 
         isImporting = true
         Task {
+            var lateFailures: [String] = []
             for file in copied {
+                // Convert anything that isn't already in the app's own WAV shape
+                // before anything reads it — see `normalizeIfNeeded`. Runs here
+                // rather than during the copy because it is slow on a long file
+                // and, unlike the copy, needs no sandbox extension. A file that
+                // can't be converted is dropped rather than left in the library
+                // to render as noise.
+                do {
+                    try await Task.detached(priority: .userInitiated) {
+                        try RecordingImporter.normalizeIfNeeded(at: file.url)
+                    }.value
+                } catch {
+                    lateFailures.append("\(file.url.lastPathComponent): \(error.localizedDescription)")
+                    try? FileManager.default.removeItem(at: file.url)
+                    continue
+                }
+
                 let image = await Task.detached(priority: .userInitiated) {
                     RecordingImporter.renderOverview(at: file.url)
                 }.value
@@ -249,7 +270,7 @@ struct SessionsView: View {
                                    spectrogramImage: image)
             }
             isImporting = false
-            reportImport(failures: failures)
+            reportImport(failures: failures + lateFailures)
         }
     }
 

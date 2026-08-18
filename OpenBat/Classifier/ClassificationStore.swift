@@ -219,8 +219,6 @@ final class ClassificationStore {
     private let sessionsURL: URL
     private let recordingsURL: URL
     private let io = DispatchQueue(label: "bat.ClassificationStore.io", qos: .utility)
-    /// Throttle full sessions.json rewrites.
-    private var lastSessionPersist: Date = .distantPast
     /// Guards `load()` against running more than once — see its doc comment.
     private var hasLoaded = false
 
@@ -502,7 +500,9 @@ final class ClassificationStore {
         let resolved = code ?? "NOID"
         recordings[index].species = resolved
         recordings[index].commonName = SpeciesInfo.commonName[resolved] ?? resolved
-        persistRecordings()
+        // Forced: a deliberate user edit, and the only feedback that it took is
+        // the list updating — it must survive a force-quit straight afterwards.
+        persistRecordings(force: true)
     }
 
     // MARK: Delete
@@ -528,7 +528,10 @@ final class ClassificationStore {
                 try? FileManager.default.removeItem(at: self.imagesDir.appendingPathComponent(file))
             }
         }
-        persist()
+        // Forced: the thumbnails are being deleted from disk right now, so a
+        // pass log still listing them after a crash would reference files that
+        // no longer exist.
+        persist(force: true)
     }
 
     /// Removes the Recording's entry, its spectrogram thumbnail, AND the underlying
@@ -570,7 +573,9 @@ final class ClassificationStore {
                 try? FileManager.default.removeItem(at: docs.appendingPathComponent(path))
             }
         }
-        persistRecordings()
+        // Forced: the WAVs are going from disk immediately, so an index that
+        // still lists them after a crash would show recordings that can't open.
+        persistRecordings(force: true)
     }
 
     /// Clear only the Listening bucket (passes and recordings not owned by a session).
@@ -787,38 +792,129 @@ final class ClassificationStore {
     // count would be real, unprompted data loss. Deletion only ever happens via
     // an explicit `delete(_:)` call (swipe-to-delete, clear-all, etc.).
 
-    private func persist() {
-        let snapshot = passes
-        io.async { [weak self] in
-            guard let self else { return }
-            if let data = try? JSONEncoder().encode(snapshot) {
-                try? data.write(to: self.jsonURL, options: .atomic)
-            }
+    // MARK: Persistence
+    //
+    // All three files are rewritten whole — there is no incremental format — so
+    // the cost of a save scales with the size of the library, not the size of the
+    // change. `passes` in particular is capped at 500 records each carrying every
+    // contributing pulse and its six top scores, which is on the order of a
+    // megabyte of JSON; re-encoding and atomically rewriting that on every
+    // finished pass (one every few seconds during real activity) was the single
+    // largest avoidable disk cost in the app.
+    //
+    // So writes are coalesced: an unforced save that lands inside the throttle
+    // window schedules one flush at the end of that window instead of being
+    // dropped. Dropping was the previous behaviour for sessions and it silently
+    // lost the last change of a burst — the final breadcrumb of a session never
+    // reached disk unless something else forced a write afterwards.
+    //
+    // `force` skips the throttle for the moments where losing up to
+    // `persistInterval` of work would be visible: deletions, session edits,
+    // and `flushPendingWrites()` on the way to the background.
+
+    private static let persistInterval: TimeInterval = 5
+
+    /// One coalescing throttle per file. `pending` is set when a save was
+    /// deferred, and cleared by whichever flush actually writes.
+    private struct PersistThrottle {
+        var last: Date = .distantPast
+        var scheduled = false
+    }
+    private var passThrottle = PersistThrottle()
+    private var recordingThrottle = PersistThrottle()
+    private var sessionThrottle = PersistThrottle()
+
+    /// Write `passes`, `recordings` and `sessions` immediately if any of them has
+    /// a deferred save outstanding. Call when the app is heading to the
+    /// background or is about to be terminated — otherwise up to
+    /// `persistInterval` of the most recent detections would be lost on a
+    /// force-quit or a jetsam kill, which on a long field night is exactly when
+    /// both are most likely.
+    func flushPendingWrites() {
+        if passThrottle.scheduled { persist(force: true) }
+        if recordingThrottle.scheduled { persistRecordings(force: true) }
+        if sessionThrottle.scheduled { persistSessions(force: true) }
+    }
+
+    /// Shared throttle body. `write` is only ever called on the main actor, and
+    /// snapshots the array it needs before handing it to `io`.
+    private func throttled(_ throttle: inout PersistThrottle,
+                           force: Bool,
+                           reschedule: @escaping () -> Void,
+                           write: () -> Void) {
+        if force {
+            throttle.scheduled = false
+            throttle.last = Date()
+            write()
+            return
+        }
+        let elapsed = Date().timeIntervalSince(throttle.last)
+        if elapsed >= Self.persistInterval {
+            throttle.scheduled = false
+            throttle.last = Date()
+            write()
+            return
+        }
+        // Already a flush pending for this file — it will pick up whatever the
+        // array holds when it fires, so this change is covered.
+        guard !throttle.scheduled else { return }
+        throttle.scheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + (Self.persistInterval - elapsed)) {
+            reschedule()
         }
     }
 
-    private func persistRecordings() {
-        let snapshot = recordings
-        io.async { [weak self] in
-            guard let self else { return }
-            if let data = try? JSONEncoder().encode(snapshot) {
-                try? data.write(to: self.recordingsURL, options: .atomic)
-            }
-        }
+    private func persist(force: Bool = false) {
+        throttled(&passThrottle, force: force,
+                  reschedule: { [weak self] in
+                      guard let self, self.passThrottle.scheduled else { return }
+                      self.persist(force: true)
+                  },
+                  write: {
+                      let snapshot = passes
+                      io.async { [weak self] in
+                          guard let self else { return }
+                          if let data = try? JSONEncoder().encode(snapshot) {
+                              try? data.write(to: self.jsonURL, options: .atomic)
+                          }
+                      }
+                  })
+    }
+
+    private func persistRecordings(force: Bool = false) {
+        throttled(&recordingThrottle, force: force,
+                  reschedule: { [weak self] in
+                      guard let self, self.recordingThrottle.scheduled else { return }
+                      self.persistRecordings(force: true)
+                  },
+                  write: {
+                      let snapshot = recordings
+                      io.async { [weak self] in
+                          guard let self else { return }
+                          if let data = try? JSONEncoder().encode(snapshot) {
+                              try? data.write(to: self.recordingsURL, options: .atomic)
+                          }
+                      }
+                  })
     }
 
     /// Persist sessions, throttled so a burst of changes doesn't rewrite on every
     /// breadcrumb. `force` bypasses the throttle (session start/end, edits, deletes).
     private func persistSessions(force: Bool = false) {
-        if !force, Date().timeIntervalSince(lastSessionPersist) < 5 { return }
-        lastSessionPersist = Date()
-        let snapshot = sessions
-        io.async { [weak self] in
-            guard let self else { return }
-            if let data = try? JSONEncoder().encode(snapshot) {
-                try? data.write(to: self.sessionsURL, options: .atomic)
-            }
-        }
+        throttled(&sessionThrottle, force: force,
+                  reschedule: { [weak self] in
+                      guard let self, self.sessionThrottle.scheduled else { return }
+                      self.persistSessions(force: true)
+                  },
+                  write: {
+                      let snapshot = sessions
+                      io.async { [weak self] in
+                          guard let self else { return }
+                          if let data = try? JSONEncoder().encode(snapshot) {
+                              try? data.write(to: self.sessionsURL, options: .atomic)
+                          }
+                      }
+                  })
     }
 
     /// Reads the three stores off the main thread. Call once, from the owning

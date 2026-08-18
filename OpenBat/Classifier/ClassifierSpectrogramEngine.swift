@@ -13,7 +13,12 @@
 import Accelerate
 import Foundation
 
-enum ClassifierSpectrogramEngine {
+/// `nonisolated`: same reasoning as `Biquad`/`AudioLevel`/`STFTGrid` — stateless
+/// DSP called only from `PulseDetector`'s capture queue, never the main actor, but
+/// it carried no isolation annotation and so inherited
+/// `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`. The single-caller, single-queue
+/// invariant its scratch state relies on is now stated rather than assumed.
+nonisolated enum ClassifierSpectrogramEngine {
 
     struct RenderOutput {
         let image: [Float]            // outH × outW × channels, values in [0,1]
@@ -336,11 +341,61 @@ enum ClassifierSpectrogramEngine {
 
     // ── Helpers ───────────────────────────────────────────────────────────
 
+    /// Median of `buf[0..<count]`, computed in place.
+    ///
+    /// This used to allocate a fresh array and fully sort it, which undid the
+    /// careful copy into a reusable scratch buffer its callers make and cost an
+    /// allocation plus an O(n log n) sort per row AND per column — 393 of each for
+    /// a single NABat pulse. A partial selection finds the median in O(n) without
+    /// allocating, and the caller's buffer is scratch that is refilled before every
+    /// use, so reordering it is free.
+    ///
+    /// `buf` is genuinely `inout` now: quickselect permutes it.
     private static func sortedMedian(_ buf: inout [Float], count: Int) -> Float {
         guard count > 0 else { return 0 }
-        var tmp = Array(buf.prefix(count))
-        tmp.sort()
-        return count % 2 == 1 ? tmp[count / 2] : (tmp[count / 2 - 1] + tmp[count / 2]) * 0.5
+        return buf.withUnsafeMutableBufferPointer { p -> Float in
+            let base = p.baseAddress!
+            if count % 2 == 1 {
+                return select(base, count: count, k: count / 2)
+            }
+            // Even count: the upper of the two middles, then the max of what sits
+            // below it — which quickselect has already partitioned to the left, so
+            // this is a scan of the lower half rather than a second selection.
+            let hi = select(base, count: count, k: count / 2)
+            var lo = base[0]
+            for i in 1..<(count / 2) where base[i] > lo { lo = base[i] }
+            return (lo + hi) * 0.5
+        }
+    }
+
+    /// Hoare-partition quickselect: returns the value that would sit at index `k`
+    /// if the buffer were sorted, leaving everything below `k` to its left.
+    /// Median-of-three pivoting keeps the already-sorted and constant runs common
+    /// in a spectrogram row off quickselect's O(n²) path.
+    private static func select(_ base: UnsafeMutablePointer<Float>, count: Int, k: Int) -> Float {
+        func exchange(_ a: Int, _ b: Int) {
+            let t = base[a]; base[a] = base[b]; base[b] = t
+        }
+        var lo = 0, hi = count - 1
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2
+            if base[mid] < base[lo] { exchange(mid, lo) }
+            if base[hi] < base[lo] { exchange(hi, lo) }
+            if base[hi] < base[mid] { exchange(hi, mid) }
+            let pivot = base[mid]
+            var i = lo, j = hi
+            while i <= j {
+                while base[i] < pivot { i += 1 }
+                while base[j] > pivot { j -= 1 }
+                if i <= j {
+                    exchange(i, j)
+                    i += 1
+                    j -= 1
+                }
+            }
+            if k <= j { hi = j } else if k >= i { lo = i } else { return base[k] }
+        }
+        return base[k]
     }
 
     /// PCEN exactly matching `batdetect2.preprocess.audio.PCEN` — runs on the LINEAR

@@ -740,6 +740,12 @@ struct ContentView: View {
         // mean "every time the app opens", not just the very first cold launch.
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { location.requestRegionFix() }
+            // Saves of the pass/recording/session logs are coalesced on a few
+            // seconds' throttle (see ClassificationStore's persistence section).
+            // Leaving the foreground is the last reliable moment to land a
+            // deferred one — a force-quit or a jetsam kill from here on gets no
+            // further notice, and on a long night that is exactly when it happens.
+            if phase != .active { classStore.flushPendingWrites() }
             updateColumnDrainOwner()
         }
         // Switching tabs is now a second way for the render loop to stop
@@ -1753,6 +1759,7 @@ struct ContentView: View {
                             timeWindowSeconds: timeWindowSeconds,
                             pulseDetector: pulseDetector,
                             isPaused: menuIsOpen || section != .detector,
+                            isIdle: !audio.isActive,
                             logFrequency: spectrogramLogFrequency,
                             scrollEnabled: !simplifiedMode)
                 .overlay(alignment: .topTrailing) { tunedPillOverlay }

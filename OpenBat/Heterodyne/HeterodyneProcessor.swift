@@ -191,15 +191,38 @@ nonisolated final class HeterodyneProcessor: @unchecked Sendable {
             scratch.reserveCapacity(n / decimation + 1)
         }
 
+        // Local oscillator by complex rotation instead of a `cos()` per sample.
+        // At 384 kHz that libm call was 384 000 double-precision transcendentals a
+        // second on the realtime capture thread; this is two multiplies and two
+        // adds. `ph` stays the authoritative phase across buffers — the rotation is
+        // seeded from it here (two libm calls per buffer, not per sample) and the
+        // phase is advanced analytically at the end.
+        let cosInc = cos(inc), sinInc = sin(inc)
+        var osc = (c: cos(ph), s: sin(ph))
+        // A rotation recurrence drifts off the unit circle through accumulated
+        // rounding. This is the first-order Newton correction to 1/|osc|, which is
+        // exact enough at this cadence and costs no libm call; without it the
+        // oscillator's amplitude would wander and take the output level with it.
+        var sinceRenorm = 0
+
         for i in 0..<n {
             // Band-limit the input so only in-band ultrasound is heterodyned.
             var x = channel[i]
             if applyHP { x = bandHPb.process(bandHPa.process(x)) }
             if applyLP { x = bandLPb.process(bandLPa.process(x)) }
 
-            let mixed = Float(Double(x) * cos(ph))
-            ph += inc
-            if ph >= 2 * Double.pi { ph -= 2 * Double.pi }
+            let mixed = Float(Double(x) * osc.c)
+
+            let nextC = osc.c * cosInc - osc.s * sinInc
+            osc.s = osc.s * cosInc + osc.c * sinInc
+            osc.c = nextC
+            sinceRenorm += 1
+            if sinceRenorm >= 512 {
+                sinceRenorm = 0
+                let correction = (3 - (osc.c * osc.c + osc.s * osc.s)) * 0.5
+                osc.c *= correction
+                osc.s *= correction
+            }
 
             let filtered = lp2.process(lp1.process(mixed))
 
@@ -210,6 +233,10 @@ nonisolated final class HeterodyneProcessor: @unchecked Sendable {
             }
         }
 
+        // Advance the phase analytically rather than carrying the oscillator's
+        // accumulated state across buffers — `ph` stays exact and the recurrence is
+        // re-seeded from it next call, so drift can never compound past one buffer.
+        ph = (ph + Double(n) * inc).truncatingRemainder(dividingBy: 2 * Double.pi)
         phase = ph
         decimCounter = dc
         enqueue(scratch)

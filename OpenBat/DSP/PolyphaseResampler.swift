@@ -13,11 +13,33 @@
 //  filter's group delay) — fine for a pulse window a few hundred samples long, where a
 //  handful of edge samples and microseconds of delay don't matter.
 //
+//  NAME NOTICE: despite the name, this is the zero-stuff → convolve → decimate form,
+//  NOT a polyphase decomposition. That is deliberate, and measured. A true polyphase
+//  (compute only the kept outputs, using only the non-zero taps) does ~6× fewer
+//  multiply-adds and was written and benchmarked on 2026-08-18 — it came out
+//  **slower**, both as per-output `vDSP_dotpr` calls (0.62 ms vs 0.40 ms on the real
+//  0.256 s / 384→256 kHz workload) and as an inlined scalar dot product (1.59 ms).
+//  `vDSP_conv` is vectorised well enough that one long convolution beats 65 536 short
+//  ones, even when five sixths of its arithmetic is against zeros. Both variants
+//  matched this one to 5e-7, so the maths was right; the operation count simply
+//  wasn't the thing that mattered. Don't rewrite this as a polyphase without
+//  re-measuring first.
+//
+//  What DID help, and is what's here: cache the filter already reversed (it was being
+//  re-reversed on every call), and zero-stuff straight into the padded buffer instead
+//  of building an upsampled array and then a concatenated copy of it. Bit-identical
+//  output, two fewer allocations (~1.6 MB per classified pulse), ~8% faster.
+//
 
 import Accelerate
 import Foundation
 
-enum PolyphaseResampler {
+/// `nonisolated`: same reasoning as `Biquad`/`AudioLevel`/`STFTGrid` — stateless
+/// DSP called only from `PulseDetector`'s capture queue, never the main actor, but
+/// it carried no isolation annotation and so inherited
+/// `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`. The single-caller, single-queue
+/// invariant its scratch state relies on is now stated rather than assumed.
+nonisolated enum PolyphaseResampler {
 
     // Keyed by (up, down): the filter only depends on the reduced ratio, and this
     // app only ever resamples 384kHz -> 256kHz (up=2, down=3), so without this the
@@ -41,21 +63,28 @@ enum PolyphaseResampler {
         let halfLen = 10 * max(up, down)
         let numTaps = 2 * halfLen + 1
 
-        let h = cachedFilter(up: up, down: down, numTaps: numTaps)
+        // Pre-reversed and cached — `vDSP_conv` computes correlation, so a true
+        // convolution needs the filter reversed. This used to be re-reversed into a
+        // fresh 61-element array on every call, which quietly defeated half the
+        // point of caching the design.
+        let reversedH = cachedReversedFilter(up: up, down: down, numTaps: numTaps)
 
-        // Zero-stuff by `up`.
-        var upsampled = [Float](repeating: 0, count: input.count * up)
-        for i in 0..<input.count { upsampled[i * up] = input[i] }
+        // Zero-stuff by `up` directly into the padded buffer: ONE allocation, where
+        // this previously built a zero-stuffed array and then a padded copy of it
+        // via two array concatenations (three live buffers, ~1.6 MB of the ~2.4 MB
+        // this routine used to allocate per classified pulse).
+        //
+        // `vDSP_conv` needs N + P - 1 input samples to produce N outputs, hence the
+        // (numTaps - 1) of zeros at each end.
+        let upsampledCount = input.count * up
+        let pad = numTaps - 1
+        var padded = [Float](repeating: 0, count: upsampledCount + 2 * pad)
+        padded.withUnsafeMutableBufferPointer { p in
+            for i in 0..<input.count { p[pad + i * up] = input[i] }
+        }
 
-        // Full convolution with the FIR filter. vDSP_conv computes correlation, so the
-        // filter is pre-reversed to get a true convolution; the signal is zero-padded
-        // by (numTaps - 1) on both sides, as vDSP_conv requires (output length N needs
-        // an input of length N + P - 1).
-        let convLen = upsampled.count + numTaps - 1
+        let convLen = upsampledCount + numTaps - 1
         var convolved = [Float](repeating: 0, count: convLen)
-        let reversedH = h.reversed() as [Float]
-        let padded = [Float](repeating: 0, count: numTaps - 1) + upsampled
-            + [Float](repeating: 0, count: numTaps - 1)
         padded.withUnsafeBufferPointer { pBuf in
             reversedH.withUnsafeBufferPointer { hBuf in
                 vDSP_conv(pBuf.baseAddress!, 1, hBuf.baseAddress!, 1,
@@ -67,9 +96,13 @@ enum PolyphaseResampler {
         // the upsampled domain) so the output is time-aligned with the input.
         let outCount = Int(ceil(Double(input.count) * Double(up) / Double(down)))
         var out = [Float](repeating: 0, count: outCount)
-        for i in 0..<outCount {
-            let idx = halfLen + i * down
-            out[i] = idx < convolved.count ? convolved[idx] : 0
+        convolved.withUnsafeBufferPointer { c in
+            out.withUnsafeMutableBufferPointer { o in
+                for i in 0..<outCount {
+                    let idx = halfLen + i * down
+                    o[i] = idx < c.count ? c[idx] : 0
+                }
+            }
         }
         return out
     }
@@ -83,7 +116,11 @@ enum PolyphaseResampler {
     /// Designs (or returns the cached) Kaiser-windowed low-pass FIR for one `(up,
     /// down)` ratio, DC-gain-scaled by `up` to compensate the 1/up average energy
     /// loss introduced by zero-stuffing (matches scipy's `h *= up`).
-    private static func cachedFilter(up: Int, down: Int, numTaps: Int) -> [Float] {
+    /// Designs (or returns the cached) Kaiser-windowed low-pass FIR for one `(up,
+    /// down)` ratio, DC-gain-scaled by `up` to compensate the 1/up average energy
+    /// loss introduced by zero-stuffing (matches scipy's `h *= up`), and stores it
+    /// already reversed for `vDSP_conv`.
+    private static func cachedReversedFilter(up: Int, down: Int, numTaps: Int) -> [Float] {
         let key = FilterKey(up: up, down: down)
         filterCacheLock.lock()
         defer { filterCacheLock.unlock() }
@@ -93,8 +130,9 @@ enum PolyphaseResampler {
         var h = designLowpass(numTaps: numTaps, cutoff: cutoff)
         var upFactor = Float(up)
         vDSP_vsmul(h, 1, &upFactor, &h, 1, vDSP_Length(h.count))
-        filterCache[key] = h
-        return h
+        let reversed = [Float](h.reversed())
+        filterCache[key] = reversed
+        return reversed
     }
 
     /// Windowed-sinc low-pass FIR, `cutoff` normalized to Nyquist = 1.0, DC gain 1.

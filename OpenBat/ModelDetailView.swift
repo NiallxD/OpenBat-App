@@ -34,7 +34,12 @@ struct ModelDetailView: View {
             metadataSection
             activeSection
             passSection
-            qualityGateSection
+            // Hidden for a model that ignores the gate — see
+            // `ModelDescriptor.honoursQualityGate`. The stored setting is left
+            // untouched rather than forced off: it belongs to this model's own
+            // settings record, and switching to a model that does honour the gate
+            // must find it as the user left it.
+            if model.honoursQualityGate { qualityGateSection }
             speciesSections
             resetSection
         }

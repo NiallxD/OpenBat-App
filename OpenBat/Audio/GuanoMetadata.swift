@@ -65,10 +65,13 @@ nonisolated enum GuanoMetadata {
     /// nil if the file is too short or has no `guan` chunk where one's expected.
     static func read(from url: URL) -> [String: String]? {
         CloudStorage.ensureDownloaded(url)
-        guard let header = WavHeader.read(url: url) else { return nil }
+        guard let format = WavHeader.describe(url: url) else { return nil }
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? handle.close() }
-        guard (try? handle.seek(toOffset: UInt64(44) + UInt64(header.dataBytes))) != nil else { return nil }
+        // Past the end of the audio, wherever that actually is — the chunk walk
+        // reports the real data offset rather than assuming the canonical 44.
+        guard (try? handle.seek(toOffset: format.dataOffset + UInt64(format.dataBytes))) != nil
+        else { return nil }
         guard let chunkHeader = try? handle.read(upToCount: 8), chunkHeader.count == 8,
               String(decoding: chunkHeader.prefix(4), as: UTF8.self) == "guan"
         else { return nil }

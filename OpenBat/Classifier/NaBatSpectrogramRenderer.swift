@@ -24,7 +24,12 @@
 
 import Foundation
 
-enum NaBatSpectrogramRenderer {
+/// `nonisolated`: same reasoning as `Biquad`/`AudioLevel`/`STFTGrid` — stateless
+/// DSP called only from `PulseDetector`'s capture queue, never the main actor, but
+/// it carried no isolation annotation and so inherited
+/// `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`. The single-caller, single-queue
+/// invariant its scratch state relies on is now stated rather than assumed.
+nonisolated enum NaBatSpectrogramRenderer {
 
     static let nFFT = 384                        // = int(0.001 * 384000)
     static let hop  = 96                          // = nFFT / 4

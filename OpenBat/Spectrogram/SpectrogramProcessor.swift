@@ -394,8 +394,18 @@ nonisolated final class SpectrogramProcessor: @unchecked Sendable {
         // DISPLAY column: adaptive ceiling tracking this column's own peak dB, so
         // the live view's contrast stays well-used regardless of absolute signal
         // level — see the property doc comments above.
+        // Taken from bin 1 upward, NOT from bin 0. `vDSP_fft_zrip` returns the
+        // packed real-FFT format, where `realp[0]` is DC and `imagp[0]` is
+        // Nyquist — so `vDSP_zvabs` makes `magnitudes[0] = sqrt(DC² + Nyquist²)`,
+        // a bin that means neither thing. The trigger scan already skips it
+        // (`minBin` starts at 1); the display ceiling did not, so a mic with a DC
+        // offset — which this app measures precisely because it happens on this
+        // hardware — pulled `runningCeilingDB` up and flattened the whole live
+        // view's contrast for a reason unrelated to any signal.
         var columnMaxLog: Float = 0
-        vDSP_maxv(magnitudes, 1, &columnMaxLog, n)
+        magnitudes.withUnsafeBufferPointer { m in
+            vDSP_maxv(m.baseAddress! + 1, 1, &columnMaxLog, n - 1)
+        }
         let columnMaxDB = columnMaxLog * 20
         if columnMaxDB > runningCeilingDB {
             runningCeilingDB = columnMaxDB

@@ -492,7 +492,10 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
                 ControlNote("The recording reaches back this far before the first call, so the approach isn't lost.")
-                Slider(value: $recorder.preRollSeconds, in: 0.5...5.0, step: 0.5)
+                // Upper bound from the recorder, which sizes its pre-roll ring for
+                // exactly this — a wider slider here than there would silently cap.
+                Slider(value: $recorder.preRollSeconds,
+                       in: 0.5...AudioRecorder.maxPreRollSeconds, step: 0.5)
 
                 LabeledContent("Stop after quiet for") {
                     Text(String(format: "%.1f s", recorder.postRollSeconds))

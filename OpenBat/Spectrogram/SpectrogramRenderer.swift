@@ -254,11 +254,21 @@ final class SpectrogramRenderer: NSObject, MTKViewDelegate {
         var isRing: Float
 
         if isScrolling {
-            // Seek texture is linear: tell the shader rightEdge = vc so it
-            // samples [0, vc/maxVisibleColumns] of UV — exactly what we uploaded.
+            // Seek texture is linear. Map the view across TEXEL CENTRES of the
+            // uploaded columns — the right edge at column vc-0.5 (centre of texel
+            // vc-1) and the left at 0.5 (centre of texel 0), which is why the span
+            // is vc-1 rather than vc.
+            //
+            // It used to say rightEdge = vc, putting uv.x = 1 exactly on the
+            // boundary between texel vc-1 and texel vc. Texel vc is outside what
+            // was uploaded, so with linear filtering the rightmost pixel column was
+            // a 50/50 blend with whatever the other seek texture held from a
+            // previous scrub — a one-pixel stripe of stale data while scrubbing.
+            // (Only visible zoomed in: at a full window vc == maxVisibleColumns, so
+            // uv.x = 1 hit u = 1 and clamp_to_edge saved it.)
             renderTexture = currentSeekTexture
-            rightEdge = Float(vc)
-            windowLen  = Float(vc)
+            rightEdge = Float(vc) - 0.5
+            windowLen  = Float(vc) - 1
             texWidth   = Float(maxVisibleColumns)
             isRing = 0
         } else {

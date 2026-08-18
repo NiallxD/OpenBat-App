@@ -29,6 +29,7 @@
 //      extension and belongs on a background task.
 //
 
+import Accelerate
 import AVFoundation
 import CoreLocation
 import Foundation
@@ -41,6 +42,7 @@ nonisolated enum RecordingImporter {
         case notAudio(String)
         case emptyFile
         case copyFailed(String)
+        case convertFailed(String)
 
         var errorDescription: String? {
             switch self {
@@ -52,6 +54,8 @@ nonisolated enum RecordingImporter {
                 return "That file contains no audio."
             case .copyFailed(let why):
                 return "The file could not be copied into the recordings library. \(why)"
+            case .convertFailed(let why):
+                return "That file could not be converted into a format the app can play. \(why)"
             }
         }
     }
@@ -159,6 +163,144 @@ nonisolated enum RecordingImporter {
                       confidence: species == "NOID" ? nil : guano?.confidence,
                       pulseCount: guano?.pulseCount ?? 0,
                       coordinate: guano?.coordinate)
+    }
+
+    /// Rewrites an imported file into the canonical 16-bit mono PCM layout the
+    /// rest of the app assumes, unless it is already in it.
+    ///
+    /// **Why this exists.** Four readers — the WAV player's PCM reader, the STFT
+    /// grid, the playback engine and the header parser — all seek straight to byte
+    /// 44 and read 16-bit mono samples. That is true of every file `AudioRecorder`
+    /// writes and of almost nothing else. A WAV with a `LIST`/`INFO` chunk (which
+    /// Audacity, Wildlife Acoustics and Pettersson all commonly write), an
+    /// extensible `fmt `, a stereo file, 24-bit or float PCM, or an AIFF/m4a the
+    /// picker also accepts, would have its audio read from the wrong offset in the
+    /// wrong format — showing a noise spectrogram and playing as static, with no
+    /// error. Those are exactly the files the importer exists for.
+    ///
+    /// Converting on the way in was chosen over teaching all four readers to parse
+    /// the chunk table: one place changes instead of four, and anything that can't
+    /// be converted fails loudly here rather than silently downstream.
+    ///
+    /// **A file already in canonical shape is left byte-for-byte alone**, which is
+    /// what preserves the `guan` chunk when someone re-imports an OpenBat export —
+    /// rewriting the samples would drop the trailing metadata and cost the
+    /// round-trip that `copyIntoLibrary` reads it for.
+    ///
+    /// Slow for a long file, and safe to defer (the URL is inside our own
+    /// container and needs no sandbox extension), so this is deliberately NOT part
+    /// of `copyIntoLibrary` — see this file's header comment for that split.
+    static func normalizeIfNeeded(at url: URL) throws {
+        CloudStorage.ensureDownloaded(url)
+        if let format = WavHeader.describe(url: url), format.isCanonical { return }
+
+        let source: AVAudioFile
+        do { source = try AVAudioFile(forReading: url) }
+        catch { throw ImportError.convertFailed(error.localizedDescription) }
+
+        // The processing format is always deinterleaved Float32; reading through it
+        // lets AVAudioFile handle 24-bit, float, big-endian AIFF and compressed
+        // sources uniformly, so none of that decoding lives here.
+        let readFormat = source.processingFormat
+        let sampleRate = source.fileFormat.sampleRate
+        let frames = source.length
+        guard sampleRate > 0, frames > 0 else { throw ImportError.emptyFile }
+
+        let temp = url.deletingLastPathComponent()
+            .appendingPathComponent(".\(url.lastPathComponent).converting")
+        try? FileManager.default.removeItem(at: temp)
+        guard FileManager.default.createFile(atPath: temp.path, contents: nil),
+              let out = try? FileHandle(forWritingTo: temp)
+        else { throw ImportError.convertFailed("Could not create a working file.") }
+        var completed = false
+        defer {
+            try? out.close()
+            if !completed { try? FileManager.default.removeItem(at: temp) }
+        }
+
+        // Placeholder sizes, patched once the true length is known — the same
+        // two-pass write `AudioRecorder` does, and for the same reason: the frame
+        // count a decoder reports is not always what it ultimately yields.
+        try? out.write(contentsOf: AudioRecorder.wavHeader(sampleRate: UInt32(sampleRate.rounded()),
+                                                           dataBytes: 0))
+
+        let chunkFrames: AVAudioFrameCount = 1 << 16
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: readFormat, frameCapacity: chunkFrames)
+        else { throw ImportError.convertFailed("Could not allocate a conversion buffer.") }
+
+        let channels = Int(readFormat.channelCount)
+        var mono = [Float](repeating: 0, count: Int(chunkFrames))
+        var pcm  = [Int16](repeating: 0, count: Int(chunkFrames))
+        var totalFrames = 0
+
+        // Loop on the file's own position, NOT on `read` returning zero frames.
+        // `AVAudioFile.read` is documented to come back with a frameLength of 0 at
+        // end of file; it actually THROWS. Trusting the documented behaviour made
+        // every conversion fail on its last iteration, after all the audio had been
+        // written — so a perfectly good import was reported as unconvertible and
+        // deleted. Caught by `RecordingImporterTests`, not by inspection.
+        while source.framePosition < frames {
+            buffer.frameLength = 0
+            do { try source.read(into: buffer, frameCount: chunkFrames) }
+            catch { throw ImportError.convertFailed(error.localizedDescription) }
+            let n = Int(buffer.frameLength)
+            if n == 0 { break }
+            guard let data = buffer.floatChannelData else { break }
+
+            // Downmix by averaging: a stereo file read as consecutive mono samples
+            // was one of the ways this went wrong before, and dropping a channel
+            // would throw away half the recording on a two-mic setup.
+            if channels == 1 {
+                mono.withUnsafeMutableBufferPointer { dst in
+                    dst.baseAddress!.update(from: data[0], count: n)
+                }
+            } else {
+                mono.withUnsafeMutableBufferPointer { dst in
+                    guard let d = dst.baseAddress else { return }
+                    vDSP_vclr(d, 1, vDSP_Length(n))
+                    for c in 0..<channels { vDSP_vadd(d, 1, data[c], 1, d, 1, vDSP_Length(n)) }
+                    var scale = Float(1) / Float(channels)
+                    vDSP_vsmul(d, 1, &scale, d, 1, vDSP_Length(n))
+                }
+            }
+
+            // Clamp before scaling: a float WAV is not guaranteed to sit inside
+            // [-1, 1], and vDSP_vfix16 wraps rather than saturates, which would
+            // turn a hot sample into full-scale noise of the opposite sign.
+            var low: Float = -1, high: Float = 1
+            mono.withUnsafeMutableBufferPointer { m in
+                vDSP_vclip(m.baseAddress!, 1, &low, &high, m.baseAddress!, 1, vDSP_Length(n))
+                var scale = Float(Int16.max)
+                vDSP_vsmul(m.baseAddress!, 1, &scale, m.baseAddress!, 1, vDSP_Length(n))
+                pcm.withUnsafeMutableBufferPointer { p in
+                    vDSP_vfix16(m.baseAddress!, 1, p.baseAddress!, 1, vDSP_Length(n))
+                }
+            }
+
+            pcm.withUnsafeBufferPointer { p in
+                try? out.write(contentsOf: Data(bytes: p.baseAddress!, count: n * 2))
+            }
+            totalFrames += n
+        }
+
+        guard totalFrames > 0 else { throw ImportError.emptyFile }
+        try? out.seek(toOffset: 0)
+        try? out.write(contentsOf: AudioRecorder.wavHeader(sampleRate: UInt32(sampleRate.rounded()),
+                                                           dataBytes: UInt32(totalFrames * 2)))
+        try? out.close()
+
+        // Swap the converted file in. Deliberately remove-then-move rather than
+        // `replaceItemAt`, which fails here with an opaque generic error — and the
+        // atomicity it offers buys nothing at this point: the only file at stake is
+        // a copy the importer made moments ago, and every throw out of this function
+        // makes the caller delete it anyway.
+        do {
+            try FileManager.default.removeItem(at: url)
+            try FileManager.default.moveItem(at: temp, to: url)
+        } catch {
+            throw ImportError.convertFailed(error.localizedDescription)
+        }
+        completed = true
     }
 
     /// Overview thumbnail for an already-copied file. Slow (a full FFT pass), so

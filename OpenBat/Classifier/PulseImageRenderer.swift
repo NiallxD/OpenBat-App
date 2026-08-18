@@ -5,14 +5,15 @@
 //  High-resolution spectrogram render of a single captured pulse, used by the
 //  Pulse View panel and the Sessions history thumbnails.
 //
-//  The live display HistoryBuffer is coarse (fftSize 1024 / hop 512 → 750
+//  The live display HistoryBuffer is coarse (fftSize 2048 / hop 256 → 1500
 //  columns/sec), so a zoom window is only a handful of columns wide and looks
 //  blurry once upscaled. This renderer instead works directly from the captured
 //  raw PCM at high resolution:
 //
 //    • A 512-sample Hann window (1.33 ms — fine time resolution for FM sweeps)
-//      is zero-padded to a 1024-point FFT, doubling the frequency bins to 187 Hz
-//      each without sacrificing time resolution (interpolated, sharper display).
+//      is zero-padded to a 2048-point FFT, quadrupling the frequency bins to
+//      187 Hz each without sacrificing time resolution (interpolated, sharper
+//      display).
 //    • A 32-sample hop → 12 000 columns/sec, so even a 10 ms window is ~120
 //      columns wide before the display upscales it.
 //
@@ -25,7 +26,12 @@
 import Accelerate
 import UIKit
 
-enum PulseImageRenderer {
+/// `nonisolated`: same reasoning as `Biquad`/`AudioLevel`/`STFTGrid` — stateless
+/// DSP called only from `PulseDetector`'s capture queue, never the main actor, but
+/// it carried no isolation annotation and so inherited
+/// `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`. The single-caller, single-queue
+/// invariant its scratch state relies on is now stated rather than assumed.
+nonisolated enum PulseImageRenderer {
 
     // ── High-resolution STFT parameters (zoom view only) ─────────────────────
     // Mirrors of STFTGrid's own constants (the STFT loop itself now lives
@@ -77,13 +83,17 @@ enum PulseImageRenderer {
     //  `render` is only ever invoked from PulseDetector's serial captureQueue
     //  (gated by isCapturing), so one set of buffers can be recycled instead of
     //  reallocating ~4 MB per pulse. `sttfScratch` backs steps 1-2 (now
-    //  STFTGrid.compute, below); `pixelScratch` backs the pixel buffer built in
-    //  step 7. Each grows to the largest capture seen and is never shrunk;
-    //  every used element is overwritten each call, so no zeroing is needed on
-    //  reuse (windowed's zero-pad tail past windowLen is written once at
+    //  STFTGrid.compute, below). It grows to the largest capture seen and is never
+    //  shrunk; every used element is overwritten each call, so no zeroing is needed
+    //  on reuse (windowed's zero-pad tail past windowLen is written once at
     //  allocation and never touched again — see STFTGrid.compute).
+    //
+    //  There was a `pixelScratch` here too, backing the RGBA buffer in step 7. It
+    //  is gone: reusing it meant the finished pixels had to be COPIED into a `Data`
+    //  for the CGDataProvider, so the reuse saved one 2 MB allocation and paid for
+    //  it with one 2 MB memcpy. The buffer is now allocated per pulse and handed to
+    //  the provider outright.
     private static var sttfScratch = STFTGrid.Scratch()
-    private static var pixelScratch: [UInt8] = []
 
     /// Render `pcm` (raw samples at `sampleRate`) into a sharp pulse spectrogram.
     ///
@@ -203,9 +213,16 @@ enum PulseImageRenderer {
         // handling rumble from the search above), not a display floor. Using it as
         // the render floor too was why pinch-zoom-out used to bottom out at
         // whatever the trigger's minimum frequency was set to (15 kHz default)
-        // instead of reaching true full spectrum. Cheap either way: this
-        // renderer's bin count is small (fftLen/2 = 512) and already runs off the
-        // main thread.
+        // instead of reaching true full spectrum.
+        //
+        // Note this is NOT cheap, which is what the comment here used to claim: it
+        // said the bin count was 512, but `fftLen` is 2048 so it is 1024, and the
+        // full-height image is ~490 000 pixels built one at a time to be displayed
+        // at roughly 350×200 points. The full height is kept deliberately —
+        // pinch-zoom-out reaching true full spectrum is a real feature — but the
+        // cost is twice what the original reasoning assumed, so if this ever needs
+        // to get cheaper, rendering lazily at the zoom level actually in use is
+        // the thing to do, not clipping the range again.
         let renderMin = 1
         let renderMax = bins - 1
         let renderBins = renderMax - renderMin + 1
@@ -226,9 +243,14 @@ enum PulseImageRenderer {
         let wideOutFrames = padLeft + outFrames + padRight
         let wideSrcStart = srcStart - padLeft
 
-        let pixelCount = wideOutFrames * renderBins * 4
-        var pixels = Self.pixelScratch; Self.pixelScratch = []
-        if pixels.count < pixelCount { pixels = [UInt8](repeating: 255, count: pixelCount) }
+        // One malloc handed straight to CoreGraphics, rather than filling a reused
+        // scratch array and then copying the whole thing into a `Data` for the
+        // provider. At ~490 000 pixels that copy was ~2 MB memcpy per captured
+        // pulse, on the capture queue, several times a second during a busy pass —
+        // and the allocation it was avoiding is one malloc. `releaseData` below
+        // hands ownership to the provider, so this is not leaked.
+        let pixelCount = wideOutFrames * renderBins
+        let words = UnsafeMutablePointer<UInt32>.allocate(capacity: pixelCount)
         // 256-entry table built once, O(1) lookup per pixel, instead of the
         // dictionary lookup + linear stop-search `DisplayColormap.rgb` does per
         // call. See `DisplayColormap.makeLUT`'s doc comment for the measurement
@@ -237,36 +259,47 @@ enum PulseImageRenderer {
         // in the app (RecordingSpectrogramRenderer, WavSpectrogramEngine) was
         // converted then; this one was missed, and it is on the hotter path — it
         // runs on every captured pulse, live, while detection continues.
-        let lut = DisplayColormap.makeLUT(palette: palette)
+        // Packed RGBA words rather than a (UInt8, UInt8, UInt8) tuple, so each pixel
+        // is a single 32-bit store instead of four byte stores plus a constant alpha
+        // write. Byte order: the bitmap below is premultipliedLast, i.e. R,G,B,A in
+        // memory order, and this is little-endian, so R must occupy the low byte.
+        let lut = DisplayColormap.makeLUT(palette: palette).map { rgb -> UInt32 in
+            UInt32(rgb.0) | (UInt32(rgb.1) << 8) | (UInt32(rgb.2) << 16) | (0xFF << 24)
+        }
         let lutMax = lut.count - 1
         let lutScale = Float(lutMax)
         lut.withUnsafeBufferPointer { lutBuf in
             for bin in renderMin...renderMax {
                 let yFlipped = renderMax - bin     // row 0 = top = high freq
                 let base = bin * nFrames
+                let rowStart = yFlipped * wideOutFrames
                 for j in 0..<wideOutFrames {
                     let srcFrame = wideSrcStart + j
                     let v: Float = (srcFrame >= 0 && srcFrame < nFrames) ? norm[base + srcFrame] : 0
-                    let (r, g, b) = lutBuf[min(lutMax, max(0, Int(gate(v) * lutScale)))]
-                    let idx = (yFlipped * wideOutFrames + j) * 4
-                    pixels[idx]     = r
-                    pixels[idx + 1] = g
-                    pixels[idx + 2] = b
-                    pixels[idx + 3] = 255
+                    words[rowStart + j] = lutBuf[min(lutMax, max(0, Int(gate(v) * lutScale)))]
                 }
             }
         }
 
-        // Copy only the used prefix into the provider (the reused scratch may be
-        // larger) — STFTGrid.compute already handed its own scratch back
-        // internally; only `pixelScratch` (this file's own buffer) needs it here.
-        let providerData = pixels.withUnsafeBufferPointer {
-            Data(bytes: $0.baseAddress!, count: pixelCount)
+        // Constructed before the `guard` on purpose: once the provider exists it
+        // owns `words` and frees it via `releaseData` (including when the CGImage
+        // below fails and the provider is released unused). If the provider itself
+        // can't be made, nothing has taken ownership yet, so free it here — that is
+        // the one path that would otherwise leak 2 MB per pulse.
+        guard let provider = CGDataProvider(
+            dataInfo: nil,
+            data: words,
+            size: pixelCount * 4,
+            releaseData: { _, data, _ in
+                UnsafeMutableRawPointer(mutating: data)
+                    .assumingMemoryBound(to: UInt32.self).deallocate()
+            })
+        else {
+            words.deallocate()
+            return nil
         }
-        Self.pixelScratch = pixels
 
         guard
-            let provider = CGDataProvider(data: providerData as CFData),
             let cgImage = CGImage(
                 width: wideOutFrames, height: renderBins,
                 bitsPerComponent: 8, bitsPerPixel: 32,

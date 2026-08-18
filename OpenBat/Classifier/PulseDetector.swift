@@ -393,8 +393,9 @@ final class PulseDetector {
         // Second-place species by mean posterior — surfaced as a runner-up suggestion
         // in the species feed. Not meaningful for a NOISE outcome (its meanScores are
         // raw, not the prior-adjusted species pool), so skip it there.
+        // Same deterministic tiebreak as the winner — see `highestScoring`.
         let runnerUp = outcome.species == "NOISE" ? nil
-            : outcome.meanScores.filter { $0.key != outcome.species }.max(by: { $0.value < $1.value })
+            : outcome.meanScores.filter { $0.key != outcome.species }.highestScoring()
 
         // Complex membership: does the classifying model admit that the winning species
         // is one it can't cleanly separate? And is the runner-up a complex-mate running
@@ -433,11 +434,15 @@ final class PulseDetector {
     /// carrying the new session's ID and coordinate. Bumping `captureGeneration`
     /// makes both completions in `scheduleCapture` drop themselves instead.
     ///
-    /// The pending-capture fields are cleared for a second reason: `pendingArmAbs`
-    /// and friends are ABSOLUTE sample indices, and a full engine restart rebases
-    /// that counter — a stale `pendingArmAbs` from the previous run compares
-    /// against the new stream's indices as a wildly negative wait, so the deferred
-    /// capture could neither fire nor be replaced.
+    /// The pending-capture fields are cleared as a defensive measure, not because
+    /// the sample clock moves under them. This comment used to claim an engine
+    /// restart rebases that counter, leaving a stale `pendingArmAbs` comparing
+    /// against the new stream as a wildly negative wait — that is false.
+    /// `SpectrogramProcessor.pcmTotalWritten` is never reset and the processor
+    /// outlives every engine restart (it's `@State` in `ContentView`), so the
+    /// absolute clock is monotonic for the whole process lifetime. Clearing these
+    /// is still right — a pending capture from the previous run belongs to a pass
+    /// that no longer exists — but don't build on the rebasing story.
     func resetStats() {
         captureGeneration &+= 1
         isCapturing = false
@@ -741,7 +746,17 @@ final class PulseDetector {
         }
         let gate = autoIDSettings?.qualityGate ?? .disabled
 
-        let cls = active?.classifier
+        // Species ID only runs at the model's native rate — see
+        // `ModelInputSpec.nativeSampleRate`. Off-rate audio would be read as if it
+        // were 384 kHz and produce a confident species name from a frequency axis
+        // wrong by the rate ratio, so nothing is classified instead. Everything else
+        // about this pulse proceeds normally; leaving `cls` nil falls through the
+        // existing no-result path below, which decrements `pendingClassifications`
+        // and closes the pass as NoID. Tolerance is fractional rather than absolute
+        // because a delivered rate isn't guaranteed integral.
+        let rateIsNative = abs(sr - inputSpec.nativeSampleRate)
+                         <= inputSpec.nativeSampleRate * 0.001
+        let cls = rateIsNative ? active?.classifier : nil
 
         captureQueue.async { [weak self] in
             guard let self else { return }

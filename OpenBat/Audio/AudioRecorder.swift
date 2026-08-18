@@ -85,21 +85,54 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
 
     // MARK: Config
 
+    // These three are bound straight into Settings sliders, i.e. written on the
+    // main thread, and every consumer of them runs on the recorder queue. They
+    // are therefore mirrored into queue-local copies (`…Q`) on write rather than
+    // read across threads — the same discipline `setPassGates`/`setCoordinate`
+    // already follow, and the one the DSP processors get from `ctrlLock`. Reading
+    // an `@Observable` stored property from another thread synchronises nothing:
+    // the registrar is thread-safe, the stored value is not.
+    //
+    // Read `preRollSecondsQ` / `postRollSecondsQ` / `maxSegmentSecondsQ` on the
+    // queue; never these.
+
+    /// Longest pre-roll the Settings slider offers — the ring is sized for this
+    /// so the setting can move without reallocating. Keep in step with
+    /// `SettingsView`'s slider range.
+    static let maxPreRollSeconds = 5.0
+
     /// Pre-trigger buffer kept rolling while idle, so a segment can start with audio
     /// from BEFORE the triggering pulse instead of clipping its onset.
-    var preRollSeconds = 3.0
+    var preRollSeconds = 3.0 {
+        didSet { let v = preRollSeconds; queue.async { [weak self] in self?.preRollSecondsQ = v } }
+    }
     /// How long to keep a segment open after the last detected pulse before closing
     /// it off — i.e. the silence gap that ends one activity "bout". Reset on every
     /// new pulse while the segment is open, so a bat giving several passes with
     /// gaps shorter than this all land in ONE file instead of fragmenting into many.
     /// User-configurable in Settings (the Detecting tab, "Length of a recording").
-    var postRollSeconds = 3.0
-    var maxSegmentSeconds = 600.0   // safety cap so a very long continuous bout can't make one unbounded file
+    var postRollSeconds = 3.0 {
+        didSet { let v = postRollSeconds; queue.async { [weak self] in self?.postRollSecondsQ = v } }
+    }
+    /// Safety cap so a very long continuous bout can't make one unbounded file.
+    var maxSegmentSeconds = 600.0 {
+        didSet { let v = maxSegmentSeconds; queue.async { [weak self] in self?.maxSegmentSecondsQ = v } }
+    }
 
     // MARK: Queue-local state (recorder queue only)
 
     private let queue = DispatchQueue(label: "bat.AudioRecorder", qos: .userInitiated)
+    /// Where a closed segment's whole-file spectrogram render happens. Separate
+    /// from `queue` on purpose — see `closeAndKeep`: `queue` drains the capture
+    /// ring, and a multi-second render there drops live audio. Serial, so a burst
+    /// of short segments renders one at a time rather than spawning a thread each.
+    private let reportQueue = DispatchQueue(label: "bat.AudioRecorder.report", qos: .utility)
     private var sampleRate: Double = 384_000
+    /// Queue-local mirrors of the three Settings-bound timings above. Defaults
+    /// must match theirs — nothing writes them until the user first moves a slider.
+    private var preRollSecondsQ = 3.0
+    private var postRollSecondsQ = 3.0
+    private var maxSegmentSecondsQ = 600.0
     private var armedQ = false
     private var activeQ = false
     private var blockedQ = false
@@ -142,9 +175,48 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
     /// poison the next, and the disk may well have been freed in between.
     private var segmentWriteFailed = false
     private var currentURL: URL?
-    private var preRoll: [Float] = []     // rolling pre-trigger buffer
     private var postRollRemaining = 0     // samples left to write after the pulse ends
     private var writtenSamples = 0        // current segment length, for the safety cap
+
+    // MARK: Pre-roll ring (recorder queue only)
+    //
+    // The rolling pre-trigger buffer is a fixed ring, not an array trimmed from
+    // the front. It used to be `preRoll.append(contentsOf:)` followed by
+    // `preRoll.removeFirst(overflow)` — and removing from the front of an Array
+    // shifts everything behind it. At 384 kHz a 3 s pre-roll is 4.6 MB, shifted
+    // once per capture callback (~188/s), i.e. of the order of 800 MB/s of pure
+    // memmove on a `.userInitiated` queue, running continuously whenever capture
+    // was up — armed or not, since only demo mode gates this path. A ring makes
+    // it two memcpys of the incoming buffer instead, independent of pre-roll
+    // length.
+    //
+    // Kept running while disarmed, deliberately: with the ring the cost is
+    // negligible, and skipping it would mean arming just as a bat passes yields
+    // a recording with a truncated pre-roll — the exact case the pre-roll exists
+    // for.
+    private var preRollRing: UnsafeMutableBufferPointer<Float>?
+    /// Ring length in samples. Grow-only within a capture, so nudging the
+    /// pre-roll slider doesn't reallocate or throw the buffer away on every
+    /// step — shortening the pre-roll just reads fewer of the samples held (see
+    /// `preRollWindow`).
+    private var preRollCapacity = 0
+    private var preRollHead = 0           // next write index
+    private var preRollFilled = 0         // valid samples held (≤ capacity)
+    /// The capture rate the held samples were taken at. A rate change rebuilds
+    /// the ring outright: the old contents are samples at a different rate, and
+    /// splicing them into a segment written at the new rate would put audio of
+    /// the wrong duration — and pitch — at the head of the file. The Array
+    /// version carried them across, and did exactly that.
+    private var preRollRate: Double = 0
+
+    /// How many of the held samples the current `preRollSeconds` actually asks
+    /// for. Read at trigger time rather than enforced on write, so shortening
+    /// the setting takes effect immediately without discarding history that a
+    /// subsequent lengthening would want back.
+    private var preRollWindow: Int {
+        guard preRollRate > 0 else { return 0 }
+        return min(preRollFilled, max(0, Int(preRollSecondsQ * preRollRate)))
+    }
 
     // MARK: Audio thread
 
@@ -177,7 +249,10 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
     /// by the audio thread.
     private var drainScratch: [Float] = []
 
-    deinit { captureRing.deallocate() }
+    deinit {
+        captureRing.deallocate()
+        preRollRing?.deallocate()
+    }
 
     /// Copy samples off the realtime thread and hand them to the recorder queue.
     ///
@@ -193,15 +268,34 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
         let cap = Self.captureRingCapacity
         var w = captureWriteA.load(ordering: .relaxed)
         let r = captureReadA.load(ordering: .acquiring)
-        for i in 0..<n {
-            let next = (w + 1) % cap
-            // Full (the recorder queue is behind) — drop the remainder rather
-            // than overwrite unread audio. At 1.4 s of headroom this means the
-            // queue has stalled for longer than any recording could survive
-            // anyway.
-            if next == r { break }
-            captureRing[w] = ch[i]
-            w = next
+        // Writable slots, keeping one empty so "full" and "empty" stay
+        // distinguishable (w == r means empty). Copying only this many drops the
+        // remainder when the recorder queue is behind — same policy as the
+        // per-sample loop this replaces, which broke out of the copy on full.
+        // At 1.4 s of headroom, being full means the queue has stalled for longer
+        // than any recording could survive anyway.
+        //
+        // Derived from what's USED, not from `(r - w + cap) % cap - 1`. That form
+        // is right for every state except the one that matters most: with the ring
+        // empty (w == r) it evaluates to (cap % cap) - 1 == -1, so nothing was
+        // copied. And empty is the steady state — `drainCapture` always takes
+        // everything available — so the ring accepted nothing, ever. Recording
+        // produced 44-byte header-only WAVs. Caught by
+        // `AudioRecorderPreRollTests`, which is why they exist.
+        let used = (w - r + cap) % cap
+        let writable = cap - 1 - used
+        let toCopy = min(n, max(0, writable))
+        // Block copies rather than a sample-at-a-time loop with a modulo per
+        // sample: this runs on the realtime thread at 384 kHz, i.e. 384 000
+        // iterations a second to move data that memcpy moves in two calls. Same
+        // shape as `drainCapture`'s read side and `SpectrogramProcessor`'s PCM
+        // ring, which already do it this way.
+        var copied = 0
+        while copied < toCopy {
+            let chunk = min(toCopy - copied, cap - w)
+            (captureRing.baseAddress! + w).update(from: ch + copied, count: chunk)
+            w = (w + chunk) % cap
+            copied += chunk
         }
         captureWriteA.store(w, ordering: .releasing)
         queue.async { [weak self] in self?.drainCapture() }
@@ -275,7 +369,7 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
             recentClassificationsQ.append((date, result.rawScores, result.allScores))
             // Nothing older than this can still belong to an open segment (maxSegmentSeconds
             // caps how long one can stay open); keep a little slack past that.
-            let cutoff = Date().addingTimeInterval(-(maxSegmentSeconds + 5))
+            let cutoff = Date().addingTimeInterval(-(maxSegmentSecondsQ + 5))
             recentClassificationsQ.removeAll { $0.date < cutoff }
         }
     }
@@ -304,7 +398,7 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
         queue.async { [weak self] in
             guard let self else { return }
             armedQ = on
-            if !on { closeSegment(); preRoll.removeAll(keepingCapacity: true) }
+            if !on { closeSegment(); clearPreRoll() }
         }
     }
 
@@ -326,9 +420,9 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
             activeQ = active
             if active {
                 if armedQ && handle == nil { startSegment() }
-                postRollRemaining = Int(postRollSeconds * sampleRate)
+                postRollRemaining = Int(postRollSecondsQ * sampleRate)
             } else if handle != nil {
-                postRollRemaining = Int(postRollSeconds * sampleRate)
+                postRollRemaining = Int(postRollSecondsQ * sampleRate)
             }
         }
     }
@@ -351,9 +445,7 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
 
         guard handle != nil else {
             // Idle: keep a rolling pre-roll so a segment can start mid-buffer.
-            let cap = Int(preRollSeconds * sr)
-            preRoll.append(contentsOf: samples)
-            if preRoll.count > cap { preRoll.removeFirst(preRoll.count - cap) }
+            appendPreRoll(samples, sampleRate: sr)
             return
         }
 
@@ -365,10 +457,77 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
             if postRollRemaining <= 0 { closeSegment(); return }
         }
         // Safety cap: rotate to a fresh file if a segment runs very long.
-        if writtenSamples >= Int(maxSegmentSeconds * sampleRate) {
+        if writtenSamples >= Int(maxSegmentSecondsQ * sampleRate) {
             closeSegment()
             if armedQ && activeQ { startSegment() }
         }
+    }
+
+    // MARK: Pre-roll (recorder queue)
+
+    /// Fold one capture buffer into the rolling pre-trigger ring. O(buffer),
+    /// independent of the pre-roll length — see `preRollRing`.
+    private func appendPreRoll(_ samples: UnsafeBufferPointer<Float>, sampleRate sr: Double) {
+        guard sr > 0 else { return }
+        // Allocated for the LONGEST pre-roll the setting can ask for, not the
+        // current one, so moving the slider never reallocates and never empties
+        // the buffer — `preRollWindow` narrows the read instead. Without this,
+        // lengthening the pre-roll would leave the next few seconds' triggers
+        // with a truncated one, which is the opposite of what the user just asked
+        // for. `max` with the current value so a future wider slider still fits.
+        let wanted = max(1, Int(max(preRollSecondsQ, Self.maxPreRollSeconds) * sr))
+        if preRollRing == nil || preRollRate != sr || preRollCapacity < wanted {
+            preRollRing?.deallocate()
+            let ring = UnsafeMutableBufferPointer<Float>.allocate(capacity: wanted)
+            ring.initialize(repeating: 0)
+            preRollRing = ring
+            preRollCapacity = wanted
+            preRollRate = sr
+            preRollHead = 0
+            preRollFilled = 0
+        }
+        guard let ring = preRollRing, let src = samples.baseAddress else { return }
+
+        // A buffer longer than the whole ring can only leave its own tail behind,
+        // so skip straight to the part that survives instead of wrapping over
+        // ourselves. (Can't happen at any real IO buffer size, but the arithmetic
+        // below would be wrong rather than merely wasteful if it did.)
+        let n = samples.count
+        let srcStart = n > preRollCapacity ? n - preRollCapacity : 0
+        let copyCount = n - srcStart
+        guard copyCount > 0 else { return }
+
+        var copied = 0
+        while copied < copyCount {
+            let chunk = min(copyCount - copied, preRollCapacity - preRollHead)
+            (ring.baseAddress! + preRollHead).update(from: src + srcStart + copied, count: chunk)
+            preRollHead = (preRollHead + chunk) % preRollCapacity
+            copied += chunk
+        }
+        preRollFilled = min(preRollFilled + copyCount, preRollCapacity)
+    }
+
+    /// Write everything the pre-roll holds into the open segment, oldest sample
+    /// first, and empty it. Returns how many samples were written.
+    @discardableResult
+    private func writePreRoll() -> Int {
+        guard let ring = preRollRing, preRollCapacity > 0 else { return 0 }
+        let count = preRollWindow
+        guard count > 0 else { clearPreRoll(); return 0 }
+        let start = (preRollHead - count + preRollCapacity) % preRollCapacity
+        let firstChunk = min(count, preRollCapacity - start)
+        write(UnsafeBufferPointer(start: ring.baseAddress! + start, count: firstChunk))
+        if count > firstChunk {
+            write(UnsafeBufferPointer(start: ring.baseAddress!, count: count - firstChunk))
+        }
+        clearPreRoll()
+        return count
+    }
+
+    /// Drop the pre-roll's contents without freeing the ring.
+    private func clearPreRoll() {
+        preRollHead = 0
+        preRollFilled = 0
     }
 
     private func startSegment() {
@@ -378,28 +537,29 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
         FileManager.default.createFile(atPath: url.path, contents: nil)
         guard let h = try? FileHandle(forWritingTo: url) else { return }
         // Write a 44-byte WAV header with placeholder sizes; patched on close.
-        try? h.write(contentsOf: Self.wavHeader(sampleRate: UInt32(sr), dataBytes: 0))
+        // Rounded, not truncated: the GUANO chunk written at close states the rate
+        // as `Int(sr.rounded())`, and a non-integral delivered rate made the file's
+        // two statements of its own sample rate differ by 1 Hz — harmless to this
+        // app, which reads the header, but other tools parse both.
+        try? h.write(contentsOf: Self.wavHeader(sampleRate: UInt32(sr.rounded()), dataBytes: 0))
         handle = h
         dataBytes = 0
         segmentWriteFailed = false
         currentURL = url
         DispatchQueue.main.async { [weak self] in self?.lastWrittenSampleRate = sr }
         writtenSamples = 0
-        postRollRemaining = Int(postRollSeconds * sr)
+        postRollRemaining = Int(postRollSecondsQ * sr)
 
-        if !preRoll.isEmpty {
-            // segmentStartDate must be the timestamp of the file's actual FIRST
-            // sample, not the trigger moment — the pre-roll pushes real audio
-            // earlier than the trigger, and using the trigger time here would
-            // shift the reported start (and ClassificationStore's pulse-matching
-            // window) later than the file's true content.
-            segmentStartDate = triggerDate.addingTimeInterval(-Double(preRoll.count) / sr)
-            preRoll.withUnsafeBufferPointer { write($0) }
-            writtenSamples += preRoll.count
-            preRoll.removeAll(keepingCapacity: true)
-        } else {
-            segmentStartDate = triggerDate
-        }
+        // segmentStartDate must be the timestamp of the file's actual FIRST
+        // sample, not the trigger moment — the pre-roll pushes real audio
+        // earlier than the trigger, and using the trigger time here would
+        // shift the reported start (and ClassificationStore's pulse-matching
+        // window) later than the file's true content.
+        let preRollSamples = preRollWindow
+        segmentStartDate = preRollSamples > 0 && sr > 0
+            ? triggerDate.addingTimeInterval(-Double(preRollSamples) / sr)
+            : triggerDate
+        writtenSamples += writePreRoll()
         DispatchQueue.main.async { [weak self] in self?.isWriting = true }
     }
 
@@ -468,29 +628,45 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
             segmentCount += 1
         }
 
-        // Spectrogram render + report run on THIS (recorder) queue too — real file
-        // IO and FFT work, kept off the audio-thread-adjacent main-thread hop above.
+        // The spectrogram render is a full FFT pass over the whole file, and it
+        // must NOT run on the recorder queue: that queue is also what drains the
+        // capture ring, which holds ~1.4 s. A render of a long segment
+        // (`maxSegmentSeconds` is 600, so up to 230 M samples at 384 kHz) blocks
+        // the drain for longer than the ring can cover, so capture buffers are
+        // dropped — and the segment-rotation path below starts the NEXT file
+        // immediately afterwards, so that file loses its own opening. Both
+        // losses were silent.
+        //
+        // Everything the report needs is queue-local state, so it is read here,
+        // on the recorder queue, and only value types cross to `reportQueue`.
         let docs = CloudStorage.baseDirectory
         let relativePath = String(finalURL.path.dropFirst(docs.path.count + 1))
-        // maxWidth 4096 matches what WavSpectrogramEngine.renderOverview
-        // requests for its fallback (non-cached) render path — keeping this
-        // cached render at the same resolution means the WAV player's reuse
-        // of this cache (see WavSpectrogramEngine.renderOverview) doesn't
-        // trade away overview sharpness to save the render time.
-        let image = RecordingSpectrogramRenderer.render(wavURL: finalURL, maxWidth: 4096)
         let (species, confidence, pulseCount): (String, Float?, Int)
         switch outcome {
         case .species(let code, let conf, let count): (species, confidence, pulseCount) = (code, conf, count)
         case .noID(let count): (species, confidence, pulseCount) = ("NOID", nil, count)
         case .noise: (species, confidence, pulseCount) = ("NOISE", nil, 0)   // unreachable — rejected before this is called
         }
-        let report = RecordingReport(
-            date: segmentStartDate ?? Date(),
-            durationSeconds: sr > 0 ? Double(closedDataBytes / 2) / sr : 0,
-            species: species, confidence: confidence, pulseCount: pulseCount,
-            sessionID: sessionIDQ, coordinate: lastCoordinateQ,
-            relativeWavPath: relativePath, spectrogramImage: image)
-        DispatchQueue.main.async { [weak self] in self?.onRecordingSaved?(report) }
+        let reportDate = segmentStartDate ?? Date()
+        let duration = sr > 0 ? Double(closedDataBytes / 2) / sr : 0
+        let sessionID = sessionIDQ
+        let coordinate = lastCoordinateQ
+
+        reportQueue.async {
+            // maxWidth 4096 matches what WavSpectrogramEngine.renderOverview
+            // requests for its fallback (non-cached) render path — keeping this
+            // cached render at the same resolution means the WAV player's reuse
+            // of this cache (see WavSpectrogramEngine.renderOverview) doesn't
+            // trade away overview sharpness to save the render time.
+            let image = RecordingSpectrogramRenderer.render(wavURL: finalURL, maxWidth: 4096)
+            let report = RecordingReport(
+                date: reportDate,
+                durationSeconds: duration,
+                species: species, confidence: confidence, pulseCount: pulseCount,
+                sessionID: sessionID, coordinate: coordinate,
+                relativeWavPath: relativePath, spectrogramImage: image)
+            DispatchQueue.main.async { [weak self] in self?.onRecordingSaved?(report) }
+        }
     }
 
     // Reused scratch for the vectorised float→Int16 conversion in write().
@@ -499,6 +675,13 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
 
     private func write(_ samples: UnsafeBufferPointer<Float>) {
         guard let handle else { return }
+        // The segment is already condemned (see below) and will be discarded at
+        // close, so there is nothing to gain by converting and re-attempting
+        // every subsequent buffer. Without this, a full disk means ~188 failed
+        // writes a second, each assigning `lastWriteError` — whose didSet hops to
+        // the main thread — for the rest of the post-roll, precisely when the
+        // device is already in trouble.
+        guard !segmentWriteFailed else { return }
         // Float32 [-1,1] → 16-bit PCM via vDSP (clip, scale, truncate). iOS is
         // little-endian, so the Int16 buffer's raw bytes are already WAV byte order.
         let n = samples.count
@@ -658,7 +841,12 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
 
     // MARK: WAV header
 
-    private static func wavHeader(sampleRate: UInt32, dataBytes: UInt32) -> Data {
+    /// The canonical 44-byte header every reader in this app assumes (16-bit mono
+    /// PCM, `data` immediately after a 16-byte `fmt `). Shared with
+    /// `RecordingImporter`, which rewrites imported files into exactly this shape
+    /// — the layout is asserted in four separate readers, so it must be written
+    /// in one place only.
+    static func wavHeader(sampleRate: UInt32, dataBytes: UInt32) -> Data {
         let channels: UInt16 = 1
         let bits: UInt16 = 16
         let byteRate = sampleRate * UInt32(channels) * UInt32(bits / 8)

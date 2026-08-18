@@ -78,6 +78,22 @@ struct ModelInputSpec {
     /// peak falls inside the model's expected band.
     var onsetFraction: Double
 
+    /// The capture rate a model's front-end assumes, and the *only* rate it may be
+    /// handed audio at. Both bundled models bake 384 kHz into everything downstream
+    /// of this window — BatDetect2 resamples `from: 384_000`, and NABat's spectrogram
+    /// derives its FFT length from the rate (`nFFT = 0.001 × 384000`) — so audio
+    /// captured at any other rate is read as if it were 384 kHz and yields a species
+    /// name computed from a frequency axis wrong by the rate ratio.
+    ///
+    /// Rather than resample into a pipeline that was only ever validated at one rate,
+    /// `PulseDetector` declines to classify when the delivered rate doesn't match (a
+    /// wrong ID is worse than none — it's indistinguishable from a right one in the
+    /// Sessions log, and it's eligible for upload). Detection, capture, the pulse
+    /// image and the recording itself are unaffected; only the species name is
+    /// withheld. In practice this is reached only without a 384 kHz mic attached —
+    /// on the built-in mic, or a Griff that iOS has clamped to 48 kHz.
+    var nativeSampleRate: Double = 384_000
+
     static let nabat = ModelInputSpec(windowSeconds: 0.05, onsetFraction: 0.30)
 
     /// 256 ms — matches BatDetect2's own training clip length exactly (see
@@ -133,6 +149,12 @@ struct ModelDescriptor: Identifiable {
     /// makes no such admission.
     let complexes: [SpeciesComplex]
     let defaultGate: QualityGate
+    /// Whether this model's `classify` actually honours the quality gate it is
+    /// handed. BatDetect2 documents that it ignores it — it has no equivalent of
+    /// NABat's per-window SNR/amplitude metrics — so the settings screen hides the
+    /// gate controls for it rather than offering a toggle and two sliders that do
+    /// nothing. Same rule as simplified view: a visible control must do something.
+    var honoursQualityGate: Bool = true
     /// How the detector cuts the PCM window for this model (length + onset placement).
     let input: ModelInputSpec
     /// PassAggregation's NoID cutoff — mean per-pulse top RAW score below this closes
@@ -347,6 +369,9 @@ nonisolated enum ModelRegistry {
                     + "acoustic ID alone."),
         ],
         defaultGate: .disabled,
+        // `BatDetect2Classifier.classify` takes a gate and documents that it
+        // ignores it, so the controls stay hidden for this model.
+        honoursQualityGate: false,
         input: .batdetect2,
         // Starting point, NOT independently verified against a labelled noise/no-call
         // dataset the way NABat's 0.57 was — see PassAggregation.aggregate's doc

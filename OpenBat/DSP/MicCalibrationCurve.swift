@@ -15,6 +15,7 @@
 //  never see this curve, so it can't affect what's saved, classified, or sent.
 //
 
+import Accelerate
 import Foundation
 
 struct MicCalibrationCurve: Codable, Equatable {
@@ -42,9 +43,20 @@ struct MicCalibrationCurve: Codable, Equatable {
     /// case, since `SpectrogramProcessor` and `STFTGrid` share one grid by
     /// design. `magnitudes` must have exactly `binCount` entries.
     func apply(to magnitudes: inout [Float]) {
-        guard magnitudes.count == binCount else { return }
-        for i in 0..<binCount {
-            magnitudes[i] *= gains[i]
+        // `gains.count` is checked as well as `magnitudes.count`: this type is
+        // `Codable` and read back from disk, so a truncated or version-skewed
+        // curve would otherwise index out of range — on the realtime audio
+        // thread, from persisted data.
+        guard magnitudes.count == binCount, gains.count == binCount else { return }
+        // Vectorised: this runs once per FFT column, i.e. ~1500 times a second at
+        // 1024 bins on the realtime audio thread. The scalar loop it replaces was
+        // 1.5 M multiplies a second, next to a `makeColumn` whose every other step
+        // is already vDSP for exactly this reason.
+        magnitudes.withUnsafeMutableBufferPointer { mag in
+            gains.withUnsafeBufferPointer { g in
+                vDSP_vmul(mag.baseAddress!, 1, g.baseAddress!, 1,
+                          mag.baseAddress!, 1, vDSP_Length(binCount))
+            }
         }
     }
 

@@ -22,6 +22,9 @@ private struct MetalSpectrogramView: UIViewRepresentable {
     let isPaused: Bool
     let logFrequency: Bool
     let palette: Palette?
+    /// Render rate. 60 while anything is actually moving; dropped right down when
+    /// capture is stopped and the user isn't scrolling — see `SpectrogramView.isIdle`.
+    let preferredFPS: Int
 
     func makeCoordinator() -> SpectrogramRenderer? {
         SpectrogramRenderer(processor: processor)
@@ -32,7 +35,7 @@ private struct MetalSpectrogramView: UIViewRepresentable {
         view.device = context.coordinator?.device ?? MTLCreateSystemDefaultDevice()
         view.delegate = context.coordinator
         view.colorPixelFormat = .bgra8Unorm
-        view.preferredFramesPerSecond = 60
+        view.preferredFramesPerSecond = preferredFPS
         view.framebufferOnly = true
         view.enableSetNeedsDisplay = false
         view.isPaused = isPaused
@@ -57,6 +60,9 @@ private struct MetalSpectrogramView: UIViewRepresentable {
         // frees the main run loop up for gesture recognition while a sheet/
         // popover is on screen — see SpectrogramView.isPaused.
         if uiView.isPaused != isPaused { uiView.isPaused = isPaused }
+        if uiView.preferredFramesPerSecond != preferredFPS {
+            uiView.preferredFramesPerSecond = preferredFPS
+        }
     }
 }
 
@@ -74,6 +80,13 @@ struct SpectrogramView: View {
     /// draining and pulse-detector feeding) entirely — for use while a sheet
     /// or popover is covering the spectrogram and doesn't need it live.
     var isPaused: Bool = false
+    /// True when capture isn't running, so there is no new audio to draw. The view
+    /// is NOT paused in that case — `enableSetNeedsDisplay` is false, so a paused
+    /// view stops responding to scroll-back too, and scrolling into history after a
+    /// stop is exactly when someone wants it. Instead the render rate drops, which
+    /// keeps the gesture live while ending a full-screen fragment pass 60 times a
+    /// second over a static image. Scrolling restores full rate on its own.
+    var isIdle: Bool = false
     /// Display the frequency axis log-scaled within [bandLow, bandHigh] instead of
     /// linear — a Settings toggle independent of the pulse view's own.
     var logFrequency: Bool = false
@@ -115,7 +128,8 @@ struct SpectrogramView: View {
                                      pulseDetector: pulseDetector,
                                      isPaused: isPaused,
                                      logFrequency: logFrequency,
-                                     palette: palette)
+                                     palette: palette,
+                                     preferredFPS: (isIdle && !isScrolling) ? 10 : 60)
                     .clipShape(RoundedRectangle(cornerRadius: 12))
 
                 gridOverlay

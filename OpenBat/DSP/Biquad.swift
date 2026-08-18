@@ -56,27 +56,10 @@ nonisolated struct Biquad {
         return b
     }
 
-    /// RBJ-cookbook notch (band-stop) coefficients.
-    ///
-    /// Added for a specific, measured artifact: the capture path injects a
-    /// narrowband tone at **inputSampleRate / 4** — 96.0 kHz at 384 kHz, sitting
-    /// +11 dB above the local noise floor in every recording checked, so it's the
-    /// ADC or the USB audio path rather than anything in the environment. It is
-    /// inaudible where it sits, but any mode that divides frequency maps it
-    /// straight into the audible band as a steady whine (12 kHz at ÷8, 6 kHz at
-    /// ÷16). A high Q keeps the notch narrow enough that no real call energy is
-    /// touched.
-    static func notch(center: Double, sampleRate: Double, q: Double = 30) -> Biquad {
-        let w0 = 2 * Double.pi * center / sampleRate
-        let cosw = cos(w0), sinw = sin(w0)
-        let alpha = sinw / (2 * q)
-        let a0 = 1 + alpha
-        var b = Biquad()
-        b.b0 = Float(1 / a0)
-        b.b1 = Float(-2 * cosw / a0)
-        b.b2 = Float(1 / a0)
-        b.a1 = Float(-2 * cosw / a0)
-        b.a2 = Float((1 - alpha) / a0)
-        return b
-    }
+    // A notch (band-stop) section lived here, written for the capture path's
+    // 96 kHz artifact and never wired to anything. Removed 2026-08-18 once the
+    // artifact was measured in absolute terms rather than relative to the noise
+    // floor beside it: it is real and consistent, but ~50 dB below the calls and
+    // inaudible after any frequency division. See Context.md §3. Don't re-derive
+    // this — the "+11 dB" figure that motivated it is true and misleading.
 }

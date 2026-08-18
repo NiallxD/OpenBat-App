@@ -277,6 +277,47 @@ they are genuinely different techniques rather than two settings of one thing:
   permanently behind, so it must select *when* to listen. That's what makes it a
   different thing legally as well as technically — see §5.
 
+### The 96 kHz capture artifact is real and does not matter (2026-08-18)
+
+**Settled — do not re-open this without new measurements.**
+
+The capture path injects a narrowband tone at a quarter of the input sample rate
+(96.0 kHz at 384 kHz). `Biquad.notch` was written for it, never wired to
+anything, and the 2026-08-18 audit flagged that as a defect. It wasn't. The
+filter and the notch section have both been removed.
+
+The original note said the tone sat **+11 dB above the local noise floor in every
+recording checked**, and that reproduces exactly — measured across six real Griff
+captures (the five 2026-08-05 passes plus a 2026-07-29 MYYU), it is +11.2 to
++11.6 dB in four of them. Dead consistent at **−83 dBFS** (−81.7 to −84.2 across
+all six), which confirms it is the ADC or the USB audio path rather than anything
+environmental.
+
+**But "+11 dB above the local noise floor" is a true statement that leads
+straight to the wrong conclusion**, and that is the lesson worth keeping. The
+floor it is 11 dB above is the floor *at 96 kHz*, where there is almost nothing
+to begin with. In absolute terms the tone sits **27–50 dB below the call peaks**
+in the same recordings and 20–30 dB below their overall RMS. Divided into the
+audible band it lands under the noise floor of the playback path, let alone a
+field environment. Niall could not hear it, and the measurement says there is
+nothing to hear — it is a spectrogram artifact, not an audible one.
+
+Two things this also settles:
+
+- **Mic calibration was never the answer either**, though it looks like it should
+  be: every calibration site in the app corrects FFT magnitudes — the live
+  spectrogram, the WAV player's tiles, `CallAnalysis` — and none of it touches
+  the audio sample stream. Calibration fixes the picture, not the sound. Where it
+  does matter is that a curve measured with the artifact present has a dip at
+  96 kHz baked into it, so the tone can be *invisible* on a calibrated
+  spectrogram while still being present in the file.
+- **"Frequency division" in the old notch comment meant the arithmetic, not the
+  detector mode.** OpenBat has no zero-crossing frequency-division mode. Time
+  expansion and snippet replay both divide frequency as a consequence of playing
+  samples out at 48 kHz instead of 384 kHz (÷8), which is what that comment was
+  describing. Don't let the phrase into user-facing text — it names a different
+  technique.
+
 ---
 
 ## 4. Adaptive time expansion: the measurements
@@ -1959,6 +2000,59 @@ under VoiceOver and in UI tests.
   non-commercial) — that constraint is why the app currently has no IAP or
   subscription of any kind.
 
+### The quality gate is hidden for a model that ignores it (2026-08-18)
+
+`BatDetect2Classifier.classify` takes a quality gate and documents that it
+ignores it — it has no equivalent of NABat's per-window SNR/amplitude metrics.
+The settings screen offered the toggle and both sliders anyway, so with
+BatDetect2 active they were controls that did nothing. Now a descriptor declares
+whether its model honours the gate and the section is hidden when it doesn't.
+
+The stored setting is deliberately left untouched rather than forced off: it
+lives in that model's own settings record, and switching to a model that does
+honour the gate has to find it as the user left it. That's the "hidden control
+must be overridden, not written" half of the simplified-view rule.
+
+### Species ID is refused off the native capture rate (2026-08-18)
+
+Found in the 2026-08-18 audit. The classifier protocol had no sample-rate
+parameter, so the one object that knows the true capture rate — the pulse
+detector — had no way to pass it on, and both models simply assumed 384 kHz:
+BatDetect2 resamples `from: 384_000`, and NABat's spectrogram renderer takes its
+384 kHz default because the single call site passes no rate. Meanwhile the
+detector sizes the classification window from the *real* rate. So the two ends
+disagreed: the detector handed over 50 ms of audio measured in real samples, and
+the classifier read it as 50 ms of 384 kHz audio. At 48 kHz that is a frequency
+axis wrong by 8×, and there was no guard and no warning — the app returned a
+confident species name computed from a mis-scaled spectrogram.
+
+**The detector now declines to classify when the delivered rate isn't the
+model's native one** (`ModelInputSpec.nativeSampleRate`, 0.1% tolerance since a
+delivered rate isn't guaranteed integral). Everything else about the pulse
+proceeds normally — detection, the pulse image, the recording, the pass — only
+the species name is withheld, and the pass closes as NoID.
+
+Two things this deliberately is *not*:
+
+- **Not a resample.** Threading the real rate into the models is mechanical, but
+  it produces approximate results from pipelines validated at one rate — and for
+  NABat the window length is itself derived from the rate (`nFFT = 0.001 ×
+  384000`), so it isn't a one-line change either. A wrong species in the
+  Sessions log is worse than none: it is indistinguishable from a right one
+  after the fact, and it is eligible for upload to the community dataset.
+- **Not user-facing.** Niall's call, and the reasoning is that the failure window
+  is narrow rather than that it doesn't matter. The pulse detector already
+  ignores anything under 15 kHz, and an iPhone's built-in mic at 48 kHz has a
+  24 kHz Nyquist — so the band that could trigger at all is a sliver, and mostly
+  noise. Off-rate classification was a real correctness hole but a rarely-reached
+  one, and it isn't worth a message explaining a hardware requirement to someone
+  who hasn't hit it.
+
+Note that `ClassifierSpectrogramEngine`'s `for bin in loBin...hiBin` is a
+`ClosedRange` that traps if `loBin > hiBin`. It stays unreachable *because* of
+this decision — a real low rate would invert it. Anyone who later revisits this
+and threads a rate through instead must guard that range in the same change.
+
 ### Species priors: from live record counts to a bundled range grid (2026-08-16)
 
 Prompted by an acceptance review. The old path asked GBIF, at each new location,
@@ -2110,6 +2204,52 @@ Sessions**, in that order. Niall's call; there were three before.
 
 Both still sit below the fold, least destructive first, and "Delete All
 Sessions" keeps the type-DELETE gate (`DeleteAllSessionsConfirmationView`).
+
+### Imported files are converted, not just copied (2026-08-18)
+
+Found in the 2026-08-18 audit. Four readers — the WAV player's PCM reader, the
+STFT grid, the playback engine and the header parser — each seek straight to
+byte 44 and read 16-bit mono samples. That is true of every file `AudioRecorder`
+writes and of essentially nothing else. The importer meanwhile byte-copied
+whatever the user picked and renamed it `.wav`, validating only that the system
+audio API could open it — which succeeds for stereo files, 24-bit and float PCM,
+extensible `fmt ` chunks, AIFF, m4a, and any WAV carrying a `LIST`/`INFO` chunk
+before `data`, which Audacity, Wildlife Acoustics and Pettersson all commonly
+write.
+
+The result was a noise spectrogram that played as static, with **no error** —
+and precisely for the files the importer exists for: a reference recording,
+something from another detector, a call library download. It never showed up in
+normal use because the app's own recordings are always canonical.
+
+**Imports are now converted into that canonical shape on the way in** rather
+than the four readers being taught to parse a chunk table: one place changes
+instead of four, no stored geometry has to be back-filled onto existing
+recordings, and anything unconvertible fails loudly at import instead of
+silently downstream. Because conversion is real, the picker's AIFF and generic
+`.audio` types are now honest rather than traps.
+
+Three details that are load-bearing:
+
+- **A file already in canonical shape is left byte-for-byte alone.** That is what
+  preserves the trailing `guan` chunk when someone re-imports an OpenBat export,
+  which the importer reads to round-trip species, confidence, pulse count, date
+  and position. Rewriting the samples would silently cost that.
+- **Conversion runs on the background task, not during the copy.** The copy must
+  stay inside the `.fileImporter` completion handler because the sandbox
+  extension is scoped to it; conversion reads a URL in our own container and is
+  slow on a long file, so it sits with `renderOverview`. A file that fails to
+  convert is deleted rather than left in the library to render as noise.
+- **Stereo is downmixed by averaging, and floats are clipped before scaling.**
+  Dropping a channel would throw away half a two-mic recording, and `vDSP_vfix16`
+  wraps rather than saturates, so an out-of-range float sample would have become
+  full-scale noise of the opposite sign.
+
+`WavHeader` now walks the chunk table properly and clamps a declared `data`
+length to what the file actually holds, so a truncated recording can't send a
+reader off the end. `GuanoMetadata` was a fifth site assuming byte 44 — the
+audit missed it — and now asks for the real data offset; it degraded safely
+before (it simply failed to find the chunk), but it was the same latent bug.
 
 ---
 
@@ -2459,6 +2599,74 @@ The app has exactly two `repeatForever` animations (`MicStatusPillContent`'s two
 pill elements, and the record glyph's breathe). A third was tried on
 `RecordingStatusBadge` and deleted rather than contained. Keep it that way:
 adding one is adding a permanent source of this bug.
+
+### The capture ring accepted nothing when empty (2026-08-18)
+
+**The most serious bug this project has had, and it shipped.** Found within
+minutes of writing the recorder's first-ever test.
+
+`AudioRecorder.append` runs on the realtime audio thread and copies into an SPSC
+ring, keeping one slot empty so "full" and "empty" stay distinguishable. It
+computed the writable space as `((r - w + cap) % cap) - 1`. That is correct for
+every state but one: with the ring **empty** (`w == r`) it evaluates to
+`(cap % cap) - 1`, i.e. **−1**, so nothing was copied.
+
+Empty is the steady state. `drainCapture` always takes everything available, so
+the ring returns to `w == r` after every drain — including at startup, before the
+first buffer. The ring therefore accepted no audio, ever. Recording produced
+44-byte header-only WAVs: a file appears, `isWriting` goes true, no error is
+reported anywhere, and there is not one sample in it.
+
+Introduced by the 2026-08-18 audit's E2 — replacing a per-sample copy loop with
+two block copies. The loop it replaced tested fullness per sample and so never
+had this state; the rewrite derived the bound from the wrong end. It was reviewed,
+reasoned about in a comment that described the intent correctly, and built clean.
+
+Now `let used = (w - r + cap) % cap; let writable = cap - 1 - used`.
+
+**The lesson is about coverage, not arithmetic.** This code path had no test.
+Nothing else in the app notices — the spectrogram has its own PCM ring and kept
+working, so the app looked completely healthy while recording silently produced
+empty files. The first `AudioRecorder` test ever written caught it immediately,
+which is the argument for the rest of `AudioRecorderPreRollTests` existing.
+
+### Operation count is not the thing that matters here (2026-08-18)
+
+Closing out the 2026-08-18 audit's efficiency findings produced one result worth
+keeping, because it contradicts the obvious intuition and the audit itself.
+
+**The resampler's "6× too much arithmetic" finding did not survive measurement.**
+`PolyphaseResampler` zero-stuffs, convolves everything, then throws away two
+thirds of the result — five sixths of its multiply-adds are against zeros the
+zero-stuffing just inserted. A true polyphase decomposition (compute only the
+kept outputs, using only the non-zero taps) was written and benchmarked against
+it on the real workload, a 0.256 s window at 384→256 kHz:
+
+| implementation | time per call |
+|---|---|
+| existing (zero-stuff → `vDSP_conv` → decimate) | 0.40 ms |
+| polyphase, per-output `vDSP_dotpr` | 0.62 ms |
+| polyphase, inlined scalar dot product | 1.59 ms |
+| existing + cached reversed filter + single padded buffer | **0.37 ms** |
+
+Both polyphase variants matched to 5e-7, so the maths was right — one long
+`vDSP_conv` simply beats 65 536 short dot products, overheads and all. The
+version kept is the last row: bit-identical output (difference exactly 0.0), two
+fewer allocations, ~8% faster. **Don't rewrite this as a polyphase without
+re-measuring.** The file carries the same warning.
+
+The same audit's other allocation finding went the opposite way and is worth
+contrasting. `PulseImageRenderer` reused a static pixel buffer to avoid a ~2 MB
+allocation per pulse — but reuse meant the finished pixels had to be *copied*
+into a `Data` for `CGDataProvider`, so it traded an allocation for a memcpy of
+the same size. Allocating per pulse and handing the buffer to the provider
+outright (with a `releaseData` callback) removes the copy. Pixels are also packed
+as `UInt32` words now rather than four byte stores.
+
+The general lesson, since this project keeps meeting it: on the capture queue,
+**measure before restructuring**. Accelerate's vectorised kernels and the memory
+traffic around them dominate; the arithmetic count on its own predicted the wrong
+answer twice here.
 
 ---
 

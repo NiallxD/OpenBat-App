@@ -21,7 +21,12 @@
 
 import Foundation
 
-enum BatDetect2SpectrogramRenderer {
+/// `nonisolated`: same reasoning as `Biquad`/`AudioLevel`/`STFTGrid` — stateless
+/// DSP called only from `PulseDetector`'s capture queue, never the main actor, but
+/// it carried no isolation annotation and so inherited
+/// `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`. The single-caller, single-queue
+/// invariant its scratch state relies on is now stated rather than assumed.
+nonisolated enum BatDetect2SpectrogramRenderer {
 
     // 256 kHz target, 2 ms window, 75% overlap — confirmed against the checkpoint's
     // stored preprocess config. PCM handed in must already be at this rate (resample

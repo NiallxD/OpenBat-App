@@ -88,7 +88,7 @@ nonisolated enum PassAggregation {
         // Winning class by raw evidence, aggregated across the pass's pulses.
         var rawSum: [String: Float] = [:]
         for p in pulses { for (k, v) in p.rawScores { rawSum[k, default: 0] += v } }
-        guard let rawBest = rawSum.max(by: { $0.value < $1.value }) else { return nil }
+        guard let rawBest = rawSum.highestScoring() else { return nil }
 
         if let noiseClassName, rawBest.key == noiseClassName {
             return Outcome(species: noiseClassName,
@@ -103,11 +103,32 @@ nonisolated enum PassAggregation {
         for p in pulses { for (k, v) in p.adjustedScores { adjSum[k, default: 0] += v } }
         let candidates = adjSum.filter { $0.key != noiseClassName }
         let pool = candidates.isEmpty ? adjSum : candidates
-        guard let best = pool.max(by: { $0.value < $1.value }) else { return nil }
+        guard let best = pool.highestScoring() else { return nil }
 
         let meanConf = best.value / n
         guard pulses.count >= minPulseCount, meanConf >= minAdjustedConfidence else { return nil }
 
         return Outcome(species: best.key, confidence: meanConf, meanScores: adjSum.mapValues { $0 / n })
+    }
+}
+
+/// Highest-scoring entry, with ties broken by species code.
+///
+/// `Dictionary.max(by:)` walks the dictionary in hash order, and Swift seeds its
+/// hashing per process — so an exact tie between two species resolved differently
+/// between launches, and the same recording could re-classify differently on a
+/// re-run. Vanishingly rare with float scores, but a log people compare across
+/// sessions shouldn't have that property at all. The code is an arbitrary but
+/// stable tiebreak; what matters is that it is the same every time.
+extension Dictionary where Key == String, Value == Float {
+    func highestScoring() -> (key: String, value: Float)? {
+        var best: (key: String, value: Float)?
+        for (k, v) in self {
+            guard let current = best else { best = (k, v); continue }
+            if v > current.value || (v == current.value && k < current.key) {
+                best = (k, v)
+            }
+        }
+        return best
     }
 }
