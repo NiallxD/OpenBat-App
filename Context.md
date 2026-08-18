@@ -1960,6 +1960,33 @@ for a progress number on one known file). It returns nil rather than 0 when
 iCloud reports no figure, and the UI shows indeterminate progress for nil — a
 transfer stuck at "0%" reads as broken.
 
+### The bulk deletes are two, on purpose (2026-08-17)
+
+Settings ▸ Storage offers exactly **Delete NoID Recordings** and **Delete All
+Sessions**, in that order. Niall's call; there were three before.
+
+- **"Delete Low-Confidence Recordings" is gone.** It destroyed everything under
+  a 57% threshold that was hardcoded, invisible and unrelated to the 75% upload
+  bar it sat next to. A number that decides what gets destroyed cannot be one
+  the user can neither see nor change, and the fix is not to expose it — junk
+  pruning is what NoID already does, and anything finer is a per-recording
+  judgement, where the swipe already is.
+- **"Delete All Recordings" became "Delete All Sessions".** The old one left
+  sessions and the pass log standing, so a user who wanted their history gone
+  cleared the WAVs and still saw every outing listed. Nothing in Settings could
+  clear session history at all.
+- **What "all sessions" does not include:** the "Not in a session" bucket —
+  imported WAVs and anything recorded before every outing became a session. A
+  bulk delete named for sessions must not take things that were never in one.
+  Those rows swipe-delete in Sessions, and the footer says so.
+- `deleteAllSessions()` loops `deleteSession` rather than clearing the arrays
+  itself. That is the method that also removes pulse images and WAVs from disk;
+  a wholesale clear is exactly the orphaning hazard §15's `clearAll()` entry
+  warns about.
+
+Both still sit below the fold, least destructive first, and "Delete All
+Sessions" keeps the type-DELETE gate (`DeleteAllSessionsConfirmationView`).
+
 ---
 
 ## 11. Privacy, consent and upload
@@ -2551,8 +2578,11 @@ cleanup:
   WAV player are gesture-driven; nothing referenced the type.
 - **`ClassificationStore.clearAll()`** — **deleted.** `deleteAllRecordings()`
   and `clearListening()` cover the two flows the UI actually offers; nothing
-  wiped both. Its doc comment recorded a hazard worth keeping, so it is
-  restated here: **`imagesDir` is shared between `passes` and `recordings`.**
+  wiped both. (`deleteAllRecordings()` has since gone too — see the bulk-delete
+  entry in §10. `clearListening()` now has no caller either, and is kept only as
+  the worked example the paragraph below points at.) Its doc comment recorded a
+  hazard worth keeping, so it is restated here: **`imagesDir` is shared between
+  `passes` and `recordings`.**
   A wipe that clears one collection while removing that directory orphans the
   other's thumbnails, leaving a broken thumbnail plus a stranded WAV and JSON
   entry. `clearListening()` shows the correct "recordings own their WAVs"

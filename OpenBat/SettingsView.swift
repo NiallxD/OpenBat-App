@@ -130,8 +130,8 @@ struct SettingsView: View {
         } message: {
             Text("Your existing recordings are moved the next time OpenBat starts. Until then they stay where they are — nothing is lost either way.")
         }
-        .sheet(isPresented: $showDeleteAllConfirmation) {
-            DeleteAllRecordingsConfirmationView(classStore: classStore) { }
+        .sheet(isPresented: $showDeleteAllSessionsConfirmation) {
+            DeleteAllSessionsConfirmationView(classStore: classStore) { }
         }
         .confirmationDialog("Delete every NoID recording?",
                             isPresented: $showDeleteNoIDConfirm, titleVisibility: .visible) {
@@ -140,24 +140,9 @@ struct SettingsView: View {
         } message: {
             Text("This can't be undone.")
         }
-        .confirmationDialog("Delete every recording under \(Int(Self.lowConfidenceDeleteThreshold * 100))% confidence?",
-                            isPresented: $showDeleteLowConfidenceConfirm, titleVisibility: .visible) {
-            Button("Delete", role: .destructive) {
-                classStore.deleteRecordings(belowConfidence: Self.lowConfidenceDeleteThreshold)
-            }
-            Button("Cancel", role: .cancel) { }
-        } message: {
-            Text("This can't be undone.")
-        }
     }
 
     // MARK: Storage sections
-
-    /// Below this, a real species ID counts as "low confidence" for the bulk
-    /// delete below — separate from RecordingUploader.minUploadConfidence (75%,
-    /// what's eligible to UPLOAD); this is a much looser bar for pruning
-    /// obvious junk locally, not for deciding what to contribute.
-    private static let lowConfidenceDeleteThreshold: Float = 0.57
 
     /// Changing this doesn't move anything immediately — the migration runs at
     /// next launch (see `CloudStorage.applyPendingStorageMigration`), so the
@@ -165,9 +150,8 @@ struct SettingsView: View {
     @AppStorage(CloudStorage.keepInICloudKey) private var keepInICloud = true
     @State private var showRestartNeeded = false
 
-    @State private var showDeleteAllConfirmation = false
+    @State private var showDeleteAllSessionsConfirmation = false
     @State private var showDeleteNoIDConfirm = false
-    @State private var showDeleteLowConfidenceConfirm = false
 
     @ViewBuilder
     private var storageSections: some View {
@@ -211,28 +195,28 @@ struct SettingsView: View {
                 }
             }
 
-            Section {
-                Button("Delete All Recordings", role: .destructive) {
-                    showDeleteAllConfirmation = true
-                }
-            } footer: {
-                Text("Permanently deletes every recording (and its WAV file) on this device. Session and pulse-ID history is unaffected.")
-            }
-
+            // Two bulk deletes, and deliberately only two (Niall's call,
+            // 2026-08-17). A "low confidence" prune sat between them, keyed to a
+            // 57% threshold nobody could see or change — a number that decides
+            // what gets destroyed has no business being invisible. Pruning junk
+            // is what NoID is for; anything finer is a judgement call that
+            // belongs on the individual recording, where the swipe already is.
+            //
+            // Ordered least destructive first, per this tab's rule.
             Section {
                 Button("Delete NoID Recordings", role: .destructive) {
                     showDeleteNoIDConfirm = true
                 }
             } footer: {
-                Text("Deletes every recording that couldn't be classified (NoID) — usually just noise triggers.")
+                Text("Deletes every recording that couldn't be classified (NoID) — usually just noise triggers. Sessions and species IDs are unaffected.")
             }
 
             Section {
-                Button("Delete Low-Confidence Recordings", role: .destructive) {
-                    showDeleteLowConfidenceConfirm = true
+                Button("Delete All Sessions", role: .destructive) {
+                    showDeleteAllSessionsConfirmation = true
                 }
             } footer: {
-                Text("Deletes every recording with a species-ID confidence under \(Int(Self.lowConfidenceDeleteThreshold * 100))%. Doesn't include NoID recordings — use the option above for those.")
+                Text("Permanently deletes every session on this device, with the species IDs and recordings each one holds. Anything under \"Not in a session\" is kept — delete those individually in Sessions.")
             }
         }
     }

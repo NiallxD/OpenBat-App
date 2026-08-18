@@ -579,25 +579,28 @@ final class ClassificationStore {
         delete(listeningRecordings)   // removes WAVs too
     }
 
-    /// Deletes every Recording (and its WAV + thumbnail) — NOT `passes`, the
-    /// separate lighter-weight per-pulse ID log entries sessions/species-feed
-    /// are built from, which survive. Settings ▸ Recordings' "Delete All"; the
-    /// disk-heavy WAVs are the actual storage problem being solved there.
-    func deleteAllRecordings() {
-        delete(recordings)
-    }
-
-    /// Settings ▸ Recordings' "Delete NoID" — triggered, but never classified
-    /// confidently enough to call a species (usually just noise).
+    /// Settings ▸ Storage's "Delete NoID Recordings" — triggered, but never
+    /// classified confidently enough to call a species (usually just noise).
+    /// Leaves the pass log alone; only the disk-heavy WAVs go.
     func deleteNoIDRecordings() {
         delete(recordings.filter(\.isNoID))
     }
 
-    /// Settings ▸ Recordings' "Delete Low-Confidence" — a real species ID, just
-    /// under `threshold`. Excludes NoID (nil confidence): that's its own
-    /// separate action above, not folded into "low confidence".
-    func deleteRecordings(belowConfidence threshold: Float) {
-        delete(recordings.filter { !$0.isNoID && ($0.confidence ?? 0) < threshold })
+    /// Settings ▸ Storage's "Delete All Sessions" — every session and
+    /// everything it owns: its passes, its recordings, and their WAVs and
+    /// thumbnails.
+    ///
+    /// The "Not in a session" bucket is deliberately untouched — imported WAVs
+    /// and anything recorded before every outing became a session were never in
+    /// one, and a bulk delete named for sessions must not quietly take them.
+    /// Those rows are swipe-deletable in Sessions.
+    ///
+    /// Routed through `deleteSession` per session rather than clearing the
+    /// arrays wholesale: that is the method that also removes the pulse images
+    /// and the WAVs off disk, and duplicating it here is how those get orphaned.
+    /// `sessions` is a value type, so mutating it inside the loop is safe.
+    func deleteAllSessions() {
+        for session in sessions { deleteSession(session) }
     }
 
     // MARK: Image loading
