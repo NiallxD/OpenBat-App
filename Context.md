@@ -12,9 +12,8 @@ upload path, or the Live Activity. Most of what's here was expensive to learn.
 - **"How OpenBat Works"** — the long plain-language explanation of every system,
   for learning the codebase. Lives in Obsidian (`Niall's Vault v2/002 - Notes/
   OpenBat Documentation.md`), *not* in this repo. It was once called
-  `HOW_IT_WORKS.md`. Because it sits outside version control it drifts silently —
-  see the propagation checklist in `CLAUDE.md` for what to update when the app
-  changes.
+  `HOW_IT_WORKS.md`. Because it sits outside version control it drifts silently
+  when the app changes.
 - `TimeExpansionTuning/FINDINGS.md` — the raw measurement corpus behind §4.
   Lives outside the repo, alongside it, so a clone won't have it.
 
@@ -192,8 +191,8 @@ playback is untouched.
 working-tree copy never removed VTD from git history, and branch `v1` — which
 carried the source from commit `c035295` — had been pushed, so the code was
 publicly readable in this source-available repo the entire time it was supposed
-to be withdrawn. Both `CLAUDE.md` and the quarantine README asserted `v1` "has
-never been pushed"; neither was checked against the remote. `v1` has since been
+to be withdrawn. The quarantine README asserted `v1` "has never been pushed";
+that was never checked against the remote. `v1` has since been
 rewritten to drop the file from all 8 commits carrying it and force-pushed, and
 the pre-rewrite history is preserved on the local-only branch
 `archive/v1-with-vtd`. GitHub may still serve the old commits by SHA, and any
@@ -1322,8 +1321,7 @@ explaining the app's internals in the app's smallest type.
   sheet while the popover it was tapped in is still dismissing gets silently
   dropped by SwiftUI, and the link read as completely dead. Same failure and same
   fix as the import-error alert being swallowed by the file importer's own
-  dismissal (`SessionsView.reportImport`) — that is twice now, hence the rule in
-  `CLAUDE.md`.
+  dismissal (`SessionsView.reportImport`) — that is twice now.
 - **The search field is a Liquid Glass capsule floating over the globe**, not a
   bare `TextField` in a black strip above it. The strip was pushing the globe down
   the screen for nothing. A `.onTapGesture` hands the whole capsule to the field:
