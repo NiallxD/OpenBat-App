@@ -98,7 +98,15 @@ struct SettingsView: View {
     private var generalTab: some View {
         Form {
             Section {
-                Toggle("Simplified view", isOn: $simplifiedMode)
+                // Labelled and bound as "Advanced mode", inverted from
+                // `simplifiedMode` itself: simplified is the app's default, so
+                // off is the state the toggle rests in until someone opts into
+                // more. `simplifiedMode` elsewhere in the codebase keeps its own
+                // polarity — only this control's presentation is flipped.
+                Toggle("Advanced mode", isOn: Binding(
+                    get: { !simplifiedMode },
+                    set: { simplifiedMode = !$0 }
+                ))
             } header: {
                 Text("Interface")
             } footer: {

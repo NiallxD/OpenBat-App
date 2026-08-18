@@ -178,7 +178,14 @@ struct AboutAppTour: View {
                 // what makes "you can change this later" a findable promise
                 // rather than a vague one.
                 VStack(spacing: 14) {
-                    Toggle("Simplified view", isOn: $simplifiedMode)
+                    // Same invert as the Settings toggle this mirrors — off is
+                    // the default (simplified), on opts into everything. See
+                    // that toggle's comment in SettingsView for why the
+                    // presentation is flipped from `simplifiedMode` itself.
+                    Toggle("Advanced mode", isOn: Binding(
+                        get: { !simplifiedMode },
+                        set: { simplifiedMode = !$0 }
+                    ))
                         .font(.headline)
                         .padding(.horizontal, 16)
                         .padding(.vertical, 12)
