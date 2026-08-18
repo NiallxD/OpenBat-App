@@ -21,6 +21,12 @@ import MapKit
 enum SpeciesGuideDestination: Hashable {
     case region(GuideRegion)
     case species(GuideSpecies)
+    /// Species whose range covers the user's location — see
+    /// `SpeciesExplorerView.nearbySpecies` and the globe pill. Carries no
+    /// payload: the destination handler resolves the list itself from
+    /// `presenceStore` + `userCoordinate` at push time, same as the pill
+    /// that offers it.
+    case nearby
 }
 
 struct SpeciesExplorerView: View {
@@ -80,6 +86,27 @@ struct SpeciesExplorerView: View {
         ))
     }
 
+    /// Species whose range covers `userCoordinate` — what the globe pill
+    /// offers ("Tap here to see bats near you") and what `.nearby` pushes.
+    /// Empty with no location fix yet (`userCoordinate` is nil until then;
+    /// see that property's doc comment) or if nothing in the guide has a
+    /// resolvable presence-grid code for this spot — either way the pill
+    /// falls back to its generic wording rather than offering a dead tap.
+    ///
+    /// Joined the same way `GBIFDistributionCard` does, via
+    /// `GuideSpecies.presenceCode` — a contributor-assigned code first, then
+    /// a fallback lookup against whichever classifier names the species —
+    /// since the grid is keyed by code and the guide only knows scientific
+    /// names (see that property's own doc comment).
+    private var nearbySpecies: [GuideSpecies] {
+        guard let coordinate = userCoordinate else { return [] }
+        return store.guide.species.filter { species in
+            guard let code = species.presenceCode else { return false }
+            if case .present = presenceStore.presence(forCode: code, at: coordinate) { return true }
+            return false
+        }
+    }
+
     private var results: [GuideSpecies] {
         let trimmed = query.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return [] }
@@ -131,9 +158,21 @@ struct SpeciesExplorerView: View {
         .navigationDestination(for: SpeciesGuideDestination.self) { destination in
             switch destination {
             case .region(let region):
-                RegionSpeciesView(region: region, store: store)
+                RegionSpeciesView(
+                    title: region.name,
+                    species: store.guide.species(in: region),
+                    countSuffix: "in region",
+                    emptyStateDescription: Text("This region has no entries in the guide yet! As a community-sourced guide, contributions are always welcome — [get started here](\(fieldGuideRepoURL)).")
+                )
             case .species(let species):
                 SpeciesDetailView(species: species, store: store, presenceStore: presenceStore)
+            case .nearby:
+                RegionSpeciesView(
+                    title: "Bats Near You",
+                    species: nearbySpecies,
+                    countSuffix: "near you",
+                    emptyStateDescription: Text("We don't have range data covering your exact location yet — try exploring a region on the globe instead, or [contribute range data here](\(fieldGuideRepoURL)).")
+                )
             }
         }
         // Flat black bar. Matters most here: the globe's bright satellite imagery
@@ -451,13 +490,33 @@ struct SpeciesExplorerView: View {
     ///
     /// Positioned against the safe area rather than the ignored bottom edge, so it
     /// sits above the tab bar instead of under it.
+    ///
+    /// Tappable and dynamic since 2026-08-17: when `nearbySpecies` has
+    /// anything in it, this offers that list directly ("Tap here to see bats
+    /// near you") instead of the generic instruction, since a resolved
+    /// answer is more useful than a hint to go find one on the globe. Falls
+    /// back to the original wording — plain text, not a link — whenever
+    /// there's no fix yet or nothing resolves nearby, so nothing here is ever
+    /// a tap that goes nowhere.
+    @ViewBuilder
     private var globeFooter: some View {
-        Text("Tap a region to explore its species")
-            .font(.footnote)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
-            .liquidGlass(in: Capsule())
+        if !nearbySpecies.isEmpty {
+            NavigationLink(value: SpeciesGuideDestination.nearby) {
+                Text("Tap here to see bats near you")
+                    .font(.footnote)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .liquidGlass(in: Capsule())
+            }
             .padding(.bottom, 12)
+        } else {
+            Text("Tap a region to explore its species")
+                .font(.footnote)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .liquidGlass(in: Capsule())
+                .padding(.bottom, 12)
+        }
     }
 
     private var sourcesSheet: some View {
@@ -588,11 +647,12 @@ enum IUCNStatusStyle {
     }
 }
 
-/// Species row thumbnail — tries a real photo from Wikipedia's open media
-/// first (same fetch pattern the Birding_Data companion app uses for its
-/// species detail pages, see WikipediaSpeciesImageService), falling back to a
+/// Species row thumbnail — the guide entry's own `imageURL` when a
+/// contributor has set one, else a live fallback lookup against Wikipedia's
+/// open media (same fetch pattern the Birding_Data companion app uses for its
+/// species detail pages, see WikipediaSpeciesImageService). Falls back to a
 /// themed silhouette icon (tinted per-family) while loading, on a species
-/// with no usable Wikipedia photo, or if the request fails.
+/// with neither, or if the Wikipedia request fails.
 private struct GuideSpeciesThumbnail: View {
     let species: GuideSpecies
     static let size: CGFloat = 50
@@ -624,7 +684,14 @@ private struct GuideSpeciesThumbnail: View {
         .frame(width: Self.size, height: Self.size)
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .task(id: species.scientificName) {
-            imageURL = await WikipediaSpeciesImageService.fetchImageURL(for: species.scientificName)
+            // Contributor-set URL first — see its doc comment on `GuideSpecies`
+            // for why that's preferred over the live Wikipedia lookup below,
+            // which stays only as a fallback for entries that haven't set one.
+            if let urlString = species.imageURL, let url = URL(string: urlString) {
+                imageURL = url
+            } else {
+                imageURL = await WikipediaSpeciesImageService.fetchImageURL(for: species.scientificName)
+            }
         }
     }
 
@@ -686,25 +753,41 @@ struct GuideSpeciesRow: View {
     }
 }
 
-// MARK: - Region page
+// MARK: - Region / nearby page
 
+/// Repo the community-editable guide JSON (SpeciesGuideData.json) lives in —
+/// same repo `SpeciesGuideStore.remoteURL` fetches from. File-scope rather
+/// than nested in `RegionSpeciesView` since both its `.region` and `.nearby`
+/// empty-state messages, built at the call sites below, point contributors
+/// there.
+private let fieldGuideRepoURL = "https://github.com/NiallxD/OpenBat-FieldGuide"
+
+/// A species list grouped by family — the region page and, since
+/// 2026-08-17, the "bats near you" page (see `SpeciesExplorerView.nearbySpecies`
+/// and the globe pill). Both are "here is a set of species, browse it" pages
+/// that differ only in how the set was chosen and what to say about an empty
+/// one, so this takes the resolved `species` list directly rather than a
+/// `GuideRegion` — the near-you set isn't a region at all, just a coordinate
+/// matched against the presence grid.
 struct RegionSpeciesView: View {
-    let region: GuideRegion
-    let store: SpeciesGuideStore
+    let title: String
+    let species: [GuideSpecies]
+    /// "in region" / "near you" — filled into "Species \(countSuffix): N"
+    /// above the list.
+    let countSuffix: String
+    /// Shown only when `species` is empty; differs between the two callers
+    /// (a region with no guide entries yet vs no presence data covering this
+    /// exact spot), so it's supplied rather than owned here.
+    let emptyStateDescription: Text
 
     private static let unclassified = "Other"
-    /// Repo the community-editable guide JSON (SpeciesGuideData.json) lives
-    /// in — same repo `SpeciesGuideStore.remoteURL` fetches from.
-    private static let repoURL = "https://github.com/NiallxD/OpenBat-FieldGuide"
 
-    /// Species in this region grouped by family — a lightweight stand-in for
-    /// the full taxonomy browser planned later (see Context.md §16);
-    /// this just gives the region list some taxonomic structure today.
-    /// Families sort alphabetically; species lacking a `family` land in an
-    /// "Other" group pinned last.
+    /// Species grouped by family — a lightweight stand-in for the full
+    /// taxonomy browser planned later (see Context.md §16); this just gives
+    /// the list some taxonomic structure today. Families sort alphabetically;
+    /// species lacking a `family` land in an "Other" group pinned last.
     private var families: [(name: String, species: [GuideSpecies])] {
-        let present = store.guide.species(in: region)
-        let grouped = Dictionary(grouping: present) { $0.family ?? Self.unclassified }
+        let grouped = Dictionary(grouping: species) { $0.family ?? Self.unclassified }
         return grouped.keys.sorted { lhs, rhs in
             if lhs == Self.unclassified { return false }
             if rhs == Self.unclassified { return true }
@@ -713,10 +796,9 @@ struct RegionSpeciesView: View {
     }
 
     var body: some View {
-        let present = store.guide.species(in: region)
         VStack(spacing: 0) {
-            if !present.isEmpty {
-                Text("Species in region: \(present.count)")
+            if !species.isEmpty {
+                Text("Species \(countSuffix): \(species.count)")
                     .font(.headline)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -725,10 +807,10 @@ struct RegionSpeciesView: View {
                     .padding(.bottom, 4)
             }
             List {
-                if present.isEmpty {
+                if species.isEmpty {
                     ContentUnavailableView("No species yet",
                                            systemImage: "book.closed",
-                                           description: Text("This region has no entries in the guide yet! As a community-sourced guide, contributions are always welcome — [get started here](\(Self.repoURL))."))
+                                           description: emptyStateDescription)
                 } else {
                     ForEach(families, id: \.name) { family in
                         Section(family.name) {
@@ -742,7 +824,7 @@ struct RegionSpeciesView: View {
                 }
             }
         }
-        .navigationTitle(region.name)
+        .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
     }
 }

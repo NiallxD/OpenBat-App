@@ -46,6 +46,16 @@ struct OnboardingView: View {
         case welcome, permissions, autoID
     }
 
+    /// iPad only (an iPhone always reports `.compact` here — landscape is
+    /// disabled on iPhone, and portrait is compact on every iPhone size). See
+    /// `body`: full-width edge-to-edge suits a phone screen, where the column
+    /// is already close to the screen's own width, but on an iPad stretching
+    /// the same layout across a much wider screen leaves the two side
+    /// permission/caveat cards absurdly long single lines. A centred, capped
+    /// card reads as a deliberate screen at any width instead.
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    private var isCenteredCard: Bool { horizontalSizeClass == .regular }
+
     @State private var step: Step = .welcome
     @State private var showPrivacyDetail = false
     // True while a permission request is in flight (soft-ask screen showing,
@@ -85,6 +95,39 @@ struct OnboardingView: View {
     // bottom bar next to the primary action, which keeps the top of the screen
     // fixed for the whole flow.
     var body: some View {
+        ZStack {
+            // The backdrop behind the card on iPad. Without a colour distinct
+            // from the card's own background here, "centred" would just mean
+            // "surrounded by empty margins of the same colour" — there'd be
+            // nothing for the eye to register as a card's edge.
+            if isCenteredCard {
+                Color(.systemGroupedBackground).ignoresSafeArea()
+            }
+            flowContent
+                .frame(maxWidth: isCenteredCard ? 480 : .infinity)
+                .background(Color(.systemBackground))
+                .clipShape(RoundedRectangle(cornerRadius: isCenteredCard ? 28 : 0, style: .continuous))
+                .shadow(color: .black.opacity(isCenteredCard ? 0.15 : 0), radius: 24, y: 8)
+                // Capped, not just centred: on an iPad screen this flow's own
+                // content (floored at 400pt by the ScrollView below) rarely
+                // needs anywhere near full height, and without a cap the card
+                // would still stretch top-to-bottom looking for a reason to.
+                .frame(maxHeight: isCenteredCard ? 780 : .infinity)
+                .padding(.vertical, isCenteredCard ? 40 : 0)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(isCenteredCard ? Color(.systemGroupedBackground) : Color(.systemBackground))
+        .sheet(isPresented: $showPrivacyDetail) { SafariView(url: PrivacyLinks.policyURL) }
+        // A light tap on each step change — the flow is a sequence of discrete
+        // moves, and the feedback makes it feel like one.
+        .sensoryFeedback(.selection, trigger: step)
+        .interactiveDismissDisabled()
+    }
+
+    /// The flow itself — progress bar, scrolling step content, pinned footer
+    /// and controls — unchanged by `isCenteredCard`. Only how `body` frames
+    /// and backgrounds this differs between iPhone and iPad.
+    private var flowContent: some View {
         VStack(spacing: 0) {
             OnboardingProgressBar(completed: step.rawValue, total: Step.allCases.count)
                 .padding(.horizontal, 24)
@@ -141,12 +184,6 @@ struct OnboardingView: View {
                 .padding(.top, 8)
                 .padding(.bottom, 16)
         }
-        .background(Color(.systemBackground))
-        .sheet(isPresented: $showPrivacyDetail) { SafariView(url: PrivacyLinks.policyURL) }
-        // A light tap on each step change — the flow is a sequence of discrete
-        // moves, and the feedback makes it feel like one.
-        .sensoryFeedback(.selection, trigger: step)
-        .interactiveDismissDisabled()
     }
 
     /// Forward pushes in from the trailing edge, Back from the leading edge.

@@ -19,8 +19,10 @@ struct SpeciesDetailView: View {
     let presenceStore: SpeciesPresenceStore
 
     @State private var showContributors = false
-    @State private var photo: WikipediaSpeciesImageService.Photo?
+    @State private var photo: SpeciesPhoto?
     @State private var showConservationInfoPopover = false
+    /// Measured width of the quick-facts row — see `leftQuickFactsColumnWidth`.
+    @State private var quickFactsRowWidth: CGFloat = 0
 
     var body: some View {
         cardLayoutBody
@@ -30,7 +32,7 @@ struct SpeciesDetailView: View {
                 ContributorsSheet(species: species)
             }
             .task(id: species.scientificName) {
-                photo = await WikipediaSpeciesImageService.fetchPhoto(for: species.scientificName)
+                photo = await SpeciesPhoto.resolve(for: species)
             }
     }
 
@@ -52,11 +54,22 @@ struct SpeciesDetailView: View {
                 }
                 VStack(alignment: .leading, spacing: 20) {
                     cardHeaderSection
+                    if let summary = species.summary {
+                        GuideCard(title: "Overview") {
+                            Text(summary).font(.subheadline)
+                        }
+                    }
                     if hasQuickFactsRow {
-                        // An even 50/50 split needs no GeometryReader/pixel
-                        // math — two children that both say `maxWidth:
-                        // .infinity` in an HStack divide the available width
-                        // evenly by construction.
+                        // A third-width left column, two-thirds right — unlike
+                        // an even 50/50 split, that ratio isn't something an
+                        // HStack of `maxWidth: .infinity` children falls into
+                        // by construction, so the left column's width is
+                        // measured off the row itself (`.onGeometryChange`,
+                        // read-only — doesn't affect the row's own sizing) and
+                        // applied as an explicit fraction. Nil until the first
+                        // measurement lands, so the very first layout pass
+                        // uses natural sizing instead of collapsing to zero
+                        // width for one frame.
                         //
                         // Both columns are `maxHeight: .infinity`, and the
                         // second row of each (the sub-stat stack on the left,
@@ -79,11 +92,16 @@ struct SpeciesDetailView: View {
                                 }
                                 ForEach(subQuickFacts) { CompactQuickFactTile(fact: $0) }
                             }
-                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                            .frame(width: leftQuickFactsColumnWidth, alignment: .leading)
+                            .frame(maxHeight: .infinity)
 
                             VStack(spacing: 8) {
                                 if let weightFact {
-                                    HeadlineQuickFactTile(fact: weightFact)
+                                    HeadlineQuickFactTile(fact: weightFact) {
+                                        if let medianWeightG {
+                                            WeightComparisonGlyph(weightGrams: medianWeightG)
+                                        }
+                                    }
                                 }
                                 if let medianWingspanCm {
                                     // `minHeight` guards the degenerate case:
@@ -97,10 +115,8 @@ struct SpeciesDetailView: View {
                             }
                             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                         }
-                    }
-                    if let summary = species.summary {
-                        GuideCard(title: "Overview") {
-                            Text(summary).font(.subheadline)
+                        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width in
+                            quickFactsRowWidth = width
                         }
                     }
                     GuideCard(title: "Distribution") {
@@ -146,10 +162,10 @@ struct SpeciesDetailView: View {
         .background(Color(.systemGroupedBackground))
     }
 
-    /// Full-bleed hero photo — real per-image credit (photographer + license,
-    /// when Wikipedia has it) sits in a pill over the bottom-right corner
-    /// rather than a caption underneath, so it reads as an overlay
-    /// attribution instead of stealing space of its own.
+    /// Full-bleed hero photo — real per-image credit (photographer + license)
+    /// sits in a pill over the bottom-right corner rather than a caption
+    /// underneath, so it reads as an overlay attribution instead of stealing
+    /// space of its own.
     ///
     /// `Color.clear` is what defines this view's layout size, with both the
     /// image and the credit pill hung off it as overlays — and that is
@@ -163,8 +179,8 @@ struct SpeciesDetailView: View {
     /// then measured wider than the screen and every card on the page got
     /// centre-clipped on both edges. Overlays can't expand their parent, so
     /// this arrangement is immune to that regardless of image aspect (and of
-    /// how long a credit string Wikipedia hands back).
-    private func cardHeroPhoto(_ photo: WikipediaSpeciesImageService.Photo) -> some View {
+    /// how long a credit string ends up being).
+    private func cardHeroPhoto(_ photo: SpeciesPhoto) -> some View {
         Color.clear
             .frame(maxWidth: .infinity)
             .frame(height: 260)
@@ -188,6 +204,27 @@ struct SpeciesDetailView: View {
                     .background(Color.black.opacity(0.8), in: Capsule())
                     .padding(10)
             }
+    }
+
+    /// The hero photo actually shown, resolved from either source — a plain
+    /// `URL` + credit string once resolved, regardless of where it came from.
+    ///
+    /// Prefers `species.imageURL`, the contributor-set field (see its doc
+    /// comment in `GuideSpecies` for why that's now preferred over a live
+    /// lookup). Falls back to `WikipediaSpeciesImageService` only for guide
+    /// entries that haven't set one yet, so older entries aren't left blank.
+    fileprivate struct SpeciesPhoto: Equatable {
+        let url: URL
+        let creditText: String
+
+        static func resolve(for species: GuideSpecies) async -> SpeciesPhoto? {
+            if let urlString = species.imageURL, let url = URL(string: urlString) {
+                return SpeciesPhoto(url: url, creditText: species.imageCredit ?? "Field guide contributor")
+            }
+            guard let wiki = await WikipediaSpeciesImageService.fetchPhoto(for: species.scientificName)
+            else { return nil }
+            return SpeciesPhoto(url: wiki.url, creditText: wiki.creditText)
+        }
     }
 
     /// Name/sci-name/breadcrumb, plus an inline IUCN status badge when
@@ -273,11 +310,31 @@ struct SpeciesDetailView: View {
         peakFreqFact != nil || weightFact != nil || medianWingspanCm != nil || !subQuickFacts.isEmpty
     }
 
+    /// A third of the quick-facts row, minus its share of the inter-column
+    /// spacing — the left column's fixed width; the right column just keeps
+    /// its `maxWidth: .infinity` and fills whatever's left, which comes out
+    /// to two-thirds automatically. Nil until `quickFactsRowWidth` has been
+    /// measured at least once, so the column uses natural sizing rather than
+    /// collapsing to zero width on the first layout pass.
+    private var leftQuickFactsColumnWidth: CGFloat? {
+        guard quickFactsRowWidth > 0 else { return nil }
+        let spacing: CGFloat = 10
+        return (quickFactsRowWidth - spacing) / 3
+    }
+
     /// Midpoint of the wingspan range — the single number `SizeComparisonCard`
     /// scales its bat glyph against. Nil (no size card shown) when the entry
     /// has no wingspan data at all.
     private var medianWingspanCm: Double? {
         guard let r = species.measurements?.wingspanCmRange else { return nil }
+        return (r.min + r.max) / 2
+    }
+
+    /// Midpoint of the weight range — what `WeightComparisonGlyph` matches
+    /// against the object ladder. Same reasoning as `medianWingspanCm`: a
+    /// single representative number reads better than trying to show a range.
+    private var medianWeightG: Double? {
+        guard let r = species.measurements?.weightGRange else { return nil }
         return (r.min + r.max) / 2
     }
 
@@ -543,8 +600,19 @@ private struct CompactQuickFactTile: View {
 /// Weight on the right, above `SizeComparisonCard`) — bigger value text and
 /// an icon+label header row, so these two stats read as the "lead" numbers
 /// rather than blending into the sub-stats stacked underneath.
-private struct HeadlineQuickFactTile: View {
+///
+/// `trailing` sits directly beside the value text — used only by the Weight
+/// tile, for `WeightComparisonGlyph`. Defaults to nothing so Peak Freq's call
+/// site doesn't need to change.
+private struct HeadlineQuickFactTile<Trailing: View>: View {
     let fact: SpeciesDetailView.QuickFact
+    @ViewBuilder var trailing: () -> Trailing
+
+    init(fact: SpeciesDetailView.QuickFact,
+         @ViewBuilder trailing: @escaping () -> Trailing = { EmptyView() }) {
+        self.fact = fact
+        self.trailing = trailing
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -556,10 +624,14 @@ private struct HeadlineQuickFactTile: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            Text(fact.value)
-                .font(.title2.weight(.bold))
-                .minimumScaleFactor(0.7)
-                .lineLimit(1)
+            HStack(spacing: 8) {
+                Text(fact.value)
+                    .font(.title2.weight(.bold))
+                    .minimumScaleFactor(0.7)
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                trailing()
+            }
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -753,6 +825,121 @@ private struct SizeComparisonCard: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(RoundedRectangle(cornerRadius: 14, style: .continuous)
             .fill(Color(.secondarySystemGroupedBackground)))
+    }
+}
+
+/// One rung on the weight-comparison ladder: an everyday object familiar
+/// enough that "about as heavy as N of these" means something at a glance,
+/// with no number to look up. See `WeightComparisonGlyph`.
+///
+/// Emoji rather than SF Symbols or hand-drawn artwork (unlike `ScaleReference`
+/// above) — there's no SF Symbol for a strawberry or a tin of beans, and an
+/// emoji needs no asset-catalog entry to add or re-tune. `half` is the coin's
+/// masked-to-its-left-half rendering, not a separate icon — see
+/// `WeightComparisonGlyph`.
+private struct WeightUnit {
+    let name: String
+    let grams: Double
+    let emoji: String
+    var half: Bool = false
+}
+
+/// Ordered small to large. Chosen so consecutive rungs are roughly 2-3×
+/// apart — close enough together that `bestWeightMatch` always has a rung
+/// that lands within a count of 1-3, which is what keeps the result reading
+/// as "a handful of a relevant object" rather than "a pile of a small one".
+private let weightLadder: [WeightUnit] = [
+    WeightUnit(name: "Half a coin", grams: 4, emoji: "🪙", half: true),
+    WeightUnit(name: "A coin", grams: 8, emoji: "🪙"),
+    WeightUnit(name: "A strawberry", grams: 10, emoji: "🍓"),
+    WeightUnit(name: "An AA battery", grams: 23, emoji: "🔋"),
+    WeightUnit(name: "A tennis ball", grams: 58, emoji: "🎾"),
+    WeightUnit(name: "An apple", grams: 182, emoji: "🍎"),
+    WeightUnit(name: "A tin of beans", grams: 400, emoji: "🥫"),
+    WeightUnit(name: "A loaf of bread", grams: 800, emoji: "🍞"),
+]
+
+/// Largest relative error a match is allowed before it's considered
+/// "close enough" — see `bestWeightMatch`.
+private let weightMatchTolerance = 0.20
+
+/// The (object, count) pair `WeightComparisonGlyph` shows for `weight`.
+///
+/// Picking whichever (rung, count) numerically minimises error sounds
+/// right and isn't: for 25g it picks "3 coins" over "an AA battery" — 24g is
+/// a hair closer to 25g than 23g is, but a single named object beats a small
+/// pile of a smaller one even when the pile is marginally more precise. What
+/// actually reads as "about right" is the biggest object that gets
+/// reasonably close on its own, reached for a *second or third* copy only
+/// when one alone isn't enough.
+///
+/// So: scan rungs biggest to smallest, and within a rung try 1, then 2, then
+/// 3 copies, returning the first that lands within `weightMatchTolerance`.
+/// `half` rungs are never tried past a single copy — a "half coin" is
+/// already a fraction, and "3× half a coin" reads as nonsense rather than a
+/// weight. If nothing on the ladder gets close enough (weight sits in a gap
+/// between two rungs' reach), fall back to whichever (rung, count) is
+/// numerically nearest, preferring fewer copies and then the bigger object
+/// on a tie.
+private func bestWeightMatch(forGrams weight: Double) -> (unit: WeightUnit, count: Int) {
+    for unit in weightLadder.reversed() {
+        let maxCount = unit.half ? 1 : 3
+        for count in 1...maxCount {
+            let error = abs(unit.grams * Double(count) - weight) / weight
+            if error <= weightMatchTolerance {
+                return (unit, count)
+            }
+        }
+    }
+    var best: (unit: WeightUnit, count: Int, error: Double)?
+    for unit in weightLadder {
+        let maxCount = unit.half ? 1 : 3
+        for count in 1...maxCount {
+            let error = abs(unit.grams * Double(count) - weight) / weight
+            guard let current = best else {
+                best = (unit, count, error)
+                continue
+            }
+            if error < current.error
+                || (error == current.error && (count, -unit.grams) < (current.count, -current.unit.grams)) {
+                best = (unit, count, error)
+            }
+        }
+    }
+    return (best!.unit, best!.count)
+}
+
+/// The weight-comparison glyph shown beside the gram figure in the Weight
+/// headline tile — "×2 🔋" next to "3–8 g", not a card of its own. Weight
+/// can't be drawn true-to-scale the way `SizeComparisonCard` draws wingspan,
+/// so instead of scaling one fixed reference this picks the best-fitting
+/// (object, count) pair off `weightLadder` via `bestWeightMatch` and shows
+/// just that — the object's name lives in `WeightUnit.name` for the
+/// accessibility label, not on screen, since the tile has no room for it.
+private struct WeightComparisonGlyph: View {
+    let weightGrams: Double
+
+    var body: some View {
+        let match = bestWeightMatch(forGrams: weightGrams)
+        HStack(spacing: 2) {
+            if match.count > 1 {
+                Text("×\(match.count)")
+                    .font(.subheadline.weight(.bold))
+                    .foregroundStyle(.secondary)
+            }
+            Text(match.unit.emoji)
+                .font(.system(size: 22))
+                // The coin's "half" rendering: masks the emoji's glyph to its
+                // left half rather than needing a second icon. Any rung could
+                // use this, but only the half-coin rung does.
+                .mask(alignment: .leading) {
+                    GeometryReader { geo in
+                        Rectangle().frame(width: match.unit.half ? geo.size.width / 2 : geo.size.width)
+                    }
+                }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("about as heavy as \(match.count > 1 ? "\(match.count) " : "")\(match.unit.name.lowercased())")
     }
 }
 

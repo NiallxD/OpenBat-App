@@ -98,7 +98,7 @@ struct ContentView: View {
     @State private var tourNudgeScheduled = false
     /// How long after the detector first appears the tour offers itself, and how
     /// long it keeps waiting for a clear moment before giving up.
-    private static let tourNudgeDelay: TimeInterval = 15
+    private static let tourNudgeDelay: TimeInterval = 5
     private static let tourNudgeWindow: TimeInterval = 120
     /// What's New, once per build. Copied out of `ReleaseState` in `.onAppear`
     /// rather than read from it live — see the sheet modifier for why.
@@ -109,6 +109,15 @@ struct ContentView: View {
     /// anything else (see that sheet's own modifier below). It used to be raised
     /// at the end of the onboarding tour instead, which no longer auto-launches.
     @State private var suggestedModelToOffer: ModelDescriptor?
+    /// Set in `.onAppear` when onboarding just finished but no location fix had
+    /// landed yet to base a suggestion on — consumed by the `onChange` below the
+    /// moment one arrives. See that flag's own history: checking
+    /// `location.currentCoordinate` synchronously, immediately after firing
+    /// `requestRegionFix()` in the same `.onAppear`, meant the fix essentially
+    /// never existed yet, since it's a real CoreLocation round trip — so the
+    /// suggestion silently never appeared after onboarding on the most common
+    /// path, a cold first launch.
+    @State private var pendingOnboardingModelOffer = false
     /// The first-connection calibration offer, and the capture it leads to. Two
     /// flags because they are two presentations: the offer is a compact sheet,
     /// and accepting it opens the real calibration sheet *after* the offer has
@@ -508,11 +517,19 @@ struct ContentView: View {
                 // wins — it is the thing that explains why the intro reappeared
                 // — and the model suggestion is still reachable from AutoID
                 // settings, which is where it lived before this shortcut existed.
-                if !ReleaseState.shared.shouldShowWhatsNew,
-                   let coordinate = location.currentCoordinate,
-                   let suggested = ModelRegistry.suggestedModel(for: coordinate),
-                   suggested.id != autoIDSettings.activeModelID {
-                    suggestedModelToOffer = suggested
+                if !ReleaseState.shared.shouldShowWhatsNew {
+                    // `requestRegionFix()` just above is a real CoreLocation round
+                    // trip — on a cold first launch (the common case) nothing has
+                    // come back yet, so checking `location.currentCoordinate`
+                    // right here found it nil essentially every time. Offer now
+                    // if a fix already happened to land; otherwise flag it and
+                    // let the `onChange(of: location.currentCoordinate)` below
+                    // pick it up the moment one does.
+                    if let coordinate = location.currentCoordinate {
+                        offerSuggestedModelIfNeeded(at: coordinate)
+                    } else {
+                        pendingOnboardingModelOffer = true
+                    }
                 }
             }
 
@@ -678,6 +695,10 @@ struct ContentView: View {
             // call on every fix rather than gating the call site.
             if let coordinate = location.currentCoordinate {
                 Task { await autoIDSettings.refreshPriors(at: coordinate, using: speciesPresence) }
+                if pendingOnboardingModelOffer {
+                    pendingOnboardingModelOffer = false
+                    offerSuggestedModelIfNeeded(at: coordinate)
+                }
             }
         }
         // ContentView.onAppear only fires once per process lifetime (SwiftUI doesn't
@@ -1416,14 +1437,27 @@ struct ContentView: View {
         }
     }
 
+    /// Raises `suggestedModelToOffer` if `coordinate` suggests a model that
+    /// isn't already active. Shared by the `.onAppear` handoff from onboarding
+    /// and, when that handoff finds no fix ready yet, by the
+    /// `pendingOnboardingModelOffer` follow-up in the coordinate `onChange` —
+    /// see that flag's doc comment for why a single synchronous check wasn't
+    /// enough.
+    private func offerSuggestedModelIfNeeded(at coordinate: CLLocationCoordinate2D) {
+        guard let suggested = ModelRegistry.suggestedModel(for: coordinate),
+              suggested.id != autoIDSettings.activeModelID else { return }
+        suggestedModelToOffer = suggested
+    }
+
     /// Opens the tour's popover by itself, once per install, `tourNudgeDelay`
     /// after the first arrival at the detector.
     ///
     /// The button alone was not enough: it is one small glyph in a nav bar, and a
-    /// first-time user has no reason to suspect there is a tour behind it. Fifteen
-    /// seconds is chosen to land *after* the screen has stopped being new — long
-    /// enough that the person has looked around and formed the question the tour
-    /// answers, short enough that they have not yet given up on it.
+    /// first-time user has no reason to suspect there is a tour behind it.
+    /// `tourNudgeDelay` is chosen to land *after* the screen has stopped being
+    /// brand new — long enough that the person has looked around and formed the
+    /// question the tour answers, short enough that they have not yet given up
+    /// on it.
     ///
     /// Three conditions, and all three are about not arriving rudely:
     ///
@@ -1436,7 +1470,7 @@ struct ContentView: View {
     /// - **The Detector must be the visible section.** The anchor lives in that
     ///   nav bar; from Species or Sessions the popover has nothing to hang on.
     ///
-    /// If those aren't met at fifteen seconds it keeps checking, briefly, rather
+    /// If those aren't met at `tourNudgeDelay` it keeps checking, briefly, rather
     /// than giving up on the first miss — a first-run user is quite likely to be
     /// inside a sheet or on another tab at exactly that moment. After
     /// `tourNudgeWindow` it stops trying and leaves the button to do its job.
@@ -2147,8 +2181,14 @@ struct ContentView: View {
     /// `isAutoTune` update at 15 Hz (the same stats timer that drives the
     /// amplitude meter) while heterodyne listening is active, so reading them
     /// inline here would invalidate all of ContentView.body at that rate.
+    ///
+    /// Gated on `audio.isActive` as well as the mode: `listenMode` defaults to
+    /// `.heterodyne` at rest (see its doc comment in AudioEngineController) so
+    /// the app is ready to listen the instant it's told to, not so it can show
+    /// live-tuning UI before anything has actually started capturing. Without
+    /// this the pill showed on a cold launch, before the engine had run once.
     @ViewBuilder private var tunedPillOverlay: some View {
-        if audio.listenMode == .heterodyne {
+        if audio.listenMode == .heterodyne, audio.isActive {
             TunedPillView(audio: audio, nyquist: nyquist).padding(8)
         }
     }

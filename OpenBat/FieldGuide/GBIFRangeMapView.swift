@@ -96,9 +96,13 @@ struct GBIFDistributionCard: View {
                 if let range = resolvedRange {
                     Map(position: $camera, interactionModes: []) {
                         ForEach(range.blocks) { block in
+                            // No stroke: blocks are only merged into runs
+                            // horizontally (see `blocks(for:cellDegrees:)`), so
+                            // a bordered row reads as a stripe at every row
+                            // boundary even where the range is one solid mass
+                            // top to bottom. Fill-only reads as a single shape.
                             MapPolygon(coordinates: block.coordinates)
                                 .foregroundStyle(Color.purple.opacity(0.55))
-                                .stroke(Color.purple.opacity(0.75), lineWidth: 0.5)
                         }
                     }
                     // **Square, and that is a correctness fix rather than a
@@ -129,20 +133,20 @@ struct GBIFDistributionCard: View {
     }
 
     /// Why there is no map, said precisely — "we have no data for this bat" and
-    /// "no classifier names this bat" are different facts, and the second is a
-    /// gap in coverage rather than a gap in knowledge.
+    /// "no code to look data up under" are different facts, and the second is
+    /// a gap in coverage rather than a gap in knowledge.
     private var unavailableReason: String {
         guard presenceStore.isLoaded else {
             return "Range data hasn't loaded yet."
         }
-        guard SpeciesGuide.code(forScientificName: species.scientificName) != nil else {
-            return "This species isn't covered by any of the identification models yet, so there's no range data for it."
+        guard species.presenceCode != nil else {
+            return "This species has no presence-grid code assigned in the field guide yet, so there's no range data for it."
         }
         return "There aren't enough records of this species to map where it lives."
     }
 
     private var resolvedRange: (rect: MKMapRect, blocks: [RangeBlock])? {
-        guard let code = SpeciesGuide.code(forScientificName: species.scientificName),
+        guard let code = species.presenceCode,
               let cells = presenceStore.presence[code], !cells.isEmpty else { return nil }
         let degrees = presenceStore.cellDegrees
         let blocks = Self.blocks(for: Set(cells.keys), cellDegrees: degrees)
@@ -191,12 +195,27 @@ struct GBIFDistributionCard: View {
         return blocks
     }
 
+    /// Each block is expanded by this fraction of a cell on every side, so
+    /// adjacent blocks overlap slightly instead of exactly sharing an edge.
+    ///
+    /// MapKit anti-aliases every polygon's edge on its own: two translucent
+    /// fills that exactly abut each leave their shared edge pixel only
+    /// partly covered, and a partly-covered pixel of a translucent fill is
+    /// lighter than a fully-covered one — which is what still read as a
+    /// border between rows even after the explicit stroke was removed. A
+    /// small overlap covers that seam with full fill from both sides instead
+    /// of a partial one from each, and is small enough not to visibly round
+    /// off the range's true outer edge (which the 8% padding in `mapRect`
+    /// already keeps clear of anyway).
+    private static let blockOverlapFraction = 0.06
+
     private static func block(row: Int, from startCol: Int, to endCol: Int,
                               cellDegrees: Double) -> RangeBlock {
-        let south = Double(row) * cellDegrees - 90
-        let north = south + cellDegrees
-        let west = Double(startCol) * cellDegrees - 180
-        let east = Double(endCol + 1) * cellDegrees - 180
+        let overlap = cellDegrees * blockOverlapFraction
+        let south = Double(row) * cellDegrees - 90 - overlap
+        let north = south + cellDegrees + 2 * overlap
+        let west = Double(startCol) * cellDegrees - 180 - overlap
+        let east = Double(endCol + 1) * cellDegrees - 180 + overlap
         let cols = Int((360 / cellDegrees).rounded())
         return RangeBlock(
             id: row * cols + startCol,

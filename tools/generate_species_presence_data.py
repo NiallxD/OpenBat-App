@@ -51,6 +51,7 @@ which is the cheap way to check the alias table after adding a model.
 
 import argparse
 import json
+import math
 import re
 import sys
 import time
@@ -68,6 +69,17 @@ CLASSIFIER_SOURCES = [
     APP / "Classifier" / "BatDetect2Classifier.swift",
 ]
 OUTPUT_PATH = ROOT / "SpeciesPresenceData.json"
+
+# Field guide JSON, for the guide-only codes step in main(). Tried in order:
+# the sibling FieldGuide repo clone first (freshest — what you have checked
+# out if you're actively editing guide content), then the copy bundled in
+# this app repo, which every checkout has but can lag behind (see
+# CLAUDE.md's "Bundled seed data" note). Neither path is required to exist —
+# see `load_guide_codes`.
+GUIDE_PATHS = [
+    ROOT.parent.parent / "FieldGuide" / "SpeciesGuideData.json",
+    APP / "FieldGuide" / "SpeciesGuideData.json",
+]
 
 MATCH_URL = "https://api.gbif.org/v1/species/match"
 SPECIES_URL = "https://api.gbif.org/v1/species"
@@ -123,9 +135,28 @@ MIN_RECORDS_FOR_PRESENCE = 50
 # this is an absolute count and not a percentage.
 MIN_CELL_RECORDS = 3
 
+# A geographically disconnected cluster of cells whose combined records don't
+# clear this floor is dropped as one outlier — UNLESS it's within
+# NEARBY_CLUSTER_KM of the main cluster, in which case proximity itself is
+# taken as the evidence and the record floor doesn't apply. See
+# drop_disconnected_outliers. Same reasoning as MIN_CELL_RECORDS for why it's
+# an absolute count: a proportional floor would erase real disjunct
+# populations of a well-recorded species while doing nothing for a sparse one.
+MIN_COMPONENT_RECORDS = 20
+
+# How close a disconnected cluster has to sit to the main range before it's
+# treated as part of the same range rather than a separate population. Sized
+# to bridge a strait or a stretch of unsurveyed coastline the grid's adjacency
+# check missed — the English Channel is ~34 km, the Strait of Gibraltar ~14 km
+# — while still rejecting an ocean or a continent: the Bogota misidentification
+# that motivated this file sits ~8,000 km from the common pipistrelle's real
+# range. Nothing in between those two scales is a case this file has seen yet;
+# narrow it if one turns up that should have been rejected.
+NEARBY_CLUSTER_KM = 500.0
+
 SCHEMA_VERSION = 1
 # Bump on every regeneration intended to ship.
-DATA_VERSION = 1
+DATA_VERSION = 2
 
 # Extra taxon names to union into a code's range, beyond the scientific name the
 # model itself uses. Every entry needs a reason: this table is the difference
@@ -183,6 +214,34 @@ def parse_scientific_names(path: Path) -> dict[str, str]:
     end = text.find("\n    ]", opening)
     body = text[opening:end if end != -1 else len(text)]
     return dict(re.findall(r'"([A-Z]+)"\s*:\s*"([^"]+)"', body))
+
+
+def load_guide_codes() -> dict[str, str]:
+    """code -> scientificName for every field guide entry that sets `code`.
+
+    Purely additive — see the caller in `main()`. Returns {} with a printed
+    warning if no guide JSON is found at either `GUIDE_PATHS` entry, rather
+    than failing the run: this step is a bonus on top of the classifier
+    tables, not a dependency of it.
+    """
+    for path in GUIDE_PATHS:
+        if not path.exists():
+            continue
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"warning: couldn't read guide JSON at {path}: {exc}", file=sys.stderr)
+            continue
+        print(f"reading guide-only codes from {path}")
+        return {
+            entry["code"]: entry["scientificName"]
+            for entry in data.get("species", [])
+            if entry.get("code")
+        }
+    checked = ", ".join(str(p) for p in GUIDE_PATHS)
+    print(f"warning: no field guide JSON found (checked {checked}) — "
+          "guide-only codes skipped", file=sys.stderr)
+    return {}
 
 
 def resolve_species_key(name: str) -> tuple[int | None, str]:
@@ -284,6 +343,114 @@ def drop_outliers(cells: dict[int, int]) -> tuple[dict[int, int], int]:
     return kept, len(cells) - len(kept)
 
 
+def cell_bounds(component: set[int], cols: int) -> tuple[float, float, float, float]:
+    """A component's (south, north, west, east) extent in degrees."""
+    lats = [(index // cols) * CELL_DEGREES - 90 for index in component]
+    lons = [(index % cols) * CELL_DEGREES - 180 for index in component]
+    return min(lats), max(lats) + CELL_DEGREES, min(lons), max(lons) + CELL_DEGREES
+
+
+def bounds_gap_km(a: tuple[float, float, float, float],
+                   b: tuple[float, float, float, float]) -> float:
+    """Rough great-circle gap between two bounding boxes; 0 if they overlap.
+
+    A bounding-box gap rather than true nearest-cell distance — cheap (no
+    per-cell comparison between two potentially large components) and no less
+    right for a yes/no "is this nearby" test, since it can only ever
+    UNDERSTATE the true gap between the shapes themselves.
+    """
+    a_south, a_north, a_west, a_east = a
+    b_south, b_north, b_west, b_east = b
+    lat_gap_deg = max(0.0, max(a_south, b_south) - min(a_north, b_north))
+    lon_gap_deg = max(0.0, max(a_west, b_west) - min(a_east, b_east))
+    # Longitude degrees shrink towards the poles; use the latitude nearest the
+    # gap (or the shared band, if the boxes already overlap in latitude) so a
+    # high-latitude gap isn't overstated in km.
+    mean_lat = min(a_north, b_north) if lat_gap_deg == 0 else max(a_south, b_south)
+    lat_km = lat_gap_deg * 111.0
+    lon_km = lon_gap_deg * 111.0 * math.cos(math.radians(mean_lat))
+    return math.hypot(lat_km, lon_km)
+
+
+def drop_disconnected_outliers(cells: dict[int, int]) -> tuple[dict[int, int], int]:
+    """Remove whole clusters of cells that are geographically cut off from the
+    species' main range — the failure mode drop_outliers cannot see.
+
+    drop_outliers catches a single misidentified record sitting alone in a sea
+    of unoccupied cells: it fails MIN_CELL_RECORDS and touches nothing that
+    passes. It does NOT catch a cluster of a few *adjacent* cells that each
+    clear MIN_CELL_RECORDS against each other — nine cells of GBIF records for
+    the common pipistrelle sit around Bogota, Colombia, a continent away from
+    its real Ireland-to-Central-Asia range, and every one of those nine cells
+    touches another cell in the same block, so each looks locally fine. What's
+    wrong with them is not density, it's distance from everything else, and
+    per-cell density cannot see distance.
+
+    So: flood-fill occupied cells into connected components, using the same
+    8-neighbour, longitude-wrapping adjacency dilate() uses. The largest
+    component is the main range and always survives regardless of its own
+    total — a species can be real and still sparse, and dropping its only
+    cluster would turn "too sparse" into "silently absent" rather than falling
+    through to the unknown list, where the app can say "no opinion" honestly
+    instead of a wrong one. Every other component survives if EITHER:
+
+      * it sits within NEARBY_CLUSTER_KM of the main component — close enough
+        that it reads as the same range with a survey gap or a strait in the
+        middle, not a separate population, so no record count is required, or
+      * it doesn't, but its own total record count clears
+        MIN_COMPONENT_RECORDS on its own — a real, independently-supported
+        disjunct population (an island subspecies, say) rather than a handful
+        of stray records.
+
+    A cluster failing both is what the Bogota block is: far away AND thin.
+    """
+    rows, cols = grid_dimensions()
+    unassigned = set(cells)
+    components: list[set[int]] = []
+    while unassigned:
+        start = next(iter(unassigned))
+        unassigned.discard(start)
+        component = {start}
+        stack = [start]
+        while stack:
+            index = stack.pop()
+            row, col = divmod(index, cols)
+            for d_row in (-1, 0, 1):
+                for d_col in (-1, 0, 1):
+                    if d_row == 0 and d_col == 0:
+                        continue
+                    r = row + d_row
+                    if not (0 <= r < rows):
+                        continue
+                    neighbour = r * cols + ((col + d_col) % cols)
+                    if neighbour in unassigned:
+                        unassigned.discard(neighbour)
+                        component.add(neighbour)
+                        stack.append(neighbour)
+        components.append(component)
+
+    components.sort(key=lambda component: sum(cells[i] for i in component),
+                     reverse=True)
+    main = components[0]
+    main_bounds = cell_bounds(main, cols)
+
+    kept: dict[int, int] = {}
+    dropped = 0
+    for n, component in enumerate(components):
+        if n == 0:
+            survives = True
+        elif bounds_gap_km(cell_bounds(component, cols), main_bounds) <= NEARBY_CLUSTER_KM:
+            survives = True
+        else:
+            survives = sum(cells[i] for i in component) >= MIN_COMPONENT_RECORDS
+        if survives:
+            for index in component:
+                kept[index] = cells[index]
+        else:
+            dropped += len(component)
+    return kept, dropped
+
+
 def grid_dimensions() -> tuple[int, int]:
     return int(round(180 / CELL_DEGREES)), int(round(360 / CELL_DEGREES))
 
@@ -377,13 +544,43 @@ def main() -> int:
                 return 1
         codes.update(names)
 
+    # The classifier tables above are unconditional and always win: every
+    # model-named species gets presence data regardless of what the guide
+    # says or whether it says anything at all — see this file's module
+    # doc comment for why that independence matters. This step only ADDS
+    # codes for species no model names, from field guide entries that have
+    # set their own `code` field (a species with no ID model can still get
+    # a code assigned by a contributor purely so it can appear on the
+    # distribution map / "bats near you" — see the field guide README).
+    #
+    # A guide code that collides with a classifier's is the same class of
+    # error as two classifiers disagreeing, and fails the run the same way —
+    # a silently wrong scientific name behind a code is worse than a
+    # generation run that has to be fixed and re-run.
+    guide_codes = load_guide_codes()
+    guide_only_count = 0
+    for code, scientific in guide_codes.items():
+        existing = codes.get(code)
+        if existing is not None:
+            if existing != scientific:
+                print(f"error: code {code} means {existing!r} to a classifier and "
+                      f"{scientific!r} in the field guide. Fix the guide entry's "
+                      f"code or scientificName before generating.", file=sys.stderr)
+                return 1
+            continue  # guide just confirms a code a model already provides
+        codes[code] = scientific
+        guide_only_count += 1
+
     if wanted:
         codes = {c: n for c, n in codes.items() if c in wanted}
 
-    print(f"{len(codes)} species codes across {len(CLASSIFIER_SOURCES)} models")
+    print(f"{len(codes)} species codes across {len(CLASSIFIER_SOURCES)} models "
+          f"({guide_only_count} guide-only, no ID model)")
     print(f"cell size {CELL_DEGREES} deg, dilation {DILATE_CELLS}, "
           f"density bins {DENSITY_SQUARE_SIZE} px, "
-          f"outlier floor {MIN_CELL_RECORDS} records/cell\n")
+          f"outlier floor {MIN_CELL_RECORDS} records/cell, "
+          f"{MIN_COMPONENT_RECORDS} records/disconnected cluster beyond "
+          f"{NEARBY_CLUSTER_KM:.0f} km of the main range\n")
 
     presence: dict[str, dict] = {}
     unknown: list[str] = []
@@ -447,6 +644,8 @@ def main() -> int:
             unknown.append(code)
             continue
 
+        cleaned, disconnected = drop_disconnected_outliers(cleaned)
+
         grown = dilate({index: 0 for index in cleaned}, DILATE_CELLS)
         ordered = sorted(grown)
         presence[code] = {
@@ -458,7 +657,8 @@ def main() -> int:
             "taxonKeys": keys,
         }
         print(f"    -> {total:,} records, {len(merged):,} cells, "
-              f"{dropped} outliers dropped, {len(ordered):,} after dilation\n")
+              f"{dropped} isolated outliers dropped, {disconnected} more in "
+              f"disconnected clusters, {len(ordered):,} after dilation\n")
 
     if args.dry_run:
         print("--- dry run, nothing written ---")

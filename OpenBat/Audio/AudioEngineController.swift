@@ -156,13 +156,17 @@ final class AudioEngineController {
     /// Boxed for the same reason as `RoutingBox` above: `Atomic` is non-copyable
     /// and so can't be captured into a render closure directly.
     private final class ModeBox: @unchecked Sendable {
-        let value = Atomic<Int>(ListenMode.off.rawValue)
+        let value = Atomic<Int>(ListenMode.heterodyne.rawValue)
     }
     private let liveMode = ModeBox()
 
     /// Mirrored into `liveMode` on every write, so the audio thread and the main
     /// actor can never disagree about which mode is running.
-    private(set) var listenMode: ListenMode = .off {
+    ///
+    /// Defaults to `.heterodyne`: listening is the reason to have the app open,
+    /// so it starts already on rather than making every session begin with a tap
+    /// through `advanceListenMode()` (ContentView) to hear anything.
+    private(set) var listenMode: ListenMode = .heterodyne {
         didSet { liveMode.value.store(listenMode.rawValue, ordering: .releasing) }
     }
     var isListening: Bool { listenMode != .off }

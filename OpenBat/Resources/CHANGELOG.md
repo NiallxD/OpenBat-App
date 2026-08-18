@@ -32,6 +32,14 @@
   interrupts everybody, before they reach the detector.
 -->
 
+## v0.9.1 (Build 95)
+
+### New
+- **Weight, at a glance** — Species pages now show what a bat's weight compares to — a coin, a strawberry, a battery — instead of leaving you to picture a number in grams.
+
+### Improved
+- **Distribution maps** — Range shading no longer shows a striped border between rows, so it reads as one shape instead of a stack of stripes. A few species also had their map skewed by a small number of clearly mislocated records (a mislabeled museum specimen, a misidentification); those are now filtered out automatically.
+
 ## v0.9.1 (Build 93)
 
 ### Improved

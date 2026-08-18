@@ -112,6 +112,36 @@ struct GuideSpecies: Codable, Identifiable, Hashable {
     var family: String?
     var regions: [String]     // GuideRegion ids where present
     var summary: String?      // short intro blurb
+    /// The classifier-vocabulary species code (4 letters, NABat-style, or 6,
+    /// BatDetect2-style — the same labels that appear on passes and
+    /// recordings), set by a contributor. Every bat has one of these whether
+    /// or not an ID model currently names it — see `GuideSpecies.presenceCode`
+    /// and the field guide README's note on this field before setting it.
+    ///
+    /// For a species a bundled model already names, this is genuinely
+    /// optional — `presenceCode` falls back to looking that code up from the
+    /// model automatically, so leaving it unset is fine and one less thing to
+    /// keep in sync. It's REQUIRED for a species no model names yet: without
+    /// it there is no code to generate presence data under at all, and the
+    /// distribution map and "bats near you" have nothing to look up.
+    var code: String?
+    /// Direct URL to a photo of the species, set by a contributor. Preferred
+    /// over the live Wikipedia lookup (`WikipediaSpeciesImageService`) that
+    /// otherwise fills the hero photo — that lookup is unpredictable (wrong
+    /// species, taxobox furniture instead of a real photo, no photo at all)
+    /// and gives contributors nothing to point at when it picks a bad one, so
+    /// this is a plain URL a contributor can choose and pin down themselves.
+    /// Wikipedia fetch remains the fallback for any entry that hasn't set one.
+    ///
+    /// MUST link a Creative Commons–licensed (or public domain) image — see
+    /// the field guide README's photo section before adding one.
+    var imageURL: String?
+    /// Attribution text shown over the photo, e.g.
+    /// "Jane Doe, Wikimedia Commons, CC BY-SA 4.0" — required whenever
+    /// `imageURL` is set; a CC license is a licence to use the image, not a
+    /// waiver of the attribution it requires. Ignored (falls back to
+    /// Wikipedia's own per-image credit) when `imageURL` is nil.
+    var imageCredit: String?
     var measurements: SpeciesMeasurements?
     var morphology: SpeciesMorphology?
     var echolocation: SpeciesEcholocation?

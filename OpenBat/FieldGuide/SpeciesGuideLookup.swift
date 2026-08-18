@@ -70,3 +70,21 @@ extension SpeciesGuide {
         name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 }
+
+extension GuideSpecies {
+    /// The presence-grid code for this species — what `SpeciesPresenceData.json`
+    /// is keyed by, and what `GBIFDistributionCard` / "bats near you" look
+    /// each guide entry up with.
+    ///
+    /// Prefers the entry's own `code` field: a contributor can set that for a
+    /// species no bundled ID model names, purely so it can appear on the
+    /// distribution map and the near-you list — see the field guide README's
+    /// note on it. Falls back to `SpeciesGuide.code(forScientificName:)` for
+    /// every entry that hasn't (which, for any species a model DOES name, is
+    /// almost always simpler than also hand-copying that model's code into
+    /// the guide). Nil only when neither source has an answer — no ID model
+    /// names this species AND no contributor has assigned it one yet.
+    var presenceCode: String? {
+        code ?? SpeciesGuide.code(forScientificName: scientificName)
+    }
+}
