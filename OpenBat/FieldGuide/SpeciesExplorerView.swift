@@ -172,17 +172,18 @@ struct SpeciesExplorerView: View {
                 NearbySpeciesGrid(guide: store, presenceStore: presenceStore, coordinate: userCoordinate)
             }
         }
-        // Flat black bar. Matters most here: the globe's bright satellite imagery
-        // sits right up against the bar, so any translucency samples through as a
-        // washed-out grey/light band. The colour fills the background; the glass
-        // material itself is removed app-wide in
-        // `OpenBatApp.configureNavigationBarAppearance`.
-        .toolbarBackground(Color.black, for: .navigationBar)
-        // `flatTopScrollEdge()` still applies here too (see that helper's own
-        // doc comment) — `Map` doesn't participate in the system's automatic
-        // scroll-edge blur the way `List`/`ScrollView` do, so leaving it off
-        // for this screen alone turned out to change nothing. `topEdgeBlur`
-        // (on `globe`) is the real fade at the top of the imagery instead.
+        // The one screen that does NOT get the app's flat black bar: the globe
+        // is bright, full-bleed imagery, and cutting it off with a solid strip
+        // wastes the top of the screen. The bar's background is cleared instead
+        // and the imagery runs up underneath it, softened by `topEdgeBlur` (on
+        // `globe`) so the toolbar buttons still have something to sit on.
+        //
+        // The old comment here claimed `.toolbarBackground(Color.black, for:)`
+        // was what pinned this bar black. It wasn't: that call is deprecated
+        // and inert on iOS 26, and the flat black comes from the UIKit
+        // appearance proxy in `OpenBatApp.configureNavigationBarAppearance`.
+        // See `clearNavigationBarBackground()`.
+        .clearNavigationBarBackground()
         .flatTopScrollEdge()
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -418,8 +419,13 @@ struct SpeciesExplorerView: View {
         // (which is what this used to do) expands the overlay along with the map
         // and drops the footer under the tab bar — the bug that sent the version
         // line under the chrome.
-        .ignoresSafeArea(edges: .bottom)
-        .overlay(alignment: .top) { topEdgeBlur }
+        // Top as well as bottom, and the top half is what makes the blurred
+        // header possible at all: with the imagery stopping at the safe area
+        // there is nothing behind the navigation bar to soften, which is why
+        // a blur strip added here on its own changed nothing visible. The
+        // bottom is unchanged — see the ORDER MATTERS note above.
+        .ignoresSafeArea(edges: [.top, .bottom])
+        .topEdgeBlur()
         .overlay(alignment: .bottom) { globeFooter }
         .opacity(globeOpacity)
         .onAppear {
@@ -484,23 +490,6 @@ struct SpeciesExplorerView: View {
         f.dateStyle = .medium
         return f
     }()
-
-    /// A real blur, not a flat colour, fading out from the bar down into the
-    /// globe — softens the seam where the imagery meets the nav bar without
-    /// touching the bar's own background (still flat black, still opaque; see
-    /// the `toolbarBackground` comment above `globe`). Masked so it reads
-    /// full-strength right under the bar and dissolves to nothing a short way
-    /// down, rather than a hard-edged translucent strip.
-    private var topEdgeBlur: some View {
-        Rectangle()
-            .fill(.ultraThinMaterial)
-            .mask(
-                LinearGradient(colors: [.black, .black.opacity(0.6), .clear],
-                                startPoint: .top, endPoint: .bottom)
-            )
-            .frame(height: 90)
-            .allowsHitTesting(false)
-    }
 
     /// Just the one instruction now — everything else that used to be down here
     /// (version, source, updated date, credits) moved to the toolbar's info
