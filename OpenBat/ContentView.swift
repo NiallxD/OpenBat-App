@@ -85,6 +85,7 @@ struct ContentView: View {
     @State private var hasCheckedReconsent = false
     @State private var showHelp = false
     @State private var showInfo = false
+    @State private var showNearbySpecies = false
     // Guided spotlight tour (launched from Info). tourActive gates the overlay;
     // tourIndex is the current step. tourPending is set by the Info sheet's tour
     // button and consumed by its onDismiss, so the tour only starts once the
@@ -266,6 +267,10 @@ struct ContentView: View {
                 }
                 .sheet(isPresented: $showHelp) {
                     SafariView(url: PrivacyLinks.helpURL)
+                }
+                .sheet(isPresented: $showNearbySpecies) {
+                    NearbySpeciesSheet(guide: speciesGuide, presenceStore: speciesPresence,
+                                       coordinate: location.currentCoordinate)
                 }
                 // onDismiss (not just the Done button) so per-model AutoID edits
                 // survive a swipe-down dismissal of the sheet too.
@@ -961,8 +966,15 @@ struct ContentView: View {
                 // `OnboardingState.shouldOfferTour`. Declaration order is what
                 // puts it there: trailing items are laid out left to right in the
                 // order they're declared.
+                //
+                // "Bats near you" swaps in once the tour offer is gone rather
+                // than sitting alongside it — someone who hasn't been shown
+                // around the app yet doesn't need a second unexplained icon
+                // competing with the tour prompt for the same trailing slot.
                 if OnboardingState.shared.shouldOfferTour(simplified: simplifiedMode) {
                     ToolbarItem(placement: .topBarTrailing) { tourButton }
+                } else {
+                    ToolbarItem(placement: .topBarTrailing) { nearbySpeciesButton }
                 }
                 ToolbarItem(placement: .topBarTrailing) { optionsMenu }
             }
@@ -1594,6 +1606,22 @@ struct ContentView: View {
         // so it must never ride along with an ambient `withAnimation`.
         .transaction { $0.animation = nil }
         .accessibilityLabel("Take the guided tour")
+    }
+
+    /// Which bats are plausible near the user right now — same presence data
+    /// the field guide's "Nearby" view uses, just a button away from the
+    /// detector instead of a tab switch.
+    private var nearbySpeciesButton: some View {
+        Button { showNearbySpecies = true } label: {
+            Image("batIcon")
+                .resizable()
+                .scaledToFit()
+                .frame(width: 22, height: 22)
+        }
+        // Same reasoning as `tourButton`/`optionsMenu` — no animated state of
+        // its own, so it must never ride along with an ambient withAnimation.
+        .transaction { $0.animation = nil }
+        .accessibilityLabel("Bats near you")
     }
 
     /// Settings / diagnostics menu — shown in the nav-bar trailing slot on the
