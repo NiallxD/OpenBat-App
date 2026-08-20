@@ -509,34 +509,42 @@ struct AppInfoView: View {
 /// sources from its own sheet — see `SpeciesExplorerView`.
 struct DataModelSourcesView: View {
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Data & Model Sources").font(.headline)
+        // Collapsed by default: every row underneath already carries its own
+        // license-text disclosure, so an expanded credits list was two levels
+        // of "extra info" showing at once. This outer group hides the whole
+        // list behind one disclosure, leaving the per-item dropdowns as they
+        // were.
+        DisclosureGroup {
+            VStack(alignment: .leading, spacing: 12) {
+                ForEach(ModelRegistry.all) { model in
+                    licenseRow(name: model.displayName, detail: model.citation, url: model.sourceURL,
+                               licenseName: model.licenseName, licenseText: model.licenseNoticeText)
+                }
+                attributionRow(name: "GBIF",
+                               detail: "Species distribution maps use occurrence data from the Global Biodiversity Information Facility (GBIF), licensed CC BY 4.0.",
+                               url: URL(string: "https://www.gbif.org"))
+                // CC BY-SA 4.0 requires attribution (title, author/source,
+                // license). Species description text is written for the field
+                // guide itself, cited to its own references (academic papers,
+                // conservation bodies) rather than Wikipedia — only photos come
+                // from there, so this only credits photos, not text.
+                attributionRow(name: "Wikipedia",
+                               detail: "Species photos in the field guide are sourced from Wikipedia's open media, licensed CC BY-SA 4.0. Individual photo authorship isn't tracked per-image. Description text is written for the field guide and cited to its own references, not Wikipedia.",
+                               url: URL(string: "https://www.wikipedia.org"))
 
-            ForEach(ModelRegistry.all) { model in
-                licenseRow(name: model.displayName, detail: model.citation, url: model.sourceURL,
-                           licenseName: model.licenseName, licenseText: model.licenseNoticeText)
+                Divider().padding(.vertical, 4)
+                Text("Open Source Software").font(.subheadline.weight(.semibold))
+
+                licenseRow(name: "FLAC", detail: "Recording contribution uses libFLAC for lossless audio encoding.",
+                           url: URL(string: "https://github.com/sbooth/flac-binary-xcframework"),
+                           licenseName: "BSD 3-Clause", licenseText: Self.xiphBSD3LicenseText(project: "FLAC", years: "2000-2009 Josh Coalson, 2011-2025", holder: "Xiph.Org Foundation"))
+                licenseRow(name: "libogg", detail: "Ogg container support, bundled alongside FLAC.",
+                           url: URL(string: "https://github.com/sbooth/ogg-binary-xcframework"),
+                           licenseName: "BSD 3-Clause", licenseText: Self.xiphBSD3LicenseText(project: "libogg", years: "2002", holder: "Xiph.org Foundation"))
             }
-            attributionRow(name: "GBIF",
-                           detail: "Species distribution maps use occurrence data from the Global Biodiversity Information Facility (GBIF), licensed CC BY 4.0.",
-                           url: URL(string: "https://www.gbif.org"))
-            // CC BY-SA 4.0 requires attribution (title, author/source,
-            // license). Species description text is written for the field
-            // guide itself, cited to its own references (academic papers,
-            // conservation bodies) rather than Wikipedia — only photos come
-            // from there, so this only credits photos, not text.
-            attributionRow(name: "Wikipedia",
-                           detail: "Species photos in the field guide are sourced from Wikipedia's open media, licensed CC BY-SA 4.0. Individual photo authorship isn't tracked per-image. Description text is written for the field guide and cited to its own references, not Wikipedia.",
-                           url: URL(string: "https://www.wikipedia.org"))
-
-            Divider().padding(.vertical, 4)
-            Text("Open Source Software").font(.headline)
-
-            licenseRow(name: "FLAC", detail: "Recording contribution uses libFLAC for lossless audio encoding.",
-                       url: URL(string: "https://github.com/sbooth/flac-binary-xcframework"),
-                       licenseName: "BSD 3-Clause", licenseText: Self.xiphBSD3LicenseText(project: "FLAC", years: "2000-2009 Josh Coalson, 2011-2025", holder: "Xiph.Org Foundation"))
-            licenseRow(name: "libogg", detail: "Ogg container support, bundled alongside FLAC.",
-                       url: URL(string: "https://github.com/sbooth/ogg-binary-xcframework"),
-                       licenseName: "BSD 3-Clause", licenseText: Self.xiphBSD3LicenseText(project: "libogg", years: "2002", holder: "Xiph.org Foundation"))
+            .padding(.top, 4)
+        } label: {
+            Text("Data & Model Sources").font(.headline)
         }
     }
 
