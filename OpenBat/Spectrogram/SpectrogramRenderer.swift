@@ -404,13 +404,33 @@ final class SpectrogramRenderer: NSObject, MTKViewDelegate {
 
         let rawDt = min(now - lastFrameTime, 0.1)
         lastFrameTime = now
-        smoothedDt = smoothedDt == 0 ? rawDt : smoothedDt + (rawDt - smoothedDt) * 0.1
-        smoothedTotal += (totalColumns - smoothedTotal) * 0.1
 
-        displayHead += columnsPerSecond * smoothedDt
-        let latencyColumns = max(columnsPerSecond * latencySeconds, 4)
-        let target = smoothedTotal - latencyColumns
-        displayHead += (target - displayHead) * 0.05
+        // The spring below is tuned for a steady ~16ms (60fps) step. A gap much
+        // wider than that means the render cadence itself just changed — most
+        // commonly `SpectrogramView.isIdle` dropping `preferredFramesPerSecond`
+        // to 10 the instant a session stops (`ContentView.stopDetecting()` →
+        // `audio.stop()` → `isActive` false, all essentially synchronous) —
+        // rather than one slow frame inside an otherwise-steady stream. Fed
+        // straight into the spring, a handful of ~100ms-apart corrections cover
+        // the same catch-up distance the 60fps case would in one continuous
+        // glide, and reads as the spectrogram visibly stuttering before it
+        // freezes. Snapping straight to the true final position instead reads
+        // as an immediate freeze, which is what stopping should look like —
+        // and there is nothing left to glide toward once new columns stop
+        // arriving anyway.
+        if rawDt > 0.05 {
+            smoothedDt = 1.0 / 60.0
+            smoothedTotal = totalColumns
+            displayHead = totalColumns
+        } else {
+            smoothedDt = smoothedDt == 0 ? rawDt : smoothedDt + (rawDt - smoothedDt) * 0.1
+            smoothedTotal += (totalColumns - smoothedTotal) * 0.1
+
+            displayHead += columnsPerSecond * smoothedDt
+            let latencyColumns = max(columnsPerSecond * latencySeconds, 4)
+            let target = smoothedTotal - latencyColumns
+            displayHead += (target - displayHead) * 0.05
+        }
 
         displayHead = min(displayHead, totalColumns)
         // Floor at 0: before `ringTextureWidth` columns have been written the
