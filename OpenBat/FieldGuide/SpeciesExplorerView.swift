@@ -158,7 +158,7 @@ struct SpeciesExplorerView: View {
         .navigationDestination(for: SpeciesGuideDestination.self) { destination in
             switch destination {
             case .region(let region):
-                RegionSpeciesView(
+                SpeciesCollectionView(
                     title: region.name,
                     species: store.guide.species(in: region),
                     countSuffix: "in region",
@@ -167,9 +167,12 @@ struct SpeciesExplorerView: View {
             case .species(let species):
                 SpeciesDetailView(species: species, store: store, presenceStore: presenceStore)
             case .nearby:
-                // Same photo-grid layout the Detector's own "Bats Near You"
-                // sheet uses — see NearbySpeciesGrid's doc comment.
-                NearbySpeciesGrid(guide: store, presenceStore: presenceStore, coordinate: userCoordinate)
+                SpeciesCollectionView(
+                    title: "Bats Near You",
+                    species: nearbySpecies,
+                    countSuffix: "near you",
+                    emptyStateDescription: markdownText("We don't have range data covering your exact location yet — try exploring a region on the globe instead, or [contribute range data here](\(fieldGuideRepoURL)).")
+                )
             }
         }
         // The one screen that does NOT get the app's flat black bar: the globe
@@ -787,73 +790,6 @@ private let fieldGuideRepoURL = "https://github.com/NiallxD/OpenBat-FieldGuide"
 /// worth a crash, and these strings are literals a compile would catch anyway.
 private func markdownText(_ markdown: String) -> Text {
     Text((try? AttributedString(markdown: markdown)) ?? AttributedString(markdown))
-}
-
-/// A species list grouped by family — the region page and, since
-/// 2026-08-17, the "bats near you" page (see `SpeciesExplorerView.nearbySpecies`
-/// and the globe pill). Both are "here is a set of species, browse it" pages
-/// that differ only in how the set was chosen and what to say about an empty
-/// one, so this takes the resolved `species` list directly rather than a
-/// `GuideRegion` — the near-you set isn't a region at all, just a coordinate
-/// matched against the presence grid.
-struct RegionSpeciesView: View {
-    let title: String
-    let species: [GuideSpecies]
-    /// "in region" / "near you" — filled into "Species \(countSuffix): N"
-    /// above the list.
-    let countSuffix: String
-    /// Shown only when `species` is empty; differs between the two callers
-    /// (a region with no guide entries yet vs no presence data covering this
-    /// exact spot), so it's supplied rather than owned here.
-    let emptyStateDescription: Text
-
-    private static let unclassified = "Other"
-
-    /// Species grouped by family — a lightweight stand-in for the full
-    /// taxonomy browser planned later (see Context.md §16); this just gives
-    /// the list some taxonomic structure today. Families sort alphabetically;
-    /// species lacking a `family` land in an "Other" group pinned last.
-    private var families: [(name: String, species: [GuideSpecies])] {
-        let grouped = Dictionary(grouping: species) { $0.family ?? Self.unclassified }
-        return grouped.keys.sorted { lhs, rhs in
-            if lhs == Self.unclassified { return false }
-            if rhs == Self.unclassified { return true }
-            return lhs < rhs
-        }.map { (name: $0, species: grouped[$0]!) }
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            if !species.isEmpty {
-                Text("Species \(countSuffix): \(species.count)")
-                    .font(.headline)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal)
-                    .padding(.top, 8)
-                    .padding(.bottom, 4)
-            }
-            List {
-                if species.isEmpty {
-                    ContentUnavailableView("No species yet",
-                                           systemImage: "book.closed",
-                                           description: emptyStateDescription)
-                } else {
-                    ForEach(families, id: \.name) { family in
-                        Section(family.name) {
-                            ForEach(family.species) { species in
-                                NavigationLink(value: SpeciesGuideDestination.species(species)) {
-                                    GuideSpeciesRow(species: species)
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        .navigationTitle(title)
-        .navigationBarTitleDisplayMode(.inline)
-    }
 }
 
 // Species detail page lives in SpeciesDetailView.swift.

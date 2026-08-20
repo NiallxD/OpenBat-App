@@ -1721,6 +1721,30 @@ out positive-area and holes negative, so a ring's sign classifies it and
 containment is only needed to pair a hole with the smallest ring around it.
 Fewer polygons than the run merging it replaced, and no internal edges at all.
 
+### Species collections: cards or list, one remembered choice (2026-08-19)
+
+Every "here is a set of species, browse it" page in the guide — a region, bats
+near you from the globe, and the Detector's own nearby sheet — is now one view,
+`SpeciesCollectionView`, with two layouts behind a toolbar toggle. **Cards are
+the default**; the choice is stored under `guide.speciesLayout` and is global
+rather than per-page, since the same toggle in the same corner meaning different
+things on two identical-looking pages is worse than one setting that moves them
+together.
+
+- **Both layouts group by family**, so the toggle only changes how a species is
+  drawn — never which ones appear or in what order. The card grid uses
+  `LazyVGrid` sections with the family name as the header.
+- **Three pages collapsed into one view.** `RegionSpeciesView` and the
+  short-lived `NearbySpeciesGrid` are gone. The Detector sheet
+  (`NearbySpeciesSheet`) is now just a `NavigationStack` wrapper that supplies
+  the resolved species set and its own empty-state wording, so the guide's
+  nearby page and the Detector's cannot drift apart — which they already had
+  once, one being a family-grouped text list and the other a flat photo grid.
+- **The toggle is hidden on an empty collection**, where it would offer a
+  choice that changes nothing on screen.
+- The button shows the icon for the layout you will *get*, not the one you are
+  looking at: the page already tells you which layout is showing.
+
 ### The species page could be dragged sideways (2026-08-17)
 
 A vertical `ScrollView` is backed by a `UIScrollView` whose `contentSize` is the
