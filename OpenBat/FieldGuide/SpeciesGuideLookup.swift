@@ -72,19 +72,27 @@ extension SpeciesGuide {
 }
 
 extension GuideSpecies {
-    /// The presence-grid code for this species — what `SpeciesPresenceData.json`
+    /// The presence-grid key for this species — what `SpeciesPresenceData.json`
     /// is keyed by, and what `GBIFDistributionCard` / "bats near you" look
     /// each guide entry up with.
     ///
-    /// Prefers the entry's own `code` field: a contributor can set that for a
-    /// species no bundled ID model names, purely so it can appear on the
-    /// distribution map and the near-you list — see the field guide README's
-    /// note on it. Falls back to `SpeciesGuide.code(forScientificName:)` for
-    /// every entry that hasn't (which, for any species a model DOES name, is
-    /// almost always simpler than also hand-copying that model's code into
-    /// the guide). Nil only when neither source has an answer — no ID model
-    /// names this species AND no contributor has assigned it one yet.
-    var presenceCode: String? {
-        code ?? SpeciesGuide.code(forScientificName: scientificName)
+    /// **Never nil, which is the point.** The guide used to carry a `code`
+    /// field a contributor filled in for a species no model names, and an
+    /// entry that left it blank got no distribution map and never appeared in
+    /// the near-you list. That was an unanswerable question to put to a
+    /// contributor — a classifier code is a fact about our models, not about
+    /// the bat — and it only got worse with scale: the guide is heading for
+    /// ~1500 species against the models' 47, so for the overwhelming majority
+    /// there is no model label to know, and hand-minted codes collide (both
+    /// *Myotis nattereri* and *M. natalensis* want MYONAT).
+    ///
+    /// So: a model's own code when one names this species — the classifier
+    /// stores, tags and exports detections under that code, so the presence
+    /// entry must share it — and otherwise the entry's `id` slug, which is
+    /// already unique and already the stable identity everything else
+    /// references. A slug key is never displayed: a species no model names
+    /// can never be a detection, so nothing shows it where a code belongs.
+    var presenceCode: String {
+        SpeciesGuide.code(forScientificName: scientificName) ?? id
     }
 }

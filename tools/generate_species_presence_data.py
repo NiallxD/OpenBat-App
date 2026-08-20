@@ -156,7 +156,7 @@ NEARBY_CLUSTER_KM = 500.0
 
 SCHEMA_VERSION = 1
 # Bump on every regeneration intended to ship.
-DATA_VERSION = 2
+DATA_VERSION = 3
 
 # Extra taxon names to union into a code's range, beyond the scientific name the
 # model itself uses. Every entry needs a reason: this table is the difference
@@ -217,7 +217,22 @@ def parse_scientific_names(path: Path) -> dict[str, str]:
 
 
 def load_guide_codes() -> dict[str, str]:
-    """code -> scientificName for every field guide entry that sets `code`.
+    """key -> scientificName for every field guide entry.
+
+    The key is the entry's `id` slug ("myotis-nattereri"), NOT a classifier
+    code — the guide no longer carries a `code` field. It used to: a
+    contributor was asked to mint one for any species no bundled model names,
+    and an entry that didn't got no range map at all. That was an unanswerable
+    question (a classifier code is a fact about our models, not about the bat)
+    and it scaled badly — the guide is heading for ~1500 species against the
+    models' 47, and hand-minted codes collide (*Myotis nattereri* and
+    *M. natalensis* both want MYONAT).
+
+    Entries a model DOES name are skipped by the caller, since the classifier
+    tables already supply those under the model's own code — which they must,
+    because detections are stored, GUANO-tagged and exported under it.
+    Everything else keys on its slug, which is already unique and already the
+    guide's stable identity. Matches `GuideSpecies.presenceCode` in the app.
 
     Purely additive — see the caller in `main()`. Returns {} with a printed
     warning if no guide JSON is found at either `GUIDE_PATHS` entry, rather
@@ -234,9 +249,9 @@ def load_guide_codes() -> dict[str, str]:
             continue
         print(f"reading guide-only codes from {path}")
         return {
-            entry["code"]: entry["scientificName"]
+            entry["id"]: entry["scientificName"]
             for entry in data.get("species", [])
-            if entry.get("code")
+            if entry.get("id") and entry.get("scientificName")
         }
     checked = ", ".join(str(p) for p in GUIDE_PATHS)
     print(f"warning: no field guide JSON found (checked {checked}) — "
@@ -557,18 +572,24 @@ def main() -> int:
     # error as two classifiers disagreeing, and fails the run the same way —
     # a silently wrong scientific name behind a code is worse than a
     # generation run that has to be fixed and re-run.
+    # Guide entries a model already names are dropped here rather than added
+    # under their slug: the app resolves those through the model's code (see
+    # `GuideSpecies.presenceCode`), so a slug-keyed duplicate would be dead
+    # weight in the file and a second range for the same bat to keep in sync.
     guide_codes = load_guide_codes()
+    named_by_model = {name.strip().lower() for name in codes.values()}
     guide_only_count = 0
-    for code, scientific in guide_codes.items():
-        existing = codes.get(code)
-        if existing is not None:
-            if existing != scientific:
-                print(f"error: code {code} means {existing!r} to a classifier and "
-                      f"{scientific!r} in the field guide. Fix the guide entry's "
-                      f"code or scientificName before generating.", file=sys.stderr)
-                return 1
-            continue  # guide just confirms a code a model already provides
-        codes[code] = scientific
+    for slug, scientific in guide_codes.items():
+        if scientific.strip().lower() in named_by_model:
+            continue
+        if slug in codes:
+            # A slug colliding with a classifier code needs a human: one of the
+            # two has to give, and guessing which would silently file one
+            # species' range under another's key.
+            print(f"error: guide slug {slug!r} ({scientific}) collides with a "
+                  f"classifier code meaning {codes[slug]!r}.", file=sys.stderr)
+            return 1
+        codes[slug] = scientific
         guide_only_count += 1
 
     if wanted:

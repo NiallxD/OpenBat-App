@@ -112,19 +112,6 @@ struct GuideSpecies: Codable, Identifiable, Hashable {
     var family: String?
     var regions: [String]     // GuideRegion ids where present
     var summary: String?      // short intro blurb
-    /// The classifier-vocabulary species code (4 letters, NABat-style, or 6,
-    /// BatDetect2-style — the same labels that appear on passes and
-    /// recordings), set by a contributor. Every bat has one of these whether
-    /// or not an ID model currently names it — see `GuideSpecies.presenceCode`
-    /// and the field guide README's note on this field before setting it.
-    ///
-    /// For a species a bundled model already names, this is genuinely
-    /// optional — `presenceCode` falls back to looking that code up from the
-    /// model automatically, so leaving it unset is fine and one less thing to
-    /// keep in sync. It's REQUIRED for a species no model names yet: without
-    /// it there is no code to generate presence data under at all, and the
-    /// distribution map and "bats near you" have nothing to look up.
-    var code: String?
     /// Direct URL to a photo of the species, set by a contributor. Preferred
     /// over the live Wikipedia lookup (`WikipediaSpeciesImageService`) that
     /// otherwise fills the hero photo — that lookup is unpredictable (wrong

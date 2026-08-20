@@ -94,15 +94,15 @@ struct SpeciesExplorerView: View {
     /// falls back to its generic wording rather than offering a dead tap.
     ///
     /// Joined the same way `GBIFDistributionCard` does, via
-    /// `GuideSpecies.presenceCode` — a contributor-assigned code first, then
-    /// a fallback lookup against whichever classifier names the species —
-    /// since the grid is keyed by code and the guide only knows scientific
-    /// names (see that property's own doc comment).
+    /// `GuideSpecies.presenceCode` — whichever classifier names the species,
+    /// falling back to the entry's own slug — since the grid is keyed by code
+    /// and the guide only knows scientific names (see that property's own doc
+    /// comment).
     private var nearbySpecies: [GuideSpecies] {
         guard let coordinate = userCoordinate else { return [] }
         return store.guide.species.filter { species in
-            guard let code = species.presenceCode else { return false }
-            if case .present = presenceStore.presence(forCode: code, at: coordinate) { return true }
+            if case .present = presenceStore.presence(forCode: species.presenceCode,
+                                                     at: coordinate) { return true }
             return false
         }
     }

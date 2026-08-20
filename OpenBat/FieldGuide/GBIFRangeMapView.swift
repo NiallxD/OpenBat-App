@@ -133,22 +133,20 @@ struct GBIFDistributionCard: View {
         }
     }
 
-    /// Why there is no map, said precisely — "we have no data for this bat" and
-    /// "no code to look data up under" are different facts, and the second is
-    /// a gap in coverage rather than a gap in knowledge.
+    /// Why there is no map, said precisely. There used to be a third case here
+    /// — "no code assigned in the guide" — which `presenceCode` has since made
+    /// impossible: every entry resolves to a key, so a missing map now always
+    /// means missing DATA, never missing wiring.
     private var unavailableReason: String {
         guard presenceStore.isLoaded else {
             return "Range data hasn't loaded yet."
-        }
-        guard species.presenceCode != nil else {
-            return "This species has no presence-grid code assigned in the field guide yet, so there's no range data for it."
         }
         return "There aren't enough records of this species to map where it lives."
     }
 
     private var resolvedRange: (rect: MKMapRect, shapes: [RangeShape])? {
-        guard let code = species.presenceCode,
-              let cells = presenceStore.presence[code], !cells.isEmpty else { return nil }
+        guard let cells = presenceStore.presence[species.presenceCode],
+              !cells.isEmpty else { return nil }
         let degrees = presenceStore.cellDegrees
         let shapes = Self.shapes(for: Set(cells.keys), cellDegrees: degrees)
         guard let rect = Self.mapRect(for: Set(cells.keys), cellDegrees: degrees) else { return nil }

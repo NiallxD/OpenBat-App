@@ -30,6 +30,11 @@ NASHVILLE = (36.1627, -86.7816)
 # southern Florida. The case was wrong, not the data; noted here so nobody
 # "fixes" the range to satisfy a bad test.
 GAINESVILLE_FL = (29.6516, -82.3248)
+SYDNEY = (-33.8688, 151.2093)
+# Perth, deliberately: same country, opposite coast, ~3300 km away. A control
+# in London only proves the range isn't global; this one proves it has the
+# right edge within Australia.
+PERTH = (-31.9523, 115.8613)
 
 # (code, place name, coordinate, expected, why)
 CASES = [
@@ -69,6 +74,19 @@ CASES = [
     ("NYCNOC", "San Francisco", SAN_FRANCISCO, False, "noctule is European"),
     ("RHIFER", "San Francisco", SAN_FRANCISCO, False, "greater horseshoe is European"),
     ("MYYU", "London", LONDON, False, "Yuma myotis is North American"),
+
+    # The first species keyed by its guide slug rather than a classifier code —
+    # no ID model names the grey-headed flying fox, so `presenceCode` falls back
+    # to the entry's `id`. These cases exist to prove that path produces a real
+    # range and not an empty or a global one.
+    ("pteropus-poliocephalus", "Sydney", SYDNEY, True,
+     "grey-headed flying fox is a familiar east-coast Australian bat, and roosts "
+     "in Sydney in tens of thousands"),
+    ("pteropus-poliocephalus", "Perth", PERTH, False,
+     "it is an EAST-coast species — a range that reaches Perth would mean the "
+     "grid had blanketed the continent"),
+    ("pteropus-poliocephalus", "London", LONDON, False,
+     "and not another continent entirely"),
 ]
 
 

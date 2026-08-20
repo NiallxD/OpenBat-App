@@ -29,8 +29,8 @@ struct NearbySpeciesSheet: View {
     private var nearbySpecies: [GuideSpecies] {
         guard let coordinate else { return [] }
         return guide.guide.species.filter { species in
-            guard let code = species.presenceCode else { return false }
-            if case .present = presenceStore.presence(forCode: code, at: coordinate) { return true }
+            if case .present = presenceStore.presence(forCode: species.presenceCode,
+                                                     at: coordinate) { return true }
             return false
         }
     }
