@@ -167,12 +167,9 @@ struct SpeciesExplorerView: View {
             case .species(let species):
                 SpeciesDetailView(species: species, store: store, presenceStore: presenceStore)
             case .nearby:
-                RegionSpeciesView(
-                    title: "Bats Near You",
-                    species: nearbySpecies,
-                    countSuffix: "near you",
-                    emptyStateDescription: markdownText("We don't have range data covering your exact location yet — try exploring a region on the globe instead, or [contribute range data here](\(fieldGuideRepoURL)).")
-                )
+                // Same photo-grid layout the Detector's own "Bats Near You"
+                // sheet uses — see NearbySpeciesGrid's doc comment.
+                NearbySpeciesGrid(guide: store, presenceStore: presenceStore, coordinate: userCoordinate)
             }
         }
         // Flat black bar. Matters most here: the globe's bright satellite imagery

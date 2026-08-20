@@ -22,6 +22,32 @@ struct NearbySpeciesSheet: View {
 
     @Environment(\.dismiss) private var dismiss
 
+    var body: some View {
+        NavigationStack {
+            NearbySpeciesGrid(guide: guide, presenceStore: presenceStore, coordinate: coordinate)
+                .navigationDestination(for: SpeciesGuideDestination.self) { destination in
+                    if case .species(let species) = destination {
+                        SpeciesDetailView(species: species, store: guide, presenceStore: presenceStore)
+                    }
+                }
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") { dismiss() }
+                    }
+                }
+        }
+    }
+}
+
+/// The photo-grid itself, shared by `NearbySpeciesSheet` (a sheet off the
+/// Detector's nav bar) and the field guide's own "Bats Near You" push from
+/// the globe footer — one card layout for the same underlying list rather
+/// than a text-row list on the guide side and a grid here.
+struct NearbySpeciesGrid: View {
+    let guide: SpeciesGuideStore
+    let presenceStore: SpeciesPresenceStore
+    let coordinate: CLLocationCoordinate2D?
+
     private var nearbySpecies: [GuideSpecies] {
         guard let coordinate else { return [] }
         return guide.guide.species.filter { species in
@@ -34,40 +60,31 @@ struct NearbySpeciesSheet: View {
     private static let columns = [GridItem(.adaptive(minimum: 150), spacing: 14)]
 
     var body: some View {
-        NavigationStack {
-            Group {
-                if coordinate == nil {
-                    ContentUnavailableView("No Location Yet",
-                                            systemImage: "location.slash",
-                                            description: Text("Bats near you will show up here once your location is available."))
-                } else if nearbySpecies.isEmpty {
-                    ContentUnavailableView("No Species Data",
-                                            systemImage: "questionmark.circle",
-                                            description: Text("Nothing in the field guide is known to be present at your location."))
-                } else {
-                    ScrollView {
-                        LazyVGrid(columns: Self.columns, spacing: 14) {
-                            ForEach(nearbySpecies) { species in
-                                NavigationLink {
-                                    SpeciesDetailView(species: species, store: guide, presenceStore: presenceStore)
-                                } label: {
-                                    NearbySpeciesCard(species: species)
-                                }
-                                .buttonStyle(.plain)
+        Group {
+            if coordinate == nil {
+                ContentUnavailableView("No Location Yet",
+                                        systemImage: "location.slash",
+                                        description: Text("Bats near you will show up here once your location is available."))
+            } else if nearbySpecies.isEmpty {
+                ContentUnavailableView("No Species Data",
+                                        systemImage: "questionmark.circle",
+                                        description: Text("Nothing in the field guide is known to be present at your location."))
+            } else {
+                ScrollView {
+                    LazyVGrid(columns: Self.columns, spacing: 14) {
+                        ForEach(nearbySpecies) { species in
+                            NavigationLink(value: SpeciesGuideDestination.species(species)) {
+                                NearbySpeciesCard(species: species)
                             }
+                            .buttonStyle(.plain)
                         }
-                        .padding(14)
                     }
-                }
-            }
-            .navigationTitle("Bats Near You")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }
+                    .padding(14)
                 }
             }
         }
+        .navigationTitle("Bats Near You")
+        .navigationBarTitleDisplayMode(.inline)
     }
 }
 

@@ -1639,6 +1639,11 @@ struct ContentView: View {
                 .resizable()
                 .scaledToFit()
                 .frame(width: 22, height: 22)
+                // Explicitly black rather than the template asset's default
+                // tint — the other nav-bar glyphs are SF Symbols that pick up
+                // the accent colour, but this one is the bat silhouette
+                // itself and reads better as a plain black mark.
+                .foregroundStyle(.black)
         }
         // Same reasoning as `tourButton`/`optionsMenu` — no animated state of
         // its own, so it must never ride along with an ambient withAnimation.
