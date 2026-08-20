@@ -178,17 +178,12 @@ struct SpeciesExplorerView: View {
         // material itself is removed app-wide in
         // `OpenBatApp.configureNavigationBarAppearance`.
         .toolbarBackground(Color.black, for: .navigationBar)
-        // NOT `.flatTopScrollEdge()` here, unlike every other section — that
-        // helper's own doc comment says why: it exists because this app
-        // "has nothing bright to blend under a bar", which is true for
-        // Sessions and the Detector but false for this screen. The globe IS
-        // bright content, so the system's native soft scroll-edge blur (the
-        // thing that helper turns off elsewhere) is exactly the right tool
-        // here: it fades the globe into the solid black bar at the seam
-        // instead of cutting hard against it. The bar's own background stays
-        // flat black either way (`toolbarBackground` above, and
-        // `backgroundEffect = nil` app-wide) — this only affects the strip
-        // of globe right at the top edge, not the bar or its buttons.
+        // `flatTopScrollEdge()` still applies here too (see that helper's own
+        // doc comment) — `Map` doesn't participate in the system's automatic
+        // scroll-edge blur the way `List`/`ScrollView` do, so leaving it off
+        // for this screen alone turned out to change nothing. `topEdgeBlur`
+        // (on `globe`) is the real fade at the top of the imagery instead.
+        .flatTopScrollEdge()
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button { showGuideInfo = true } label: {
@@ -424,6 +419,7 @@ struct SpeciesExplorerView: View {
         // and drops the footer under the tab bar — the bug that sent the version
         // line under the chrome.
         .ignoresSafeArea(edges: .bottom)
+        .overlay(alignment: .top) { topEdgeBlur }
         .overlay(alignment: .bottom) { globeFooter }
         .opacity(globeOpacity)
         .onAppear {
@@ -488,6 +484,23 @@ struct SpeciesExplorerView: View {
         f.dateStyle = .medium
         return f
     }()
+
+    /// A real blur, not a flat colour, fading out from the bar down into the
+    /// globe — softens the seam where the imagery meets the nav bar without
+    /// touching the bar's own background (still flat black, still opaque; see
+    /// the `toolbarBackground` comment above `globe`). Masked so it reads
+    /// full-strength right under the bar and dissolves to nothing a short way
+    /// down, rather than a hard-edged translucent strip.
+    private var topEdgeBlur: some View {
+        Rectangle()
+            .fill(.ultraThinMaterial)
+            .mask(
+                LinearGradient(colors: [.black, .black.opacity(0.6), .clear],
+                                startPoint: .top, endPoint: .bottom)
+            )
+            .frame(height: 90)
+            .allowsHitTesting(false)
+    }
 
     /// Just the one instruction now — everything else that used to be down here
     /// (version, source, updated date, credits) moved to the toolbar's info
