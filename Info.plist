@@ -6,12 +6,6 @@
 	<dict>
 		<key>iCloud.openbat-doc-container</key>
 		<dict>
-			<!-- false: the container is for PERSISTENCE (surviving an app delete /
-			     new device), not for browsing. Exposing it in Files let users
-			     move, rename or delete recordings out from under the app, which
-			     leaves dangling `Recording.relativeWavPath` entries — broken
-			     playback and deletes that remove nothing. Exporting a recording
-			     is handled in-app instead (see WavExport's ShareLink). -->
 			<key>NSUbiquitousContainerIsDocumentScopePublic</key>
 			<false/>
 			<key>NSUbiquitousContainerName</key>
@@ -20,17 +14,6 @@
 			<string>Any</string>
 		</dict>
 	</dict>
-	<!-- Required for ActivityKit. Without it `ActivityAuthorizationInfo().areActivitiesEnabled`
-	     is false and `Activity.request` throws, with no other symptom than the card
-	     never appearing. -->
-	<key>NSSupportsLiveActivities</key>
-	<true/>
-	<!-- Lets the app update an in-flight Live Activity more often than the default
-	     budget allows. We stay well inside it anyway (updates are coalesced to one
-	     per 2 s in LiveActivityController), but a busy feeding buzz can finalise
-	     several passes in quick succession and this keeps those from being dropped. -->
-	<key>NSSupportsLiveActivitiesFrequentUpdates</key>
-	<true/>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>
