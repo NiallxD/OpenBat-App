@@ -272,6 +272,10 @@ struct ContentView: View {
                 .sheet(isPresented: $showNearbySpecies) {
                     NearbySpeciesSheet(guide: speciesGuide, presenceStore: speciesPresence,
                                        coordinate: location.currentCoordinate)
+                        // The sheet's own card material defaults to a light
+                        // translucent fill — flat black instead, matching the
+                        // guide's push destination of the same grid.
+                        .presentationBackground(Color.black)
                 }
                 // Ending stops live listening (and any in-progress recording)
                 // outright — the logged IDs themselves aren't deleted, but the
@@ -1639,11 +1643,6 @@ struct ContentView: View {
                 .resizable()
                 .scaledToFit()
                 .frame(width: 22, height: 22)
-                // Explicitly black rather than the template asset's default
-                // tint — the other nav-bar glyphs are SF Symbols that pick up
-                // the accent colour, but this one is the bat silhouette
-                // itself and reads better as a plain black mark.
-                .foregroundStyle(.black)
         }
         // Same reasoning as `tourButton`/`optionsMenu` — no animated state of
         // its own, so it must never ride along with an ambient withAnimation.

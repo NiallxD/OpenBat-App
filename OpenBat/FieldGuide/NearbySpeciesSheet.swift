@@ -83,8 +83,14 @@ struct NearbySpeciesGrid: View {
                 }
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.black)
         .navigationTitle("Bats Near You")
         .navigationBarTitleDisplayMode(.inline)
+        // Flat black bar, same reasoning as SpeciesExplorerView's globe
+        // toolbar: the default glass material samples through to a washed-out
+        // grey against the black body behind it otherwise.
+        .toolbarBackground(Color.black, for: .navigationBar)
     }
 }
 
