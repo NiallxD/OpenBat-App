@@ -86,6 +86,7 @@ struct ContentView: View {
     @State private var showHelp = false
     @State private var showInfo = false
     @State private var showNearbySpecies = false
+    @State private var showEndSessionConfirm = false
     // Guided spotlight tour (launched from Info). tourActive gates the overlay;
     // tourIndex is the current step. tourPending is set by the Info sheet's tour
     // button and consumed by its onDismiss, so the tour only starts once the
@@ -271,6 +272,19 @@ struct ContentView: View {
                 .sheet(isPresented: $showNearbySpecies) {
                     NearbySpeciesSheet(guide: speciesGuide, presenceStore: speciesPresence,
                                        coordinate: location.currentCoordinate)
+                }
+                // Ending stops live listening (and any in-progress recording)
+                // outright — the logged IDs themselves aren't deleted, but the
+                // mic goes silent and the Live Activity card disappears, which
+                // matters if this was a stray tap mid-pass. Session deletion
+                // already gets its own confirmation (see SessionsView); this is
+                // the same pattern for the one step upstream of it.
+                .confirmationDialog("End this session?",
+                                    isPresented: $showEndSessionConfirm, titleVisibility: .visible) {
+                    Button("End Session", role: .destructive) { stopDetecting() }
+                    Button("Cancel", role: .cancel) { }
+                } message: {
+                    Text("Listening and recording will stop. Anything already logged stays saved.")
                 }
                 // onDismiss (not just the Done button) so per-model AutoID edits
                 // survive a swipe-down dismissal of the sheet too.
@@ -1310,7 +1324,7 @@ struct ContentView: View {
                         onCycleListen: advanceListenMode,
                         onEndSession: {
                             withAnimation(.bouncy(duration: 0.35)) { showTransportMenu = false }
-                            stopDetecting()
+                            showEndSessionConfirm = true
                         }
                     )
                     .transition(.scale(scale: 0.6, anchor: transportMenuIsBelowBar ? .top : .bottom)
