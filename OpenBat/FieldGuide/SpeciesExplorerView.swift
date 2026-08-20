@@ -174,9 +174,8 @@ struct SpeciesExplorerView: View {
         }
         // The one screen that does NOT get the app's flat black bar: the globe
         // is bright, full-bleed imagery, and cutting it off with a solid strip
-        // wastes the top of the screen. The bar's background is cleared instead
-        // and the imagery runs up underneath it, softened by `topEdgeBlur` (on
-        // `globe`) so the toolbar buttons still have something to sit on.
+        // wastes the top of the screen. The imagery runs up under the bar
+        // instead (`ignoresSafeArea` on `globe`).
         //
         // The old comment here claimed `.toolbarBackground(Color.black, for:)`
         // was what pinned this bar black. It wasn't: that call is deprecated
@@ -419,13 +418,13 @@ struct SpeciesExplorerView: View {
         // (which is what this used to do) expands the overlay along with the map
         // and drops the footer under the tab bar — the bug that sent the version
         // line under the chrome.
-        // Top as well as bottom, and the top half is what makes the blurred
-        // header possible at all: with the imagery stopping at the safe area
-        // there is nothing behind the navigation bar to soften, which is why
-        // a blur strip added here on its own changed nothing visible. The
-        // bottom is unchanged — see the ORDER MATTERS note above.
+        // Top as well as bottom. The top half pairs with
+        // `clearNavigationBarBackground()` below: clearing the bar's
+        // background only stops the bar painting, so without this the globe
+        // would still stop at the safe area and leave a black gap where the
+        // bar used to be. The bottom is unchanged — see the ORDER MATTERS
+        // note above.
         .ignoresSafeArea(edges: [.top, .bottom])
-        .topEdgeBlur()
         .overlay(alignment: .bottom) { globeFooter }
         .opacity(globeOpacity)
         .onAppear {
