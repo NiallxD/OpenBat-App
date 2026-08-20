@@ -347,6 +347,13 @@ final class ClassificationStore {
         guard let since else { return [] }
         let source = (sessionID.map(passes(inSession:)) ?? listeningPasses)
             .filter { $0.date >= since }
+            // A NOID pass built from a single pulse is usually just a missed
+            // partner pulse, not a real "heard something, couldn't tell what" —
+            // it was drowning out genuine multi-pulse NOIDs (species-deduped, so
+            // only the newest NOID can ever occupy the row) with noise on every
+            // run. A real NOID worth surfacing has at least a second pulse
+            // agreeing there was something there.
+            .filter { !($0.isNoID && $0.pulses.count <= 1) }
         var seen = Set<String>()
         return source.filter { seen.insert($0.species).inserted }
     }
