@@ -1841,13 +1841,9 @@ struct ContentView: View {
                 .allowsHitTesting(!showsSpeciesID)
 
             if showsSpeciesID {
-                // Thumbnails only in simplified view. In advanced view the pulse
-                // close-up is one tap away and shows the same image larger, so
-                // repeating it in the list is clutter — but simplified view has
-                // no close-up anywhere, which makes this the only place the
-                // shape of the call is ever visible. That pairing (this shape,
-                // that species) is most of what teaches someone to read a call.
-                SpeciesFeedView(store: classStore, guide: speciesGuide, presenceStore: speciesPresence, activeSessionID: classStore.activeSessionID, sessionStart: feedSessionStart, showsThumbnail: simplifiedMode, autoIDActive: autoIDSettings.activeModelID != nil)
+                // Mirrors the spectrogram panel's species ID list, thumbnail
+                // included — see `spectrogramPanelContent`.
+                SpeciesFeedView(store: classStore, guide: speciesGuide, presenceStore: speciesPresence, activeSessionID: classStore.activeSessionID, sessionStart: feedSessionStart, autoIDActive: autoIDSettings.activeModelID != nil)
             }
         }
     }

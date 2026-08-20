@@ -45,7 +45,16 @@ struct SpeciesFeedView: View {
             } else {
                 ScrollView {
                     LazyVStack(spacing: 8) {
-                        ForEach(entries) { pass in
+                        // Keyed by species, not `pass.id`: a re-detection of an
+                        // already-listed species produces a brand-new PassRecord
+                        // (fresh UUID, see ClassificationStore.addPass), and keying
+                        // on that would make SwiftUI tear down and recreate the row
+                        // out from under the user — silently closing its pulse-detail
+                        // sheet mid-view. The feed already dedupes to one entry per
+                        // species (speciesFeed(sessionID:since:)), so species is a
+                        // stable identity across re-detections; the row survives and
+                        // just receives the newer `pass` value.
+                        ForEach(entries, id: \.species) { pass in
                             SpeciesFeedRow(pass: pass, store: store, guide: guide,
                                            presenceStore: presenceStore,
                                            showsThumbnail: showsThumbnail)
@@ -54,7 +63,7 @@ struct SpeciesFeedView: View {
                     }
                     .padding(8)
                 }
-                .animation(.spring(response: 0.4, dampingFraction: 0.85), value: entries.map(\.id))
+                .animation(.spring(response: 0.4, dampingFraction: 0.85), value: entries.map(\.species))
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
