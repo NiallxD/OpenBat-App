@@ -251,6 +251,7 @@ private struct SunWindowExplainer: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Bat activity tonight")
                 .font(.subheadline.weight(.semibold))
+                .frame(maxWidth: .infinity, alignment: .center)
 
             if let night = SunWindow.night(at: Date(), coordinate: coordinate) {
                 SunArcView(sunset: night.sunset, sunrise: night.sunrise, now: Date())
