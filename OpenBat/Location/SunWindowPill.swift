@@ -253,10 +253,8 @@ private struct SunWindowExplainer: View {
                 .font(.subheadline.weight(.semibold))
 
             if let night = SunWindow.night(at: Date(), coordinate: coordinate) {
-                VStack(spacing: 4) {
-                    row("sunset.fill", "Sunset", Self.clock.string(from: night.sunset))
-                    row("sunrise.fill", "Sunrise", Self.clock.string(from: night.sunrise))
-                }
+                SunArcView(sunset: night.sunset, sunrise: night.sunrise, now: Date())
+                    .padding(.vertical, 2)
 
                 Text("Most bats emerge soon after sunset and are most active for the first couple of hours, with a second, quieter burst before sunrise as they return to the roost.")
                     .font(.caption)
@@ -289,15 +287,97 @@ private struct SunWindowExplainer: View {
         .frame(width: 280, alignment: .leading)
     }
 
-    private func row(_ icon: String, _ label: String, _ value: String) -> some View {
-        HStack(spacing: 6) {
-            Image(systemName: icon)
-                .font(.system(size: 12))
-                .foregroundStyle(Color.batAccent)
-                .frame(width: 16)
-            Text(label).font(.caption)
-            Spacer(minLength: 12)
-            Text(value).font(.caption.monospacedDigit().weight(.semibold))
+}
+
+// MARK: - Sun arc
+
+/// Sunrise on the left, sunset on the right, a dashed arc between them, and a
+/// sun glyph riding the arc at wherever `now` falls in tonight's sunset→sunrise
+/// span. Static once drawn — same "computed when the popover opens" choice as
+/// the rest of `SunWindowExplainer`, not a live clock.
+private struct SunArcView: View {
+    let sunset: Date
+    let sunrise: Date
+    let now: Date
+
+    private static let clock: DateFormatter = {
+        let f = DateFormatter(); f.timeStyle = .short; return f
+    }()
+
+    /// 0 at sunset, 1 at sunrise — how far through tonight `now` is. Clamped
+    /// so a popover opened just before sunset or just after sunrise still
+    /// pins the sun glyph to the nearer end rather than running off the arc.
+    private var progress: Double {
+        let total = sunrise.timeIntervalSince(sunset)
+        guard total > 0 else { return 0 }
+        return min(max(now.timeIntervalSince(sunset) / total, 0), 1)
+    }
+
+    /// The moving glyph is the sun, not the night — once sunset has actually
+    /// passed there's nothing for it to represent, so it disappears rather
+    /// than riding the arc as a stand-in for "how far through the night".
+    private var isBeforeSunset: Bool { now < sunset }
+
+    /// y of the arc's two ends, and where the end icons sit — everything below
+    /// that line is the icon + time labels.
+    private static let baseline: CGFloat = 44
+    /// y of the arc's highest point, above the baseline. Kept well clear of
+    /// the baseline (was 30pt, now 42) so the curve reads as a rounded dome
+    /// rather than two near-straight sides meeting a flat top — a shallow
+    /// arc over this width looked like it just stopped at the ends instead
+    /// of curving into them.
+    private static let arcTop: CGFloat = 2
+    private static let totalHeight: CGFloat = 86
+    /// Inset from each edge so the end labels' full width (icon or the wider
+    /// time text below it) doesn't clip against the popover's padding.
+    private static let edgeInset: CGFloat = 18
+
+    var body: some View {
+        GeometryReader { geo in
+            let width = geo.size.width
+            let left = CGPoint(x: Self.edgeInset, y: Self.baseline)
+            let right = CGPoint(x: width - Self.edgeInset, y: Self.baseline)
+            let control = CGPoint(x: width / 2, y: Self.arcTop)
+
+            Path { path in
+                path.move(to: left)
+                path.addQuadCurve(to: right, control: control)
+            }
+            .stroke(Color.batAccent, style: StrokeStyle(lineWidth: 4, lineCap: .round))
+
+            // Sunrise sits at the curve's t=0 end, sunset at t=1 — the mirror
+            // of `progress` (0 at sunset, 1 at sunrise), so the glyph moves
+            // right-to-left as the night goes on, ending at sunrise on the left.
+            if isBeforeSunset {
+                Image(systemName: "sun.max.fill")
+                    .font(.system(size: 13))
+                    .foregroundStyle(Color.batAccent)
+                    .position(Self.quadPoint(t: 1 - progress, p0: left, control: control, p1: right))
+            }
+
+            endLabel(icon: "sunrise.fill", time: sunrise)
+                .position(x: left.x, y: Self.baseline + 20)
+            endLabel(icon: "sunset.fill", time: sunset)
+                .position(x: right.x, y: Self.baseline + 20)
         }
+        .frame(height: Self.totalHeight)
+    }
+
+    private func endLabel(icon: String, time: Date) -> some View {
+        VStack(spacing: 2) {
+            Image(systemName: icon)
+                .font(.system(size: 13))
+                .foregroundStyle(Color.batAccent)
+            Text(Self.clock.string(from: time))
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private static func quadPoint(t: Double, p0: CGPoint, control: CGPoint, p1: CGPoint) -> CGPoint {
+        let mt = 1 - t
+        let x = mt * mt * p0.x + 2 * mt * t * control.x + t * t * p1.x
+        let y = mt * mt * p0.y + 2 * mt * t * control.y + t * t * p1.y
+        return CGPoint(x: x, y: y)
     }
 }
