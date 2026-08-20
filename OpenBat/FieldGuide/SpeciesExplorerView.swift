@@ -178,7 +178,17 @@ struct SpeciesExplorerView: View {
         // material itself is removed app-wide in
         // `OpenBatApp.configureNavigationBarAppearance`.
         .toolbarBackground(Color.black, for: .navigationBar)
-        .flatTopScrollEdge()
+        // NOT `.flatTopScrollEdge()` here, unlike every other section — that
+        // helper's own doc comment says why: it exists because this app
+        // "has nothing bright to blend under a bar", which is true for
+        // Sessions and the Detector but false for this screen. The globe IS
+        // bright content, so the system's native soft scroll-edge blur (the
+        // thing that helper turns off elsewhere) is exactly the right tool
+        // here: it fades the globe into the solid black bar at the seam
+        // instead of cutting hard against it. The bar's own background stays
+        // flat black either way (`toolbarBackground` above, and
+        // `backgroundEffect = nil` app-wide) — this only affects the strip
+        // of globe right at the top edge, not the bar or its buttons.
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button { showGuideInfo = true } label: {
