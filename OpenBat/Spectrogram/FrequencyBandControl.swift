@@ -57,9 +57,9 @@ struct FrequencyBandControl: View {
                 Text("Time window")
                     .font(.subheadline.weight(.semibold))
                 Spacer()
-                Button("Reset") { timeWindowSeconds = 0.5 }
+                Button("Reset") { timeWindowSeconds = 0.75 }
                     .font(.caption2)
-                    .disabled(timeWindowSeconds == 0.5)
+                    .disabled(timeWindowSeconds == 0.75)
             }
 
             Slider(value: $timeWindowSeconds, in: 0.1...2.0)

@@ -73,8 +73,8 @@ struct SpectrogramView: View {
     /// Visible frequency band, as fractions of Nyquist.
     var bandLow: Double = 0
     var bandHigh: Double = 1
-    /// Width of the x-axis time window, in seconds (e.g. 0.5 = 500 ms).
-    var timeWindowSeconds: Double = 0.5
+    /// Width of the x-axis time window, in seconds (e.g. 0.75 = 750 ms).
+    var timeWindowSeconds: Double = 0.75
     var pulseDetector: PulseDetector? = nil
     /// When true, stops the Metal render loop (and with it, FFT-column
     /// draining and pulse-detector feeding) entirely — for use while a sheet

@@ -34,7 +34,7 @@ final class SpectrogramRenderer: NSObject, MTKViewDelegate {
     var columnsPerSecond: Double = 1500
 
     /// Width of the x-axis time window shown on screen, in seconds.
-    var timeWindowSeconds: Double = 0.5
+    var timeWindowSeconds: Double = 0.75
 
     /// Visible frequency band as fractions of Nyquist.
     var bandLow: Float = 0
