@@ -515,6 +515,7 @@ struct TransportMenuRecordItem: View {
 /// effect inside it ever runs (see `ContentView.sessionGlyph`). Anything that
 /// needs to animate has to live out here, under the glass.
 struct SessionGlow: View {
+    let audio: AudioEngineController
     let recorder: AudioRecorder
     /// The button's real, measured size — the glow matches it rather than
     /// assuming `SessionButtonMetrics.diameter`, because the system draws that
@@ -543,23 +544,26 @@ struct SessionGlow: View {
             // record button once slid diagonally out of the row and back, for
             // the rest of the run (see `recordPulseAnimation`). An opacity-only
             // pulse has no geometry for the repeat to catch hold of.
-            .animation(recordPulseAnimation(armed: recorder.isArmed,
+            .animation(recordPulseAnimation(listening: audio.isActive,
                                             writing: recorder.isWriting),
                        value: pulseBright)
             .allowsHitTesting(false)
             .accessibilityHidden(true)
-            .onAppear { syncRecordPulse(armed: recorder.isArmed, writing: recorder.isWriting, pulseBright: $pulseBright) }
-            .onChange(of: recorder.isArmed) { _, armed in
-                syncRecordPulse(armed: armed, writing: recorder.isWriting, pulseBright: $pulseBright)
+            .onAppear { syncRecordPulse(listening: audio.isActive, writing: recorder.isWriting, pulseBright: $pulseBright) }
+            .onChange(of: audio.isActive) { _, listening in
+                syncRecordPulse(listening: listening, writing: recorder.isWriting, pulseBright: $pulseBright)
             }
             .onChange(of: recorder.isWriting) { _, writing in
-                syncRecordPulse(armed: recorder.isArmed, writing: writing, pulseBright: $pulseBright)
+                syncRecordPulse(listening: audio.isActive, writing: writing, pulseBright: $pulseBright)
             }
     }
 
-    /// Steady and bright while a segment is open, breathing while armed and
-    /// waiting — the same reading as the record glyph's ring, so a glance at
-    /// either tells you the same thing.
+    /// Steady and bright while a segment is open, breathing while listening
+    /// and not currently writing — the same reading as the record glyph's
+    /// ring, so a glance at either tells you the same thing. Deliberately not
+    /// keyed on `recorder.isArmed`: this glow says "the session is live," and
+    /// listening can run with recording stopped, so it must keep breathing
+    /// through that state rather than going dark.
     private var opacity: Double {
         if recorder.isWriting { return 0.85 }
         return pulseBright ? 0.7 : 0.18
@@ -604,6 +608,14 @@ func syncRecordPulse(armed: Bool, writing: Bool, pulseBright: Binding<Bool>) {
     pulseBright.wrappedValue = armed && !writing
 }
 
+/// Same shape as `syncRecordPulse`, for `SessionGlow`: active while listening
+/// and not currently writing a segment, so the glow keeps breathing through
+/// "recording stopped, still listening" instead of going dark — see the note
+/// on `SessionGlow.opacity`.
+func syncRecordPulse(listening: Bool, writing: Bool, pulseBright: Binding<Bool>) {
+    pulseBright.wrappedValue = listening && !writing
+}
+
 /// The pulse's animation, applied to the record glyph's own subtree.
 ///
 /// This deliberately isn't a `withAnimation(.repeatForever(autoreverses: true))`
@@ -630,6 +642,15 @@ func syncRecordPulse(armed: Bool, writing: Bool, pulseBright: Binding<Bool>) {
 /// `MicStatusPillContent` in LiveStatusViews.swift.
 func recordPulseAnimation(armed: Bool, writing: Bool) -> Animation {
     armed && !writing
+        ? .easeInOut(duration: 0.9).repeatForever(autoreverses: true)
+        : .easeInOut(duration: 0.2)
+}
+
+/// Same shape as `recordPulseAnimation(armed:writing:)`, for `SessionGlow` —
+/// see `syncRecordPulse(listening:writing:pulseBright:)` for why this is keyed
+/// on listening rather than armed.
+func recordPulseAnimation(listening: Bool, writing: Bool) -> Animation {
+    listening && !writing
         ? .easeInOut(duration: 0.9).repeatForever(autoreverses: true)
         : .easeInOut(duration: 0.2)
 }

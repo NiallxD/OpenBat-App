@@ -1434,19 +1434,27 @@ struct ContentView: View {
     /// coloured disc that covers the button exactly is the same proof.
     private var sessionTapCatcherTint: Color { .clear }
 
-    /// The pulsing light behind the session button while recording, placed on
+    /// The pulsing light behind the session button while listening, placed on
     /// the button's measured frame. Drawn on the *screen* rather than the tab
     /// host so it lands under the bar and the glass lights it — see
     /// `SessionGlow`.
+    ///
+    /// Mounted on `audio.isActive`, not `recorder.isArmed`: this glow reads as
+    /// "the session is live," and listening can run with recording stopped.
+    /// Gating on `isArmed` used to tear the glow's `@State` down the instant
+    /// recording was stopped from the transport menu, even though listening
+    /// carried on — the button's own icon still looked live while the glow
+    /// behind it vanished.
     @ViewBuilder private var recordingGlowOverlay: some View {
-        if recorder.isArmed {
+        if audio.isActive {
             SessionButtonAnchored(locator: sessionButtonLocator) { size in
-                SessionGlow(recorder: recorder, buttonSize: size)
-                    // Fades in and out with arming rather than snapping — the
-                    // glow appearing at full strength the instant a bat trips
-                    // the recorder reads as a glitch rather than a state change.
+                SessionGlow(audio: audio, recorder: recorder, buttonSize: size)
+                    // Fades in and out with listening rather than snapping —
+                    // the glow appearing at full strength the instant a
+                    // session starts reads as a glitch rather than a state
+                    // change.
                     .transition(.opacity)
-                    .animation(.easeInOut(duration: 0.3), value: recorder.isArmed)
+                    .animation(.easeInOut(duration: 0.3), value: audio.isActive)
             }
         }
     }
