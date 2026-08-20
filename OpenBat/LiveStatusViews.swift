@@ -293,10 +293,9 @@ private struct MicStatusPillContent: View {
         // listen-mode restart — see AudioEngineController.isActive.
         let rateKnown = audio.isActive && d.actualSampleRate > 0
         let rateBad = !demo && rateKnown && d.actualSampleRate < micStatusRequiredRate
-        // Both faded states are computed here rather than inline so each can be the
-        // `value:` of its own scoped `.animation` below — see the onAppear comment.
+        // Computed here rather than inline so it can be the `value:` of its own
+        // scoped `.animation` below — see the onAppear comment.
         let iconFaded = !demo && connected && slowPulse
-        let rateFaded = rateBad && fastFlash
         // What the icon is SAYING, as one value: demo / connected / no mic. Only
         // here so the inner `.animation(nil, value:)` below has something to key
         // on — see the comment under the HStack.
@@ -310,13 +309,28 @@ private struct MicStatusPillContent: View {
                 .animation(.easeInOut(duration: 1.4).repeatForever(autoreverses: true), value: iconFaded)
                 .geometryGroup()
             if rateKnown {
-                Text("\(Int((d.actualSampleRate / 1000).rounded())) kHz")
-                    .font(.system(size: 9, weight: .semibold).monospacedDigit())
-                    .foregroundStyle(rateBad ? Color.red : .secondary)
-                    .animation(nil, value: rateBad)
-                    .opacity(rateFaded ? 0.25 : 1)
-                    .animation(.easeInOut(duration: 0.4).repeatForever(autoreverses: true), value: rateFaded)
-                    .geometryGroup()
+                // Branched rather than a single Text with a `rateFaded`-keyed
+                // `.opacity`/`.animation(repeatForever)` pair: a `repeatForever`
+                // animation stays live on the view it's attached to forever once
+                // started (same mechanism as the icon's colour-cycling bug above),
+                // so a single early moment of `rateBad` — before the feed rate
+                // settles at launch — left the label oscillating opacity for the
+                // rest of the run even after the rate was stable. Branching on
+                // `rateBad` gives the pulsing view a different identity than the
+                // stable one, so when the rate recovers, SwiftUI tears the whole
+                // animated subview down instead of leaving its repeat running.
+                if rateBad {
+                    Text("\(Int((d.actualSampleRate / 1000).rounded())) kHz")
+                        .font(.system(size: 9, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(Color.red)
+                        .opacity(fastFlash ? 0.25 : 1)
+                        .animation(.easeInOut(duration: 0.4).repeatForever(autoreverses: true), value: fastFlash)
+                        .geometryGroup()
+                } else {
+                    Text("\(Int((d.actualSampleRate / 1000).rounded())) kHz")
+                        .font(.system(size: 9, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
             }
         }
         // The two inner `.animation(nil, value:)`s above are the COLOUR half of
