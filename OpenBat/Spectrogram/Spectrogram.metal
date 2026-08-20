@@ -28,7 +28,8 @@ vertex VertexOut spectro_vertex(uint vid [[vertex_id]]) {
 // Selectable display palettes. Stop tables MUST mirror `DisplayPalette.swift`
 // (the CPU-side pulse-view/thumbnail colormap) exactly — see that file's header
 // comment. Palette index (Swift `Palette.rawValue`): 0 inferno, 1 viridis,
-// 2 magma, 3 greyscale, 4 jet, 5 plasma, 6 neon.
+// 3 greyscale, 4 jet, 6 neon. 2 (magma) and 5 (plasma) were retired, not
+// renumbered — see `Palette`'s header comment for why.
 
 static float3 infernoColormap(float t) {
     const float3 c0 = float3(0.001, 0.000, 0.014); // near-black
@@ -56,18 +57,6 @@ static float3 viridisColormap(float t) {
     return mix(c3, c4, (t - 0.75) / 0.25);
 }
 
-static float3 magmaColormap(float t) {
-    const float3 c0 = float3(0.001, 0.000, 0.016);
-    const float3 c1 = float3(0.316, 0.071, 0.485);
-    const float3 c2 = float3(0.716, 0.215, 0.475);
-    const float3 c3 = float3(0.988, 0.538, 0.380);
-    const float3 c4 = float3(0.988, 0.992, 0.749);
-    if (t < 0.25) return mix(c0, c1, t / 0.25);
-    if (t < 0.50) return mix(c1, c2, (t - 0.25) / 0.25);
-    if (t < 0.75) return mix(c2, c3, (t - 0.50) / 0.25);
-    return mix(c3, c4, (t - 0.75) / 0.25);
-}
-
 // Classic "thermal camera" rainbow — nostalgic, high-contrast, genuinely funky.
 static float3 jetColormap(float t) {
     const float3 c0 = float3(0.000, 0.000, 0.500);
@@ -81,19 +70,6 @@ static float3 jetColormap(float t) {
     if (t < 0.625) return mix(c2, c3, (t - 0.375) / 0.25);
     if (t < 0.875) return mix(c3, c4, (t - 0.625) / 0.25);
     return mix(c4, c5, (t - 0.875) / 0.125);
-}
-
-// Matplotlib plasma — vivid purple → magenta → orange → yellow.
-static float3 plasmaColormap(float t) {
-    const float3 c0 = float3(0.050, 0.030, 0.528);
-    const float3 c1 = float3(0.494, 0.012, 0.658);
-    const float3 c2 = float3(0.798, 0.280, 0.469);
-    const float3 c3 = float3(0.973, 0.585, 0.253);
-    const float3 c4 = float3(0.940, 0.975, 0.131);
-    if (t < 0.25) return mix(c0, c1, t / 0.25);
-    if (t < 0.50) return mix(c1, c2, (t - 0.25) / 0.25);
-    if (t < 0.75) return mix(c2, c3, (t - 0.50) / 0.25);
-    return mix(c3, c4, (t - 0.75) / 0.25);
 }
 
 // Synthwave-style neon — black → magenta → cyan → white.
@@ -112,14 +88,12 @@ static float3 colormap(float t, float paletteIndex) {
     int p = int(paletteIndex + 0.5);
     float3 c;
     if      (p == 1) c = viridisColormap(t);
-    else if (p == 2) c = magmaColormap(t);
     else if (p == 3) c = float3(t, t, t);
     else if (p == 4) c = jetColormap(t);
-    else if (p == 5) c = plasmaColormap(t);
     else if (p == 6) c = neonColormap(t);
     else             c = infernoColormap(t);
     // Fade the bottom of every palette to black so silence renders dark even for
-    // palettes whose t=0 stop is a saturated colour (viridis, jet, plasma).
+    // palettes whose t=0 stop is a saturated colour (viridis, jet).
     // Mirrors the identical fade in DisplayColormap.rgb (DisplayPalette.swift).
     return c * min(t / 0.12, 1.0);
 }

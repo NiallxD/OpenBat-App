@@ -17,14 +17,18 @@ import Foundation
 /// User-selectable display colormaps. `rawValue` is read directly by
 /// `Spectrogram.metal`'s `paletteIndex` uniform, so ordering/values here and
 /// the shader's `if (p == …)` chain must stay in step.
+///
+/// Values are pinned explicitly (rather than left to auto-increment) because
+/// `rawValue` is also what gets persisted (`pulse.displayPalette`, and the
+/// `@AppStorage` in `WavPlayerView`) — magma (2) and plasma (5) were removed
+/// by retiring their numbers rather than renumbering the rest, so an install
+/// that had e.g. jet (4) saved doesn't wake up on neon after the update.
 enum Palette: Int, CaseIterable, Identifiable {
-    case inferno
-    case viridis
-    case magma
-    case greyscale
-    case jet
-    case plasma
-    case neon
+    case inferno = 0
+    case viridis = 1
+    case greyscale = 3
+    case jet = 4
+    case neon = 6
 
     var id: Int { rawValue }
 
@@ -32,10 +36,8 @@ enum Palette: Int, CaseIterable, Identifiable {
         switch self {
         case .inferno:   "Inferno"
         case .viridis:   "Viridis"
-        case .magma:     "Magma"
         case .greyscale: "Greyscale"
         case .jet:       "Jet"
-        case .plasma:    "Plasma"
         case .neon:      "Neon"
         }
     }
@@ -66,13 +68,6 @@ nonisolated enum DisplayColormap {
             (0.75, (0.369, 0.788, 0.384)),
             (1.00, (0.993, 0.906, 0.144)),
         ],
-        .magma: [
-            (0.00, (0.001, 0.000, 0.016)),
-            (0.25, (0.316, 0.071, 0.485)),
-            (0.50, (0.716, 0.215, 0.475)),
-            (0.75, (0.988, 0.538, 0.380)),
-            (1.00, (0.988, 0.992, 0.749)),
-        ],
         .greyscale: [
             (0.0, (0, 0, 0)),
             (1.0, (1, 1, 1)),
@@ -85,14 +80,6 @@ nonisolated enum DisplayColormap {
             (0.625, (1.000, 1.000, 0.000)),
             (0.875, (1.000, 0.000, 0.000)),
             (1.000, (0.500, 0.000, 0.000)),
-        ],
-        // Matplotlib plasma — vivid purple → magenta → orange → yellow.
-        .plasma: [
-            (0.00, (0.050, 0.030, 0.528)),
-            (0.25, (0.494, 0.012, 0.658)),
-            (0.50, (0.798, 0.280, 0.469)),
-            (0.75, (0.973, 0.585, 0.253)),
-            (1.00, (0.940, 0.975, 0.131)),
         ],
         // Synthwave-style neon — black → magenta → cyan → white.
         .neon: [
@@ -107,8 +94,8 @@ nonisolated enum DisplayColormap {
         let t = min(max(t, 0), 1)
         let c = sample(t, palette: palette)
         // Fade the bottom of every palette to black so silence renders dark even
-        // for palettes whose t=0 stop is a saturated colour (viridis, jet,
-        // plasma). Mirrors the identical fade in Spectrogram.metal's colormap().
+        // for palettes whose t=0 stop is a saturated colour (viridis, jet).
+        // Mirrors the identical fade in Spectrogram.metal's colormap().
         let fade = min(t / 0.12, 1)
         return (UInt8(c.0 * fade * 255), UInt8(c.1 * fade * 255), UInt8(c.2 * fade * 255))
     }
