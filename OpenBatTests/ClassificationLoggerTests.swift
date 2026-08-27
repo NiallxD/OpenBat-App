@@ -70,14 +70,17 @@ struct ClassificationLoggerTests {
         #expect(fields[5] == "3")                // pulse_count
         #expect(fields.count == 6 + columns.count)
 
-        // Score columns line up with the header order: codeA/codeB carry their values,
-        // every other class column is 0.0000.
+        // Score columns line up with the header order: codeA/codeB carry their
+        // values, every other class column is a bare "0" — the compact form the
+        // logger writes for structurally-absent classes (the ones belonging to
+        // the model that didn't produce this row), which is about half the
+        // file's bytes on a wide union header.
         for (i, code) in columns.enumerated() {
             let field = fields[6 + i]
             switch code {
             case codeA: #expect(field == "0.9000")
             case codeB: #expect(field == "0.1000")
-            default:    #expect(field == "0.0000")
+            default:    #expect(field == "0")
             }
         }
     }

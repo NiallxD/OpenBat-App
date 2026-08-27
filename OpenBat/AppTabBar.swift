@@ -456,22 +456,31 @@ struct TransportMenuRecordItem: View {
             accessibilityLabel: recorder.isArmed ? "Stop recording" : "Record",
             action: action
         ) {
-            Image(systemName: "record.circle")
-                .symbolRenderingMode(.palette)
-                .foregroundStyle(
-                    RecordButtonTone.ring(armed: recorder.isArmed,
-                                          writing: recorder.isWriting,
-                                          pulseBright: pulseBright),
-                    RecordButtonTone.dot(armed: recorder.isArmed,
-                                         writing: recorder.isWriting)
-                )
-                .animation(recordPulseAnimation(armed: recorder.isArmed,
-                                                writing: recorder.isWriting),
-                           value: pulseBright)
-                // See `recordPulseAnimation`'s note on containment — a
-                // repeatForever animation stays live on the view forever and
-                // will pick up any later geometry change unless it is grouped.
-                .geometryGroup()
+            // Two glyphs cross-fading, for the same reason `SessionGlow` uses
+            // two discs: the writing state must not reach the pulse's own
+            // animation. Feeding `isWriting` into the ring's colour instead
+            // silently killed this pulse — with the repeat still live, the
+            // first pass moved the ring to solid red, and when the pass ended
+            // the "bright" end of the breath was solid red too, so the repeat
+            // had a zero-length change to animate and the ring simply stayed
+            // on for the rest of the session.
+            ZStack {
+                glyph(ring: .red, dot: RecordButtonTone.faded)
+                    .opacity(recorder.isWriting ? 1 : 0)
+                    .animation(RecordPulse.settle, value: recorder.isWriting)
+
+                glyph(ring: RecordButtonTone.ring(armed: recorder.isArmed,
+                                                  pulseBright: pulseBright),
+                      dot: RecordButtonTone.dot(armed: recorder.isArmed))
+                    .animation(RecordPulse.breathe, value: pulseBright)
+                    // See `RecordPulse`'s note on containment — a repeatForever
+                    // animation stays live on the view forever and will pick up
+                    // any later geometry change unless it is grouped.
+                    .geometryGroup()
+                    // Above the pulse's `.animation`, so outside its scope.
+                    .opacity(recorder.isWriting ? 0 : 1)
+                    .animation(RecordPulse.settle, value: recorder.isWriting)
+            }
         }
         .disabled(recorder.isBlocked)
         // `.disabled` alone is not a visible state here: the glyph is already
@@ -480,13 +489,16 @@ struct TransportMenuRecordItem: View {
         .opacity(recorder.isBlocked ? 0.35 : 1)
         .accessibilityHint(recorder.isBlocked ? "Unavailable during a demo" : "")
         .tourTarget(.record)
-        .onAppear { syncRecordPulse(armed: recorder.isArmed, writing: recorder.isWriting, pulseBright: $pulseBright) }
-        .onChange(of: recorder.isArmed) { _, armed in
-            syncRecordPulse(armed: armed, writing: recorder.isWriting, pulseBright: $pulseBright)
-        }
-        .onChange(of: recorder.isWriting) { _, writing in
-            syncRecordPulse(armed: recorder.isArmed, writing: writing, pulseBright: $pulseBright)
-        }
+        // Keyed on `isArmed` alone: the breath starts once when the recorder is
+        // armed and runs untouched until it is disarmed.
+        .onAppear { pulseBright = recorder.isArmed }
+        .onChange(of: recorder.isArmed) { _, armed in pulseBright = armed }
+    }
+
+    private func glyph(ring: Color, dot: Color) -> some View {
+        Image(systemName: "record.circle")
+            .symbolRenderingMode(.palette)
+            .foregroundStyle(ring, dot)
     }
 }
 
@@ -529,44 +541,64 @@ struct SessionGlow: View {
     private let glowColor = Color.batAccent
 
     var body: some View {
-        // Sized to the button itself, not wider. The glass spreads and softens
-        // whatever is under it, so a disc any bigger than the button stops
-        // reading as the button glowing and starts reading as a cloud sitting
-        // behind the bar — which is what the first attempt looked like.
+        ZStack {
+            // Steady and bright while a segment is open. A separate layer from
+            // the breath below rather than a third value the breath's own
+            // opacity could take: see the note on the gate.
+            disc
+                .opacity(recorder.isWriting ? 0.85 : 0)
+                .animation(RecordPulse.settle, value: recorder.isWriting)
+
+            // The breath. `pulseBright` tracks listening ALONE, so this
+            // `repeatForever` is started once when the session goes live and is
+            // never re-triggered for the rest of it.
+            //
+            // It used to be keyed on `listening && !writing`, and that is what
+            // made the pulse go lumpy after a few minutes in the field. A
+            // `repeatForever(autoreverses:)` oscillates between the value the
+            // view was AT when the animation started and the new target — not
+            // between the two values in the expression. `isWriting` flips on
+            // every WAV pass a bat opens, so every pass restarted the pulse
+            // from wherever the opacity happened to be: after the first
+            // detection the breath ran 0.85 ⇄ 0.7 instead of 0.18 ⇄ 0.7, a
+            // near-invisible wobble at the bright end reading as "on… on…
+            // on…", and each subsequent pass re-anchored it somewhere else
+            // again. Nothing ever restored the full swing, so the longer a
+            // session ran the less it looked like a breath.
+            disc
+                .opacity(pulseBright ? 0.7 : 0.18)
+                .animation(RecordPulse.breathe, value: pulseBright)
+                // Applied ABOVE the pulse's own `.animation(_:value:)`, so it
+                // sits outside that modifier's scope and the repeat cannot
+                // catch hold of it: the gate cross-fades, while the breath
+                // underneath keeps running at its own phase and amplitude and
+                // is simply not shown. That is the whole point — the writing
+                // state must never touch the pulse's animation.
+                .opacity(recorder.isWriting ? 0 : 1)
+                .animation(RecordPulse.settle, value: recorder.isWriting)
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+        .onAppear { pulseBright = audio.isActive }
+        .onChange(of: audio.isActive) { _, listening in pulseBright = listening }
+    }
+
+    /// Sized to the button itself, not wider. The glass spreads and softens
+    /// whatever is under it, so a disc any bigger than the button stops reading
+    /// as the button glowing and starts reading as a cloud sitting behind the
+    /// bar — which is what the first attempt looked like.
+    ///
+    /// Only opacity is ever animated, deliberately. A `repeatForever` animation
+    /// stays live on its view forever and picks up any later change to that
+    /// view's resolved *geometry* — which is how the record button once slid
+    /// diagonally out of the row and back, for the rest of the run (see
+    /// `RecordPulse`). An opacity-only pulse has no geometry for the
+    /// repeat to catch hold of.
+    private var disc: some View {
         Circle()
             .fill(glowColor)
             .frame(width: buttonSize.width, height: buttonSize.height)
             .blur(radius: 8)
-            .opacity(opacity)
-            // Only opacity is animated, deliberately. A `repeatForever`
-            // animation stays live on its view forever and picks up any later
-            // change to that view's resolved *geometry* — which is how the
-            // record button once slid diagonally out of the row and back, for
-            // the rest of the run (see `recordPulseAnimation`). An opacity-only
-            // pulse has no geometry for the repeat to catch hold of.
-            .animation(recordPulseAnimation(listening: audio.isActive,
-                                            writing: recorder.isWriting),
-                       value: pulseBright)
-            .allowsHitTesting(false)
-            .accessibilityHidden(true)
-            .onAppear { syncRecordPulse(listening: audio.isActive, writing: recorder.isWriting, pulseBright: $pulseBright) }
-            .onChange(of: audio.isActive) { _, listening in
-                syncRecordPulse(listening: listening, writing: recorder.isWriting, pulseBright: $pulseBright)
-            }
-            .onChange(of: recorder.isWriting) { _, writing in
-                syncRecordPulse(listening: audio.isActive, writing: writing, pulseBright: $pulseBright)
-            }
-    }
-
-    /// Steady and bright while a segment is open, breathing while listening
-    /// and not currently writing — the same reading as the record glyph's
-    /// ring, so a glance at either tells you the same thing. Deliberately not
-    /// keyed on `recorder.isArmed`: this glow says "the session is live," and
-    /// listening can run with recording stopped, so it must keep breathing
-    /// through that state rather than going dark.
-    private var opacity: Double {
-        if recorder.isWriting { return 0.85 }
-        return pulseBright ? 0.7 : 0.18
     }
 }
 
@@ -584,75 +616,63 @@ struct SessionGlow: View {
 enum RecordButtonTone {
     static let faded = Color.red.opacity(0.35)
 
-    static func ring(armed: Bool, writing: Bool, pulseBright: Bool) -> Color {
+    /// The breathing layer's colours. No `writing` parameter, deliberately:
+    /// the solid-while-writing glyph is a separate layer that cross-fades over
+    /// this one, so that state can never perturb the breath — see
+    /// `TransportMenuRecordItem`.
+    static func ring(armed: Bool, pulseBright: Bool) -> Color {
         guard armed else { return .secondary }
-        if writing { return .red }
         return pulseBright ? .red : faded
     }
 
-    static func dot(armed: Bool, writing: Bool) -> Color {
-        guard armed else { return .secondary }
-        return writing ? faded : .red
+    static func dot(armed: Bool) -> Color {
+        armed ? .red : .secondary
     }
 }
 
-/// Starts/stops the ring's breathing pulse to match armed/writing state — active
-/// only while armed and waiting (not yet writing); frozen (no visible jump, since
-/// `RecordButtonTone.ring` ignores `pulseBright` whenever `writing` is true) once
-/// a segment opens, and restarts when it closes but the recorder is still armed.
+/// The record pulse's two animations, shared by the transport-menu glyph and
+/// `SessionGlow` so the two can never drift out of step.
 ///
-/// Sets the flag with NO animation of its own. The repeating animation is attached
-/// to the glyph itself via `.animation(_:value:)` (see `recordPulseAnimation`) —
-/// it must NOT be started with `withAnimation`, for the reason documented there.
-func syncRecordPulse(armed: Bool, writing: Bool, pulseBright: Binding<Bool>) {
-    pulseBright.wrappedValue = armed && !writing
-}
-
-/// Same shape as `syncRecordPulse`, for `SessionGlow`: active while listening
-/// and not currently writing a segment, so the glow keeps breathing through
-/// "recording stopped, still listening" instead of going dark — see the note
-/// on `SessionGlow.opacity`.
-func syncRecordPulse(listening: Bool, writing: Bool, pulseBright: Binding<Bool>) {
-    pulseBright.wrappedValue = listening && !writing
-}
-
-/// The pulse's animation, applied to the record glyph's own subtree.
+/// **`breathe` is applied unconditionally to the pulsing layer, and its driving
+/// flag tracks one thing only** — armed, or listening. It is never keyed on an
+/// expression involving `isWriting`. A `repeatForever(autoreverses:)`
+/// oscillates between the value the view was at when the animation started and
+/// the target it was given, so re-triggering it mid-session re-anchors the
+/// pulse to wherever it happened to be. `isWriting` flips on every WAV pass a
+/// bat opens, which meant the pulse was re-anchored every few seconds in the
+/// field: the glow's breath collapsed to a wobble near full brightness, and the
+/// menu glyph's ring stopped moving altogether. Whatever needs to change with
+/// `isWriting` is a separate layer, cross-faded with `settle` from OUTSIDE the
+/// pulsing layer's `.animation(_:value:)` scope.
 ///
-/// This deliberately isn't a `withAnimation(.repeatForever(autoreverses: true))`
-/// wrapped around the state change. `withAnimation` installs its animation on the
-/// WHOLE current transaction, so every other view that happens to change in that
-/// same update cycle inherits it too — and an inherited `repeatForever` +
-/// `autoreverses` has nothing to end it, so whatever caught it oscillates for the
-/// rest of the run. That's what put the nav-bar Menu buttons into a permanent slow
-/// throb while detecting: `syncRecordPulse` fires on every `isArmed`/`isWriting`
-/// flip, i.e. on every WAV pass opened by a passing bat, and the toolbar's Liquid
-/// Glass chrome re-lays-out constantly, so sooner or later a toolbar update lands
-/// in the same transaction as one of those flips and latches the repeat. Scoping
-/// the animation here means the transaction never carries it.
+/// **These are scoped `.animation(_:value:)` modifiers, never
+/// `withAnimation`.** `withAnimation` installs its animation on the WHOLE
+/// current transaction, so every other view that happens to change in that same
+/// update cycle inherits it too — and an inherited `repeatForever` +
+/// `autoreverses` has nothing to end it, so whatever caught it oscillates for
+/// the rest of the run. That's what put the nav-bar Menu buttons into a
+/// permanent slow throb while detecting: the pulse flag was being set on every
+/// WAV pass opened by a passing bat, and the toolbar's Liquid Glass chrome
+/// re-lays-out constantly, so sooner or later a toolbar update landed in the
+/// same transaction and latched the repeat.
 ///
-/// **Scoping alone is not enough, and the glyph needs `.geometryGroup()` too.**
-/// A scoped `.animation(_:value:)` carrying `repeatForever(autoreverses:)` stays
-/// ACTIVE on that view forever once started — it does not only animate the
-/// `value:` it was keyed to. So every later change to the glyph's resolved
+/// **Scoping alone is not enough, and a glyph needs `.geometryGroup()` too.**
+/// A scoped `.animation(_:value:)` carrying `repeatForever(autoreverses:)`
+/// stays ACTIVE on that view forever once started — it does not only animate
+/// the `value:` it was keyed to. So every later change to the glyph's resolved
 /// geometry was picked up by that repeat as well, and the record button slid
 /// diagonally out of the row and back, forever. `.geometryGroup()` makes the
 /// glyph take its position from the parent's unanimated transaction as a rigid
 /// unit, so the repeat can only reach the palette colours, which is all it was
 /// ever for. Same failure and same fix as the mic pill's rate label — see
-/// `MicStatusPillContent` in LiveStatusViews.swift.
-func recordPulseAnimation(armed: Bool, writing: Bool) -> Animation {
-    armed && !writing
-        ? .easeInOut(duration: 0.9).repeatForever(autoreverses: true)
-        : .easeInOut(duration: 0.2)
-}
-
-/// Same shape as `recordPulseAnimation(armed:writing:)`, for `SessionGlow` —
-/// see `syncRecordPulse(listening:writing:pulseBright:)` for why this is keyed
-/// on listening rather than armed.
-func recordPulseAnimation(listening: Bool, writing: Bool) -> Animation {
-    listening && !writing
-        ? .easeInOut(duration: 0.9).repeatForever(autoreverses: true)
-        : .easeInOut(duration: 0.2)
+/// `MicStatusPillContent` in LiveStatusViews.swift. `SessionGlow` animates
+/// nothing but opacity and so needs no group.
+enum RecordPulse {
+    /// The breath. Started once per session, never re-triggered.
+    static let breathe: Animation = .easeInOut(duration: 0.9).repeatForever(autoreverses: true)
+    /// The cross-fade between the breathing layer and the solid
+    /// segment-is-open layer.
+    static let settle: Animation = .easeInOut(duration: 0.2)
 }
 
 // MARK: - Legacy bar (iOS 18–25)

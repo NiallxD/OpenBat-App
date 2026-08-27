@@ -17,6 +17,13 @@
 //  for BatDetect2. The superset keeps one stable, analysis-friendly CSV that's correct
 //  for whichever model produced the row.
 //
+//  Kept as CSV, deliberately. It is a wide, fully-rectangular table of numbers —
+//  the shape CSV is smallest for. JSON would repeat all 48 score-column names on
+//  every single row, several times the size for the same content; the honest
+//  wins here are not re-encoding but writing "0" rather than "0.0000" for the
+//  columns belonging to the model that didn't produce the row (see `makeRow`),
+//  the size cap below, and zipping on the way out (see `makeShareItem`).
+//
 //  Size management: the active file is capped at `maxLogBytes`. When an append would
 //  push it past that, the current file is rolled to a timestamped archive
 //  (`bat_classifier_log_v2-<stamp>.csv`) and a fresh header-only file takes over, so
@@ -80,6 +87,52 @@ final class ClassificationLogger {
         append(makeRow(type: "pass", date: date, result: result, pulseCount: pulseCount, modelID: modelID))
     }
 
+    /// The whole log — the active file plus every rolled archive — staged into a
+    /// temp folder and zipped, for the share sheet. Returns the zip, or the bare
+    /// active CSV if zipping fails.
+    ///
+    /// Zipped, and not just because these are big: the archives are the older
+    /// half of the picture and a share that silently dropped them would be
+    /// misleading to anyone reading the log. CSV of this shape compresses by
+    /// well over ten to one, so a season's worth arrives as a small attachment.
+    /// Same `NSFileCoordinator(.forUploading)` trick as `WavExport` — no zip
+    /// dependency.
+    func makeShareItem() -> URL {
+        let fm = FileManager.default
+        let stage = fm.temporaryDirectory.appendingPathComponent("OpenBat-classifier-log", isDirectory: true)
+        try? fm.removeItem(at: stage)
+        guard (try? fm.createDirectory(at: stage, withIntermediateDirectories: true)) != nil else {
+            return fileURL
+        }
+        // Copies taken ON `queue`, so none of them can catch a half-written row.
+        queue.sync {
+            for url in [fileURL] + archiveURLs() {
+                try? fm.copyItem(at: url, to: stage.appendingPathComponent(url.lastPathComponent))
+            }
+        }
+
+        var zipURL: URL?
+        var coordError: NSError?
+        NSFileCoordinator().coordinate(readingItemAt: stage, options: [.forUploading], error: &coordError) { tempZip in
+            // `tempZip` is system-managed and deleted when this closure returns.
+            let dest = fm.temporaryDirectory.appendingPathComponent("OpenBat-classifier-log.zip")
+            try? fm.removeItem(at: dest)
+            if (try? fm.moveItem(at: tempZip, to: dest)) != nil { zipURL = dest }
+        }
+        return zipURL ?? fileURL
+    }
+
+    /// Bytes on disk for the active file and every archive together — what the
+    /// log actually costs, which is what the settings row reports.
+    func totalBytesOnDisk() -> Int {
+        queue.sync {
+            ([fileURL] + archiveURLs()).reduce(0) { total, url in
+                let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+                return total + ((attrs?[.size] as? Int) ?? 0)
+            }
+        }
+    }
+
     /// Delete the active log and every rolled archive, then recreate the header.
     func clearLog() {
         queue.async { [self] in
@@ -112,7 +165,10 @@ final class ClassificationLogger {
         // of score columns) — appending under a stale header would misalign every
         // subsequent row. This is a diagnostic log, so a rare column-set change
         // starting a fresh file is acceptable.
-        if let handle = try? FileHandle(forReadingFrom: fileURL) {
+        // Same trap as `append` — see the note there. Absent is the NORMAL case
+        // on a first run, so this path takes it constantly.
+        if FileManager.default.fileExists(atPath: fileURL.path),
+           let handle = try? FileHandle(forReadingFrom: fileURL) {
             let existing = try? handle.read(upToCount: headerData.count)
             try? handle.close()
             if existing == headerData { return }
@@ -169,8 +225,15 @@ final class ClassificationLogger {
                  pulseCount: Int, modelID: String?) -> String {
         let ts = Self.iso8601.string(from: date)
         let conf = String(format: "%.1f", result.confidence * 100)
+        // A bare "0" for absent/zero classes rather than "0.0000". Every row
+        // carries the UNION of both models' class codes, so 17 or 31 of the 48
+        // score columns are real and the rest are structurally zero — at five
+        // wasted bytes each that was roughly half the file. Same columns, same
+        // parse, about half the bytes. (Encoding the whole log as JSON would go
+        // the other way: it repeats all 48 column NAMES on every row.)
         let scores = classNames.map { name in
-            String(format: "%.4f", result.allScores[name] ?? 0)
+            let score = result.allScores[name] ?? 0
+            return score == 0 ? "0" : String(format: "%.4f", score)
         }.joined(separator: ",")
         return "\(ts),\(type),\(modelID ?? "—"),\(result.species),\(conf),\(pulseCount),\(scores)\n"
     }
@@ -179,6 +242,19 @@ final class ClassificationLogger {
         queue.async { [self] in
             rotateIfNeeded()
             guard let data = row.data(using: .utf8) else { return }
+            // The existence check is not belt-and-braces, it is the whole point.
+            // `FileHandle(forWritingTo:)` on a path that isn't there does not
+            // reliably throw: the Objective-C initialiser can return nil without
+            // setting an error, and Swift's failable-init bridging then traps
+            // with "invalid reuse after initialization failure" — a crash, from
+            // inside a `try?` that looks like it has already handled failure.
+            // The file genuinely can be missing here: Clear Log removes it, and
+            // it lives in iCloud Drive (`CloudStorage.baseDirectory`), where it
+            // can be evicted underneath a running app.
+            guard FileManager.default.fileExists(atPath: fileURL.path) else {
+                try? data.write(to: fileURL)
+                return
+            }
             if let handle = try? FileHandle(forWritingTo: fileURL) {
                 handle.seekToEndOfFile()
                 try? handle.write(contentsOf: data)

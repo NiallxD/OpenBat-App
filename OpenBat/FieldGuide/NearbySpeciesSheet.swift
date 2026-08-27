@@ -51,12 +51,26 @@ struct NearbySpeciesSheet: View {
                                   countSuffix: "near you",
                                   emptyStateDescription: emptyDescription)
                 .navigationDestination(for: SpeciesGuideDestination.self) { destination in
-                    if case .species(let species) = destination {
+                    switch destination {
+                    case .species(let species):
                         SpeciesDetailView(species: species, store: guide, presenceStore: presenceStore)
+                    case .compare(let first, let second):
+                        SpeciesComparisonView(first: first, second: second,
+                                              store: guide, presenceStore: presenceStore)
+                    // The globe's own destinations can't be reached from this
+                    // sheet — it shows one already-resolved list and has no
+                    // region pins or near-you pill of its own.
+                    case .region, .nearby:
+                        EmptyView()
                     }
                 }
                 .toolbar {
-                    ToolbarItem(placement: .confirmationAction) {
+                    // Leading, not the usual trailing `confirmationAction`: the
+                    // page underneath owns the trailing side — compare, and the
+                    // layout toggle — and a Done sharing that corner reads as a
+                    // third control of the collection rather than the way out of
+                    // the sheet (Niall, 2026-08-26).
+                    ToolbarItem(placement: .topBarLeading) {
                         Button("Done") { dismiss() }
                     }
                 }

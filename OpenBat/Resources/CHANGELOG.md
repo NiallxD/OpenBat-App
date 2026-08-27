@@ -32,6 +32,29 @@
   interrupts everybody, before they reach the detector.
 -->
 
+## v0.9.4 (Build 118)
+
+### New
+- **Compare two bats side by side** — Pick any two species from the guide and read their pages together. The two sides scroll in step, so the same section is always next to the same section.
+- **Bats near you** — A button in the guide's toolbar shows which species are plausible where you're standing, as a grid of photos.
+- **Records or range on distribution maps** — Species maps are now shaded by how many records each area holds, so you can see the difference between the heart of a bat's range and its thin edges. A toggle switches between the records themselves and the fuller range built from them.
+- **A sun arc** — The sun clock draws the night as an arc through the evening rather than listing sunset and sunrise as two rows.
+
+### Improved
+- **Ranges no longer stop where the records run out** — Distribution maps were being trimmed wherever records get sparse, which is exactly where a bat is least likely to have been recorded and most likely to be new to you. Whole regions were missing: the spotted bat stopped dead at the Canadian border despite living well into British Columbia, and the Hawaiian hoary bat was not on the map at all. Ranges now carry through thinly recorded ground, and every species gained rather than lost coverage.
+- **Species photos load once** — Guide photos are kept on the device after the first download instead of being fetched again every time you open a page.
+- **Guide collections your way** — Species lists can be shown as photo cards or as a compact list.
+- **A calmer spectrogram** — A slightly wider default time window, two hard-to-read colour palettes retired, and the display now settles into place when a session ends instead of stuttering.
+- **Settings rebuilt** — Grouped into cards so related controls sit together, and the simplified-view switch is now called Advanced mode, which is what it actually does.
+- **Harder to end a session by accident** — Ending a session from the transport menu asks first, and bulk delete is now limited to unidentified detections or all sessions rather than anything in between.
+
+### Fixed
+- **Call thumbnails everywhere** — Detections show their call picture in every view, and species rows no longer reshuffle when a call is re-identified.
+- **Single stray pulses no longer become detections** — A lone click picked up out of nowhere used to be filed as an unidentified bat.
+- **The session glow stays lit** — It went out when recording stopped even though the app was still listening.
+- **The microphone rate warning** — It could stick mid-flash after the rate had already recovered, and the speaker feedback warning now only appears while audio is actually running.
+- **iPhone no longer rotates upside down.**
+
 ## v0.9.1 (Build 95)
 
 ### New

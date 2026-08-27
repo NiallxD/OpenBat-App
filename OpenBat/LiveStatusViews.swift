@@ -370,7 +370,7 @@ private struct MicStatusPillContent: View {
         // unrelated view updating in that same cycle — this pill sits directly under
         // the nav bar, whose Liquid Glass buttons re-lay-out constantly — inherits an
         // autoreversing repeat with nothing to end it, and throbs forever. Same fix as
-        // the record button's pulse; see `recordPulseAnimation` in ContentView.
+        // the record button's pulse; see `RecordPulse` in AppTabBar.
         .onAppear {
             slowPulse = true
             fastFlash = true
@@ -656,7 +656,7 @@ struct SnippetStatusPill: View {
 ///
 /// **Static, with no pulsing dot.** The first version pulsed the dot with
 /// `.repeatForever(autoreverses:)`. That is the one animation kind
-/// `recordPulseAnimation` documents as unsafe here: it can be picked up from the
+/// `RecordPulse` documents as unsafe here: it can be picked up from the
 /// transaction by unrelated views, and once inherited there is nothing to end
 /// it, so they oscillate for the rest of the run. Adding a second one to the
 /// hierarchy (the record glyph already has the one carefully scoped instance)

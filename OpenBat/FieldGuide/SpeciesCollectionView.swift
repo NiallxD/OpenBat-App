@@ -61,6 +61,17 @@ struct SpeciesCollectionView: View {
 
     @AppStorage("guide.speciesLayout") private var layout: SpeciesLayout = .cards
 
+    /// Only for orienting the compare glyph — see `compareToggle`.
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+
+    /// Compare mode: armed from the toolbar, then two taps pick the pair.
+    /// Deliberately not a long-press on a species — that gesture is invisible,
+    /// has no VoiceOver equivalent, and a mode you can see you are in beats one
+    /// you can only discover (Niall, 2026-08-26).
+    @State private var isComparing = false
+    /// The first of the pair, once picked. Tapping it again puts it back.
+    @State private var firstPick: GuideSpecies?
+
     private static let unclassified = "Other"
 
     private static let columns = [GridItem(.adaptive(minimum: 150), spacing: 14)]
@@ -107,14 +118,142 @@ struct SpeciesCollectionView: View {
                 }
             }
         }
+        // Floats over the collection rather than pushing it down. A banner in
+        // the flow shoved every card down the screen the moment compare mode
+        // was armed, which is a lot of movement to say one sentence — and the
+        // sentence stops being news after the first pick. Same treatment as the
+        // globe's "Tap here to see bats near you" (Niall, 2026-08-26).
+        .overlay(alignment: .bottom) {
+            if isComparing { comparePill }
+        }
+        .animation(.snappy(duration: 0.25), value: isComparing)
+        .animation(.snappy(duration: 0.25), value: firstPick)
         .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            // Two species are the minimum for a comparison to mean anything, so
+            // the button isn't offered on a page that can't satisfy it.
+            if species.count > 1 {
+                ToolbarItem(placement: .topBarTrailing) { compareToggle }
+            }
             if !species.isEmpty {
                 ToolbarItem(placement: .topBarTrailing) { layoutToggle }
             }
         }
+        // Covers both directions: pushing the comparison, and coming back from
+        // it. Either way the mode is spent — leaving it armed would mean a tap
+        // on a species after returning silently starting a second comparison
+        // instead of opening the page.
+        .onDisappear(perform: exitCompare)
     }
+
+    // MARK: Compare
+
+    private var compareToggle: some View {
+        Button {
+            if isComparing { exitCompare() } else { isComparing = true }
+        } label: {
+            Image(systemName: "chevron.up.chevron.down.square")
+                .symbolVariant(isComparing ? .fill : .none)
+                // Turned on its side where the comparison itself is: the glyph
+                // shows the two halves you are about to get, so it should be
+                // split the way they will be — stacked on a phone, beside each
+                // other on an iPad.
+                .rotationEffect(.degrees(horizontalSizeClass == .regular ? 90 : 0))
+        }
+        .tint(isComparing ? Color.batAccent : nil)
+        .accessibilityLabel(isComparing ? "Cancel comparing" : "Compare two species")
+    }
+
+    /// Says which of the two taps you are on, and carries the way out. Without
+    /// it, an armed mode with nothing picked yet looks exactly like an ordinary
+    /// page whose taps have stopped opening anything.
+    ///
+    /// A glass capsule floating at the bottom, matching the globe's footer pill
+    /// — it sits against the safe area, so it clears the tab bar rather than
+    /// hiding under it.
+    private var comparePill: some View {
+        HStack(spacing: 12) {
+            Text(firstPick.map { "\($0.commonName) — now tap another" }
+                 ?? "Tap two species to compare")
+                .font(.footnote)
+                .lineLimit(1)
+            Button("Cancel") { exitCompare() }
+                .font(.footnote.weight(.semibold))
+                .buttonStyle(.plain)
+                .foregroundStyle(Color.batAccent)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .liquidGlass(in: Capsule())
+        .padding(.bottom, 12)
+        // Rises into place rather than fading in on the spot, so it reads as
+        // arriving from the bottom edge like the rest of the app's pills.
+        .transition(.move(edge: .bottom).combined(with: .opacity))
+    }
+
+    private func exitCompare() {
+        isComparing = false
+        firstPick = nil
+    }
+
+    /// Wraps a card or a row in whatever tapping it should do right now.
+    ///
+    /// **One structure, always — an enabled `NavigationLink` with a tap catcher
+    /// laid over it when the tap should pick rather than push.** The obvious
+    /// spelling is an `if`/`else` choosing between a link and a button, and it
+    /// was: each branch of an `if` is a DIFFERENT view as far as SwiftUI's
+    /// structural identity goes, so arming compare mode — and then picking the
+    /// first species — tore every card down and built it again. Each card holds
+    /// its resolved photo URL in `@State`, so every one of them dropped back to
+    /// its placeholder and re-resolved, and the whole page visibly flashed
+    /// twice on the way into a comparison (Niall, 2026-08-26).
+    ///
+    /// The catcher is an overlay rather than `.disabled` on the link: disabling
+    /// a control dims its label in some button styles, and the point here is
+    /// that nothing about the card should change except what a tap does.
+    ///
+    /// The second pick is a `NavigationLink` to the comparison rather than a
+    /// button that pushes a path — the value carries both species, so the
+    /// existing `SpeciesGuideDestination` routing does the push and this view
+    /// needs no binding to the stack it happens to be inside. That matters
+    /// because it is inside two different stacks (the guide's, and
+    /// `NearbySpeciesSheet`'s).
+    @ViewBuilder
+    private func speciesTile<Content: View>(_ species: GuideSpecies,
+                                            @ViewBuilder content: () -> Content) -> some View {
+        NavigationLink(value: destination(for: species)) { content() }
+            .overlay {
+                if picksOnTap(species) {
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            // Tapping the pick again puts it back rather than
+                            // trapping you into comparing it with something.
+                            firstPick = (firstPick == species) ? nil : species
+                        }
+                }
+            }
+    }
+
+    /// True while a tap should choose this species instead of opening it:
+    /// compare mode is armed and this card is either the one already picked or
+    /// one of the candidates waiting for a first pick.
+    private func picksOnTap(_ species: GuideSpecies) -> Bool {
+        isComparing && (firstPick == nil || firstPick == species)
+    }
+
+    /// Where the link under the card goes. Unused whenever `picksOnTap` is
+    /// true — the catcher takes the tap first — but it still has to be a real
+    /// destination, because the link itself is always there.
+    private func destination(for species: GuideSpecies) -> SpeciesGuideDestination {
+        if let firstPick, isComparing, firstPick != species {
+            return .compare(firstPick, species)
+        }
+        return .species(species)
+    }
+
+    private func isPicked(_ species: GuideSpecies) -> Bool { firstPick == species }
 
     /// Shows the icon for the layout you will GET, not the one you are looking
     /// at — the page itself already tells you which layout is showing, so
@@ -134,8 +273,9 @@ struct SpeciesCollectionView: View {
             ForEach(families, id: \.name) { family in
                 Section(family.name) {
                     ForEach(family.species) { species in
-                        NavigationLink(value: SpeciesGuideDestination.species(species)) {
+                        speciesTile(species) {
                             GuideSpeciesRow(species: species)
+                                .comparePick(isPicked(species), cornerRadius: 10)
                         }
                     }
                 }
@@ -149,8 +289,13 @@ struct SpeciesCollectionView: View {
                 ForEach(families, id: \.name) { family in
                     Section {
                         ForEach(family.species) { species in
-                            NavigationLink(value: SpeciesGuideDestination.species(species)) {
+                            speciesTile(species) {
                                 GuideSpeciesCard(species: species)
+                                    // 18 to match the card's own corner radius —
+                                    // a rounder or squarer outline reads as a
+                                    // second object sitting on top of the card
+                                    // rather than the card being selected.
+                                    .comparePick(isPicked(species), cornerRadius: 18)
                             }
                             .buttonStyle(.plain)
                         }
@@ -196,15 +341,7 @@ struct GuideSpeciesCard: View {
         Color.clear
             .aspectRatio(1, contentMode: .fit)
             .overlay {
-                if let imageURL {
-                    AsyncImage(url: imageURL) { phase in
-                        if case .success(let image) = phase {
-                            image.resizable().scaledToFill()
-                        } else {
-                            placeholder
-                        }
-                    }
-                } else {
+                CachedSpeciesImage(url: imageURL, size: .thumbnail) {
                     placeholder
                 }
             }
@@ -256,5 +393,32 @@ struct GuideSpeciesCard: View {
             .padding(28)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(tint.gradient)
+    }
+}
+
+
+/// The orange outline on the first of a compared pair. An outline rather than a
+/// checkmark or a dimming of everything else: it marks the one thing that
+/// changed without redrawing the page around it, and the accent is the same
+/// orange the session button glows, which is this app's colour for "this is the
+/// live one".
+private struct ComparePickOutline: ViewModifier {
+    let isPicked: Bool
+    let cornerRadius: CGFloat
+
+    func body(content: Content) -> some View {
+        content
+            .overlay {
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .strokeBorder(Color.batAccent, lineWidth: 3)
+                    .opacity(isPicked ? 1 : 0)
+            }
+            .accessibilityAddTraits(isPicked ? .isSelected : [])
+    }
+}
+
+extension View {
+    func comparePick(_ isPicked: Bool, cornerRadius: CGFloat) -> some View {
+        modifier(ComparePickOutline(isPicked: isPicked, cornerRadius: cornerRadius))
     }
 }

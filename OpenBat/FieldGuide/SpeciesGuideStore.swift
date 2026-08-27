@@ -146,6 +146,29 @@ final class SpeciesGuideStore {
         }
     }
 
+    // MARK: Image cache warming
+
+    /// Sweeps stale photo derivatives and warms the cache for the guide as it
+    /// now stands. Call after `loadLocal()`/`refreshFromRemote()`, so it sees
+    /// the final guide rather than the bundled one it started from.
+    ///
+    /// The URL list is everything resolvable *without* a network call: the
+    /// guide's own `imageURL` fields, plus Wikipedia lookups already resolved
+    /// on an earlier run. Species still needing a live Wikipedia lookup are
+    /// left for whenever someone actually opens them.
+    ///
+    /// Thumbnails are warmed before heroes because the grid and lists are what
+    /// a user sees first, and a hero is one tap behind a decision they haven't
+    /// made yet.
+    func warmImageCache() async {
+        let urls = guide.species.compactMap { $0.imageURL.flatMap(URL.init(string:)) }
+            + WikipediaSpeciesImageService.cachedPhotoURLs
+        guard !urls.isEmpty else { return }
+        await SpeciesImageCache.shared.sweep(keeping: urls)
+        await SpeciesImageCache.shared.preload(urls, size: .thumbnail)
+        await SpeciesImageCache.shared.preload(urls, size: .hero)
+    }
+
     // MARK: Decoding helpers
 
     nonisolated private static func bundledData() -> Data? {

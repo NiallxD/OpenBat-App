@@ -31,7 +31,6 @@ struct DiagnosticsView: View {
     /// dump gets off a device, which is the only place the failure happens.
     let sessionButtonLocator: SessionButtonLocator
     @Environment(\.dismiss) private var dismiss
-    @State private var logCleared = false
     @State private var showDemoPicker = false
     /// Last file written by the dump button, so it can be shared without
     /// re-capturing (a second capture would be a different moment in time).
@@ -56,7 +55,6 @@ struct DiagnosticsView: View {
                     tuningSection
                     settingsDumpSection
                     sessionButtonSection
-                    logSection
                 }
                 .padding()
             }
@@ -289,45 +287,9 @@ struct DiagnosticsView: View {
         return text + "── Dump taken now ──\n" + SessionButtonLocator.hierarchyDump()
     }
 
-    private var logSection: some View {
-        VStack(spacing: 12) {
-            HStack {
-                Text("Classifier Log")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Text(logFileSize())
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-            }
-
-            HStack(spacing: 12) {
-                ShareLink(item: ClassificationLogger.shared.fileURL) {
-                    Label("Share CSV", systemImage: "square.and.arrow.up")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-
-                Button(role: .destructive) {
-                    ClassificationLogger.shared.clearLog()
-                    logCleared = true
-                } label: {
-                    Label(logCleared ? "Cleared" : "Clear Log", systemImage: "trash")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-            }
-        }
-        .padding()
-        .background(.quaternary, in: RoundedRectangle(cornerRadius: 16))
-    }
-
-    private func logFileSize() -> String {
-        let url = ClassificationLogger.shared.fileURL
-        guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
-              let size = attrs[.size] as? Int else { return "no log yet" }
-        return size < 1024 ? "\(size) B" : String(format: "%.1f KB", Double(size) / 1024)
-    }
+    // The classifier-log card lived here until 2026-08-26. It moved to
+    // Settings → General, where a user reporting a wrong identification can
+    // actually find it — see `SettingsView.classifierLogSections`.
 
 }
 

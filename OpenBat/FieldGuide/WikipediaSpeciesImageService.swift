@@ -124,6 +124,16 @@ enum WikipediaSpeciesImageService {
     /// even asking for their image info.
     private static let bannedTitleWords = ["logo", "icon", "flag", "map", "range", "distribution"]
 
+    /// Every photo URL resolved on a previous run, for `SpeciesGuideStore`'s
+    /// cache warming. Reading these costs no network call, which is the whole
+    /// point: a preload that had to resolve names first would fire a burst of
+    /// Wikipedia API requests at launch for species nobody has opened.
+    static var cachedPhotoURLs: [URL] {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        return cache.values.compactMap { $0?.url }
+    }
+
     /// Resolves a scientific name to a photo URL only (an 800px-wide thumbnail
     /// when Wikipedia generated one, else the original) — for thumbnail-only
     /// call sites (`GuideSpeciesThumbnail`) that don't display a credit.

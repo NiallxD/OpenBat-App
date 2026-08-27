@@ -416,7 +416,14 @@ struct ContentView: View {
         // `SpeciesGuideStore.init()`'s doc comment for why this can't just
         // happen in the `@State` initializer), then checks GitHub once per
         // launch for a newer dataVersion. Offline → the remote check no-ops.
-        .task { await speciesGuide.loadLocal(); await speciesGuide.refreshFromRemote() }
+        .task {
+            await speciesGuide.loadLocal()
+            await speciesGuide.refreshFromRemote()
+            // Background priority and last in the chain: this is speculative
+            // work for pages nobody has asked for, and it must never compete
+            // with the guide load the UI is actually waiting on.
+            await Task(priority: .background) { await speciesGuide.warmImageCache() }.value
+        }
         // Same pattern for the species presence grid, except this one DOES ship
         // a bundled copy: it decides which species the classifier considers
         // plausible, so a cold offline install must not be left with no opinion.
@@ -1671,7 +1678,7 @@ struct ContentView: View {
             }
         }
         // Belt-and-braces against the inherited-animation bug documented on
-        // `recordPulseAnimation`: this button has no animated state of its own,
+        // `RecordPulse`: this button has no animated state of its own,
         // so clearing the transaction's animation here means it can never ride
         // along with an ambient animation set by an unrelated `withAnimation`
         // elsewhere in the same update — which is what left it slowly throbbing

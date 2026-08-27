@@ -27,6 +27,12 @@ enum SpeciesGuideDestination: Hashable {
     /// `presenceStore` + `userCoordinate` at push time, same as the pill
     /// that offers it.
     case nearby
+    /// Two species on one screen — see `SpeciesComparisonView`. Both are
+    /// carried in the value so the collection page can hand the pair straight
+    /// to a `NavigationLink` without needing a binding to the stack's path;
+    /// it lives in two different stacks (the guide's and
+    /// `NearbySpeciesSheet`'s) and neither owns it.
+    case compare(GuideSpecies, GuideSpecies)
 }
 
 struct SpeciesExplorerView: View {
@@ -166,6 +172,9 @@ struct SpeciesExplorerView: View {
                 )
             case .species(let species):
                 SpeciesDetailView(species: species, store: store, presenceStore: presenceStore)
+            case .compare(let first, let second):
+                SpeciesComparisonView(first: first, second: second,
+                                      store: store, presenceStore: presenceStore)
             case .nearby:
                 SpeciesCollectionView(
                     title: "Bats Near You",
@@ -680,15 +689,7 @@ private struct GuideSpeciesThumbnail: View {
 
     var body: some View {
         Group {
-            if let imageURL {
-                AsyncImage(url: imageURL) { phase in
-                    if case .success(let image) = phase {
-                        image.resizable().scaledToFill()
-                    } else {
-                        placeholder
-                    }
-                }
-            } else {
+            CachedSpeciesImage(url: imageURL, size: .thumbnail) {
                 placeholder
             }
         }

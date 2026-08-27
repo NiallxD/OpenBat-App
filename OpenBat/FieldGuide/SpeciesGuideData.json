@@ -1,133 +1,133 @@
 {
   "schemaVersion": 1,
-  "dataVersion": 10,
-  "updatedAt": "2026-07-29T00:44:44Z",
+  "dataVersion": 15,
+  "updatedAt": "2026-08-20T16:27:45Z",
   "regions": [
     {
       "id": "uk-ireland",
       "name": "UK & Ireland",
-      "latitude": 54.0,
-      "longitude": -4.0
+      "latitude": 54,
+      "longitude": -4
     },
     {
       "id": "continental-europe",
       "name": "Continental Europe",
       "latitude": 48.5,
-      "longitude": 10.0
+      "longitude": 10
     },
     {
       "id": "canada-east",
       "name": "Eastern Canada",
-      "latitude": 58.0,
-      "longitude": -81.0
+      "latitude": 58,
+      "longitude": -81
     },
     {
       "id": "canada-west",
       "name": "Western Canada",
-      "latitude": 58.0,
+      "latitude": 58,
       "longitude": -113.7
     },
     {
       "id": "america-east",
       "name": "Eastern US",
-      "latitude": 38.0,
-      "longitude": -81.0
+      "latitude": 38,
+      "longitude": -81
     },
     {
       "id": "america-west",
       "name": "Western US",
-      "latitude": 38.0,
+      "latitude": 38,
       "longitude": -113.7
     },
     {
       "id": "australia-east",
       "name": "Eastern Australia",
-      "latitude": -30.0,
-      "longitude": 150.0
+      "latitude": -30,
+      "longitude": 150
     },
     {
       "id": "mexico-central-america",
       "name": "Mexico & Central America",
-      "latitude": 17.0,
-      "longitude": -92.0
+      "latitude": 17,
+      "longitude": -92
     },
     {
       "id": "caribbean",
       "name": "Caribbean",
       "latitude": 18.5,
-      "longitude": -70.0
+      "longitude": -70
     },
     {
       "id": "south-america-north",
       "name": "Northern South America",
-      "latitude": -3.0,
-      "longitude": -60.0
+      "latitude": -3,
+      "longitude": -60
     },
     {
       "id": "south-america-south",
       "name": "Southern South America",
-      "latitude": -35.0,
-      "longitude": -65.0
+      "latitude": -35,
+      "longitude": -65
     },
     {
       "id": "west-africa",
       "name": "West Africa",
-      "latitude": 9.0,
-      "longitude": -2.0
+      "latitude": 9,
+      "longitude": -2
     },
     {
       "id": "east-africa",
       "name": "East Africa",
-      "latitude": 1.0,
-      "longitude": 37.0
+      "latitude": 1,
+      "longitude": 37
     },
     {
       "id": "southern-africa",
       "name": "Southern Africa",
-      "latitude": -27.0,
-      "longitude": 24.0
+      "latitude": -27,
+      "longitude": 24
     },
     {
       "id": "north-africa-middle-east",
       "name": "North Africa & Middle East",
-      "latitude": 27.0,
-      "longitude": 30.0
+      "latitude": 27,
+      "longitude": 30
     },
     {
       "id": "south-asia",
       "name": "South Asia",
-      "latitude": 22.0,
-      "longitude": 79.0
+      "latitude": 22,
+      "longitude": 79
     },
     {
       "id": "southeast-asia",
       "name": "Southeast Asia",
-      "latitude": 5.0,
-      "longitude": 110.0
+      "latitude": 5,
+      "longitude": 110
     },
     {
       "id": "east-asia",
       "name": "East Asia",
-      "latitude": 35.0,
-      "longitude": 105.0
+      "latitude": 35,
+      "longitude": 105
     },
     {
       "id": "central-asia",
       "name": "Central Asia",
-      "latitude": 45.0,
-      "longitude": 68.0
+      "latitude": 45,
+      "longitude": 68
     },
     {
       "id": "australia-west",
       "name": "Western Australia",
-      "latitude": -25.0,
-      "longitude": 122.0
+      "latitude": -25,
+      "longitude": 122
     },
     {
       "id": "new-zealand-pacific",
       "name": "New Zealand & Pacific Islands",
-      "latitude": -41.0,
-      "longitude": 174.0
+      "latitude": -41,
+      "longitude": 174
     }
   ],
   "species": [
@@ -146,19 +146,21 @@
         "caribbean",
         "south-america-north"
       ],
-      "summary": "One of the most widespread and familiar bats in North America, the big brown bat is a robust, glossy brown vespertilionid that readily roosts in buildings, bridges, and bat houses across BC in addition to natural rock crevices and tree cavities. A hardy generalist forager, it is among the most secure and least-at-risk bat species in the province.",
+      "summary": "One of the most widespread and familiar bats in North America, the big brown bat is a robust, glossy brown vespertilionid that readily roosts in buildings, bridges, and bat houses across BC in addition to natural rock crevices and tree cavities. A hardy generalist forager, it is among the most secure and least-at-risk bat species in its range.",
+      "imageURL": "https://upload.wikimedia.org/wikipedia/commons/6/6c/Big_brown_bat_crawl.png",
+      "imageCredit": "John MacGregor (Land Between the Lakes KY/TN), Public domain, via Wikimedia Commons",
       "measurements": {
         "forearmMmRange": {
-          "min": 42.0,
-          "max": 52.0
+          "min": 42,
+          "max": 52
         },
         "wingspanCmRange": {
           "min": 32.5,
-          "max": 35.0
+          "max": 35
         },
         "weightGRange": {
-          "min": 15.0,
-          "max": 26.0
+          "min": 15,
+          "max": 26
         },
         "color": "Pinkish-tan to rich chocolate-brown fur dorsally, paler pinkish to olive-buff ventrally; bare skin of the face, ears, wings, and tail membrane is black and glossy."
       },
@@ -192,8 +194,8 @@
           "max": 25000
         },
         "durationMsRange": {
-          "min": 3.0,
-          "max": 20.0
+          "min": 3,
+          "max": 20
         },
         "notes": "In open, uncluttered airspace produces long (14–20 ms), narrow-bandwidth, low-frequency (Fmin ~22–25 kHz) search calls; in wooded/cluttered settings switches to shorter (6–11 ms), broader-bandwidth calls with a higher minimum frequency (~27–30 kHz) — signal duration and minimum frequency are inversely correlated. Distinguished from silver-haired bat mainly by steeper sweep and typically shorter, less QCF-dominated calls; distinguished from hoary bat by higher characteristic frequency."
       },
@@ -214,6 +216,13 @@
         "Wikipedia, Big brown bat — https://en.wikipedia.org/wiki/Big_brown_bat",
         "Surlykke & Moss, 'Echolocation behavior of big brown bats, Eptesicus fuscus, in the field and the laboratory', J. Acoust. Soc. Am. — https://pubmed.ncbi.nlm.nih.gov/11108382/",
         "bcbats.ca, Bat Species in BC — https://bcbats.ca/bat-basics/bat-species-in-bc/"
+      ],
+      "contributors": [
+        {
+          "name": "Niall Bell",
+          "date": "2026-07-01T00:00:00Z",
+          "note": "Created species profile"
+        }
       ]
     },
     {
@@ -228,14 +237,16 @@
         "mexico-central-america"
       ],
       "summary": "One of the smallest bats in British Columbia, the California myotis is an erratic, fluttery flier often seen foraging around trees, cliffs, and buildings at dusk. It is widespread and secure through most of the province, tolerating both dry interior valleys and moister coastal forest.",
+      "imageURL": "https://upload.wikimedia.org/wikipedia/commons/7/70/Myotis_californicus.jpg",
+      "imageCredit": "The High Fin Sperm Whale, CC BY-SA 3.0, via Wikimedia Commons",
       "measurements": {
         "forearmMmRange": {
-          "min": 30.0,
-          "max": 35.0
+          "min": 30,
+          "max": 35
         },
         "wingspanCmRange": {
-          "min": 22.0,
-          "max": 26.0
+          "min": 22,
+          "max": 26
         },
         "weightGRange": {
           "min": 3.3,
@@ -295,6 +306,13 @@
         "Echolocation Call Characteristics of Western North American Bats — Joe Szewczak, Cal Poly Humboldt Bat Lab (SonoBat), https://sonobat.com/download/Western_NA_Bat_Acoustic_Table.pdf",
         "BC Conservation Data Centre Species Summary — Myotis californicus, https://a100.gov.bc.ca/pub/eswp/speciesSummary.do?id=17953",
         "bcbats.ca — Bat Species in BC, https://bcbats.ca/bat-basics/bat-species-in-bc/"
+      ],
+      "contributors": [
+        {
+          "name": "Niall Bell",
+          "date": "2026-07-01T00:00:00Z",
+          "note": "Created species profile"
+        }
       ]
     },
     {
@@ -309,18 +327,20 @@
         "mexico-central-america"
       ],
       "summary": "The smallest bat in the United States and Canada, the canyon bat (formerly known as the western pipistrelle) is a tiny, weak-flying species of rocky desert and canyon country. It is only an accidental vagrant in British Columbia, recorded far north of its core range in the arid US Southwest.",
+      "imageURL": "https://upload.wikimedia.org/wikipedia/commons/d/d8/Canyon_Bat.jpg",
+      "imageCredit": "Bob Johnson, CC BY-SA 4.0, via Wikimedia Commons",
       "measurements": {
         "forearmMmRange": {
-          "min": 27.0,
-          "max": 33.0
+          "min": 27,
+          "max": 33
         },
         "wingspanCmRange": {
-          "min": 19.0,
+          "min": 19,
           "max": 21.5
         },
         "weightGRange": {
-          "min": 3.0,
-          "max": 6.0
+          "min": 3,
+          "max": 6
         },
         "color": "Pale yellowish-gray to dark brown dorsal fur with counter-shaded, lighter venter; hair bases blackish, tips lighter; face, ears, feet, and wing membranes usually very dark, almost black, contrasting with the paler body fur."
       },
@@ -353,8 +373,8 @@
           "max": 42000
         },
         "durationMsRange": {
-          "min": 4.0,
-          "max": 12.0
+          "min": 4,
+          "max": 12
         },
         "notes": "Among the highest-frequency callers in western North America; combined with its small size and consistently high, steep FM sweeps, this helps distinguish it acoustically from co-occurring Myotis species, although overlap with some high-frequency Myotis calls is possible and visual/contextual confirmation is valuable for rare/vagrant BC records."
       },
@@ -389,14 +409,16 @@
         "continental-europe"
       ],
       "summary": "One of the smallest and most widespread European bats. Echolocates with FM sweeps ending around 45 kHz; a fast, erratic flier commonly seen at dusk around gardens, hedgerows and waterways.",
+      "imageURL": "https://upload.wikimedia.org/wikipedia/commons/9/93/Zwergfledermaus_%28Pipistrellus_pipistrellus%29.jpg?utm_source=commons.wikimedia.org&utm_campaign=index&utm_content=original",
+      "imageCredit": "Klaus Krahn, CC BY-SA 4.0, via Wikimedia Commons",
       "measurements": {
         "forearmMmRange": {
-          "min": 27.0,
-          "max": 32.0
+          "min": 27,
+          "max": 32
         },
         "wingspanCmRange": {
-          "min": 18.0,
-          "max": 24.0
+          "min": 18,
+          "max": 24
         },
         "weightGRange": {
           "min": 3.5,
@@ -432,8 +454,8 @@
           "max": 45000
         },
         "durationMsRange": {
-          "min": 4.0,
-          "max": 8.0
+          "min": 4,
+          "max": 8
         },
         "notes": "Steep FM sweep ending in a near-flat tail around 46 kHz; distinguishable from Soprano Pipistrelle by ~10 kHz lower Fc."
       },
@@ -452,6 +474,13 @@
         "Barlow, K.E. & Jones, G. (1997) Function of pipistrelle social calls: field data and a playback experiment. Animal Behaviour, 53(5), 991–999.",
         "Davidson-Watts, I. & Jones, G. (2006) Differences in foraging behaviour between Pipistrellus pipistrellus and Pipistrellus pygmaeus. Journal of Zoology, 268(1), 55–62.",
         "Bat Conservation Trust (2023) Common Pipistrelle. bats.org.uk/about-bats/bat-species-in-the-uk/common-pipistrelle"
+      ],
+      "contributors": [
+        {
+          "name": "Niall Bell",
+          "date": "2026-07-01T00:00:00Z",
+          "note": "Created species profile"
+        }
       ]
     },
     {
@@ -467,18 +496,20 @@
         "mexico-central-america"
       ],
       "summary": "A brightly coloured, solitary tree-roosting bat of eastern and central North America. The eastern red bat is only a rare, likely vagrant or wind-farm-fatality record in British Columbia — the province lies at the far northwestern edge of its known range, with confirmed BC records limited to a genetically-verified 1905 museum specimen and turbine-mortality finds in the northeast of the province.",
+      "imageURL": "https://upload.wikimedia.org/wikipedia/commons/1/19/Lasiurus_borealis1.jpg?utm_source=commons.wikimedia.org&utm_campaign=index&utm_content=original",
+      "imageCredit": "Susan Ellis, Bugwoord.org, CC BY 3.0 US, via Wikimedia Commons",
       "measurements": {
         "forearmMmRange": {
-          "min": 36.0,
-          "max": 46.0
+          "min": 36,
+          "max": 46
         },
         "wingspanCmRange": {
-          "min": 29.0,
-          "max": 33.0
+          "min": 29,
+          "max": 33
         },
         "weightGRange": {
-          "min": 9.0,
-          "max": 15.0
+          "min": 9,
+          "max": 15
         },
         "color": "Brick-red to yellowish-orange or rusty-red fur with white-frosted tips; females typically paler/more heavily frosted than the brighter, more richly coloured males; buffy patches at the shoulder and wrist."
       },
@@ -512,8 +543,8 @@
           "max": 30000
         },
         "durationMsRange": {
-          "min": 3.0,
-          "max": 8.0
+          "min": 3,
+          "max": 8
         },
         "notes": "One of the highest-frequency callers among BC's Lasiurus/Lasionycteris/Eptesicus group, clearly separable from the much lower-frequency hoary and silver-haired bats; can be confused acoustically with Myotis species in the same frequency band, so should be identified with caution given its rarity in BC."
       },
@@ -534,6 +565,13 @@
         "COSEWIC Assessment and Status Report on Hoary Bat, Eastern Red Bat, and Silver-haired Bat in Canada (2023) — https://www.canada.ca/en/environment-climate-change/services/species-risk-public-registry/cosewic-assessments-status-reports/hoary-bat-eastern-red-bat-silver-haired-bat-2023.html",
         "BC Species and Ecosystems Explorer, Lasiurus borealis species summary — https://a100.gov.bc.ca/pub/eswp/speciesSummary.do?id=29449",
         "bcbats.ca, Bat Species in BC — https://bcbats.ca/bat-basics/bat-species-in-bc/"
+      ],
+      "contributors": [
+        {
+          "name": "Niall Bell",
+          "date": "2026-07-01T00:00:00Z",
+          "note": "Created species profile"
+        }
       ]
     },
     {
@@ -548,18 +586,20 @@
         "mexico-central-america"
       ],
       "summary": "One of the larger western Myotis, unmistakable up close for the fringe of stiff hairs lining the trailing edge of its tail membrane. In Canada it is a rare species restricted to a single intermontane valley in south-central BC, where it roosts in caves, mines, cliffs, and old buildings and forages for beetles with slow, highly maneuverable flight near the canopy.",
+      "imageURL": "https://upload.wikimedia.org/wikipedia/commons/8/88/Myotis_Thysanodes_Cluster_%2844290176760%29.jpg?utm_source=commons.wikimedia.org&utm_campaign=index&utm_content=original",
+      "imageCredit": "mypubliclands, Public domain, via Wikimedia Commons",
       "measurements": {
         "forearmMmRange": {
-          "min": 37.0,
-          "max": 46.0
+          "min": 37,
+          "max": 46
         },
         "wingspanCmRange": {
-          "min": 27.0,
-          "max": 30.0
+          "min": 27,
+          "max": 30
         },
         "weightGRange": {
-          "min": 5.0,
-          "max": 9.0
+          "min": 5,
+          "max": 9
         },
         "color": "Light brown dorsal fur with off-white to buff underparts."
       },
@@ -593,7 +633,7 @@
         },
         "durationMsRange": {
           "min": 2.9,
-          "max": 5.0
+          "max": 5
         },
         "notes": "Call shape is very similar to M. evotis (both can show up to ~100 kHz of bandwidth with a near-linear FM sweep that makes the characteristic frequency hard to pin down), but M. thysanodes has a distinctly lower characteristic frequency (~25 kHz vs ~36 kHz for M. evotis). Fragments of these calls can also mimic Townsend's big-eared bat (Corynorhinus townsendii); presence of harmonics helps distinguish the two."
       },
@@ -614,6 +654,13 @@
         "COSEWIC, Fringed Bat (Myotis thysanodes) assessment and status report — https://www.canada.ca/en/environment-climate-change/services/species-risk-public-registry/cosewic-assessments-status-reports/fringed-bat.html",
         "BC Ministry of Environment, Identified Wildlife Management Strategy — Fringed Myotis account — https://www.env.gov.bc.ca/wld/frpa/iwms/documents/Mammals/m_fringedmyotis.pdf",
         "Szewczak, J., Cal Poly Humboldt Bat Lab, Echolocation Call Characteristics of Western North American Bats (SonoBat), 2024 — https://sonobat.com/download/Western_NA_Bat_Acoustic_Table.pdf"
+      ],
+      "contributors": [
+        {
+          "name": "Niall Bell",
+          "date": "2026-07-01T00:00:00Z",
+          "note": "Created species profile"
+        }
       ]
     },
     {
@@ -640,18 +687,20 @@
         "mexico-central-america"
       ],
       "summary": "The largest bat in Canada, the hoary bat is a solitary, tree-roosting species named for its frosted, hoary-tipped fur. A powerful long-distance migrant, it summers across most of BC's forests and is one of the species most frequently killed by wind turbines during fall migration.",
+      "imageURL": "https://upload.wikimedia.org/wikipedia/commons/9/94/Grey_headed_flying_fox_-_eating_figs_-_AndrewMercer_IMG42296.jpg?utm_source=commons.wikimedia.org&utm_campaign=index&utm_content=original",
+      "imageCredit": "Andrew Mercer (www.baldwhiteguy.co.nz), CC BY-SA 4.0, via Wikimedia Commons",
       "measurements": {
         "forearmMmRange": {
-          "min": 46.0,
-          "max": 57.0
+          "min": 46,
+          "max": 57
         },
         "wingspanCmRange": {
-          "min": 38.0,
-          "max": 43.0
+          "min": 38,
+          "max": 43
         },
         "weightGRange": {
-          "min": 20.0,
-          "max": 35.0
+          "min": 20,
+          "max": 35
         },
         "color": "Dark brown to grayish fur heavily frosted with white tips (giving the 'hoary' appearance), a buffy-yellow patch on the throat and shoulders, and dark wrist/shoulder patches against pale wing membranes."
       },
@@ -685,8 +734,8 @@
           "max": 20000
         },
         "durationMsRange": {
-          "min": 4.0,
-          "max": 16.0
+          "min": 4,
+          "max": 16
         },
         "notes": "Among the lowest-frequency callers in North America — often near or below the upper limit of human hearing. Distinguished from other low-frequency BC bats (e.g. big brown bat) by its markedly lower characteristic frequency and longer, narrower-bandwidth calls; also known to fly and navigate with reduced or absent echolocation at times. Call frequency varies with body size (geographic/subspecies variation) and habitat clutter."
       },
@@ -707,6 +756,13 @@
         "COSEWIC Assessment and Status Report on Hoary Bat, Eastern Red Bat, and Silver-haired Bat in Canada (2023) — https://www.canada.ca/en/environment-climate-change/services/species-risk-public-registry/cosewic-assessments-status-reports/hoary-bat-eastern-red-bat-silver-haired-bat-2023.html",
         "bcbats.ca, Bat Species in BC — https://bcbats.ca/bat-basics/bat-species-in-bc/",
         "Koehler, Barclay & Fenton, and other geographic-variation echolocation studies of Lasiurus cinereus (ResearchGate summaries) — https://www.researchgate.net/publication/249542306"
+      ],
+      "contributors": [
+        {
+          "name": "Niall Bell",
+          "date": "2026-07-01T00:00:00Z",
+          "note": "Created species profile"
+        }
       ]
     },
     {
@@ -720,7 +776,9 @@
         "america-east",
         "america-west"
       ],
-      "summary": "Once among the most common bats in North America, now heavily impacted by white-nose syndrome. Calls sweep from about 80 kHz down to 40 kHz; forages over water and along forest edges."
+      "summary": "Once among the most common bats in North America, now heavily impacted by white-nose syndrome. Calls sweep from about 80 kHz down to 40 kHz; forages over water and along forest edges.",
+      "imageURL": "https://upload.wikimedia.org/wikipedia/commons/1/18/Little_Brown_Bat_%285688118054%29.jpg?utm_source=commons.wikimedia.org&utm_campaign=index&utm_content=original",
+      "imageCredit": "J Jongsma from Minneapolis, United States, CC BY-SA 2.0, via Wikimedia Commons"
     },
     {
       "id": "myotis-evotis",
@@ -736,16 +794,16 @@
       "summary": "A pale, straw-brown Myotis instantly recognizable by its long black ears, which extend well past the nose when laid forward — the longest of any North American Myotis. It forages both by classic aerial hawking and by gleaning motionless prey off foliage, using quiet, low-duty-cycle calls well suited to hunting in cluttered forest habitat.",
       "measurements": {
         "forearmMmRange": {
-          "min": 36.0,
-          "max": 41.0
+          "min": 36,
+          "max": 41
         },
         "wingspanCmRange": {
-          "min": 25.0,
-          "max": 30.0
+          "min": 25,
+          "max": 30
         },
         "weightGRange": {
-          "min": 5.0,
-          "max": 8.0
+          "min": 5,
+          "max": 8
         },
         "color": "Dull to pale brown or straw-colored pelage, strikingly contrasted by black ears and wing membranes."
       },
@@ -799,6 +857,13 @@
         "BC Bats (Community Bat Programs of BC), Bat species in BC — https://bcbats.ca/bat-basics/bat-species-in-bc/",
         "Encyclopedia of Puget Sound, Western Long-eared Myotis (Myotis evotis) — https://www.eopugetsound.org/articles/western-long-eared-myotis-myotis-evotis",
         "Szewczak, J., Cal Poly Humboldt Bat Lab, Echolocation Call Characteristics of Western North American Bats (SonoBat), 2024 — https://sonobat.com/download/Western_NA_Bat_Acoustic_Table.pdf"
+      ],
+      "contributors": [
+        {
+          "name": "Niall Bell",
+          "date": "2026-07-01T00:00:00Z",
+          "note": "Created species profile"
+        }
       ]
     },
     {
@@ -816,15 +881,15 @@
       "measurements": {
         "forearmMmRange": {
           "min": 35.2,
-          "max": 42.0
+          "max": 42
         },
         "wingspanCmRange": {
           "min": 24.2,
           "max": 28.6
         },
         "weightGRange": {
-          "min": 5.0,
-          "max": 10.0
+          "min": 5,
+          "max": 10
         },
         "color": "Dark brown to blackish-brown dorsal fur, only slightly paler below; fur extends noticeably onto the ventral wing membrane from the body out to the elbow/knee line, a useful field character."
       },
@@ -858,8 +923,8 @@
           "max": 39000
         },
         "durationMsRange": {
-          "min": 3.0,
-          "max": 5.0
+          "min": 3,
+          "max": 5
         },
         "notes": "Belongs to the '40 kHz myotis' guild along with M. lucifugus and M. ciliolabrum; calls under ~3.5 ms are essentially indistinguishable between these species. M. volans calls tend to stay steeper through the body of the call than other 40 kHz myotids and occasionally show a diagnostic upward sweep at call onset. Acoustically very similar to M. evotis, though M. evotis calls are typically less frequency-modulated and have a lower characteristic frequency."
       },
@@ -878,6 +943,13 @@
         "Animal Diversity Web, Myotis volans — https://animaldiversity.org/accounts/Myotis_volans/",
         "BC Bats (Community Bat Programs of BC), Bat species in BC — https://bcbats.ca/bat-basics/bat-species-in-bc/",
         "Szewczak, J., Cal Poly Humboldt Bat Lab, Echolocation Call Characteristics of Western North American Bats (SonoBat), 2024 — https://sonobat.com/download/Western_NA_Bat_Acoustic_Table.pdf"
+      ],
+      "contributors": [
+        {
+          "name": "Niall Bell",
+          "date": "2026-07-01T00:00:00Z",
+          "note": "Created species profile"
+        }
       ]
     },
     {
@@ -896,18 +968,20 @@
         "south-america-south"
       ],
       "summary": "A free-tailed bat of the family Molossidae — not a vespertilionid like BC's other bats — built for fast, high-altitude flight with long narrow wings and a tail extending well beyond its membrane. Its core range across the southern US, Mexico, and Central and South America hosts the largest bat colonies on Earth (including Bracken Cave, Texas); it is only an accidental vagrant this far north, with the first confirmed BC acoustic records published in 2017.",
+      "imageURL": "https://upload.wikimedia.org/wikipedia/commons/b/b5/Mexican_free-tailed_bat_%288006856842%29.jpg",
+      "imageCredit": "U.S. Fish and Wildlife Service Headquarters, Public domain, via Wikimedia Commons",
       "measurements": {
         "forearmMmRange": {
-          "min": 41.0,
-          "max": 46.0
+          "min": 41,
+          "max": 46
         },
         "wingspanCmRange": {
-          "min": 28.0,
-          "max": 33.0
+          "min": 28,
+          "max": 33
         },
         "weightGRange": {
-          "min": 7.0,
-          "max": 12.0
+          "min": 7,
+          "max": 12
         },
         "color": "Short, dense dark brown to grayish-brown fur; muzzle and lips have a characteristic wrinkled appearance."
       },
@@ -942,7 +1016,7 @@
         },
         "durationMsRange": {
           "min": 9.2,
-          "max": 16.0
+          "max": 16
         },
         "notes": "Calls are variable, ranging from FM to essentially flat, and can be confused with big brown bat (Eptesicus fuscus), silver-haired bat (Lasionycteris noctivagans), or hoary bat (Lasiurus cinereus). Diagnostic calls show an upswing into the call and a downswing out; long flat calls often peak in power at onset then gradually decline, giving a characteristic 'carrot-shaped' oscillogram. Among the longest-duration search-phase calls of western bats, which helps separate it from short-duration Myotis calls."
       },
@@ -962,6 +1036,18 @@
         "BC Bats (Community Bat Programs of BC), Bat species in BC — https://bcbats.ca/bat-basics/bat-species-in-bc/",
         "Ommundsen, P., Lausen, C., and Matthias, L. (2017). First Acoustic Records of the Brazilian Free-Tailed Bat (Tadarida brasiliensis) In British Columbia. Northwestern Naturalist — https://www.researchgate.net/publication/319424456",
         "Szewczak, J., Cal Poly Humboldt Bat Lab, Echolocation Call Characteristics of Western North American Bats (SonoBat), 2024 — https://sonobat.com/download/Western_NA_Bat_Acoustic_Table.pdf"
+      ],
+      "contributors": [
+        {
+          "name": "Niall Bell",
+          "date": "2026-07-01T00:00:00Z",
+          "note": "Created species profile"
+        },
+        {
+          "name": "Niall Bell",
+          "date": "2026-08-20T16:27:41Z",
+          "note": "Updated the photograph."
+        }
       ]
     },
     {
@@ -978,16 +1064,16 @@
       "summary": "Also known as the northern long-eared bat, this forest-dwelling Myotis is instantly recognizable by its long, pointed ears and long, sharp tragus, which it uses to glean insects directly off foliage and bark. Once widespread, it has been devastated by white-nose syndrome across the eastern part of its range and is now federally listed as Endangered in Canada.",
       "measurements": {
         "forearmMmRange": {
-          "min": 34.0,
-          "max": 38.0
+          "min": 34,
+          "max": 38
         },
         "wingspanCmRange": {
-          "min": 23.0,
-          "max": 26.0
+          "min": 23,
+          "max": 26
         },
         "weightGRange": {
-          "min": 6.0,
-          "max": 9.0
+          "min": 6,
+          "max": 9
         },
         "color": "Dull yellow-brown fur with a pale grey ventral side and faint brown shoulder spotting."
       },
@@ -1046,6 +1132,13 @@
         "Echolocation Call Characteristics of Eastern North American Bats — Joe Szewczak, Cal Poly Humboldt Bat Lab (SonoBat), https://sonobat.com/download/Eastern_NA_Acoustic_Table.pdf",
         "BC Conservation Data Centre Species Summary — Myotis septentrionalis, https://a100.gov.bc.ca/pub/eswp/speciesSummary.do?id=16442",
         "bcbats.ca — Bat Species in BC, https://bcbats.ca/bat-basics/bat-species-in-bc/"
+      ],
+      "contributors": [
+        {
+          "name": "Niall Bell",
+          "date": "2026-07-01T00:00:00Z",
+          "note": "Created species profile"
+        }
       ]
     },
     {
@@ -1062,16 +1155,16 @@
       "summary": "A pale, large-eared bat best known for hunting on the ground — it drops onto scorpions, crickets, and other large arthropods and even small vertebrates, locating them by listening for footsteps and rustling rather than by echolocation alone. In Canada it reaches the very northern edge of its range in the dry valleys of south-central British Columbia.",
       "measurements": {
         "forearmMmRange": {
-          "min": 45.0,
-          "max": 60.0
+          "min": 45,
+          "max": 60
         },
         "wingspanCmRange": {
-          "min": 34.0,
-          "max": 41.0
+          "min": 34,
+          "max": 41
         },
         "weightGRange": {
-          "min": 17.0,
-          "max": 28.0
+          "min": 17,
+          "max": 28
         },
         "color": "Cream-yellow to light brown dorsal fur, pale to whitish venter; woolly-textured pelage."
       },
@@ -1104,8 +1197,8 @@
           "max": 15000
         },
         "durationMsRange": {
-          "min": 2.0,
-          "max": 10.0
+          "min": 2,
+          "max": 10
         },
         "notes": "Search-phase calls sweep steeply downward from roughly 60 kHz to below 15-30 kHz; because pallid bats primarily use passive listening (rustling, footsteps) to find ground prey, their echolocation is comparatively sparse and low-intensity, which can make them under-detected by passive acoustic monitoring relative to their true abundance."
       },
@@ -1128,6 +1221,13 @@
         "SonoBat — Echolocation Call Characteristics of Western North American Bats, https://sonobat.com/download/Western_NA_Bat_Acoustic_Table.pdf",
         "BC Bats (Community Bat Programs of BC) — Bat Species in BC, https://bcbats.ca/bat-basics/bat-species-in-bc/",
         "Texas Parks and Wildlife — Pallid Bat, https://tpwd.texas.gov/huntwild/wild/species/pallid/"
+      ],
+      "contributors": [
+        {
+          "name": "Niall Bell",
+          "date": "2026-07-01T00:00:00Z",
+          "note": "Created species profile"
+        }
       ]
     },
     {
@@ -1146,16 +1246,16 @@
       "summary": "A medium-sized, slow-flying forest bat named for its blackish fur frosted with silvery-white tips. Closely tied to old-growth and mature forest with abundant snags in BC, the silver-haired bat is unusual in being a 'migratory hibernator' — some individuals migrate south while others overwinter locally in tree cavities and rock crevices.",
       "measurements": {
         "forearmMmRange": {
-          "min": 37.0,
-          "max": 44.0
+          "min": 37,
+          "max": 44
         },
         "wingspanCmRange": {
-          "min": 27.0,
-          "max": 31.0
+          "min": 27,
+          "max": 31
         },
         "weightGRange": {
-          "min": 8.0,
-          "max": 12.0
+          "min": 8,
+          "max": 12
         },
         "color": "Blackish-brown to nearly black fur with silvery-white tipped hairs on the back, producing a frosted or silvered sheen; fur is glossy and relatively long."
       },
@@ -1189,8 +1289,8 @@
           "max": 25000
         },
         "durationMsRange": {
-          "min": 4.0,
-          "max": 10.0
+          "min": 4,
+          "max": 10
         },
         "notes": "Calls overlap in frequency with big brown bat but are typically produced at a slower repetition rate with more pronounced QCF tail component; successive chirps within a phrase tend to rise in frequency (~4 kHz per chirp), a useful distinguishing pattern in sequences."
       },
@@ -1211,6 +1311,13 @@
         "COSEWIC Assessment and Status Report on Hoary Bat, Eastern Red Bat, and Silver-haired Bat in Canada (2023) — https://www.canada.ca/en/environment-climate-change/services/species-risk-public-registry/cosewic-assessments-status-reports/hoary-bat-eastern-red-bat-silver-haired-bat-2023.html",
         "Lausen et al., 'Singing silver-haired bats (Lasionycteris noctivagans)', Wildlife Society Bulletin (2023) — https://wildlife.onlinelibrary.wiley.com/doi/full/10.1002/wsb.1500",
         "bcbats.ca, Bat Species in BC — https://bcbats.ca/bat-basics/bat-species-in-bc/"
+      ],
+      "contributors": [
+        {
+          "name": "Niall Bell",
+          "date": "2026-07-01T00:00:00Z",
+          "note": "Created species profile"
+        }
       ]
     },
     {
@@ -1227,16 +1334,16 @@
       "summary": "One of North America's most distinctive bats, the spotted bat has jet-black fur marked with three bold white spots and enormous pink, translucent ears. Its echolocation call is pitched so low that much of it falls within human hearing range, and it specializes in hunting large moths over open shrub-steppe and canyon country.",
       "measurements": {
         "forearmMmRange": {
-          "min": 48.0,
-          "max": 51.0
+          "min": 48,
+          "max": 51
         },
         "wingspanCmRange": {
-          "min": 34.0,
-          "max": 36.0
+          "min": 34,
+          "max": 36
         },
         "weightGRange": {
-          "min": 16.0,
-          "max": 20.0
+          "min": 16,
+          "max": 20
         },
         "color": "Black dorsal fur with three prominent white spots (one on each shoulder, one on the rump); black face; venter paler with dark underfur; ears and wing membranes pale pink and translucent."
       },
@@ -1269,8 +1376,8 @@
           "max": 9000
         },
         "durationMsRange": {
-          "min": 5.0,
-          "max": 21.0
+          "min": 5,
+          "max": 21
         },
         "notes": "Unmistakable acoustically: the spotted bat is the only bat in its range whose search-phase calls regularly fall around 10 kHz, well below every other North American species (most of which call above 20 kHz). Calls are audible to many humans as faint clicks. Low frequency and low intensity are thought to be an adaptation to avoid detection by eared moths."
       },
@@ -1293,6 +1400,13 @@
         "SonoBat — Echolocation Call Characteristics of Western North American Bats, https://sonobat.com/download/Western_NA_Bat_Acoustic_Table.pdf",
         "BC Bats (Community Bat Programs of BC) — Bat Species in BC, https://bcbats.ca/bat-basics/bat-species-in-bc/",
         "Fullard, J.H. et al. — The echolocation calls of the spotted bat Euderma maculatum are relatively inaudible to moths, PubMed, https://pubmed.ncbi.nlm.nih.gov/9317482/"
+      ],
+      "contributors": [
+        {
+          "name": "Niall Bell",
+          "date": "2026-07-01T00:00:00Z",
+          "note": "Created species profile"
+        }
       ]
     },
     {
@@ -1310,16 +1424,16 @@
       "summary": "Instantly recognizable by its enormous, rabbit-like ears and the paired glandular lumps on its nose, Townsend's big-eared bat is a quiet, low-intensity 'whisper' echolocator that gleans moths from foliage. In BC it is restricted mainly to the dry Okanagan and Thompson valleys, where it roosts in caves, mines, cliffs, and increasingly in buildings and purpose-built bat houses.",
       "measurements": {
         "forearmMmRange": {
-          "min": 39.0,
-          "max": 48.0
+          "min": 39,
+          "max": 48
         },
         "wingspanCmRange": {
-          "min": 28.0,
-          "max": 32.0
+          "min": 28,
+          "max": 32
         },
         "weightGRange": {
-          "min": 5.0,
-          "max": 14.0
+          "min": 5,
+          "max": 14
         },
         "color": "Fur color varies geographically from pale cinnamon-brown to slate gray on the back, slightly paler below; hair bases dark."
       },
@@ -1352,8 +1466,8 @@
           "max": 18000
         },
         "durationMsRange": {
-          "min": 2.0,
-          "max": 6.0
+          "min": 2,
+          "max": 6
         },
         "notes": "Calls are very quiet relative to most vespertilionids ('whisper bat'), so this species is often under-recorded by passive acoustic detectors even where locally common. Simple FM downsweep; the second harmonic can sometimes exceed the fundamental in recorded maximum frequency, which can confuse automatic classifiers."
       },
@@ -1375,6 +1489,13 @@
         "SonoBat — Echolocation Call Characteristics of Rocky Mountain / Eastern US Bats, https://sonobat.com/download/EasternUS_Acoustic_Table_Mar2011.pdf",
         "BC Bats (Community Bat Programs of BC) — Bat Species in BC, https://bcbats.ca/bat-basics/bat-species-in-bc/",
         "Colorado Parks and Wildlife — Townsend's Big-eared Bat, https://cpw.state.co.us/species/townsends-big-eared-bat"
+      ],
+      "contributors": [
+        {
+          "name": "Niall Bell",
+          "date": "2026-07-01T00:00:00Z",
+          "note": "Created species profile"
+        }
       ]
     },
     {
@@ -1391,16 +1512,16 @@
       "summary": "A tiny, dark-masked bat of BC's dry interior valleys, the western small-footed myotis roosts almost exclusively in rock crevices and cliffs rather than trees or buildings. It is among the province's smallest bats, recognizable by its diminutive feet and a distinct black facial mask.",
       "measurements": {
         "forearmMmRange": {
-          "min": 30.0,
-          "max": 34.0
+          "min": 30,
+          "max": 34
         },
         "wingspanCmRange": {
           "min": 20.5,
           "max": 24.5
         },
         "weightGRange": {
-          "min": 4.0,
-          "max": 7.0
+          "min": 4,
+          "max": 7
         },
         "color": "Yellowish-buff to tawny fur, paler (sometimes whitish) underparts; a distinctive black mask across the muzzle and chin, with black ears and forearms."
       },
@@ -1457,6 +1578,13 @@
         "BC Conservation Data Centre Species Summary — Myotis ciliolabrum, https://a100.gov.bc.ca/pub/eswp/speciesSummary.do?id=17143",
         "Western Small-footed Myotis — BC Ministry of Forests species account (BC Timber Sales), https://www2.gov.bc.ca/assets/gov/farming-natural-resources-and-industry/forestry/bc-timber-sales/ems-sfm-certification/business-area/kamloops/western_small-footed_myotis.pdf",
         "bcbats.ca — Bat Species in BC, https://bcbats.ca/bat-basics/bat-species-in-bc/"
+      ],
+      "contributors": [
+        {
+          "name": "Niall Bell",
+          "date": "2026-07-01T00:00:00Z",
+          "note": "Created species profile"
+        }
       ]
     },
     {
@@ -1473,16 +1601,16 @@
       "summary": "A small, dull-furred myotis strongly tied to open water, the Yuma myotis skims low over ponds, lakes, and slow streams in pursuit of aquatic insects. It is one of the most common bats in buildings and bat houses across southern BC, where large maternity colonies form each summer.",
       "measurements": {
         "forearmMmRange": {
-          "min": 33.0,
-          "max": 37.0
+          "min": 33,
+          "max": 37
         },
         "wingspanCmRange": {
           "min": 21.3,
-          "max": 25.0
+          "max": 25
         },
         "weightGRange": {
-          "min": 5.0,
-          "max": 7.0
+          "min": 5,
+          "max": 7
         },
         "color": "Short, dull fur ranging from pale tan to dark brown on the back with whitish to buffy underparts; closely resembles the little brown myotis but smaller and duller, without the glossy sheen."
       },
@@ -1539,6 +1667,13 @@
         "Echolocation Call Characteristics of Western North American Bats — Joe Szewczak, Cal Poly Humboldt Bat Lab (SonoBat), https://sonobat.com/download/Western_NA_Bat_Acoustic_Table.pdf",
         "BC Conservation Data Centre Species Summary — Myotis yumanensis, https://a100.gov.bc.ca/pub/eswp/speciesSummary.do?id=14966",
         "bcbats.ca — Bat Species in BC, https://bcbats.ca/bat-basics/bat-species-in-bc/"
+      ],
+      "contributors": [
+        {
+          "name": "Niall Bell",
+          "date": "2026-07-01T00:00:00Z",
+          "note": "Created species profile"
+        }
       ]
     }
   ]

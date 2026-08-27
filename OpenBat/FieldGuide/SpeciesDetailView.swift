@@ -13,27 +13,247 @@
 import SwiftUI
 import UIKit
 
+/// The page's cards, in the order they are drawn. Their only job is to be a
+/// scroll target: `SpeciesComparisonView` reads which section the pane you are
+/// scrolling has reached and moves the other pane to the section with the same
+/// name, which is the whole of linked scrolling.
+///
+/// A section a species has no data for simply isn't drawn — so asking the other
+/// pane to scroll to it does nothing and that pane holds still, which is the
+/// right answer for a bat with no echolocation entry.
+enum GuideSection: Hashable, CaseIterable {
+    /// The very top of the page, above the hero photo. Not a card — an anchor,
+    /// and the page needs one: the hero isn't a section, so with `header` (which
+    /// sits *below* a 260pt photo) as the highest thing to scroll to, a pane
+    /// that followed you down could never be sent back to the top again. No
+    /// section qualified as reached up there, so the follower was given no
+    /// instruction at all and just stayed where it was.
+    case top
+    /// The very end of the page, for the mirror of `top`'s problem: the last
+    /// card's own top can be a long way above the end of a page, so a leader
+    /// scrolled all the way down would leave the follower parked at that card's
+    /// heading with a screen of content still below it.
+    case bottom
+    case header
+    case overview
+    case quickFacts
+    case distribution
+    case measurements
+    case echolocation
+    case conservation
+    case habits
+    case regions
+}
+
+/// The wiring between one species page and the pane beside it. Supplied only
+/// when this page is half of a comparison; nil the rest of the time, and then
+/// none of the tracking below is installed at all.
+struct SectionScrollLink {
+    /// Section this pane has been told to scroll to. Changing it scrolls.
+    var scrollTo: GuideSection?
+    /// The user has their finger on this pane — it leads from now on.
+    var onUserScroll: () -> Void
+    /// This pane's scroll has reached the top of a new section.
+    var onTopSection: (GuideSection) -> Void
+}
+
+/// What one pane's scroll position is worth reporting: how far down it is, and
+/// whether it has run out of page. Equatable so the observer stays quiet while
+/// neither answer changes.
+private struct ScrollProbe: Equatable {
+    var line: CGFloat
+    var atEnd: Bool
+}
+
+/// Coordinate space of the page's own content. A card's frame inside it does
+/// not change while the page scrolls, which is exactly why the offsets are
+/// measured here: they settle once, at layout, instead of churning every frame.
+private let guidePageSpace = "guidePageContent"
+
+/// Breathing room left above a card when a pane snaps to it. Landing a heading
+/// flush against the top edge looks like the page has been cut off there; a
+/// little space above it reads as the section having been scrolled to.
+///
+/// It is real padding on the card rather than an adjustment at the scroll call,
+/// because `scrollTo(anchor:)` speaks in unit points — a fraction of two
+/// different heights — and there is no fraction that means "16 points" on both
+/// a card and a viewport. Carving the gap out of the stack's spacing instead
+/// (see `cardLayoutBody`) leaves every gap on the page exactly as it was.
+let guideSectionTopGap: CGFloat = 16
+
+/// Tags a card as a section: an identity to scroll to, and its fixed offset
+/// down the page.
+private struct GuideSectionMarker: ViewModifier {
+    let section: GuideSection
+    @Binding var offsets: [GuideSection: CGFloat]
+    let isTracking: Bool
+    /// Zero for the top anchor — a gap there would push the hero photo down
+    /// the page, and there is nothing above it to be separated from anyway.
+    var topGap: CGFloat = guideSectionTopGap
+
+    func body(content: Content) -> some View {
+        if isTracking {
+            content
+                // Measured BEFORE the gap is added, so an offset is the card's
+                // own top — what "this section has been reached" should mean —
+                // while the scroll target below is the gap's top.
+                .onGeometryChange(for: CGFloat.self) {
+                    $0.frame(in: .named(guidePageSpace)).minY
+                } action: { offsets[section] = $0 }
+                .padding(.top, topGap)
+                .id(section)
+        } else {
+            content
+                .padding(.top, topGap)
+                .id(section)
+        }
+    }
+}
+
+/// Pins the page's content to the width it should occupy — measured when one
+/// is supplied, container-relative otherwise. See the call site for why the two
+/// cases can't be the same call.
+private struct PageContentWidth: ViewModifier {
+    let explicit: CGFloat?
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if let explicit {
+            content.frame(width: explicit)
+        } else {
+            content.containerRelativeFrame(.horizontal)
+        }
+    }
+}
+
 struct SpeciesDetailView: View {
     let species: GuideSpecies
     let store: SpeciesGuideStore
     let presenceStore: SpeciesPresenceStore
+    /// True when this page is one half of `SpeciesComparisonView` rather than a
+    /// screen of its own. Two of these are on screen at once there, and they
+    /// cannot both own the navigation bar — the last one drawn would silently
+    /// win the title and both would stack a sources button into the same
+    /// corner. So the embedded copy claims no bar chrome; the comparison screen
+    /// titles itself and labels each pane with its own strip.
+    var isEmbedded = false
+    /// Width to pin the page's content to. Nil when this page owns a screen —
+    /// `containerRelativeFrame` measures that case for itself. Non-nil only
+    /// from `SpeciesComparisonView`, which has to measure and pass it: see the
+    /// note at the `.containerRelativeFrame` call below.
+    var contentWidth: CGFloat?
+    /// Set only by `SpeciesComparisonView`, to keep this page in step with the
+    /// one beside it. Nil means this page is on its own and none of the scroll
+    /// tracking is installed.
+    var link: SectionScrollLink?
 
-    @State private var showContributors = false
+    /// Where each section sits down the page. Measured once at layout — see
+    /// `guidePageSpace`.
+    @State private var sectionOffsets: [GuideSection: CGFloat] = [:]
+    /// Last section reported upward, so a scroll that stays inside one section
+    /// reports nothing at all.
+    @State private var reportedSection: GuideSection?
+
+    @State private var showSources = false
+    @State private var showComparePicker = false
+    /// The species chosen in the picker, held between that sheet closing and
+    /// the comparison opening.
+    @State private var compareWith: GuideSpecies?
+    @State private var showComparison = false
+    /// Only for orienting the compare glyph — see `compareButton`.
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var photo: SpeciesPhoto?
     @State private var showConservationInfoPopover = false
     /// Measured width of the quick-facts row — see `leftQuickFactsColumnWidth`.
     @State private var quickFactsRowWidth: CGFloat = 0
 
     var body: some View {
-        cardLayoutBody
-            .navigationTitle(species.commonName)
-            .navigationBarTitleDisplayMode(.inline)
-            .sheet(isPresented: $showContributors) {
-                ContributorsSheet(species: species)
-            }
+        page
             .task(id: species.scientificName) {
                 photo = await SpeciesPhoto.resolve(for: species)
             }
+    }
+
+    /// The bar chrome is attached only when this page owns a screen. An
+    /// embedded pane must not set `navigationTitle` at all — not even to the
+    /// empty string: a descendant's title wins over the ancestor's, so two
+    /// panes each setting one would fight each other and then overwrite
+    /// `SpeciesComparisonView`'s own title.
+    @ViewBuilder private var page: some View {
+        if isEmbedded {
+            cardLayoutBody
+        } else {
+            cardLayoutBody
+                .navigationTitle(species.commonName)
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .topBarTrailing) { compareButton }
+                    // The `if` sits outside the item, not inside its content: a
+                    // ToolbarItem whose content resolves to nothing is never hosted
+                    // at all (see the sun clock pill), so gating within it is a trap.
+                    if hasSources {
+                        ToolbarItem(placement: .topBarTrailing) { sourcesButton }
+                    }
+                }
+                .sheet(isPresented: $showSources) {
+                    SourcesSheet(species: species)
+                }
+                .sheet(isPresented: $showComparePicker) {
+                    SpeciesComparePickerSheet(base: species, store: store,
+                                              presenceStore: presenceStore) { chosen in
+                        compareWith = chosen
+                        showComparePicker = false
+                    }
+                }
+                // **The wait is not a flourish.** Presenting anything while the
+                // presentation it was chosen in is still dismissing gets
+                // silently DROPPED by SwiftUI — the comparison simply never
+                // appears, and the button reads as dead. Same failure, and the
+                // same fix, as the guide's "Sources & licences" button and
+                // `SessionsView.reportImport`.
+                .onChange(of: showComparePicker) { _, isShowing in
+                    guard !isShowing, compareWith != nil else { return }
+                    Task {
+                        try? await Task.sleep(for: .milliseconds(350))
+                        showComparison = true
+                    }
+                }
+                // Full screen, not a sheet: two species pages want every point
+                // there is, and a comparison arrived at from a species page
+                // should read as having replaced that page rather than as
+                // something stacked on top of it.
+                .fullScreenCover(isPresented: $showComparison, onDismiss: { compareWith = nil }) {
+                    if let compareWith {
+                        NavigationStack {
+                            SpeciesComparisonView(first: species, second: compareWith,
+                                                  store: store, presenceStore: presenceStore)
+                                .toolbar {
+                                    // Leading, matching Bats Near You: the
+                                    // comparison owns its trailing corner for
+                                    // the scroll-link toggle.
+                                    ToolbarItem(placement: .topBarLeading) {
+                                        Button("Done") { showComparison = false }
+                                    }
+                                }
+                        }
+                    }
+                }
+        }
+    }
+
+    /// Starts a comparison from the bat you are already reading, rather than
+    /// from a list. Same glyph as the collection page's compare toggle, so the
+    /// two routes into the same screen look like the same thing.
+    private var compareButton: some View {
+        Button {
+            showComparePicker = true
+        } label: {
+            Image(systemName: "chevron.up.chevron.down.square")
+                // Split the way the comparison will be — see the same glyph on
+                // a collection's compare toggle.
+                .rotationEffect(.degrees(horizontalSizeClass == .regular ? 90 : 0))
+        }
+        .accessibilityLabel("Compare with another species")
     }
 
     // MARK: Card layout
@@ -47,17 +267,35 @@ struct SpeciesDetailView: View {
     /// it briefly existed behind a toolbar toggle for comparison; see git
     /// history if that layout's code is ever needed again.
     private var cardLayoutBody: some View {
+        // The reader is only here to give the follower pane something to scroll
+        // with. `scrollPosition(id:)` would be the tidier spelling, but it wants
+        // a `scrollTargetLayout` on the scroll view's immediate content, and
+        // this page's content is a hero photo beside a stack of cards — the
+        // proxy works on the ids wherever they are nested.
+        ScrollViewReader { proxy in
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
+                // Zero-height, so it changes nothing about the layout — it
+                // exists only to be scrolled to. See `GuideSection.top`.
+                Color.clear
+                    .frame(height: 0)
+                    .guideSection(.top, offsets: $sectionOffsets,
+                                  tracking: link != nil, topGap: 0)
                 if let photo {
                     cardHeroPhoto(photo)
                 }
-                VStack(alignment: .leading, spacing: 20) {
+                // Spacing 4, not 20: every card carries `guideSectionTopGap`
+                // (16) of its own now, and 4 + 16 is the 20 this page has
+                // always had between cards. The gap belongs to the card because
+                // that is what makes it part of the card's scroll target.
+                VStack(alignment: .leading, spacing: 4) {
                     cardHeaderSection
+                        .guideSection(.header, offsets: $sectionOffsets, tracking: link != nil)
                     if let summary = species.summary {
                         GuideCard(title: "Overview") {
                             Text(summary).font(.subheadline)
                         }
+                        .guideSection(.overview, offsets: $sectionOffsets, tracking: link != nil)
                     }
                     if hasQuickFactsRow {
                         // A third-width left column, two-thirds right — unlike
@@ -118,29 +356,45 @@ struct SpeciesDetailView: View {
                         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width in
                             quickFactsRowWidth = width
                         }
+                        .guideSection(.quickFacts, offsets: $sectionOffsets, tracking: link != nil)
                     }
                     GuideCard(title: "Distribution") {
                         GBIFDistributionCard(species: species, presenceStore: presenceStore, mapHeight: 200)
                             .clipShape(RoundedRectangle(cornerRadius: 12))
                     }
+                    .guideSection(.distribution, offsets: $sectionOffsets, tracking: link != nil)
                     if species.measurements != nil || species.morphology != nil {
                         GuideCard(title: "Measurements & Morphology") { measurementsContent }
+                            .guideSection(.measurements, offsets: $sectionOffsets, tracking: link != nil)
                     }
                     if species.echolocation != nil {
                         GuideCard(title: "Echolocation Calls") { echolocationContent }
+                            .guideSection(.echolocation, offsets: $sectionOffsets, tracking: link != nil)
                     }
                     if let c = species.conservation, c.iucnStatus != nil || c.localStatus != nil {
                         GuideCard(title: "Conservation Status", accessory: AnyView(conservationInfoButton)) { conservationContent }
+                            .guideSection(.conservation, offsets: $sectionOffsets, tracking: link != nil)
                     }
                     if species.habits != nil {
                         GuideCard(title: "Habits") { habitsContent }
+                            .guideSection(.habits, offsets: $sectionOffsets, tracking: link != nil)
                     }
                     GuideCard(title: "Regions") { regionsContent }
-                    if hasReferences {
-                        GuideCard(title: "References") { referencesContent }
-                    }
+                        .guideSection(.regions, offsets: $sectionOffsets, tracking: link != nil)
                 }
-                .padding(16)
+                // Top inset comes from the first card's own gap instead, or the
+                // header would sit 32 below the hero photo rather than 16.
+                .padding([.horizontal, .bottom], 16)
+
+                // The end-of-page anchor. Untracked, deliberately: unlike
+                // `top`, its position is never compared against the scroll
+                // offset — "am I at the end" is a question the scroll geometry
+                // answers directly — so it needs an identity to scroll to and
+                // nothing else.
+                Color.clear
+                    .frame(height: 0)
+                    .guideSection(.bottom, offsets: $sectionOffsets,
+                                  tracking: false, topGap: 0)
                 // **Pins the content to the viewport width, so the page cannot
                 // be dragged sideways.** A vertical `ScrollView` is backed by a
                 // `UIScrollView` whose `contentSize` is the measured content in
@@ -156,10 +410,90 @@ struct SpeciesDetailView: View {
                 // below documents a previous instance of exactly this. Anything
                 // over-wide is now clipped instead of scrollable, which is the
                 // behaviour asked for (Niall, 2026-08-17).
-                .containerRelativeFrame(.horizontal)
+                //
+                // **`containerRelativeFrame` is wrong in a comparison pane, and
+                // `contentWidth` is why the caller measures.** "Container" there
+                // resolves past the pane to the navigation container — the whole
+                // window — so on an iPad side-by-side both pages laid themselves
+                // out full-window-wide and centred, hanging off both edges of
+                // their half. A measured width is the pane, whatever the pane
+                // turns out to be.
+                .modifier(PageContentWidth(explicit: contentWidth))
+            }
+            .coordinateSpace(.named(guidePageSpace))
+        }
+        // One observer for the whole page, and it writes no state unless the
+        // section actually changed — the per-card measurements above are static,
+        // so nothing here churns while a finger is moving.
+        .onScrollGeometryChange(for: ScrollProbe.self) { geometry in
+            ScrollProbe(
+                line: geometry.contentOffset.y + geometry.contentInsets.top,
+                // `>=` rather than `==`: rubber-banding takes this past the end
+                // and back, and 2pt of slack absorbs the fractional offsets a
+                // deceleration settles on.
+                atEnd: geometry.visibleRect.maxY >= geometry.contentSize.height - 2
+            )
+        } action: { _, probe in
+            report(probe)
+        }
+        // Directly on the scroll view, not on an ancestor. A programmatic scroll
+        // reports `.animating`, never `.interacting`, so the pane that is merely
+        // following can't promote itself to leading and reverse the pair.
+        .onScrollPhaseChange { _, phase in
+            if phase == .interacting || phase == .decelerating { link?.onUserScroll() }
+        }
+        .onChange(of: link?.scrollTo) { _, target in
+            guard let target = target ?? nil else { return }
+            // Slower than the finger that caused it: a snap that keeps pace with
+            // scrolling reads as a twitch rather than a page keeping up.
+            withAnimation(.easeInOut(duration: 0.35)) {
+                // The end anchor is aligned to the BOTTOM of the viewport —
+                // scrolling a zero-height view at the end of the content to the
+                // top edge would ask for a screenful of nothing below it, which
+                // the scroll view can't give and so mostly wouldn't move.
+                proxy.scrollTo(target, anchor: target == .bottom ? .bottom : .top)
             }
         }
         .background(Color(.systemGroupedBackground))
+        }
+    }
+
+    /// How far below the top of the viewport a section counts as reached.
+    ///
+    /// Not a fudge factor — it is what keeps the two pages feeling like one.
+    /// Waiting for a card's top edge to actually cross the top of the screen
+    /// meant the other pane only moved once you had already scrolled past the
+    /// heading you were reading, so the pair spent most of a scroll visibly out
+    /// of step and caught up in a lurch. Counting a section as reached while it
+    /// is still ~50pt down means the follower is moving as the heading arrives,
+    /// which is what reads as the two pages travelling together (Niall,
+    /// 2026-08-26).
+    private static let sectionReachedLookahead: CGFloat = 50
+
+    /// Where this pane has got to: the end of the page if it is there,
+    /// otherwise the last section whose top has come within
+    /// `sectionReachedLookahead` of the top of the viewport. Reported upward
+    /// only when it changes.
+    ///
+    /// The end wins over any section, and has to. The two pages are different
+    /// lengths, so the follower running out of content before the leader does
+    /// is the normal case — without this, a leader scrolled to the very bottom
+    /// reports whatever heading happens to be near its top edge, and the
+    /// follower sits at that heading with the rest of its page unread below.
+    private func report(_ probe: ScrollProbe) {
+        guard let link else { return }
+        let reached: GuideSection?
+        if probe.atEnd {
+            reached = .bottom
+        } else {
+            reached = sectionOffsets
+                .filter { $0.value <= probe.line + Self.sectionReachedLookahead }
+                .max { $0.value < $1.value }?
+                .key
+        }
+        guard let reached, reached != reportedSection else { return }
+        reportedSection = reached
+        link.onTopSection(reached)
     }
 
     /// Full-bleed hero photo — real per-image credit (photographer + license)
@@ -185,12 +519,8 @@ struct SpeciesDetailView: View {
             .frame(maxWidth: .infinity)
             .frame(height: 260)
             .overlay {
-                AsyncImage(url: photo.url) { phase in
-                    if case .success(let image) = phase {
-                        image.resizable().scaledToFill()
-                    } else {
-                        Color(.systemGray5)
-                    }
+                CachedSpeciesImage(url: photo.url, size: .hero) {
+                    Color(.systemGray5)
                 }
             }
             .clipped()
@@ -338,26 +668,22 @@ struct SpeciesDetailView: View {
         return (r.min + r.max) / 2
     }
 
-    // MARK: References
+    // MARK: Sources
 
-    private var hasReferences: Bool {
+    /// Nothing to open the sheet for when the entry credits nobody and cites
+    /// nothing — sparse guide entries just lose the button, in keeping with
+    /// every other section on this page.
+    private var hasSources: Bool {
         species.creator != nil || (species.references?.isEmpty == false)
     }
 
-    @ViewBuilder private var referencesContent: some View {
-        if let creator = species.creator {
-            Button {
-                showContributors = true
-            } label: {
-                ContributorSummaryRow(creator: creator, editorCount: species.editors.count)
-            }
-            .buttonStyle(.plain)
+    private var sourcesButton: some View {
+        Button {
+            showSources = true
+        } label: {
+            Image(systemName: "scroll")
         }
-        ForEach(Array((species.references ?? []).enumerated()), id: \.offset) { _, citation in
-            Text(citation)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-        }
+        .accessibilityLabel("Contributors and references")
     }
 
     // MARK: Regions
@@ -1017,44 +1343,11 @@ private struct StatsTable: View {
     }
 }
 
-/// Compact "Created by X · N edits" row shown at the top of the References
-/// section; tapping it opens `ContributorsSheet` for the full history.
-private struct ContributorSummaryRow: View {
-    let creator: SpeciesContributor
-    let editorCount: Int
-
-    var body: some View {
-        HStack {
-            Label {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Created by \(creator.name)")
-                    if let date = creator.parsedDate {
-                        Text(date, style: .date)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            } icon: {
-                Image(systemName: "person.crop.circle")
-            }
-            Spacer()
-            if editorCount > 0 {
-                Text("+\(editorCount) edit\(editorCount == 1 ? "" : "s")")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-            Image(systemName: "chevron.right")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-        }
-        .font(.subheadline)
-        .foregroundStyle(.primary)
-    }
-}
-
-/// Full contributor history for a species page — creator plus every editor,
-/// each with their date and an optional note on what they changed.
-private struct ContributorsSheet: View {
+/// Everything behind the page's scroll button: who wrote the entry, then what
+/// they cited. Contributors lead because the References card they used to sit
+/// under is gone — the page itself now shows only species content, and
+/// provenance is one tap away rather than a block at the foot of the scroll.
+private struct SourcesSheet: View {
     let species: GuideSpecies
     @Environment(\.dismiss) private var dismiss
 
@@ -1073,8 +1366,17 @@ private struct ContributorsSheet: View {
                         }
                     }
                 }
+                if let references = species.references, !references.isEmpty {
+                    Section("References") {
+                        ForEach(Array(references.enumerated()), id: \.offset) { _, citation in
+                            Text(citation)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
             }
-            .navigationTitle("Contributors")
+            .navigationTitle("Sources")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
@@ -1127,5 +1429,17 @@ private extension MeasurementRange {
 private extension Double {
     var formattedTrimmed: String {
         truncatingRemainder(dividingBy: 1) == 0 ? String(format: "%.0f", self) : String(format: "%.1f", self)
+    }
+}
+
+
+extension View {
+    /// Tags one of the species page's cards — see `GuideSection`.
+    func guideSection(_ section: GuideSection,
+                      offsets: Binding<[GuideSection: CGFloat]>,
+                      tracking: Bool,
+                      topGap: CGFloat = guideSectionTopGap) -> some View {
+        modifier(GuideSectionMarker(section: section, offsets: offsets,
+                                    isTracking: tracking, topGap: topGap))
     }
 }

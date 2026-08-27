@@ -157,6 +157,7 @@ struct SettingsView: View {
 
             storageSections
             privacySections
+            classifierLogSections
         }
         .onChange(of: keepInICloud) { _, _ in showRestartNeeded = true }
         .alert("Restart OpenBat to finish", isPresented: $showRestartNeeded) {
@@ -276,6 +277,95 @@ struct SettingsView: View {
             // connection-style error that misrepresents a deliberate,
             // permanent severance as a network hiccup.
         }
+    }
+
+    // MARK: Classifier log
+
+    @State private var showShareLogConfirm = false
+    @State private var shareLogItem: ShareItem?
+    @State private var logCleared = false
+    /// Read once when the card appears and after a clear, not on every body
+    /// pass — measuring it touches the logger's queue and the filesystem.
+    @State private var logBytes = 0
+
+    private struct ShareItem: Identifiable { let id = UUID(); let url: URL }
+
+    /// Out of the Debug sheet and into ordinary settings (2026-08-26). The log
+    /// is the one thing a user can send that explains *why* OpenBat called
+    /// something what it called it, so a bug report is worth far more with it
+    /// attached — and nobody finds it behind a debug build.
+    @ViewBuilder
+    private var classifierLogSections: some View {
+        Section {
+            LabeledContent("Size on this device", value: logSizeText)
+                .font(.callout)
+
+            Button {
+                showShareLogConfirm = true
+            } label: {
+                Label("Share Log", systemImage: "square.and.arrow.up")
+            }
+            ControlNote("Sends a zipped copy. Useful if you're reporting an identification that looks wrong.")
+
+            Button(role: .destructive) {
+                ClassificationLogger.shared.clearLog()
+                logCleared = true
+                // The clear runs on the logger's own queue, so re-read a beat
+                // later or the size still shows the old file.
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(300))
+                    logBytes = ClassificationLogger.shared.totalBytesOnDisk()
+                }
+            } label: {
+                Label(logCleared ? "Cleared" : "Clear Log", systemImage: "trash")
+            }
+            ControlNote("Deletes the log only. Your recordings, sessions and species IDs are untouched.")
+        } header: {
+            CardHeader("Classifier log", "A running record of what OpenBat thought it heard.")
+        } footer: {
+            Text("Every detection is written down with its date and time, the species OpenBat picked, and how each species scored. It's kept on this device and never sent anywhere on its own.")
+        }
+        .onAppear { logBytes = ClassificationLogger.shared.totalBytesOnDisk() }
+        // The share sheet is deliberately behind a confirmation. The log is a
+        // dated diary of every night you were out listening — on its own that
+        // says a good deal about where somebody was and when, and roosts are
+        // exactly the thing bat workers don't publish. It has to be a decision,
+        // not a tap.
+        //
+        // An alert, not a confirmation dialog: a dialog is an action sheet, and
+        // on an iPad it arrives as a popover hanging off the row — which is the
+        // presentation for "pick one of these", not for "read this, then decide".
+        .alert("Share your classifier log?", isPresented: $showShareLogConfirm) {
+            Button("Share") { shareLogAfterDismissal() }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("The log records the date and time of every detection and what OpenBat identified — enough for someone reading it to work out when, and roughly where, you were listening. It doesn't include your recordings or your exact location. Only share it with someone you trust.")
+        }
+        .sheet(item: $shareLogItem) { item in
+            ShareSheet(items: [item.url])
+        }
+    }
+
+    /// Opens the share sheet a beat after the alert has gone.
+    ///
+    /// **The wait is why the share sheet stopped appearing and then vanishing.**
+    /// Presenting a sheet while the presentation it was chosen in is still
+    /// dismissing gets dropped by SwiftUI — here it got far enough to animate in
+    /// before the alert's own dismissal tore it straight back out. Third time
+    /// this project has hit it: see the guide's "Sources & licences" button and
+    /// `SessionsView.reportImport`.
+    private func shareLogAfterDismissal() {
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(350))
+            shareLogItem = ShareItem(url: ClassificationLogger.shared.makeShareItem())
+        }
+    }
+
+    private var logSizeText: String {
+        if logBytes == 0 { return "empty" }
+        if logBytes < 1024 { return "\(logBytes) B" }
+        if logBytes < 1024 * 1024 { return String(format: "%.0f KB", Double(logBytes) / 1024) }
+        return String(format: "%.1f MB", Double(logBytes) / (1024 * 1024))
     }
 
     // MARK: - Detecting

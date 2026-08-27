@@ -87,6 +87,11 @@ also makes it usable in the simulator.
   removed: each detection already carries a coordinate and a timestamp, so a
   track can be rebuilt from exported data by any GIS tool without the app
   keeping a second, denser record of your movements.
+- **The classifier log** is a diagnostic diary of what OpenBat thought it heard —
+  a date, a time, an identification and the scores behind it, for every
+  detection. No coordinates, no audio. It stays on the device; Settings →
+  General offers to share a zipped copy, behind a confirmation, for when you're
+  reporting an identification that looks wrong.
 - **Species ranges are decided on device**, from range data that ships with the
   app. Earlier versions asked GBIF, at your location, which species occurred
   nearby; that network lookup is gone.
