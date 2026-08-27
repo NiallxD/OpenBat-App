@@ -149,12 +149,20 @@ struct SpeciesDetailView: View {
 
     /// Where each section sits down the page. Measured once at layout — see
     /// `guidePageSpace`.
+    /// Which half of the distribution map is showing. Held here rather than in
+    /// the map because the control that changes it is the card's title-row
+    /// pill, which is a sibling of the map, not a child. Per detail view, so
+    /// the two panes of a comparison can be set differently.
+    @State private var rangeMode: GBIFDistributionCard.RangeMode = .modelled
     @State private var sectionOffsets: [GuideSection: CGFloat] = [:]
     /// Last section reported upward, so a scroll that stays inside one section
     /// reports nothing at all.
     @State private var reportedSection: GuideSection?
 
     @State private var showSources = false
+    /// What "compare" should do here, decided by whichever stack this page is
+    /// sitting in — see `SpeciesCompareMode`.
+    @Environment(\.speciesCompareMode) private var compareMode
     @State private var showComparePicker = false
     /// The species chosen in the picker, held between that sheet closing and
     /// the comparison opening.
@@ -187,7 +195,12 @@ struct SpeciesDetailView: View {
                 .navigationTitle(species.commonName)
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
-                    ToolbarItem(placement: .topBarTrailing) { compareButton }
+                    // Gated outside the item for the same reason as the
+                    // sources button below: an item whose content resolves to
+                    // nothing is never hosted at all.
+                    if compareMode.isAvailable {
+                        ToolbarItem(placement: .topBarTrailing) { compareButton }
+                    }
                     // The `if` sits outside the item, not inside its content: a
                     // ToolbarItem whose content resolves to nothing is never hosted
                     // at all (see the sun clock pill), so gating within it is a trap.
@@ -212,16 +225,30 @@ struct SpeciesDetailView: View {
                 // same fix, as the guide's "Sources & licences" button and
                 // `SessionsView.reportImport`.
                 .onChange(of: showComparePicker) { _, isShowing in
-                    guard !isShowing, compareWith != nil else { return }
+                    guard !isShowing, let chosen = compareWith else { return }
                     Task {
                         try? await Task.sleep(for: .milliseconds(350))
-                        showComparison = true
+                        switch compareMode {
+                        case .replacesPage(let replace):
+                            // Waits for the same reason the cover does, though
+                            // not for the same failure: swapping this page out
+                            // from under a sheet that is still dismissing takes
+                            // the sheet's own host with it mid-animation.
+                            compareWith = nil
+                            replace(species, chosen)
+                        case .presentsOverPage:
+                            showComparison = true
+                        case .unavailable:
+                            compareWith = nil
+                        }
                     }
                 }
-                // Full screen, not a sheet: two species pages want every point
-                // there is, and a comparison arrived at from a species page
-                // should read as having replaced that page rather than as
-                // something stacked on top of it.
+                // The fallback path only — where the host owns a path, the
+                // comparison is pushed in this page's place instead and none of
+                // this runs. Full screen rather than a sheet because two species
+                // pages want every point there is, and because a comparison
+                // reached from a species page should read as having replaced it,
+                // which is what `.replacesPage` now does literally.
                 .fullScreenCover(isPresented: $showComparison, onDismiss: { compareWith = nil }) {
                     if let compareWith {
                         NavigationStack {
@@ -358,8 +385,12 @@ struct SpeciesDetailView: View {
                         }
                         .guideSection(.quickFacts, offsets: $sectionOffsets, tracking: link != nil)
                     }
-                    GuideCard(title: "Distribution") {
-                        GBIFDistributionCard(species: species, presenceStore: presenceStore, mapHeight: 200)
+                    GuideCard(title: "Distribution",
+                              accessory: AnyView(GBIFDistributionModePill(
+                                  species: species, presenceStore: presenceStore,
+                                  mode: $rangeMode))) {
+                        GBIFDistributionCard(species: species, presenceStore: presenceStore,
+                                             mode: $rangeMode, mapHeight: 200)
                             .clipShape(RoundedRectangle(cornerRadius: 12))
                     }
                     .guideSection(.distribution, offsets: $sectionOffsets, tracking: link != nil)

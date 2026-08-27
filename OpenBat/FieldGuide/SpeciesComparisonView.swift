@@ -174,3 +174,44 @@ struct SpeciesComparisonView: View {
         .accessibilityLabel("\(species.commonName), \(species.scientificName)")
     }
 }
+
+/// How comparison is offered on the screens inside one navigation stack.
+///
+/// A species page cannot answer this for itself. What "compare" should do
+/// depends entirely on where the page is sitting, and it sits in four different
+/// stacks — the guide's, Bats Near You, the Detector's species feed, and the
+/// profile sheet — which have different answers and no way to ask each other.
+enum SpeciesCompareMode {
+    /// Not offered at all, and no compare control drawn.
+    case unavailable
+
+    /// The host owns its stack's path and will SWAP the species page for the
+    /// comparison rather than stacking one on the other.
+    ///
+    /// This is what makes Back land on the guide. A comparison started from a
+    /// species page is a better view of that same page, not a place you went
+    /// afterwards, so leaving the page behind to return to puts a screen in the
+    /// way that nobody wants to visit — you have to go back twice to reach the
+    /// list you were browsing.
+    case replacesPage(@MainActor (GuideSpecies, GuideSpecies) -> Void)
+
+    /// No path to swap, so the comparison is presented over the page instead.
+    /// The fallback, and what every stack did before the guide grew a path.
+    case presentsOverPage
+
+    var isAvailable: Bool {
+        if case .unavailable = self { return false }
+        return true
+    }
+}
+
+private struct SpeciesCompareModeKey: EnvironmentKey {
+    nonisolated static let defaultValue: SpeciesCompareMode = .presentsOverPage
+}
+
+extension EnvironmentValues {
+    var speciesCompareMode: SpeciesCompareMode {
+        get { self[SpeciesCompareModeKey.self] }
+        set { self[SpeciesCompareModeKey.self] = newValue }
+    }
+}

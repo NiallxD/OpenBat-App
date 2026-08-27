@@ -914,18 +914,43 @@ struct ContentView: View {
         }
     }
 
+    /// One navigation path per section. Separate paths for the same reason the
+    /// stacks are separate — a push in Sessions must not unwind when you visit
+    /// Species — but held here, rather than left implicit inside each stack,
+    /// because the guide's has to be EDITED and not only appended to: starting
+    /// a comparison from a species page replaces that page.
+    @State private var sectionPaths: [AppSection: NavigationPath] = [:]
+
+    private func pathBinding(for section: AppSection) -> Binding<NavigationPath> {
+        Binding(get: { sectionPaths[section] ?? NavigationPath() },
+                set: { sectionPaths[section] = $0 })
+    }
+
     /// Each section's screen. Each owns its own `NavigationStack` — the
     /// section views already set their own titles and toolbar items and assume
     /// they are inside one, and a tab bar wants a stack per tab so a push in
     /// Sessions doesn't unwind when you visit Species.
     @ViewBuilder private func sectionScreen(_ s: AppSection) -> some View {
-        NavigationStack {
+        NavigationStack(path: pathBinding(for: s)) {
             Group {
                 switch s {
                 case .detector: detectorScreen
                 case .sessions: SessionsView(store: classStore, settings: autoIDSettings, consent: consent,
                                             micCalSettings: micCalSettings)
-                case .species:  SpeciesExplorerView(store: speciesGuide, presenceStore: speciesPresence, userCoordinate: location.currentCoordinate)
+                case .species:
+                    SpeciesExplorerView(store: speciesGuide, presenceStore: speciesPresence, userCoordinate: location.currentCoordinate)
+                        // Only the guide can offer this: it is the only stack
+                        // whose path this view owns, and swapping a page for
+                        // its comparison needs the path. See SpeciesCompareMode.
+                        .environment(\.speciesCompareMode, .replacesPage { first, second in
+                            var path = sectionPaths[.species] ?? NavigationPath()
+                            // Drop the species page being compared FROM, so the
+                            // comparison takes its place and Back reaches the
+                            // list underneath rather than the page you left.
+                            if !path.isEmpty { path.removeLast() }
+                            path.append(SpeciesGuideDestination.compare(first, second))
+                            sectionPaths[.species] = path
+                        })
                 }
             }
             // Reserves the height of the hand-built bar, so the last row of a

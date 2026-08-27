@@ -50,17 +50,22 @@ struct NearbySpeciesSheet: View {
                                   species: nearbySpecies,
                                   countSuffix: "near you",
                                   emptyStateDescription: emptyDescription)
+                // No comparing from the Detector's quick list. It answers one
+                // question — what might be flying here tonight — and a
+                // comparison launched from inside a sheet has nowhere sensible
+                // to go back to, since the page it would replace is the sheet's
+                // own root (Niall, 2026-08-27).
+                .environment(\.speciesCompareMode, .unavailable)
                 .navigationDestination(for: SpeciesGuideDestination.self) { destination in
                     switch destination {
                     case .species(let species):
                         SpeciesDetailView(species: species, store: guide, presenceStore: presenceStore)
-                    case .compare(let first, let second):
-                        SpeciesComparisonView(first: first, second: second,
-                                              store: guide, presenceStore: presenceStore)
-                    // The globe's own destinations can't be reached from this
-                    // sheet — it shows one already-resolved list and has no
-                    // region pins or near-you pill of its own.
-                    case .region, .nearby:
+                    // None of these are reachable from this sheet. The globe's
+                    // own destinations have nothing to push them — one
+                    // already-resolved list, no region pins, no near-you pill —
+                    // and comparison is deliberately not offered here at all
+                    // (see the `.unavailable` below).
+                    case .region, .nearby, .compare:
                         EmptyView()
                     }
                 }

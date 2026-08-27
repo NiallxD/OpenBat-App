@@ -74,6 +74,10 @@ struct GBIFDistributionCard: View {
     /// Bundled presence grid. Ships in the app, so this card has no loading
     /// state and no network path — see SpeciesPresenceStore's header.
     let presenceStore: SpeciesPresenceStore
+    /// Owned by the host rather than this view: the control that changes it
+    /// sits in the card's title row, outside this view's bounds — see
+    /// `GBIFDistributionModePill`.
+    @Binding var mode: RangeMode
     /// Height of the "no data" placeholder only — the map itself is square (see
     /// `Self.aspect`) and takes its height from its width. Callers own this
     /// rather than the card hardcoding one so the placeholder doesn't tower over
@@ -87,11 +91,12 @@ struct GBIFDistributionCard: View {
         case modelled = "Range"
         case observations = "Records"
         var id: String { rawValue }
+        /// The state a tap moves to. Two cases, so this is total.
+        var other: RangeMode { self == .modelled ? .observations : .modelled }
     }
 
     @Environment(\.colorScheme) private var colorScheme
 
-    @State private var mode: RangeMode = .modelled
     @State private var showInfoPopover = false
     /// Re-framed from the map's REAL size rather than set once up front.
     /// `initialPosition` is evaluated before the final layout width is known, and
@@ -203,52 +208,36 @@ struct GBIFDistributionCard: View {
                 }
             }
             .overlay(alignment: .topTrailing) { infoButton }
-            if resolvedRange != nil, hasDensity {
-                modePicker
+            if resolvedRange != nil, Self.hasDensity(for: species, in: presenceStore) {
                 legend
             }
             attributionFooter
         }
     }
 
-    /// Range vs. records. Hidden when there is no density data to switch to —
-    /// a picker with one working option is worse than no picker.
-    private var modePicker: some View {
-        Picker("Map shows", selection: $mode) {
-            ForEach(RangeMode.allCases) { Text($0.rawValue).tag($0) }
-        }
-        .pickerStyle(.segmented)
-        .padding(.horizontal, 16)
-        .padding(.top, 10)
-    }
-
     /// What the shades mean, in records. Without this the tiers are decoration
     /// — a reader can see that one part of the range is darker than another and
     /// has no way to know whether that is ten records or ten thousand.
+    ///
+    /// Inferred sits at the head of the same row rather than on a line of its
+    /// own: it is the bottom of one ramp, not a separate idea, so reading left
+    /// to right runs pale to dark exactly as the map does. It drops out
+    /// entirely in Records mode, where nothing on screen is inferred.
     private var legend: some View {
-        let palette = Self.palette(colorScheme)
-        let density = presenceStore.density[species.presenceCode]
-        let breaks = density?.breaks ?? []
-        let smallest = density?.observed.values.min() ?? 1
+        let items = legendItems
+        // Splits at the halfway mark rather than wrapping cell by cell, so the
+        // two rows stay even. Five items of five-figure counts do not fit one
+        // line on a small phone.
+        let half = (items.count + 1) / 2
         return VStack(alignment: .leading, spacing: 5) {
             Text("Records per \(Self.cellWidthDescription) cell")
                 .font(.caption2.weight(.semibold))
                 .foregroundStyle(.secondary)
-            // Wraps rather than truncating: four tiers of five-figure counts
-            // do not fit one line on a small phone.
             ViewThatFits(in: .horizontal) {
-                HStack(spacing: 10) { tierSwatches(palette: palette, breaks: breaks, smallest: smallest) }
+                swatchRow(items)
                 VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 10) { tierSwatches(palette: palette, breaks: breaks,
-                                                       smallest: smallest, range: 0..<2) }
-                    HStack(spacing: 10) { tierSwatches(palette: palette, breaks: breaks,
-                                                       smallest: smallest, range: 2..<(breaks.count + 1)) }
-                }
-            }
-            if mode == .modelled {
-                HStack(spacing: 5) {
-                    swatch(palette.inferred)
-                    Text("No records — inferred from surrounding cells")
+                    swatchRow(Array(items.prefix(half)))
+                    swatchRow(Array(items.suffix(items.count - half)))
                 }
             }
         }
@@ -258,16 +247,37 @@ struct GBIFDistributionCard: View {
         .padding(.top, 10)
     }
 
-    @ViewBuilder
-    private func tierSwatches(palette: (inferred: Color, tiers: [Color]),
-                              breaks: [Int], smallest: Int,
-                              range: Range<Int>? = nil) -> some View {
-        let all = 0..<(breaks.count + 1)
-        ForEach(Array(range ?? all).filter { all.contains($0) }, id: \.self) { tier in
-            HStack(spacing: 5) {
-                swatch(palette.tiers[min(tier, palette.tiers.count - 1)])
-                Text(Self.tierLabel(breaks: breaks, smallest: smallest, tier: tier))
-                    .monospacedDigit()
+    private struct LegendItem: Identifiable {
+        let id: Int
+        let colour: Color
+        let label: String
+    }
+
+    private var legendItems: [LegendItem] {
+        let palette = Self.palette(colorScheme)
+        let density = presenceStore.density[species.presenceCode]
+        let breaks = density?.breaks ?? []
+        let smallest = density?.observed.values.min() ?? 1
+        var items: [LegendItem] = []
+        if mode == .modelled {
+            items.append(LegendItem(id: -1, colour: palette.inferred, label: "Inferred"))
+        }
+        for tier in 0...breaks.count {
+            items.append(LegendItem(
+                id: tier,
+                colour: palette.tiers[min(tier, palette.tiers.count - 1)],
+                label: Self.tierLabel(breaks: breaks, smallest: smallest, tier: tier)))
+        }
+        return items
+    }
+
+    private func swatchRow(_ items: [LegendItem]) -> some View {
+        HStack(spacing: 10) {
+            ForEach(items) { item in
+                HStack(spacing: 5) {
+                    swatch(item.colour)
+                    Text(item.label).monospacedDigit()
+                }
             }
         }
     }
@@ -294,8 +304,13 @@ struct GBIFDistributionCard: View {
     /// Whether this species has per-cell record counts to shade and toggle
     /// with. False for data generated before the density tiers, where the map
     /// falls back to drawing the range in one tone.
-    private var hasDensity: Bool {
-        !(presenceStore.density[species.presenceCode]?.observed.isEmpty ?? true)
+    ///
+    /// Static because the pill in the title row asks the same question from
+    /// outside this view, and the two must agree — a pill offering a switch the
+    /// map cannot honour is worse than no pill.
+    static func hasDensity(for species: GuideSpecies,
+                           in store: SpeciesPresenceStore) -> Bool {
+        !(store.density[species.presenceCode]?.observed.isEmpty ?? true)
     }
 
     /// Why there is no map, said precisely. There used to be a third case here
@@ -610,5 +625,56 @@ struct GBIFDistributionCard: View {
         .foregroundStyle(.secondary)
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
+    }
+}
+
+
+/// The Range/Records switch, sized and styled for a `GuideCard` title row.
+///
+/// A segmented control under the map was the first version, and it was wrong
+/// for two states: a full row of chrome directly beneath the thing it
+/// describes, pushing the legend and the attribution further from the map that
+/// gives them meaning. With only two states the control can BE the state — the
+/// pill names what you are looking at, and tapping swaps to the other.
+///
+/// Lives here rather than in `SpeciesDetailView` because it and the map have to
+/// agree about when there is anything to switch between; both ask
+/// `GBIFDistributionCard.hasDensity`.
+struct GBIFDistributionModePill: View {
+    let species: GuideSpecies
+    let presenceStore: SpeciesPresenceStore
+    @Binding var mode: GBIFDistributionCard.RangeMode
+
+    var body: some View {
+        if GBIFDistributionCard.hasDensity(for: species, in: presenceStore) {
+            Button {
+                withAnimation(.snappy(duration: 0.2)) { mode = mode.other }
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "arrow.trianglehead.2.clockwise.rotate.90")
+                        .font(.caption2.weight(.semibold))
+                    // Every title drawn, all but one hidden, so the pill is as
+                    // wide as its LONGEST state and keeps that width as you tap
+                    // it. A control that resizes when pressed reads as a
+                    // glitch, and this one sits against a card edge where the
+                    // movement would be obvious.
+                    ZStack {
+                        ForEach(GBIFDistributionCard.RangeMode.allCases) { state in
+                            Text(state.rawValue)
+                                .opacity(state == mode ? 1 : 0)
+                        }
+                    }
+                    .font(.subheadline.weight(.medium))
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(Capsule().fill(Color.accentColor.opacity(0.15)))
+                .foregroundStyle(Color.accentColor)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Map shows")
+            .accessibilityValue(mode.rawValue)
+            .accessibilityHint("Shows \(mode.other.rawValue.lowercased()) instead")
+        }
     }
 }

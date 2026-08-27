@@ -32,12 +32,12 @@
   interrupts everybody, before they reach the detector.
 -->
 
-## v0.9.4 (Build 118)
+## v0.9.4 (Build 119)
 
 ### New
-- **Compare two bats side by side** — Pick any two species from the guide and read their pages together. The two sides scroll in step, so the same section is always next to the same section.
+- **Compare two bats side by side** — Read two species' pages together, with the two sides scrolling in step so the same section is always next to the same section. Start from a list and pick two, or tap compare while reading one bat and choose what to set beside it.
 - **Bats near you** — A button in the guide's toolbar shows which species are plausible where you're standing, as a grid of photos.
-- **Records or range on distribution maps** — Species maps are now shaded by how many records each area holds, so you can see the difference between the heart of a bat's range and its thin edges. A toggle switches between the records themselves and the fuller range built from them.
+- **Records or range on distribution maps** — Species maps are now shaded by how many records each area holds, so you can see the difference between the heart of a bat's range and its thin edges. Tap the button beside the Distribution heading to switch between the records themselves and the fuller range built from them.
 - **A sun arc** — The sun clock draws the night as an arc through the evening rather than listing sunset and sunrise as two rows.
 
 ### Improved

@@ -61,6 +61,8 @@ struct SpeciesCollectionView: View {
 
     @AppStorage("guide.speciesLayout") private var layout: SpeciesLayout = .cards
 
+    /// Whether this stack offers comparison at all — see `SpeciesCompareMode`.
+    @Environment(\.speciesCompareMode) private var compareMode
     /// Only for orienting the compare glyph — see `compareToggle`.
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
@@ -132,8 +134,9 @@ struct SpeciesCollectionView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             // Two species are the minimum for a comparison to mean anything, so
-            // the button isn't offered on a page that can't satisfy it.
-            if species.count > 1 {
+            // the button isn't offered on a page that can't satisfy it — nor on
+            // a stack that doesn't offer comparison at all.
+            if species.count > 1, compareMode.isAvailable {
                 ToolbarItem(placement: .topBarTrailing) { compareToggle }
             }
             if !species.isEmpty {
