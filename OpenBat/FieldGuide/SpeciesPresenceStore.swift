@@ -72,7 +72,43 @@ final class SpeciesPresenceStore {
         "https://raw.githubusercontent.com/NiallxD/OpenBat-FieldGuide/main/SpeciesPresenceData.json")!
 
     /// code -> (cell index -> month bitmask). Absent key means no range data.
+    ///
+    /// This is the MODELLED range — observed cells plus the buffer and bridge
+    /// around them — and it is what every "does this bat live here" question
+    /// resolves against. `density` below carries the observations it was built
+    /// from, for the map to draw; nothing decides plausibility from those.
     private(set) var presence: [String: [Int: UInt16]] = [:]
+
+    /// code -> where the records actually are, for the range map only.
+    private(set) var density: [String: SpeciesDensity] = [:]
+
+    /// The observations behind one species' modelled range.
+    ///
+    /// Kept apart from `presence` because the two answer different questions.
+    /// `presence` answers "could this bat be here", where a buffered cell is as
+    /// good as a recorded one. This answers "what do we actually know about
+    /// here", where the difference between a cell holding 400 records and a
+    /// cell nobody has ever recorded in is the whole point — a range drawn one
+    /// flat colour asserts a uniform population across ground that ranges from
+    /// heavily surveyed to entirely inferred.
+    struct SpeciesDensity: Equatable {
+        /// Cell index -> records GBIF holds for it. Only cells with at least
+        /// one record appear; everything else in the range is inferred.
+        var observed: [Int: Int]
+        /// Three ascending record counts splitting `observed` into four tiers.
+        /// Computed per species by the generator — counts differ by five orders
+        /// of magnitude between species, so one shared scale would flatten every
+        /// sparse one — and shipped so the phone never sorts cells to draw a map.
+        /// Fewer than three when a species' counts are too tied to separate.
+        var breaks: [Int]
+
+        /// Which tier a cell falls in, 0-based, or nil if it holds no records.
+        func tier(forCell index: Int) -> Int? {
+            guard let count = observed[index] else { return nil }
+            return breaks.filter { count >= $0 }.count
+        }
+    }
+
     /// Codes the generator explicitly recorded as having no usable range, kept
     /// separate from "not in the file at all" only for diagnostics — both
     /// resolve to `.unknown`.
@@ -111,6 +147,13 @@ final class SpeciesPresenceStore {
         /// the file. Re-accumulated on load.
         var cells: [Int]
         var months: [Int]
+        /// The subset of `cells` that holds records, delta-encoded the same way,
+        /// with `counts` aligned to it. Optional so that data predating the
+        /// density tiers still decodes — the map falls back to drawing the range
+        /// flat, which is what it did before them.
+        var observed: [Int]?
+        var counts: [Int]?
+        var breaks: [Int]?
     }
 
     // MARK: - Loading
@@ -185,6 +228,18 @@ final class SpeciesPresenceStore {
         dataVersion = data.dataVersion
         updatedAt = data.updatedAt
         unknownCodes = Set(data.unknown)
+        density = data.presence.compactMapValues { entry -> SpeciesDensity? in
+            guard let observed = entry.observed, let counts = entry.counts,
+                  observed.count == counts.count, !observed.isEmpty else { return nil }
+            var cells: [Int: Int] = [:]
+            cells.reserveCapacity(observed.count)
+            var index = 0
+            for (delta, count) in zip(observed, counts) {
+                index += delta
+                cells[index] = count
+            }
+            return SpeciesDensity(observed: cells, breaks: entry.breaks ?? [])
+        }
         presence = data.presence.compactMapValues { entry in
             // A malformed entry is dropped rather than half-adopted: a species
             // with a truncated cell list would read as absent across most of its

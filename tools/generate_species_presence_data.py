@@ -61,6 +61,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import mvt_lite
+import presence_algorithms
 
 ROOT = Path(__file__).resolve().parent
 APP = ROOT.parent / "OpenBat"
@@ -118,45 +119,40 @@ DENSITY_SQUARE_SIZE = 8
 # mostly encode survey effort.
 CELL_DEGREES = 1.0
 
-# A cell with at least one sighting is occupied; DILATE_CELLS then marks its
-# immediate neighbours occupied too. This closes the checkerboard holes left by
-# uneven recording effort — a bat recorded either side of a county is not
-# absent from the middle of it. Set to 0 if ranges start looking implausibly
-# generous; that is the first knob to reach for.
-DILATE_CELLS = 1
+# THE FILTER CHAIN LIVES IN presence_algorithms NOW
+# ---------------------------------------------------
+# What used to sit here — DILATE_CELLS, MIN_CELL_RECORDS, MIN_COMPONENT_RECORDS,
+# NEARBY_CLUSTER_KM and the four functions they drove — filtered raw cells by
+# RECORD COUNT and only then buffered the survivors. Measured against the data
+# in August 2026, that order was deleting real range at exactly the edges a
+# detector user stands in:
+#
+#   * The spotted bat's run north into BC is four cells holding 1, 1, 2 and 3
+#     records, one empty row from the cells at 47N. Judged before buffering they
+#     touch nothing that clears the floor, so the shipped range stopped dead on
+#     the 49th parallel.
+#   * The Hawaiian hoary bat is seven cells holding 18 records against a
+#     disconnected-cluster floor of 20. An entire island population was missing
+#     by two records.
+#
+# Recording effort is thinnest where a range ends, so a per-cell record floor
+# reads survey intensity as absence. presence_algorithms buffers and bridges
+# FIRST and judges connected groups afterwards, which lets a thin edge inherit
+# the credibility of the mass it attaches to. Its module docstring carries the
+# measurements and the reasoning, including why a group is judged on cell count
+# OR record count and never both.
+#
+# The species-level floor below stays here: it asks about the SPECIES ("do we
+# know enough to hold any opinion at all"), not about a cell.
 
 # Below this, a species' cells are too sparse to be a range rather than a
 # scatter, and the app is told to hold no opinion (see "unknown" in the output)
 # instead of inventing a boundary from a handful of dots.
 MIN_RECORDS_FOR_PRESENCE = 50
 
-# A cell holding fewer records than this, and touching no cell that holds more,
-# is treated as an error rather than a range edge. See drop_outliers for why
-# this is an absolute count and not a percentage.
-MIN_CELL_RECORDS = 3
-
-# A geographically disconnected cluster of cells whose combined records don't
-# clear this floor is dropped as one outlier — UNLESS it's within
-# NEARBY_CLUSTER_KM of the main cluster, in which case proximity itself is
-# taken as the evidence and the record floor doesn't apply. See
-# drop_disconnected_outliers. Same reasoning as MIN_CELL_RECORDS for why it's
-# an absolute count: a proportional floor would erase real disjunct
-# populations of a well-recorded species while doing nothing for a sparse one.
-MIN_COMPONENT_RECORDS = 20
-
-# How close a disconnected cluster has to sit to the main range before it's
-# treated as part of the same range rather than a separate population. Sized
-# to bridge a strait or a stretch of unsurveyed coastline the grid's adjacency
-# check missed — the English Channel is ~34 km, the Strait of Gibraltar ~14 km
-# — while still rejecting an ocean or a continent: the Bogota misidentification
-# that motivated this file sits ~8,000 km from the common pipistrelle's real
-# range. Nothing in between those two scales is a case this file has seen yet;
-# narrow it if one turns up that should have been rejected.
-NEARBY_CLUSTER_KM = 500.0
-
 SCHEMA_VERSION = 1
 # Bump on every regeneration intended to ship.
-DATA_VERSION = 3
+DATA_VERSION = 4
 
 # Extra taxon names to union into a code's range, beyond the scientific name the
 # model itself uses. Every entry needs a reason: this table is the difference
@@ -317,153 +313,8 @@ def fetch_density_cells(taxon_key: int) -> tuple[dict[int, int], int]:
     return cells, total
 
 
-def drop_outliers(cells: dict[int, int]) -> tuple[dict[int, int], int]:
-    """Remove isolated cells holding a handful of records.
-
-    Raw occurrence data contains misidentifications, transposed coordinates and
-    specimens catalogued at the museum that holds them rather than where they
-    were collected. Unfiltered, the gray bat — a Tennessee and Alabama cave
-    species — claims a cell in Alaska on the strength of ONE record out of 283.
-
-    The rule is absolute, not proportional, and deliberately so. A proportional
-    threshold scales with how well studied a species is: 0.5% of the common
-    pipistrelle's 3.2 million records is 16,000, which would erase most of its
-    genuine European range, while 0.5% of the gray bat's 283 is one record,
-    which erases nothing. So: a cell survives if it holds at least
-    MIN_CELL_RECORDS, or if it touches a cell that does. The second clause is
-    what keeps the thin edges of a real range, which is exactly where a bat
-    detector user is most likely to be standing and most likely to be doubted.
-    """
-    rows, cols = grid_dimensions()
-    strong = {index for index, count in cells.items() if count >= MIN_CELL_RECORDS}
-    kept: dict[int, int] = {}
-    for index, count in cells.items():
-        if index in strong:
-            kept[index] = count
-            continue
-        row, col = divmod(index, cols)
-        touches = False
-        for d_row in (-1, 0, 1):
-            for d_col in (-1, 0, 1):
-                r = row + d_row
-                if not (0 <= r < rows):
-                    continue
-                if r * cols + ((col + d_col) % cols) in strong:
-                    touches = True
-                    break
-            if touches:
-                break
-        if touches:
-            kept[index] = count
-    return kept, len(cells) - len(kept)
 
 
-def cell_bounds(component: set[int], cols: int) -> tuple[float, float, float, float]:
-    """A component's (south, north, west, east) extent in degrees."""
-    lats = [(index // cols) * CELL_DEGREES - 90 for index in component]
-    lons = [(index % cols) * CELL_DEGREES - 180 for index in component]
-    return min(lats), max(lats) + CELL_DEGREES, min(lons), max(lons) + CELL_DEGREES
-
-
-def bounds_gap_km(a: tuple[float, float, float, float],
-                   b: tuple[float, float, float, float]) -> float:
-    """Rough great-circle gap between two bounding boxes; 0 if they overlap.
-
-    A bounding-box gap rather than true nearest-cell distance — cheap (no
-    per-cell comparison between two potentially large components) and no less
-    right for a yes/no "is this nearby" test, since it can only ever
-    UNDERSTATE the true gap between the shapes themselves.
-    """
-    a_south, a_north, a_west, a_east = a
-    b_south, b_north, b_west, b_east = b
-    lat_gap_deg = max(0.0, max(a_south, b_south) - min(a_north, b_north))
-    lon_gap_deg = max(0.0, max(a_west, b_west) - min(a_east, b_east))
-    # Longitude degrees shrink towards the poles; use the latitude nearest the
-    # gap (or the shared band, if the boxes already overlap in latitude) so a
-    # high-latitude gap isn't overstated in km.
-    mean_lat = min(a_north, b_north) if lat_gap_deg == 0 else max(a_south, b_south)
-    lat_km = lat_gap_deg * 111.0
-    lon_km = lon_gap_deg * 111.0 * math.cos(math.radians(mean_lat))
-    return math.hypot(lat_km, lon_km)
-
-
-def drop_disconnected_outliers(cells: dict[int, int]) -> tuple[dict[int, int], int]:
-    """Remove whole clusters of cells that are geographically cut off from the
-    species' main range — the failure mode drop_outliers cannot see.
-
-    drop_outliers catches a single misidentified record sitting alone in a sea
-    of unoccupied cells: it fails MIN_CELL_RECORDS and touches nothing that
-    passes. It does NOT catch a cluster of a few *adjacent* cells that each
-    clear MIN_CELL_RECORDS against each other — nine cells of GBIF records for
-    the common pipistrelle sit around Bogota, Colombia, a continent away from
-    its real Ireland-to-Central-Asia range, and every one of those nine cells
-    touches another cell in the same block, so each looks locally fine. What's
-    wrong with them is not density, it's distance from everything else, and
-    per-cell density cannot see distance.
-
-    So: flood-fill occupied cells into connected components, using the same
-    8-neighbour, longitude-wrapping adjacency dilate() uses. The largest
-    component is the main range and always survives regardless of its own
-    total — a species can be real and still sparse, and dropping its only
-    cluster would turn "too sparse" into "silently absent" rather than falling
-    through to the unknown list, where the app can say "no opinion" honestly
-    instead of a wrong one. Every other component survives if EITHER:
-
-      * it sits within NEARBY_CLUSTER_KM of the main component — close enough
-        that it reads as the same range with a survey gap or a strait in the
-        middle, not a separate population, so no record count is required, or
-      * it doesn't, but its own total record count clears
-        MIN_COMPONENT_RECORDS on its own — a real, independently-supported
-        disjunct population (an island subspecies, say) rather than a handful
-        of stray records.
-
-    A cluster failing both is what the Bogota block is: far away AND thin.
-    """
-    rows, cols = grid_dimensions()
-    unassigned = set(cells)
-    components: list[set[int]] = []
-    while unassigned:
-        start = next(iter(unassigned))
-        unassigned.discard(start)
-        component = {start}
-        stack = [start]
-        while stack:
-            index = stack.pop()
-            row, col = divmod(index, cols)
-            for d_row in (-1, 0, 1):
-                for d_col in (-1, 0, 1):
-                    if d_row == 0 and d_col == 0:
-                        continue
-                    r = row + d_row
-                    if not (0 <= r < rows):
-                        continue
-                    neighbour = r * cols + ((col + d_col) % cols)
-                    if neighbour in unassigned:
-                        unassigned.discard(neighbour)
-                        component.add(neighbour)
-                        stack.append(neighbour)
-        components.append(component)
-
-    components.sort(key=lambda component: sum(cells[i] for i in component),
-                     reverse=True)
-    main = components[0]
-    main_bounds = cell_bounds(main, cols)
-
-    kept: dict[int, int] = {}
-    dropped = 0
-    for n, component in enumerate(components):
-        if n == 0:
-            survives = True
-        elif bounds_gap_km(cell_bounds(component, cols), main_bounds) <= NEARBY_CLUSTER_KM:
-            survives = True
-        else:
-            survives = sum(cells[i] for i in component) >= MIN_COMPONENT_RECORDS
-        if survives:
-            for index in component:
-                kept[index] = cells[index]
-        else:
-            dropped += len(component)
-    return kept, dropped
 
 
 def grid_dimensions() -> tuple[int, int]:
@@ -484,29 +335,55 @@ def cell_index(lat: float, lon: float) -> int:
     return row * cols + col
 
 
-def dilate(cells: dict[int, int], radius: int) -> dict[int, int]:
-    """Mark cells adjacent to an occupied cell occupied, inheriting its months.
 
-    Longitude wraps at the antimeridian; latitude does not (there is no cell
-    north of the north pole). Without this, unevenly surveyed regions come out
-    as a checkerboard and a user standing in an unsurveyed gap is told their
-    local bat does not live there.
+def density_breaks(counts: list[int]) -> list[int]:
+    """Three record-count cut points splitting a species' cells into four tiers.
+
+    Computed here, once, and shipped — rather than in the app — so the shading
+    on the phone and the shading on the diagnostic maps cannot drift apart, and
+    so a device never has to sort a species' cells to draw a map.
+
+    PER SPECIES, never global. Per-cell counts differ by five orders of
+    magnitude between species: the spotted bat's densest cell holds 10 records,
+    the common pipistrelle's holds 187,356. One shared scale renders every
+    sparse species as a single flat tone, which loses exactly the core-vs-edge
+    structure the tiers exist to show.
+
+    Quartiles by preference — they spread the four tones evenly over the cells,
+    so the map shows structure rather than one dark dot in a pale field.
+
+    Every break must sit STRICTLY ABOVE the smallest count. About a quarter of
+    all cells hold exactly one record, so the lower quartiles tie at the
+    minimum; a break equal to it leaves the palest tier matching nothing, and
+    the map then draws four tiers' worth of data in three tones. Where the
+    quartiles collapse that way, log-spaced cuts are used instead: they divide
+    the RANGE rather than the cells, so they cannot tie.
     """
-    if radius <= 0:
-        return cells
-    rows, cols = grid_dimensions()
-    grown = dict(cells)
-    for index, months in cells.items():
-        row, col = divmod(index, cols)
-        for d_row in range(-radius, radius + 1):
-            for d_col in range(-radius, radius + 1):
-                r = row + d_row
-                if not (0 <= r < rows):
-                    continue
-                c = (col + d_col) % cols
-                neighbour = r * cols + c
-                grown[neighbour] = grown.get(neighbour, 0) | months
-    return grown
+    if not counts:
+        return []
+    ordered = sorted(counts)
+    smallest = ordered[0]
+
+    def quantile(fraction: float) -> float:
+        # Linear interpolation between order statistics, matching numpy's
+        # default so the shipped breaks equal the ones the maps were tuned on.
+        if len(ordered) == 1:
+            return float(ordered[0])
+        position = fraction * (len(ordered) - 1)
+        low = int(math.floor(position))
+        high = min(low + 1, len(ordered) - 1)
+        return ordered[low] + (ordered[high] - ordered[low]) * (position - low)
+
+    quartiles = sorted({math.ceil(quantile(f)) for f in (0.25, 0.50, 0.75)})
+    quartiles = [b for b in quartiles if b > smallest]
+    if len(quartiles) == 3:
+        return quartiles
+
+    low = math.log10(max(smallest, 1))
+    high = math.log10(max(ordered[-1], smallest + 1))
+    spaced = sorted({math.ceil(10 ** (low + (high - low) * f))
+                     for f in (0.25, 0.50, 0.75)})
+    return [b for b in spaced if b > smallest]
 
 
 def delta_encode(indices: list[int]) -> list[int]:
@@ -597,11 +474,13 @@ def main() -> int:
 
     print(f"{len(codes)} species codes across {len(CLASSIFIER_SOURCES)} models "
           f"({guide_only_count} guide-only, no ID model)")
-    print(f"cell size {CELL_DEGREES} deg, dilation {DILATE_CELLS}, "
+    print(f"cell size {CELL_DEGREES} deg, "
           f"density bins {DENSITY_SQUARE_SIZE} px, "
-          f"outlier floor {MIN_CELL_RECORDS} records/cell, "
-          f"{MIN_COMPONENT_RECORDS} records/disconnected cluster beyond "
-          f"{NEARBY_CLUSTER_KM:.0f} km of the main range\n")
+          f"species floor {MIN_RECORDS_FOR_PRESENCE} records\n"
+          f"buffer {presence_algorithms.BUFFER_CELLS} cell, "
+          f"bridge {presence_algorithms.BRIDGE_CELLS} cells, "
+          f"group needs {presence_algorithms.MIN_GROUP_CELLS} observation cells "
+          f"or {presence_algorithms.MIN_GROUP_RECORDS} records\n")
 
     presence: dict[str, dict] = {}
     unknown: list[str] = []
@@ -659,16 +538,20 @@ def main() -> int:
             unknown.append(code)
             continue
 
-        cleaned, dropped = drop_outliers(merged)
-        if not cleaned:
-            print(f"    ! every cell was an isolated outlier — no opinion recorded\n")
+        built = presence_algorithms.build_presence(merged)
+        if not built["kept"]:
+            print("    ! no group survived — no opinion recorded\n")
             unknown.append(code)
             continue
 
-        cleaned, disconnected = drop_disconnected_outliers(cleaned)
-
-        grown = dilate({index: 0 for index in cleaned}, DILATE_CELLS)
-        ordered = sorted(grown)
+        ordered = sorted(built["kept"])
+        # Only the OBSERVED cells carry record counts. The rest of the range is
+        # buffer and bridge — inferred from what surrounds it, with nobody
+        # having recorded a bat there — and the app draws that distinction
+        # rather than filling the whole range one flat colour, which would
+        # assert a uniform population it has no evidence for.
+        observed = sorted(i for i in built["kept"] if i in merged)
+        counts = [merged[i] for i in observed]
         presence[code] = {
             "cells": delta_encode(ordered),
             # Zero throughout: the density tiles carry no dates. Kept in the
@@ -676,10 +559,16 @@ def main() -> int:
             "months": [0] * len(ordered),
             "records": total,
             "taxonKeys": keys,
+            "observed": delta_encode(observed),
+            "counts": counts,
+            "breaks": density_breaks(counts),
         }
-        print(f"    -> {total:,} records, {len(merged):,} cells, "
-              f"{dropped} isolated outliers dropped, {disconnected} more in "
-              f"disconnected clusters, {len(ordered):,} after dilation\n")
+        dropped_groups = [g for g in built["groups"] if not g["kept"]]
+        dropped = sum(g["seed_cells"] for g in dropped_groups)
+        print(f"    -> {total:,} records, {len(merged):,} observed cells, "
+              f"{len(built['groups']) - len(dropped_groups)}/{len(built['groups'])} "
+              f"groups kept ({dropped} observation cells dropped), "
+              f"{len(ordered):,} cells in the modelled range\n")
 
     if args.dry_run:
         print("--- dry run, nothing written ---")
@@ -689,7 +578,10 @@ def main() -> int:
             "dataVersion": DATA_VERSION,
             "updatedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "cellDegrees": CELL_DEGREES,
-            "dilation": DILATE_CELLS,
+            # The shape of the range the app draws, so a reader of the file
+            # can tell how much of it is inferred without rerunning anything.
+            "buffer": presence_algorithms.BUFFER_CELLS,
+            "bridge": presence_algorithms.BRIDGE_CELLS,
             # Codes the app must treat as "no information" rather than absent —
             # the distinction the live GBIF path never made, and the whole reason
             # a Tennessee cave bat could read as a full-confidence San Francisco

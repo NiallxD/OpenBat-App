@@ -35,6 +35,34 @@
 //  (holes included), so a widespread species covering ~1100 one-degree cells
 //  becomes a handful of shapes with no internal edges at all.
 //
+//  SHADED BY RECORD DENSITY, AND WHY IT IS DRAWN IN NESTED LAYERS (2026-08-27)
+//  --------------------------------------------------------------------------
+//  One flat purple asserted something the data does not support: that the bat
+//  is equally at home everywhere inside the boundary. Most of a modelled range
+//  is buffer and bridge — ground nobody has ever recorded in, included because
+//  of what surrounds it — and among the cells that DO hold records, counts run
+//  from one to six figures. So the range is drawn in four tiers by record
+//  count, over a pale wash for the inferred part.
+//
+//  The tiers are drawn as NESTED regions, each one a subset of the one below:
+//  the wash covers the whole range, then every cell holding any record, then
+//  every cell above the first break, and so on. Drawing them as disjoint bands
+//  instead would put a shared edge between every pair of neighbouring tiers,
+//  and MapKit anti-aliases each polygon's edge independently — the seam problem
+//  described above, which is why cells became outlines in the first place.
+//  Nested regions have no shared edges at all: each layer simply paints over
+//  the middle of the last.
+//
+//  THE TOGGLE
+//  ----------
+//  Two things are worth seeing and they are not the same thing. "Modelled" is
+//  the range the app actually reasons with — what it consults to decide whether
+//  a species is plausible where the user is standing. "Observations" is the
+//  evidence underneath it, the cells GBIF holds records for and nothing else.
+//  A user who wants to know why their local bat is or isn't offered should be
+//  able to see both, and the gap between them is honest information rather than
+//  something to hide.
+//
 
 import SwiftUI
 import MapKit
@@ -52,6 +80,18 @@ struct GBIFDistributionCard: View {
     /// a short caller's layout.
     var mapHeight: CGFloat = 220
 
+    /// Which of the two views is showing. Modelled first: it is what the app
+    /// reasons with, and the raw observations read as alarmingly sparse without
+    /// that context.
+    enum RangeMode: String, CaseIterable, Identifiable {
+        case modelled = "Range"
+        case observations = "Records"
+        var id: String { rawValue }
+    }
+
+    @Environment(\.colorScheme) private var colorScheme
+
+    @State private var mode: RangeMode = .modelled
     @State private var showInfoPopover = false
     /// Re-framed from the map's REAL size rather than set once up front.
     /// `initialPosition` is evaluated before the final layout width is known, and
@@ -92,18 +132,52 @@ struct GBIFDistributionCard: View {
         let polygon: MKPolygon
     }
 
+    /// One nested layer of the map: everything at or above a density tier.
+    private struct RangeLayer: Identifiable {
+        let id: Int
+        /// nil for the inferred wash, which is not a density tier at all.
+        let tier: Int?
+        let shapes: [RangeShape]
+    }
+
+    /// Wash first, then four tiers light to dark.
+    ///
+    /// Two ramps rather than one with opacity: MapKit's own map is near-white
+    /// in light mode and near-black in dark, so a single translucent purple
+    /// reads as lavender on one and as a bruise on the other. Both ramps run
+    /// from "barely there" to "unmistakable" against their own background,
+    /// which is what the shading has to communicate.
+    private static func palette(_ scheme: ColorScheme) -> (inferred: Color, tiers: [Color]) {
+        if scheme == .dark {
+            return (Color(red: 0.23, green: 0.19, blue: 0.33),
+                    [Color(red: 0.36, green: 0.25, blue: 0.60),
+                     Color(red: 0.49, green: 0.33, blue: 0.79),
+                     Color(red: 0.62, green: 0.47, blue: 0.91),
+                     Color(red: 0.77, green: 0.65, blue: 1.00)])
+        }
+        return (Color(red: 0.925, green: 0.886, blue: 0.984),
+                [Color(red: 0.796, green: 0.702, blue: 0.925),
+                 Color(red: 0.651, green: 0.498, blue: 0.863),
+                 Color(red: 0.490, green: 0.294, blue: 0.820),
+                 Color(red: 0.275, green: 0.133, blue: 0.549)])
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Group {
                 if let range = resolvedRange {
+                    let palette = Self.palette(colorScheme)
                     Map(position: $camera, interactionModes: []) {
-                        ForEach(range.shapes) { shape in
-                            // No stroke, and no overlapping neighbours to
-                            // stroke between — each shape is one region's
-                            // whole outline, so the fill is uniform across it
-                            // however many cells it was built from.
-                            MapPolygon(shape.polygon)
-                                .foregroundStyle(Color.purple.opacity(0.55))
+                        // Painted in order, each layer a subset of the last —
+                        // see the header note on nesting. No stroke and no
+                        // shared edges, so no seams.
+                        ForEach(range.layers) { layer in
+                            ForEach(layer.shapes) { shape in
+                                MapPolygon(shape.polygon)
+                                    .foregroundStyle(
+                                        layer.tier.map { palette.tiers[min($0, palette.tiers.count - 1)] }
+                                        ?? palette.inferred)
+                            }
                         }
                     }
                     // **Square, and that is a correctness fix rather than a
@@ -129,8 +203,99 @@ struct GBIFDistributionCard: View {
                 }
             }
             .overlay(alignment: .topTrailing) { infoButton }
+            if resolvedRange != nil, hasDensity {
+                modePicker
+                legend
+            }
             attributionFooter
         }
+    }
+
+    /// Range vs. records. Hidden when there is no density data to switch to —
+    /// a picker with one working option is worse than no picker.
+    private var modePicker: some View {
+        Picker("Map shows", selection: $mode) {
+            ForEach(RangeMode.allCases) { Text($0.rawValue).tag($0) }
+        }
+        .pickerStyle(.segmented)
+        .padding(.horizontal, 16)
+        .padding(.top, 10)
+    }
+
+    /// What the shades mean, in records. Without this the tiers are decoration
+    /// — a reader can see that one part of the range is darker than another and
+    /// has no way to know whether that is ten records or ten thousand.
+    private var legend: some View {
+        let palette = Self.palette(colorScheme)
+        let density = presenceStore.density[species.presenceCode]
+        let breaks = density?.breaks ?? []
+        let smallest = density?.observed.values.min() ?? 1
+        return VStack(alignment: .leading, spacing: 5) {
+            Text("Records per \(Self.cellWidthDescription) cell")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+            // Wraps rather than truncating: four tiers of five-figure counts
+            // do not fit one line on a small phone.
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 10) { tierSwatches(palette: palette, breaks: breaks, smallest: smallest) }
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 10) { tierSwatches(palette: palette, breaks: breaks,
+                                                       smallest: smallest, range: 0..<2) }
+                    HStack(spacing: 10) { tierSwatches(palette: palette, breaks: breaks,
+                                                       smallest: smallest, range: 2..<(breaks.count + 1)) }
+                }
+            }
+            if mode == .modelled {
+                HStack(spacing: 5) {
+                    swatch(palette.inferred)
+                    Text("No records — inferred from surrounding cells")
+                }
+            }
+        }
+        .font(.caption2)
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 16)
+        .padding(.top, 10)
+    }
+
+    @ViewBuilder
+    private func tierSwatches(palette: (inferred: Color, tiers: [Color]),
+                              breaks: [Int], smallest: Int,
+                              range: Range<Int>? = nil) -> some View {
+        let all = 0..<(breaks.count + 1)
+        ForEach(Array(range ?? all).filter { all.contains($0) }, id: \.self) { tier in
+            HStack(spacing: 5) {
+                swatch(palette.tiers[min(tier, palette.tiers.count - 1)])
+                Text(Self.tierLabel(breaks: breaks, smallest: smallest, tier: tier))
+                    .monospacedDigit()
+            }
+        }
+    }
+
+    private func swatch(_ colour: Color) -> some View {
+        RoundedRectangle(cornerRadius: 2)
+            .fill(colour)
+            .frame(width: 11, height: 11)
+    }
+
+    /// The record span one tier covers, e.g. "1", "2–3", "238+".
+    private static func tierLabel(breaks: [Int], smallest: Int, tier: Int) -> String {
+        guard !breaks.isEmpty else { return "\(smallest)+" }
+        let low = tier == 0 ? smallest : breaks[tier - 1]
+        guard tier < breaks.count else { return "\(low.formatted())+" }
+        let high = breaks[tier] - 1
+        return high <= low ? "\(low.formatted())" : "\(low.formatted())–\(high.formatted())"
+    }
+
+    /// Cell size in round numbers, for the legend heading. Derived rather than
+    /// hardcoded so it stays true if the generator's resolution ever changes.
+    private static var cellWidthDescription: String { "100 km" }
+
+    /// Whether this species has per-cell record counts to shade and toggle
+    /// with. False for data generated before the density tiers, where the map
+    /// falls back to drawing the range in one tone.
+    private var hasDensity: Bool {
+        !(presenceStore.density[species.presenceCode]?.observed.isEmpty ?? true)
     }
 
     /// Why there is no map, said precisely. There used to be a third case here
@@ -144,13 +309,40 @@ struct GBIFDistributionCard: View {
         return "There aren't enough records of this species to map where it lives."
     }
 
-    private var resolvedRange: (rect: MKMapRect, shapes: [RangeShape])? {
+    private var resolvedRange: (rect: MKMapRect, layers: [RangeLayer])? {
         guard let cells = presenceStore.presence[species.presenceCode],
               !cells.isEmpty else { return nil }
         let degrees = presenceStore.cellDegrees
-        let shapes = Self.shapes(for: Set(cells.keys), cellDegrees: degrees)
-        guard let rect = Self.mapRect(for: Set(cells.keys), cellDegrees: degrees) else { return nil }
-        return (rect, shapes)
+        let modelled = Set(cells.keys)
+        guard let rect = Self.mapRect(for: modelled, cellDegrees: degrees) else { return nil }
+
+        let density = presenceStore.density[species.presenceCode]
+        guard let density, !density.observed.isEmpty else {
+            // Data predating the density tiers: draw the range in one mid tone,
+            // exactly as it looked before them, rather than showing nothing.
+            return (rect, [RangeLayer(id: 0, tier: 2,
+                                      shapes: Self.shapes(for: modelled, cellDegrees: degrees))])
+        }
+
+        var layers: [RangeLayer] = []
+        if mode == .modelled {
+            // The wash underneath everything: the whole modelled range, most of
+            // which holds no records at all.
+            layers.append(RangeLayer(id: 0, tier: nil,
+                                     shapes: Self.shapes(for: modelled, cellDegrees: degrees)))
+        }
+        // Nested tiers, each the cells at or above one break — so every layer
+        // is a subset of the one before it and paints over its middle.
+        let observed = Set(density.observed.keys)
+        for tier in 0...density.breaks.count {
+            let cellsInTier: Set<Int> = tier == 0
+                ? observed
+                : observed.filter { density.observed[$0, default: 0] >= density.breaks[tier - 1] }
+            guard !cellsInTier.isEmpty else { continue }
+            layers.append(RangeLayer(id: tier + 1, tier: tier,
+                                     shapes: Self.shapes(for: cellsInTier, cellDegrees: degrees)))
+        }
+        return (rect, layers)
     }
 
     // MARK: - Grid geometry
@@ -384,7 +576,7 @@ struct GBIFDistributionCard: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text("About this map")
                     .font(.headline)
-                Text("This map is built from records reported to biodiversity databases (GBIF), grouped into blocks of roughly 100 km. It shows where the species has been recorded, not a modelled range — under-surveyed areas may still have the species present. It's the same data OpenBat uses to decide which species to expect near you.")
+                Text("Built from records reported to biodiversity databases (GBIF), grouped into blocks of roughly 100 km.\n\n**Records** shows only the blocks someone has actually reported this species in, shaded by how many records each holds. Darker means more records — which partly reflects where people have looked, not only where the bats are.\n\n**Range** fills in the gaps: blocks next to and between the records are included too, and shown in the palest shade because nobody has recorded the species there. This is the version OpenBat uses to decide which species to expect near you.\n\nNeither is a surveyed range map. An under-recorded area may still have the species in it.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

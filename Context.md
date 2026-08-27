@@ -2130,6 +2130,54 @@ because nobody has mapped it.
   to throttle network calls; a local lookup has no such cost, and 100 km was far
   too coarse to catch crossing a range boundary.
 
+### The range grid should lean generous (2026-08-27)
+
+Niall's framing, and it settles a whole class of threshold argument. The grid
+serves two jobs, and **both prefer a range slightly too big to one slightly too
+small**:
+
+1. **It sets species priors.** Someone is most likely to be out recording
+   somewhere nobody has recorded before — that is what a new detector is *for*.
+   A range that stops at the edge of existing survey coverage suppresses the
+   prior exactly where the user is standing, and the cost is a missed detection
+   of a bat that was really there.
+2. **It is a guide.** "We probably get this one here" is the useful thing for a
+   reader to be able to say. A boundary drawn tight enough to exclude the
+   plausible edge cannot support that sentence.
+
+So where a threshold is genuinely uncertain it goes to the generous side, and an
+over-inclusive edge is a known cost rather than a bug to be tuned out. The
+counterweight is `unknown`: a species we know too little about is still held at
+half weight rather than handed a confident range, so generosity applies to the
+EDGES of a range we believe in, not to inventing one.
+
+### Rejected 2026-08-27: judging observation clusters before buffering
+
+The rebuilt chain leaves one wrong answer — the southeastern myotis reaching
+Miami, off two single-record cells over Florida Bay. The obvious fix is to judge
+raw observation clusters *first*, by whether they chain to neighbours, and buffer
+only the survivors. It was built and measured, and it is a bad trade.
+
+Linking observation cells at one cell's distance and requiring three per cluster
+does remove Miami — and pulls **28 of 48 species' northern edges back**, Northern
+Myotis from 62 N to 49 N, for a 22% overall shrink. Widening the link to 2 or 3
+cells keeps the north but stops removing Miami, at every cluster size tested.
+
+Why no setting does both: **the cells are the same object.** Miami's strays are
+isolated single-record cells at a range margin, and so are the seven that carry
+Northern Myotis into boreal Canada — same counts, same isolation, same position.
+Geometry cannot separate a stray from a real under-surveyed edge, so no hop
+distance, cluster size or record floor will.
+
+⚠️ **The verification suite could not see this.** Its northernmost case is London
+at 51.5 N, so the hop rule scored a clean 20/20 while truncating half the species
+list. That gap is still open — the suite needs boreal cases before it can be
+trusted on anything touching a northern edge.
+
+What *would* work is geography rather than geometry: a land mask. The Miami
+stray's buffer expands across open water; boreal Canada is solid ground. Not
+built — it is a coastline raster in the generator for the sake of one cell.
+
 ---
 
 ## 10. Recording and storage
@@ -2832,6 +2880,24 @@ leads to check, not as confirmed regressions.
 ---
 
 ## 16. Open questions
+
+- **The presence verification suite has no boreal cases, and that hid a real
+  regression (2026-08-27).** Its northernmost check is London at 51.5 N, so a
+  candidate filter chain that pulled 28 species' northern edges back — Northern
+  Myotis from 62 N to 49 N — still scored 20/20. Anything touching a northern
+  edge cannot be trusted against this suite until it has cases up there. The
+  ones worth adding, once Niall has confirmed the ranges: Northern Myotis around
+  Yellowknife, Little Brown around Whitehorse, and spotted bat present in the
+  Okanagan but absent at Prince Rupert — that last pair is what would have
+  caught the bug that started the rebuild. See §9.
+
+- **A land mask would fix the range grid's coastal over-reach, and nothing else
+  will.** The one accepted wrong answer in the grid — southeastern myotis
+  reaching Miami — comes of a buffer expanding across Florida Bay. Geometry
+  cannot separate that from a genuine under-surveyed edge (§9), but geography
+  can: the stray's buffer grows over open water and boreal Canada is solid
+  ground. Costs a coastline raster in the generator. Not worth it for one cell
+  alone; worth revisiting if loose coastal edges turn up elsewhere.
 
 - **The tab bar's indicator blinks when you tap the session button, and the
   fix for it does not work — left alone on Niall's call, 2026-08-17.** The
