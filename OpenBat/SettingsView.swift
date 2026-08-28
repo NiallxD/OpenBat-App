@@ -159,6 +159,25 @@ struct SettingsView: View {
             privacySections
             classifierLogSections
         }
+        .onAppear { logBytes = ClassificationLogger.shared.totalBytesOnDisk() }
+        // The share sheet is deliberately behind a confirmation. The log is a
+        // dated diary of every night you were out listening — on its own that
+        // says a good deal about where somebody was and when, and roosts are
+        // exactly the thing bat workers don't publish. It has to be a decision,
+        // not a tap.
+        //
+        // An alert, not a confirmation dialog: a dialog is an action sheet, and
+        // on an iPad it arrives as a popover hanging off the row — which is the
+        // presentation for "pick one of these", not for "read this, then decide".
+        .alert("Share your classifier log?", isPresented: $showShareLogConfirm) {
+            Button("Share") { shareLogAfterDismissal() }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("The log records the date and time of every detection and what OpenBat identified — enough for someone reading it to work out when, and roughly where, you were listening. It doesn't include your recordings or your exact location. Only share it with someone you trust.")
+        }
+        .sheet(item: $shareLogItem) { item in
+            ShareSheet(items: [item.url])
+        }
         .onChange(of: keepInICloud) { _, _ in showRestartNeeded = true }
         .alert("Restart OpenBat to finish", isPresented: $showRestartNeeded) {
             Button("OK") { }
@@ -284,7 +303,7 @@ struct SettingsView: View {
     @State private var showShareLogConfirm = false
     @State private var shareLogItem: ShareItem?
     @State private var logCleared = false
-    /// Read once when the card appears and after a clear, not on every body
+    /// Read once when the tab appears and after a clear, not on every body
     /// pass — measuring it touches the logger's queue and the filesystem.
     @State private var logBytes = 0
 
@@ -325,35 +344,22 @@ struct SettingsView: View {
         } footer: {
             Text("Every detection is written down with its date and time, the species OpenBat picked, and how each species scored. It's kept on this device and never sent anywhere on its own.")
         }
-        .onAppear { logBytes = ClassificationLogger.shared.totalBytesOnDisk() }
-        // The share sheet is deliberately behind a confirmation. The log is a
-        // dated diary of every night you were out listening — on its own that
-        // says a good deal about where somebody was and when, and roosts are
-        // exactly the thing bat workers don't publish. It has to be a decision,
-        // not a tap.
-        //
-        // An alert, not a confirmation dialog: a dialog is an action sheet, and
-        // on an iPad it arrives as a popover hanging off the row — which is the
-        // presentation for "pick one of these", not for "read this, then decide".
-        .alert("Share your classifier log?", isPresented: $showShareLogConfirm) {
-            Button("Share") { shareLogAfterDismissal() }
-            Button("Cancel", role: .cancel) { }
-        } message: {
-            Text("The log records the date and time of every detection and what OpenBat identified — enough for someone reading it to work out when, and roughly where, you were listening. It doesn't include your recordings or your exact location. Only share it with someone you trust.")
-        }
-        .sheet(item: $shareLogItem) { item in
-            ShareSheet(items: [item.url])
-        }
     }
+
+    // The presentations that belong to this card live on the Form in
+    // `generalTab`, NOT here. A `.sheet` written on a `Section` is handed down
+    // to the section's rows, so the same `shareLogItem` ends up with several
+    // presenters bound to it; they race, and the share sheet animates in and
+    // straight back out. That — not the alert's dismissal — is why it kept
+    // closing itself.
 
     /// Opens the share sheet a beat after the alert has gone.
     ///
-    /// **The wait is why the share sheet stopped appearing and then vanishing.**
     /// Presenting a sheet while the presentation it was chosen in is still
-    /// dismissing gets dropped by SwiftUI — here it got far enough to animate in
-    /// before the alert's own dismissal tore it straight back out. Third time
-    /// this project has hit it: see the guide's "Sources & licences" button and
-    /// `SessionsView.reportImport`.
+    /// dismissing gets dropped by SwiftUI, so the share sheet waits the alert
+    /// out. Third time this project has hit it: see the guide's "Sources &
+    /// licences" button and `SessionsView.reportImport`. The wait alone did not
+    /// fix the sheet closing itself here — see the note above the Section.
     private func shareLogAfterDismissal() {
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(350))
