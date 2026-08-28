@@ -42,7 +42,7 @@
 //  is buffer and bridge — ground nobody has ever recorded in, included because
 //  of what surrounds it — and among the cells that DO hold records, counts run
 //  from one to six figures. So the range is drawn in four tiers by record
-//  count, over a pale wash for the inferred part.
+//  count, over a lighter wash for the inferred part.
 //
 //  The tiers are drawn as NESTED regions, each one a subset of the one below:
 //  the wash covers the whole range, then every cell holding any record, then
@@ -95,8 +95,6 @@ struct GBIFDistributionCard: View {
         var other: RangeMode { self == .modelled ? .observations : .modelled }
     }
 
-    @Environment(\.colorScheme) private var colorScheme
-
     @State private var showInfoPopover = false
     /// Re-framed from the map's REAL size rather than set once up front.
     /// `initialPosition` is evaluated before the final layout width is known, and
@@ -145,33 +143,58 @@ struct GBIFDistributionCard: View {
         let shapes: [RangeShape]
     }
 
-    /// Wash first, then four tiers light to dark.
+    /// Wash first, then four tiers light to dark: lightest for the inferred part
+    /// nobody has recorded in, darkest for the cells holding the most records.
     ///
-    /// Two ramps rather than one with opacity: MapKit's own map is near-white
-    /// in light mode and near-black in dark, so a single translucent purple
-    /// reads as lavender on one and as a bruise on the other. Both ramps run
-    /// from "barely there" to "unmistakable" against their own background,
-    /// which is what the shading has to communicate.
-    private static func palette(_ scheme: ColorScheme) -> (inferred: Color, tiers: [Color]) {
-        if scheme == .dark {
-            return (Color(red: 0.23, green: 0.19, blue: 0.33),
-                    [Color(red: 0.36, green: 0.25, blue: 0.60),
-                     Color(red: 0.49, green: 0.33, blue: 0.79),
-                     Color(red: 0.62, green: 0.47, blue: 0.91),
-                     Color(red: 0.77, green: 0.65, blue: 1.00)])
-        }
-        return (Color(red: 0.925, green: 0.886, blue: 0.984),
-                [Color(red: 0.796, green: 0.702, blue: 0.925),
-                 Color(red: 0.651, green: 0.498, blue: 0.863),
-                 Color(red: 0.490, green: 0.294, blue: 0.820),
-                 Color(red: 0.275, green: 0.133, blue: 0.549)])
-    }
+    /// The whole ramp was moved down a step (2026-08-27, Niall): the wash and
+    /// the first tiers were so pale they read as empty map rather than as the
+    /// bottom of a scale. The inferred wash is now the tone the third tier used
+    /// to carry, and every tier darkens from there.
+    ///
+    /// Orange, as of the same day — amber for the inferred ground, deep rust for
+    /// the cells with the most records. It is a straight hue swap: each stop was
+    /// matched to the luminance of the purple stop it replaced, so the scale
+    /// steps by the same amount it did before and only the colour changed. The
+    /// purple it came from, if it wants reverting:
+    /// `0.651/0.498/0.863` wash, then `0.549/0.373/0.816`, `0.451/0.259/0.749`,
+    /// `0.337/0.161/0.639`, `0.204/0.071/0.451`.
+    ///
+    /// **One ramp, in both colour schemes** (2026-08-27). Dark mode used to run
+    /// the other way — dark wash, near-white cores — on the reasoning that each
+    /// ramp should climb from "barely there" to "unmistakable" against its own
+    /// basemap. What that actually produced was a map whose meaning flipped with
+    /// the phone's appearance setting, and a help note ("Darker means more
+    /// records") that was only true half the time. More is darker, always.
+    ///
+    /// It survives the near-black dark-mode basemap because the tiers are drawn
+    /// NESTED (see the header note): every tier is ringed by the lighter one
+    /// below it, so a dark core is read against its own surround rather than
+    /// against the map, and the pale wash keeps the whole range shape visible.
+    private static let rangePalette: (inferred: Color, tiers: [Color]) = (
+        Color(red: 0.93, green: 0.53, blue: 0.22),
+        [Color(red: 0.85, green: 0.42, blue: 0.14),
+         Color(red: 0.72, green: 0.28, blue: 0.07),
+         Color(red: 0.56, green: 0.19, blue: 0.05),
+         Color(red: 0.33, green: 0.10, blue: 0.03)]
+    )
+
+    /// How solid the range sits over the basemap — half, so coastlines, borders
+    /// and place names stay readable underneath it.
+    ///
+    /// **This is per LAYER, and the layers are nested** (see the header note), so
+    /// it is not a flat 50% across the map: the inferred wash is a single layer
+    /// at 0.5, but a cell in the top tier has five layers stacked over it and
+    /// composites to about 0.97. Translucency and nesting can't both be exact —
+    /// cumulative alpha only ever climbs, so no per-layer value makes every
+    /// region land on 0.5. Drawing the tiers as disjoint bands instead would,
+    /// at the cost of the anti-aliased seams the nesting exists to avoid.
+    private static let rangeOpacity = 0.5
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Group {
                 if let range = resolvedRange {
-                    let palette = Self.palette(colorScheme)
+                    let palette = Self.rangePalette
                     Map(position: $camera, interactionModes: []) {
                         // Painted in order, each layer a subset of the last —
                         // see the header note on nesting. No stroke and no
@@ -180,8 +203,9 @@ struct GBIFDistributionCard: View {
                             ForEach(layer.shapes) { shape in
                                 MapPolygon(shape.polygon)
                                     .foregroundStyle(
-                                        layer.tier.map { palette.tiers[min($0, palette.tiers.count - 1)] }
-                                        ?? palette.inferred)
+                                        (layer.tier.map { palette.tiers[min($0, palette.tiers.count - 1)] }
+                                         ?? palette.inferred)
+                                            .opacity(Self.rangeOpacity))
                             }
                         }
                     }
@@ -254,7 +278,7 @@ struct GBIFDistributionCard: View {
     }
 
     private var legendItems: [LegendItem] {
-        let palette = Self.palette(colorScheme)
+        let palette = Self.rangePalette
         let density = presenceStore.density[species.presenceCode]
         let breaks = density?.breaks ?? []
         let smallest = density?.observed.values.min() ?? 1
@@ -284,8 +308,13 @@ struct GBIFDistributionCard: View {
 
     private func swatch(_ colour: Color) -> some View {
         RoundedRectangle(cornerRadius: 2)
-            .fill(colour)
+            .fill(colour.opacity(Self.rangeOpacity))
             .frame(width: 11, height: 11)
+            // Hairline edge: the ramp no longer flips with the colour scheme, so
+            // in dark mode the darkest swatch sits on a background close to its
+            // own tone and would otherwise read as a gap in the legend.
+            .overlay(RoundedRectangle(cornerRadius: 2)
+                .stroke(Color.primary.opacity(0.25), lineWidth: 0.5))
     }
 
     /// The record span one tier covers, e.g. "1", "2–3", "238+".
