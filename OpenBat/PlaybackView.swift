@@ -33,6 +33,10 @@ struct PlaybackControlsView: View {
     /// the spectrogram header pill (see WavPlayerView), and this slot now
     /// exports the recording.
     let onShare: () -> Void
+    /// Prepares the hand-off to iNaturalist (`INatObservationSheet`). Optional
+    /// so the older `PlaybackView` call site, which has no recording context to
+    /// build an observation from, keeps a plain Share button.
+    var onAddToINaturalist: (() -> Void)? = nil
     /// Landscape uses a tighter vertical footprint so the short-height
     /// spectrogram keeps as much room as possible; portrait keeps the roomier
     /// spacing.
@@ -47,17 +51,43 @@ struct PlaybackControlsView: View {
         .padding(.vertical, compact ? 6 : 16)
     }
 
+    /// A menu once there are two destinations for a recording: the raw bundle
+    /// that has always been here, and the iNaturalist hand-off. Falls back to a
+    /// plain button where only the former applies.
+    @ViewBuilder
     private var shareButton: some View {
-        Button(action: onShare) {
-            VStack(spacing: 4) {
-                Image(systemName: "square.and.arrow.up").font(.title2)
-                Text("Share").font(.caption2)
+        if let onAddToINaturalist {
+            Menu {
+                Button {
+                    onShare()
+                } label: {
+                    Label("Share Recording", systemImage: "waveform")
+                }
+                Button {
+                    onAddToINaturalist()
+                } label: {
+                    Label("Add to iNaturalist…", systemImage: "leaf")
+                }
+            } label: {
+                shareLabel
             }
-            .frame(width: 64)
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .accessibilityLabel("Share recording")
+        } else {
+            Button(action: onShare) { shareLabel }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("Export recording")
         }
-        .buttonStyle(.plain)
-        .foregroundStyle(.secondary)
-        .accessibilityLabel("Export recording")
+    }
+
+    private var shareLabel: some View {
+        VStack(spacing: 4) {
+            Image(systemName: "square.and.arrow.up").font(.title2)
+            Text("Share").font(.caption2)
+        }
+        .frame(width: 64)
     }
 
     /// True once playback has run to the end and stopped — the transport

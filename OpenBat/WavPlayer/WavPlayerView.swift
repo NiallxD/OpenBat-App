@@ -97,6 +97,7 @@ struct WavPlayerView: View {
     /// Share/export: the prepared item URL (a zip of WAV + spectrogram PNG,
     /// or the plain WAV as a fallback) drives the presented share sheet.
     @State private var shareItem: ShareItem?
+    @State private var inatObservation: INatObservation?
     private struct ShareItem: Identifiable { let id = UUID(); let url: URL }
 
     @State private var silenceMap: SilenceMap?
@@ -245,6 +246,14 @@ struct WavPlayerView: View {
         }
     }
 
+    /// Builds the iNaturalist hand-off and opens the sheet. The text is cheap
+    /// and built here; the files are prepared by the sheet itself, off the main
+    /// actor — see `INatExport.prepareFiles`.
+    private func addToINaturalist() {
+        inatObservation = INatExport.draft(recording: recording,
+                                           passes: store.passes(forRecording: recording))
+    }
+
     var body: some View {
         Group {
             if verticalSizeClass == .compact {
@@ -255,6 +264,11 @@ struct WavPlayerView: View {
         }
         .sheet(item: $shareItem) { item in
             ShareSheet(items: [item.url])
+        }
+        .sheet(item: $inatObservation) { observation in
+            INatObservationSheet(observation: observation,
+                                 wavURL: store.wavURL(for: recording),
+                                 overviewPNG: overview?.image.pngData())
         }
         .navigationTitle(recording.commonName)
         .navigationBarTitleDisplayMode(.inline)
@@ -384,7 +398,8 @@ struct WavPlayerView: View {
             // the button row within it, reading as floating in the middle
             // of the screen rather than sitting with the transport controls
             // where they belong: snug under the minimap/time readout.
-            PlaybackControlsView(engine: engine, onShare: shareRecording)
+            PlaybackControlsView(engine: engine, onShare: shareRecording,
+                                 onAddToINaturalist: addToINaturalist)
                 .padding(.bottom, 8)
         }
     }
@@ -408,7 +423,8 @@ struct WavPlayerView: View {
                         .frame(maxHeight: .infinity)
                         .padding(.horizontal, 8)
                     minimapBlock
-                    PlaybackControlsView(engine: engine, onShare: shareRecording, compact: true)
+                    PlaybackControlsView(engine: engine, onShare: shareRecording,
+                                     onAddToINaturalist: addToINaturalist, compact: true)
                 }
                 .frame(maxWidth: .infinity)
 

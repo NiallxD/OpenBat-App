@@ -18,7 +18,12 @@ import Foundation
 
 /// Where the audio actually lives in a RIFF file, and in what format. Produced by
 /// walking the chunk table rather than assuming offsets.
-struct WavFormat {
+///
+/// `nonisolated` for the same reason `WavHeader` is: a plain value type read by
+/// off-main file parsing, which would otherwise inherit
+/// `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` and make `isCanonical`
+/// unreachable from the very callers that need it.
+nonisolated struct WavFormat {
     var sampleRate: UInt32
     var channels: UInt16
     var bitsPerSample: UInt16
