@@ -29,12 +29,41 @@ import CoreLocation
 /// privacy and battery wearing the costume of a question about filing, and it
 /// had to be answered before the user had heard a single bat. Tracks are gone
 /// (see LocationProvider), so the question went with them.
+/// What the classifier was weighted with while a session ran.
+///
+/// Priors are derived from where the user is (see `AutoIDSettings.refreshPriors`)
+/// and they move: a species that is `absent` here is suppressed to 0.01, and
+/// crossing 10 km can re-derive the lot mid-outing. Without a stamped copy, an
+/// exported detection can't be interpreted later — you'd be reading a confidence
+/// that was shaped by settings nobody recorded, and re-deriving them from today's
+/// location would be quietly wrong for last month's session.
+///
+/// One is taken when a session opens, and another whenever the priors are
+/// re-derived while it's still running, so the list covers the whole outing.
+struct PriorSnapshot: Codable, Identifiable {
+    let id: UUID
+    let takenAt: Date
+    /// The model these priors belong to — a prior is meaningless without it,
+    /// since each model has its own species list.
+    let modelID: String
+    /// Species code → the weight actually applied (`effectivePrior`), so this is
+    /// what the classifier used rather than what the settings screen displayed.
+    let priors: [String: Float]
+    /// Species switched off outright. They appear in `priors` at 0.01 as well;
+    /// listed separately because "off" and "very unlikely" are different
+    /// statements and only one of them is the user's decision.
+    let disabled: [String]
+}
+
 struct RecordingSession: Codable, Identifiable {
     let id: UUID
     var title: String            // "29 Jun 2026 · Mendip Hills" — place filled in async
     var notes: String
     let startDate: Date
     var endDate: Date?
+    /// Optional: sessions recorded before this existed decode as nil, and there
+    /// is no way to reconstruct it for them — see `PriorSnapshot`.
+    var priorSnapshots: [PriorSnapshot]?
 
     /// Sessions saved before tracks were removed carry one; it is decoded and
     /// discarded rather than rejected, so an existing library still opens.
@@ -45,14 +74,17 @@ struct RecordingSession: Codable, Identifiable {
         notes = try c.decode(String.self, forKey: .notes)
         startDate = try c.decode(Date.self, forKey: .startDate)
         endDate = try c.decodeIfPresent(Date.self, forKey: .endDate)
+        priorSnapshots = try c.decodeIfPresent([PriorSnapshot].self, forKey: .priorSnapshots)
     }
 
-    init(id: UUID, title: String, notes: String, startDate: Date, endDate: Date?) {
+    init(id: UUID, title: String, notes: String, startDate: Date, endDate: Date?,
+         priorSnapshots: [PriorSnapshot]? = nil) {
         self.id = id
         self.title = title
         self.notes = notes
         self.startDate = startDate
         self.endDate = endDate
+        self.priorSnapshots = priorSnapshots
     }
 }
 
@@ -107,6 +139,16 @@ struct PassRecord: Codable, Identifiable, NoIDFilterable {
     /// pass can be in a complex (`complexID != nil`) without being ambiguous — the
     /// species is confusable in general, but nothing close ran second this time.
     var complexAmbiguous: Bool?
+    /// Mean of each pulse's own top RAW score — the model's confidence before
+    /// species priors were applied, and before any of the user's own filtering.
+    /// `confidence` above is the prior-adjusted figure for the species actually
+    /// reported; the two answer different questions, and anyone re-analysing an
+    /// export needs the raw one to compare a detection against someone else's
+    /// data (or against the same recording under different settings).
+    ///
+    /// Optional, so records written before this existed decode as nil — there is
+    /// no way to recover it for them, since the raw scores were never stored.
+    var rawConfidence: Float?
     /// The resolved complex, or nil for a clean ID.
     var complex: SpeciesComplex? { ModelRegistry.complex(id: complexID) }
     /// Whether to phrase the caveat as an active "could also be…" vs an ambient note.
@@ -375,6 +417,28 @@ final class ClassificationStore {
 
     /// Build a `PassRecord` from a finished pass and persist it. Safe to call from
     /// the main thread; thumbnail encoding + disk writes happen off-thread.
+    /// Stamps the priors currently in force onto a session.
+    ///
+    /// Called when a session opens and again whenever the priors are re-derived
+    /// while one is running (`AutoIDSettings.refreshPriors`), so an export can
+    /// say what the classifier was weighted with at any point in the outing.
+    /// A snapshot identical to the last one is dropped — a refresh that changed
+    /// nothing is not an event.
+    func recordPriorSnapshot(modelID: String, priors: [String: Float], disabled: [String],
+                             sessionID: UUID? = nil) {
+        guard let target = sessionID ?? activeSessionID,
+              let i = sessions.firstIndex(where: { $0.id == target })
+        else { return }
+        if let last = sessions[i].priorSnapshots?.last,
+           last.modelID == modelID, last.priors == priors, last.disabled == disabled {
+            return
+        }
+        let snapshot = PriorSnapshot(id: UUID(), takenAt: Date(), modelID: modelID,
+                                     priors: priors, disabled: disabled)
+        sessions[i].priorSnapshots = (sessions[i].priorSnapshots ?? []) + [snapshot]
+        persistSessions()
+    }
+
     func addPass(species: String,
                  confidence: Float,
                  pulses: [CapturedPulse],
@@ -384,7 +448,8 @@ final class ClassificationStore {
                  runnerUpSpecies: String? = nil,
                  runnerUpConfidence: Float? = nil,
                  complexID: String? = nil,
-                 complexAmbiguous: Bool? = nil) {
+                 complexAmbiguous: Bool? = nil,
+                 rawConfidence: Float? = nil) {
         guard !pulses.isEmpty else { return }
         let passID = UUID()
 
@@ -413,7 +478,8 @@ final class ClassificationStore {
                                   pulses: records, sessionID: sessionID,
                                   latitude: coordinate?.latitude, longitude: coordinate?.longitude,
                                   runnerUpSpecies: runnerUpSpecies, runnerUpConfidence: runnerUpConfidence,
-                                  complexID: complexID, complexAmbiguous: complexAmbiguous)
+                                  complexID: complexID, complexAmbiguous: complexAmbiguous,
+                                  rawConfidence: rawConfidence)
 
             DispatchQueue.main.async {
                 self.passes.insert(pass, at: 0)

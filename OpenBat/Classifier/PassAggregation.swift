@@ -43,6 +43,13 @@ nonisolated enum PassAggregation {
         let species: String   // "NOISE" or a species code — never "No ID"/nil, see aggregate(_:)
         let confidence: Float
         let meanScores: [String: Float]
+        /// Mean of each pulse's own top RAW score — the model's confidence in
+        /// whatever it predicted, before priors. Distinct from `confidence`,
+        /// which is prior-adjusted and about the species actually reported.
+        /// Carried out of here so it can be persisted on the pass and exported:
+        /// it is the only number that says how strong the acoustic evidence was
+        /// independently of the user's own location and species settings.
+        let meanRawConfidence: Float
     }
 
     /// Mean per-pulse raw confidence below this is NoID — the reference pipeline's
@@ -71,6 +78,15 @@ nonisolated enum PassAggregation {
     ///     none — its background/"not bat" probability is summed away into
     ///     `detection_probs` before OpenBat ever sees per-class scores (see
     ///     `BatDetect2Classifier`), so passing `nil` here is correct, not a gap.
+    /// Mean of each pulse's own top raw score. Exposed separately because the
+    /// NoID path needs it too: `aggregate` returns nil there, and the raw
+    /// confidence is precisely the number that failed the gate — the most
+    /// informative thing about a pass OpenBat declined to name.
+    static func meanRawConfidence(_ pulses: [Pulse]) -> Float {
+        guard !pulses.isEmpty else { return 0 }
+        return pulses.reduce(Float(0)) { $0 + ($1.rawScores.values.max() ?? 0) } / Float(pulses.count)
+    }
+
     static func aggregate(_ pulses: [Pulse],
                           minAdjustedConfidence: Float,
                           minPulseCount: Int,
@@ -82,8 +98,8 @@ nonisolated enum PassAggregation {
         // NoID gate: mean of each pulse's own top RAW score (its confidence in
         // whatever it predicted, unbiased by priors) — independent of which class
         // actually wins below.
-        let meanRawConfidence = pulses.reduce(Float(0)) { $0 + ($1.rawScores.values.max() ?? 0) } / n
-        guard meanRawConfidence >= rawConfidenceThreshold else { return nil }   // NoID
+        let rawConfidence = meanRawConfidence(pulses)
+        guard rawConfidence >= rawConfidenceThreshold else { return nil }   // NoID
 
         // Winning class by raw evidence, aggregated across the pass's pulses.
         var rawSum: [String: Float] = [:]
@@ -93,7 +109,8 @@ nonisolated enum PassAggregation {
         if let noiseClassName, rawBest.key == noiseClassName {
             return Outcome(species: noiseClassName,
                            confidence: rawBest.value / n,
-                           meanScores: rawSum.mapValues { $0 / n })
+                           meanScores: rawSum.mapValues { $0 / n },
+                           meanRawConfidence: rawConfidence)
         }
 
         // Real bat call by raw evidence — now defer to prior-adjusted posteriors to
@@ -108,7 +125,9 @@ nonisolated enum PassAggregation {
         let meanConf = best.value / n
         guard pulses.count >= minPulseCount, meanConf >= minAdjustedConfidence else { return nil }
 
-        return Outcome(species: best.key, confidence: meanConf, meanScores: adjSum.mapValues { $0 / n })
+        return Outcome(species: best.key, confidence: meanConf,
+                       meanScores: adjSum.mapValues { $0 / n },
+                       meanRawConfidence: rawConfidence)
     }
 }
 

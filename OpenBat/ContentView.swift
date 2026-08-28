@@ -144,6 +144,10 @@ struct ContentView: View {
     /// pause the render loop and the processor, which is the one thing the
     /// overlay exists to avoid.
     @State private var showTuningOverlay = false
+
+    /// App-lifetime, so an export survives leaving the session it was started
+    /// from — see `SessionExportManager`.
+    @State private var exportManager = SessionExportManager.shared
     /// The vertical transport menu hanging off the session button — record,
     /// listen mode, end session. Only openable while a session is running; see
     /// `handleSessionButtonTap`. Deliberately absent from `menuIsOpen`: it is
@@ -259,6 +263,21 @@ struct ContentView: View {
             // see `transportMenuOverlay` for why it can't be a popover.
             .overlay(alignment: transportMenuAlignment) { transportMenuOverlay }
             .overlay(alignment: transportMenuAlignment) { notRecordingNudgeOverlay }
+            // Session exports outlive the screen that started them, so their
+            // progress card and the share sheet at the end are hosted here —
+            // see SessionExportManager.
+            .overlay(alignment: exportPillAlignment) { sessionExportOverlay }
+            .sheet(item: $exportManager.ready) { ready in
+                ShareSheet(items: [ready.url])
+            }
+            .alert("Export failed", isPresented: Binding(
+                get: { exportManager.failure != nil },
+                set: { if !$0 { exportManager.failure = nil } }
+            )) {
+                Button("OK") { }
+            } message: {
+                Text(exportManager.failure ?? "")
+            }
                 .sheet(isPresented: $showDiagnostics) {
                     DiagnosticsView(audio: audio, recorder: recorder, classStore: classStore,
                                     onStartDemo: startDemo, onEndDemo: endDemo,
@@ -437,6 +456,7 @@ struct ContentView: View {
             // or a launch where the fix wins leaves every species unresolved.
             if let coordinate = location.currentCoordinate {
                 await autoIDSettings.refreshPriors(at: coordinate, using: speciesPresence)
+                recordPriorSnapshot()
             }
             await speciesPresence.refreshFromRemote()
         }
@@ -755,7 +775,13 @@ struct ContentView: View {
             // enough since the last one — see refreshPriors' doc comment. Safe to
             // call on every fix rather than gating the call site.
             if let coordinate = location.currentCoordinate {
-                Task { await autoIDSettings.refreshPriors(at: coordinate, using: speciesPresence) }
+                Task {
+                    await autoIDSettings.refreshPriors(at: coordinate, using: speciesPresence)
+                    // A refresh can land mid-outing (the user drove 10 km), which
+                    // re-weights everything classified from here on. The store
+                    // drops it if nothing actually changed.
+                    recordPriorSnapshot()
+                }
                 if pendingOnboardingModelOffer {
                     pendingOnboardingModelOffer = false
                     offerSuggestedModelIfNeeded(at: coordinate)
@@ -1376,6 +1402,35 @@ struct ContentView: View {
     /// menu that is usually closed, there is nothing to hang a popover on, so it
     /// is drawn against the bar in the same place the transport menu appears —
     /// which is where it is pointing anyway.
+    /// Centred, not trailing like the rest of the chrome around the bar. The
+    /// pill is a status readout rather than something hanging off the session
+    /// button, and on the globe it is laid out centred alongside the "near you"
+    /// pill (see `SpeciesExplorerView.globeFooter`) — it should not jump to the
+    /// edge on every other tab.
+    ///
+    /// Vertical placement still follows the bar, which is why this borrows
+    /// `transportMenuIsBelowBar`/`transportMenuInset` rather than inventing its
+    /// own clearance.
+    private var exportPillAlignment: Alignment {
+        transportMenuIsBelowBar ? .top : .bottom
+    }
+
+    /// Cleared from the bar with the same inset as `notRecordingNudgeOverlay` —
+    /// the bar it has to clear is the same bar.
+    @ViewBuilder private var sessionExportOverlay: some View {
+        // Nothing here while a screen is showing the pill in its own layout —
+        // see SessionExportManager.inlineHosts.
+        SessionExportBanner(manager: exportManager)
+            .opacity(exportManager.inlineHosts == 0 ? 1 : 0)
+            .allowsHitTesting(exportManager.inlineHosts == 0)
+            .padding(.horizontal, SessionButtonMetrics.horizontalPadding)
+            .padding(transportMenuIsBelowBar ? .top : .bottom, transportMenuInset)
+            // Keyed on the job's identity, not the job: the fraction updates
+            // several times a second and animating those would leave the card
+            // permanently mid-transition.
+            .animation(.easeInOut(duration: 0.25), value: exportManager.job?.id)
+    }
+
     @ViewBuilder private var notRecordingNudgeOverlay: some View {
         if showNotRecordingNudge {
             VStack(alignment: .leading, spacing: 10) {
@@ -1502,6 +1557,13 @@ struct ContentView: View {
         SessionButtonMetrics.bottomPadding
             + SessionButtonMetrics.diameter
             + TransportMenuMetrics.gap
+    }
+
+    /// Records the priors in force against the running session, if there is one.
+    private func recordPriorSnapshot(sessionID: UUID? = nil) {
+        guard let data = autoIDSettings.priorSnapshotData else { return }
+        classStore.recordPriorSnapshot(modelID: data.modelID, priors: data.priors,
+                                       disabled: data.disabled, sessionID: sessionID)
     }
 
     /// Offers to calibrate a microphone the first time it turns up, if this is a
@@ -2523,6 +2585,10 @@ struct ContentView: View {
         // in `startDemo`, a demo leaves no trace in the user's data.
         if !audio.isDemoMode {
             let id = classStore.startSession()
+            // Stamp the classifier's weights onto the session the moment it
+            // opens — see PriorSnapshot for why an export is unreadable without
+            // them, and `refreshPriors` below for the mid-session case.
+            recordPriorSnapshot(sessionID: id)
             let session = classStore.sessions.first(where: { $0.id == id })
             let label = session?.title ?? "Session"
             pulseDetector.activeSessionID = id

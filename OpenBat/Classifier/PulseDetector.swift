@@ -373,9 +373,13 @@ final class PulseDetector {
             // pass just vanished with no trace; recording it as its own "NOID" species
             // lets the ID list show "something triggered, we couldn't tell what" instead
             // of silently dropping evidence the user did see/hear.
+            // The raw confidence is recorded even here — especially here. It is
+            // the number that failed the gate, so it is the difference between
+            // "nothing much happened" and "a strong call the settings rejected".
             store?.addPass(species: "NOID", confidence: 0, pulses: passPulses,
                            sessionID: activeSessionID,
-                           coordinate: activeSessionID != nil ? coordinateProvider?() : nil)
+                           coordinate: activeSessionID != nil ? coordinateProvider?() : nil,
+                           rawConfidence: PassAggregation.meanRawConfidence(passAggPulses))
             return
         }
 
@@ -420,7 +424,8 @@ final class PulseDetector {
                        runnerUpSpecies: runnerUp?.key,
                        runnerUpConfidence: runnerUp?.value,
                        complexID: complex?.id,
-                       complexAmbiguous: complexAmbiguous)
+                       complexAmbiguous: complexAmbiguous,
+                       rawConfidence: outcome.meanRawConfidence)
     }
 
     /// Clears the session counters (count, rate, last capture) AND invalidates any

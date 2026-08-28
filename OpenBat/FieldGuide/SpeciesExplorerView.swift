@@ -518,25 +518,59 @@ struct SpeciesExplorerView: View {
     /// back to the original wording — plain text, not a link — whenever
     /// there's no fix yet or nothing resolves nearby, so nothing here is ever
     /// a tap that goes nowhere.
+    /// Shares its row with the export pill (`SessionExportBanner`) rather than
+    /// being displaced by it: the two sit side by side, centred as a pair. While
+    /// an export runs this footer drops to a bat icon and "near you" — still
+    /// tappable, still saying what it opens — so the pair fits without either
+    /// one being pushed off-centre. Full text again the moment it finishes.
+    ///
+    /// The pill is drawn HERE, not by the app-wide chrome in ContentView, for
+    /// the length of time this footer is on screen — that is what
+    /// `addInlineHost`/`removeInlineHost` announce, and it is the only way the
+    /// two can be laid out as one centred row rather than as two overlays
+    /// anchored by different hosts at different heights.
+    private var isExporting: Bool { SessionExportManager.shared.job != nil }
+
     @ViewBuilder
     private var globeFooter: some View {
-        if !nearbySpecies.isEmpty {
-            NavigationLink(value: SpeciesGuideDestination.nearby) {
-                Text("Tap here to see bats near you")
+        HStack(spacing: 8) {
+            if !nearbySpecies.isEmpty {
+                NavigationLink(value: SpeciesGuideDestination.nearby) {
+                    Group {
+                        if isExporting {
+                            HStack(spacing: 6) {
+                                Image("batIcon")
+                                    .resizable()
+                                    .scaledToFit()
+                                    .frame(width: 16, height: 16)
+                                Text("near you")
+                            }
+                        } else {
+                            Text("Tap here to see bats near you")
+                        }
+                    }
+                    .font(.footnote)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .liquidGlass(in: Capsule())
+                }
+                .accessibilityLabel("See bats near you")
+            } else if !isExporting {
+                // No collapsed form for this one: it's a hint, not an offer, and
+                // a hint is the thing to drop when something real needs the row.
+                Text("Tap a region to explore its species")
                     .font(.footnote)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 8)
                     .liquidGlass(in: Capsule())
             }
-            .padding(.bottom, 12)
-        } else {
-            Text("Tap a region to explore its species")
-                .font(.footnote)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 8)
-                .liquidGlass(in: Capsule())
-                .padding(.bottom, 12)
+            SessionExportBanner(manager: SessionExportManager.shared)
         }
+        .padding(.horizontal, SessionButtonMetrics.horizontalPadding)
+        .padding(.bottom, 12)
+        .animation(.easeInOut(duration: 0.25), value: isExporting)
+        .onAppear { SessionExportManager.shared.addInlineHost() }
+        .onDisappear { SessionExportManager.shared.removeInlineHost() }
     }
 
     private var sourcesSheet: some View {

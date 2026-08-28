@@ -330,6 +330,22 @@ final class AutoIDSettings {
         }
     }
 
+    /// The weights the classifier is applying right now, for the active model —
+    /// what `ClassificationStore.recordPriorSnapshot` stamps onto a session.
+    ///
+    /// Reports `effectivePrior`'s answer for every species rather than the raw
+    /// `prior` field, so what gets recorded is what classification actually used.
+    var priorSnapshotData: (modelID: String, priors: [String: Float], disabled: [String])? {
+        guard let id = activeModelID, let model = perModel[id] else { return nil }
+        var priors: [String: Float] = [:]
+        var disabled: [String] = []
+        for (code, state) in model.species {
+            priors[code] = state.enabled ? max(0.01, state.prior) : 0.01
+            if !state.enabled { disabled.append(code) }
+        }
+        return (id, priors, disabled.sorted())
+    }
+
     /// Prior to apply during classification. Disabled species are suppressed to 0.01.
     func effectivePrior(for code: String) -> Float {
         guard let s = activeModel?.species[code], s.enabled else { return 0.01 }

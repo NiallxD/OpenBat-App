@@ -391,6 +391,10 @@ struct SessionDetailView: View {
     let consent: ConsentStore
     let micCalSettings: MicCalibrationSettings
     @AppStorage("display.showNoID") private var showNoID = false
+    /// Exports don't belong to this screen — see `SessionExportManager`. This
+    /// view only starts them and reflects whether one is already running for
+    /// this session.
+    private let exportManager = SessionExportManager.shared
 
     var body: some View {
         List {
@@ -429,9 +433,9 @@ struct SessionDetailView: View {
             }
             Section("Recordings") {
                 if sessionRecordings.isEmpty {
-                    Text(store.recordings(inSession: session.id).isEmpty
+                    Text(allSessionRecordings.isEmpty
                          ? "No recordings in this session."
-                         : "Every recording here is unclassified (NoID) — tap the filter icon to show them.")
+                         : "Every recording here is unclassified (NoID) — turn on \"Show unclassified\" in the menu above to see them.")
                         .foregroundStyle(.secondary)
                 } else {
                     ForEach(sessionRecordings) { recording in
@@ -453,20 +457,124 @@ struct SessionDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                Button {
-                    showNoID.toggle()
+                Menu {
+                    // A Toggle rather than a Button: inside a Menu it draws
+                    // its own checkmark, which is what carries the on/off
+                    // state now that the toolbar icon no longer can.
+                    Toggle("Show unclassified", isOn: $showNoID)
+                    Divider()
+                    if isExporting {
+                        // Not a disabled "Export Session…" — that reads as
+                        // "you can't", when what's true is "it's already
+                        // happening, and the banner is showing you where".
+                        Label("Exporting…", systemImage: "clock")
+                    } else {
+                        Button {
+                            exportSession()
+                        } label: {
+                            Label("Export Session…", systemImage: "square.and.arrow.up")
+                        }
+                        .disabled(allSessionRecordings.isEmpty)
+                    }
                 } label: {
-                    Image(systemName: showNoID ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
-                        .foregroundStyle(showNoID ? .blue : .primary)
+                    Image(systemName: "ellipsis.circle")
                 }
-                .accessibilityLabel(showNoID ? "Hide unclassified recordings" : "Show unclassified recordings")
+                .accessibilityLabel("Session options")
             }
         }
     }
 
+    private var isExporting: Bool { exportManager.isActive(sessionID: session.id) }
+
+    /// Hands the export to `SessionExportManager` and returns. Everything after
+    /// this — progress, cancelling, and the share sheet at the end — belongs to
+    /// the manager, so leaving this screen doesn't abandon the work.
+    ///
+    /// Exports the whole session, NOT what the list is currently showing:
+    /// `showNoID` is a filter on this screen, and a bundle that quietly dropped
+    /// the unclassified files would be a worse archive than the session it came
+    /// from. Every recording is in the CSV either way, with its species column
+    /// reading NOID.
+    private func exportSession() {
+        let input = SessionExport.Input(
+            sessionID: session.id,
+            title: session.title,
+            notes: session.notes,
+            startDate: session.startDate,
+            endDate: session.endDate,
+            rows: allSessionRecordings.map { recording in
+                SessionExport.Row(
+                    recordingID: recording.id,
+                    wavURL: store.wavURL(for: recording),
+                    date: recording.date,
+                    durationSeconds: recording.durationSeconds,
+                    species: recording.species,
+                    commonName: recording.commonName,
+                    confidence: recording.confidence,
+                    pulseCount: recording.pulseCount,
+                    latitude: recording.latitude,
+                    longitude: recording.longitude,
+                    uploadStatus: recording.uploadStatus?.phase.rawValue ?? ""
+                )
+            },
+            detections: sessionPasses.map { pass in
+                SessionExport.Detection(
+                    passID: pass.id,
+                    date: pass.date,
+                    species: pass.species,
+                    commonName: pass.commonName,
+                    confidence: pass.confidence,
+                    rawConfidence: pass.rawConfidence,
+                    pulseCount: pass.pulseCount,
+                    runnerUpSpecies: pass.runnerUpSpecies,
+                    runnerUpConfidence: pass.runnerUpConfidence,
+                    complexID: pass.complexID,
+                    complexAmbiguous: pass.complexAmbiguous,
+                    latitude: pass.latitude,
+                    longitude: pass.longitude
+                )
+            },
+            // Flattened here rather than in the exporter: this is the only place
+            // that knows the snapshots are stored on the session.
+            priors: (session.priorSnapshots ?? []).flatMap { snapshot in
+                snapshot.priors
+                    .sorted { $0.key < $1.key }
+                    .map { code, prior in
+                        SessionExport.PriorRow(
+                            takenAt: snapshot.takenAt,
+                            modelID: snapshot.modelID,
+                            species: code,
+                            prior: prior,
+                            enabled: !snapshot.disabled.contains(code))
+                    }
+            },
+            pulseScores: sessionPasses.flatMap { pass in
+                pass.pulses.flatMap { pulse -> [SessionExport.PulseScore] in
+                    func row(rank: Int?, species: String?, score: Float?) -> SessionExport.PulseScore {
+                        SessionExport.PulseScore(
+                            passID: pass.id, pulseID: pulse.id, date: pulse.date,
+                            pulseSpecies: pulse.species, pulseConfidence: pulse.confidence,
+                            peakFreqHz: pulse.peakFreqHz, durationMs: pulse.durationMs,
+                            rank: rank, species: species, score: score)
+                    }
+                    // A pulse that stored no scores still gets a row. In long
+                    // format it would otherwise vanish from the file entirely,
+                    // and "this pulse has no scores" is itself worth seeing.
+                    guard !pulse.topScores.isEmpty else { return [row(rank: nil, species: nil, score: nil)] }
+                    return pulse.topScores.enumerated().map { index, entry in
+                        row(rank: index + 1, species: entry.species, score: entry.score)
+                    }
+                }
+            }
+        )
+        exportManager.enqueue(input)
+    }
+
     private var sessionPasses: [PassRecord] { store.passes(inSession: session.id) }
+    /// Everything in the session, unfiltered — what the export bundles.
+    private var allSessionRecordings: [Recording] { store.recordings(inSession: session.id) }
     private var sessionRecordings: [Recording] {
-        store.recordings(inSession: session.id).filteredByNoID(showNoID: showNoID)
+        allSessionRecordings.filteredByNoID(showNoID: showNoID)
     }
     private var mappablePasses: [PassRecord] { sessionPasses.filter(settings.isMappable) }
     private var hasGeo: Bool { !mappablePasses.isEmpty }
