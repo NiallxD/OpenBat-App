@@ -260,9 +260,9 @@ struct ContentView: View {
             // Finds the system's session button so the glow and the tap
             // catcher can be placed on it rather than near it.
             .locatesSessionButton(sessionButtonLocator)
-            // Swallows the tap before the system bar can act on it — see
-            // `sessionButtonTapCatcher`. Above the bar, below the menu.
-            .overlay(alignment: transportMenuAlignment) { sessionButtonTapCatcher }
+            // Our own session button, where the bar is not drawing one — see
+            // `poppedSessionButton`. Above the bar, below the menu.
+            .overlay(alignment: transportMenuAlignment) { poppedSessionButton }
             // The transport menu, drawn over the bar rather than inside it —
             // see `transportMenuOverlay` for why it can't be a popover.
             .overlay(alignment: transportMenuAlignment) { transportMenuOverlay }
@@ -1133,12 +1133,36 @@ struct ContentView: View {
             // is being used for the *button* it produces, not for a screen.
             // `Color.clear` rather than `EmptyView()` because a tab with no
             // content is not a tab the system will lay out.
-            Tab(value: TabSelection.sessionControl, role: .search) {
-                Color.clear
-            } label: {
-                sessionTabLabel
+            //
+            // Absent on iPad, where we draw the button ourselves — see
+            // `drawsOwnSessionButton`.
+            if !drawsOwnSessionButton {
+                Tab(value: TabSelection.sessionControl, role: .search) {
+                    Color.clear
+                } label: {
+                    sessionTabLabel
+                }
             }
         }
+    }
+
+    /// Whether the session button is ours to draw rather than the bar's.
+    ///
+    /// **Why iPad.** `Tab(role: .search)` is rendered as a detached circle
+    /// *beside* the bar on iPhone, which is the arrangement the design wants and
+    /// the reason the button was ever a tab. On iPad the same tab is drawn as
+    /// the last item *inside* the centred pill, indistinguishable from a
+    /// destination — which is what App Review tapped on 2026-08-29, expecting a
+    /// screen, and reported as a bug when nothing opened. A control that starts
+    /// listening should not look like a fourth place to go.
+    ///
+    /// The idiom, deliberately, and not the bar's measured position: a `Tab`
+    /// cannot be added and removed as the window resizes without the bar
+    /// re-laying itself out under the user, and the idiom is the one thing here
+    /// that cannot change while the app runs. Where the button is *drawn* is
+    /// measured — see `poppedSessionButton`.
+    private var drawsOwnSessionButton: Bool {
+        UIDevice.current.userInterfaceIdiom == .pad
     }
 
     /// Label for the system bar's detached circle. The system draws the glass
@@ -1162,7 +1186,7 @@ struct ContentView: View {
         // exact match, and the label is the fallback for when the bar rebuilds
         // the item as its own view and carries only the accessibility text
         // across. Changing either string without changing the locator's copy
-        // leaves the glow and the tap catcher with nothing to attach to.
+        // leaves the glow and the transport menu with nothing to attach to.
         .accessibilityIdentifier(SessionButtonLocator.accessibilityIdentifier)
     }
 
@@ -1490,65 +1514,144 @@ struct ContentView: View {
         }
     }
 
-    /// An invisible disc sitting exactly over the system's session button,
-    /// taking the tap before the bar ever sees it.
+    /// The session button, drawn by us, beside the system's pill.
     ///
-    /// **This was meant to stop the Detector indicator blinking, and it does
-    /// not. Don't spend an afternoon tuning it — it cannot work.** The button is
-    /// a `Tab`, and the only hook a `TabView` gives us is its selection binding,
-    /// so the bar moves its own indicator onto the tapped tab, we refuse to
-    /// store that selection, and it animates back. Off and on, every time you
-    /// open the transport menu.
+    /// **This replaces two things.** It replaces the `Tab(role: .search)` on
+    /// iPad, which the bar drew as the last item inside the pill — a control
+    /// that looked exactly like a fourth destination and opened nothing, which
+    /// is what App Review reported. And it replaces the invisible tap catcher
+    /// that used to sit here, whose job was to stop a touch reaching the bar's
+    /// item cell so the selection indicator would not blink. That could never
+    /// work — SwiftUI draws an overlay into the hosting view's layer rather than
+    /// as a `UIView`, so UIKit hit-tested straight past it into the bar (see
+    /// Context.md §16) — and there is now nothing for it to do: with no tab
+    /// there is no selection to refuse and no indicator to move.
     ///
-    /// The idea was for the touch never to reach the bar. A SwiftUI overlay
-    /// cannot do that. A hierarchy dump from an iPad (2026-08-17) shows the
-    /// hosting view has three subviews — the locator's probe, the TabView's
-    /// host, and a dimming view — and nothing for this catcher, because SwiftUI
-    /// draws it into the hosting view's own layer rather than as a `UIView`.
-    /// UIKit hit-tests through real subviews, reaches the bar's item cell inside
-    /// the TabView's host, and gives it the touch. There is no view here to
-    /// block with, so position is beside the point.
+    /// **Placed against the pill, never against the bar's own view.** On an
+    /// 11-inch iPad in portrait the floating bar's view measures 820×44 — the
+    /// full width of the window — while the glass it draws is 350 of that,
+    /// centred. Hanging this off the view would put it off the screen edge.
+    /// `barContentFrameInWindow` is the glass.
     ///
-    /// Left in place on Niall's call (2026-08-17): the blink is cosmetic, the
-    /// menu opens and the tab never changes. What would actually fix it is not
-    /// making the button a `Tab` at all — see `Context.md` §16. **If the
-    /// transport menu ever starts flicking open and shut on one tap, suspect
-    /// this**: the tap gesture here still fires alongside the bar's own
-    /// handling, which toggles the menu twice. Deleting this whole view is then
-    /// the fix.
-    ///
-    /// Sized to the button, and positioned from the button's *measured* frame
-    /// rather than from our metrics — see `SessionButtonLocator`. Until that
-    /// frame is known it draws nothing at all, deliberately: an invisible tap
-    /// target in a guessed position is the worst thing on this screen, and on
-    /// iPad the guess landed on the Settings gear.
-    ///
-    /// The `.sessionControl` case in `tabSelection` stays as the fallback: this
-    /// catcher is a plain tap gesture, so VoiceOver and keyboard activation
-    /// still go through the real tab, and so does any tap this misses.
-    @ViewBuilder private var sessionButtonTapCatcher: some View {
-        if #available(iOS 26.0, *) {
-            SessionButtonAnchored(locator: sessionButtonLocator) { size in
-                Circle()
-                    .fill(sessionTapCatcherTint)
-                    // The button's own measured size, never padded outwards.
-                    // It sits next to a real tab item, and a catcher that
-                    // overhangs would swallow taps meant for that instead —
-                    // far worse than the blink this exists to stop.
-                    .frame(width: size.width, height: size.height)
-                    .contentShape(.circle)
-                    .onTapGesture { handleSessionButtonTap() }
-                    // The real tab underneath carries the label and the traits;
-                    // announcing this as well would read the control out twice.
-                    .accessibilityHidden(true)
+    /// It sits *over* the bar's row, and that works because the bar passes
+    /// touches through outside its own pill: the Settings gear already lives in
+    /// that row, inside the bar view's bounds, and has always been tappable.
+    @ViewBuilder private var poppedSessionButton: some View {
+        if #available(iOS 26.0, *), drawsOwnSessionButton {
+            GeometryReader { proxy in
+                if let pill = sessionButtonLocator.barContentFrameInWindow {
+                    let host = proxy.frame(in: .global)
+                    // Matched to the pill's height rather than to a constant of
+                    // ours, so the button is the same size as the thing it sits
+                    // beside whatever the system decides that is — 44 on iPad
+                    // today. Floored at the 44pt minimum touch target.
+                    let diameter = max(pill.height, 44)
+                    poppedSessionButtonBody(diameter: diameter)
+                        // Everything that hangs off the button — the glow, the
+                        // transport menu, the nudge — asks the locator where it
+                        // is, and this is the answer. Same mechanism the pre-26
+                        // bar uses.
+                        //
+                        // **Before `.position`, which is load-bearing.**
+                        // `position` hands back a view that fills its parent and
+                        // places the content inside it, so measuring after it
+                        // reports the whole screen — which sized the recording
+                        // glow to the whole screen the first time this was
+                        // written.
+                        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: {
+                            sessionButtonLocator.updateSelfDrawn($0)
+                        }
+                        .position(x: buttonCentreX(pill: pill, diameter: diameter) - host.minX,
+                                  y: pill.midY - host.minY)
+                }
             }
+            .onDisappear { sessionButtonLocator.updateSelfDrawn(nil) }
         }
     }
 
-    /// Normally clear. Flip to a visible colour to check the catcher is landing
-    /// on the button — it cannot be verified by tapping in a simulator, but a
-    /// coloured disc that covers the button exactly is the same proof.
-    private var sessionTapCatcherTint: Color { .clear }
+    /// The button itself: the bar's own glass, with the same glyph the bar was
+    /// drawing a moment ago.
+    ///
+    /// **Deliberately not `SessionButton`**, which is the pre-26 bar's button —
+    /// a red record circle with the listening ear inside it. That is right next
+    /// to *that* bar and wrong next to this one, whose tabs are bare glyphs on
+    /// clear glass. Reusing `sessionGlyph` instead means this is the same
+    /// bitmap, at the same size, in the same colours the system was drawing
+    /// inside the pill, so popping the button out changes where it is and
+    /// nothing about how it looks.
+    private func poppedSessionButtonBody(diameter: CGFloat) -> some View {
+        Button(action: handleSessionButtonTap) {
+            Color.clear
+                .frame(width: diameter, height: diameter)
+                .liquidGlass(interactive: true, in: .circle)
+                // **The glyph is drawn over the glass, not inside it, and as an
+                // ordinary symbol rather than a baked bitmap.**
+                //
+                // `sessionGlyph` bakes the colour into a `UIImage` because
+                // everything SwiftUI offers for styling a `Tab`'s label is
+                // ignored by the bar — see there. None of that applies here:
+                // this is our own view, so a symbol with a concrete
+                // `foregroundStyle` is simply what it says it is, and there is
+                // one less layer between the colour and the pixels.
+                //
+                // Over rather than inside because iOS 26 treats whatever
+                // `glassEffect` is applied to as glass *content* and gives it a
+                // vibrancy treatment, which repaints a monochrome glyph against
+                // the material.
+                .overlay {
+                    Image(systemName: sessionSymbol)
+                        .font(.system(size: sessionSymbolPointSize, weight: sessionSymbolWeight))
+                        .foregroundStyle(sessionSymbolTint)
+                }
+        }
+        .buttonStyle(.plain)
+        // A tint on the button would be inherited by the label and is exactly
+        // the sort of thing that turns a glyph the wrong colour; the glyph says
+        // what it is above.
+        .tint(sessionSymbolTint)
+        .accessibilityLabel(sessionButtonAccessibilityLabel)
+        .accessibilityAddTraits(.isButton)
+        .tourTarget(.start)
+    }
+
+    /// Point size for the symbol on our own button. The same numbers
+    /// `sessionGlyph` bakes, and for the same reason: they were measured against
+    /// the 23pt glyph the system drew in its own circle.
+    private var sessionSymbolPointSize: CGFloat {
+        switch sessionSymbol {
+        case "waveform": 21
+        case "play.fill": 19
+        default: 18
+        }
+    }
+
+    /// The waveform is drawn heavier than the others on purpose — its bars are
+    /// thin enough at this size that anti-aliasing eats their colour.
+    private var sessionSymbolWeight: Font.Weight {
+        sessionSymbol == "waveform" ? .bold : .semibold
+    }
+
+    /// What the button is called, in each of its three states. Shared with the
+    /// labels `SessionButtonLocator` matches on, which is why the strings live
+    /// in one place rather than being written out twice.
+    private var sessionButtonAccessibilityLabel: String {
+        if showTransportMenu { return "Close session controls" }
+        return audio.isActive ? "Session controls" : "Start session"
+    }
+
+    /// Where the button's centre goes: just past the pill's trailing edge, and
+    /// never off the window.
+    ///
+    /// The clamp is not decoration. In a compact-width window — an iPad in Split
+    /// View or Slide Over — the system lays the bar out the way it does on
+    /// iPhone, and how much room it leaves to the pill's right is its business,
+    /// not ours. Running off the edge would be the worse failure of the two.
+    private func buttonCentreX(pill: CGRect, diameter: CGFloat) -> CGFloat {
+        let beside = pill.maxX + SessionButtonMetrics.gap + diameter / 2
+        let limit = (sessionButtonLocator.windowWidth ?? beside)
+            - SessionButtonMetrics.horizontalPadding - diameter / 2
+        return min(beside, limit)
+    }
 
     /// The pulsing light behind the session button while listening, placed on
     /// the button's measured frame. Drawn on the *screen* rather than the tab

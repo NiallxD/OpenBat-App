@@ -2966,8 +2966,36 @@ leads to check, not as confirmed regressions.
   ground. Costs a coastline raster in the generator. Not worth it for one cell
   alone; worth revisiting if loose coastal edges turn up elsewhere.
 
+- **The session button is no longer a tab on iPad — 2026-08-30, and it settles
+  the entry below.** `Tab(role: .search)` is drawn as a detached circle beside
+  the bar on iPhone, which is the whole reason the button was ever a tab. On
+  iPad the same tab is drawn as the last item *inside* the centred pill, where
+  nothing distinguishes it from a fourth destination; App Review tapped it
+  expecting a screen and refused the build. So on iPad the tab is not declared
+  and the button is drawn by us, beside the pill.
+
+  Three things that made this cheap, and are worth knowing before touching it:
+
+  - **Place it against the pill, never against the bar's view.** The floating
+    bar's own view is the full width of the window — measured 820×44 on an
+    11-inch in portrait — while the glass it draws is 350 of that, centred.
+    `barContentFrameInWindow` is the glass; `barFrameInWindow` is not.
+  - **The bar passes touches through outside its pill**, which is what makes an
+    overlay in that row workable at all. The Settings gear has always lived
+    inside the bar view's bounds and has always been tappable. (The tap catcher
+    below failed for the opposite reason: it sat *over* the bar's own item.)
+  - **A glyph inside `glassEffect` is glass content and gets repainted.** Drawn
+    the obvious way — glass applied to the image — the play triangle came out
+    black on device while staying white in every simulator. Baking the colour
+    into a `UIImage` does not save it. Draw the glyph as an overlay *over* the
+    glass. The baked bitmap is gone with it: it only ever existed because a
+    `Tab` label ignores SwiftUI styling, and this is no longer a `Tab` label.
+
+  The tap catcher is deleted, and the indicator blink is gone with the tab.
+
 - **The tab bar's indicator blinks when you tap the session button, and the
-  fix for it does not work — left alone on Niall's call, 2026-08-17.** The
+  fix for it does not work — left alone on Niall's call, 2026-08-17.
+  RESOLVED 2026-08-30 by the entry above; kept for the reasoning.** The
   button is a `Tab`, so the bar moves its indicator there, the selection is
   refused, and it animates back. The invisible tap catcher written to stop the
   touch reaching the bar **cannot** do so: SwiftUI draws that overlay into the

@@ -34,6 +34,9 @@
 
 ## v0.9.5 (Build 130)
 
+### Changed
+- **The play button is its own button on iPad** — It used to be the last item inside the tab pill, where it looked like a fourth place to go rather than the control that starts listening. It now sits beside the pill as its own circle, the way it already did on iPhone.
+
 ### Fixed
 - **The session button always answers now** — With microphone access refused, the button explained itself once and then went quiet: every tap after the first did nothing at all, with no way to tell whether the app had heard you. It now says what is wrong every time you ask, and says it for any other reason a session can't start too.
 - **No more empty sessions from a session that never started** — A refused start still opened a session, armed recording and started the timer, so the screen said it was recording while the button said it hadn't started. Nothing opens until listening is actually running.

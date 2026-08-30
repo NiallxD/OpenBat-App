@@ -37,7 +37,7 @@ def find_one(path, tpl_path='tpl_play.png'):
 
 def find(path):
     best = None
-    for tpl in ('tpl_play.png', 'tpl_record.png'):
+    for tpl in ('tpl_play.png', 'tpl_record.png', 'tpl_play_popped.png'):
         r = find_one(path, tpl)
         if best is None or r[0] > best[0]: best = r
     return best

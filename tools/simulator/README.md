@@ -30,3 +30,22 @@ Two things that will waste an afternoon if you don't know them:
   so anything relying on `accessibilityIdentifier`/`accessibilityLabel` passes
   here and fails on hardware. Launch with `-locator.structuralOnly YES` to force
   the code path real hardware takes — see `SessionButtonLocator`.
+
+## Two ways this harness lies to you
+
+Both were found the hard way on 2026-08-30, and both look exactly like the app
+ignoring taps:
+
+- **The Simulator must be frontmost.** `screencapture -R` grabs a region of the
+  *screen* and `cliclick` clicks a point on the *screen*, so any window sitting
+  over the Simulator gets both. The calibration then matches a browser page and
+  every tap goes to it, silently. `simctl_ui.activate()` handles it; don't
+  bypass it.
+- **Boot one device at a time.** With two booted, `simctl io booted` and the
+  Simulator's frontmost window can be different devices, so the screenshot and
+  the clicks describe different screens.
+
+The calibration is scored by normalised cross-correlation for a related reason:
+mean absolute difference rewards a shrunken screenshot parked on a black region,
+so the scale search bottoms out and returns a confident-looking transform that
+is simply wrong.

@@ -2,11 +2,12 @@
 //  SessionButtonLocator.swift
 //  OpenBat
 //
-//  Finds out where the system tab bar actually put the session button, so the
-//  things that hang off it — the recording glow behind it, the tap catcher in
-//  front of it — can be placed against the real thing rather than against a
-//  guess. It locates the ordinary tabs the same way, for the guided tour's
-//  spotlight; everything below about *why* applies equally to those.
+//  Finds out where the tab bar is, and where it put the session button, so the
+//  things that hang off it — the recording glow behind it, the transport menu
+//  that grows out of it, and on iPad the button itself — can be placed against
+//  the real thing rather than against a guess. It locates the ordinary tabs the
+//  same way, for the guided tour's spotlight; everything below about *why*
+//  applies equally to those.
 //
 //  Why this exists. On iOS 26 the session button is a `Tab(role: .search)`,
 //  drawn by the bar, and the bar tells us nothing about where it drew it. The
@@ -63,7 +64,7 @@ import UIKit
 /// Where the session button is, in window coordinates. `nil` until it has been
 /// found — every caller must handle that, and handle it by drawing nothing
 /// rather than by falling back to a guess. A glow in the wrong place is untidy;
-/// an invisible tap catcher in the wrong place eats a control the user needs.
+/// a control in the wrong place is worse than no control at all.
 @Observable
 final class SessionButtonLocator {
     /// Where the session button is, whoever put it there.
@@ -186,6 +187,35 @@ final class SessionButtonLocator {
         }.joined(separator: "\n\n")
     }
 
+    /// The tab bar's own frame, in window coordinates, or `nil` while it has
+    /// not been found.
+    ///
+    /// Published because the bar is a steadier thing to hang layout off than
+    /// the button inside it: it is found by *type* first (`UITabBar`), which
+    /// cannot stop matching, whereas the button is found by private class name.
+    /// Anything that only needs to know where the bar is should ask for this.
+    private(set) var barFrameInWindow: CGRect?
+
+    func updateBar(_ frame: CGRect?) {
+        guard frame != barFrameInWindow else { return }
+        barFrameInWindow = frame
+    }
+
+    /// The bar as it is *drawn* — the glass pill, not the view it lives in.
+    ///
+    /// `barFrameInWindow` is no use for placing anything beside the bar: on
+    /// iPad the floating bar's own view spans the whole width of the window
+    /// (measured 820×44 on an 11-inch in portrait) while the pill it draws is
+    /// 350 points of that, centred. Hanging a button off the *view's* trailing
+    /// edge would put it off the screen; hanging it off the pill's puts it
+    /// where the eye expects it.
+    private(set) var barContentFrameInWindow: CGRect?
+
+    func updateBarContent(_ frame: CGRect?) {
+        guard frame != barContentFrameInWindow else { return }
+        barContentFrameInWindow = frame
+    }
+
     /// Which half of the window the bar put the session button in, or `nil`
     /// while the button has not been found.
     ///
@@ -203,13 +233,15 @@ final class SessionButtonLocator {
         return frameInWindow.midY < windowHeight / 2
     }
 
-    /// Height of the window the button was found in, kept only so
-    /// `buttonIsInTopHalf` has something to compare against.
+    /// Size of the window the bar was found in — the height so
+    /// `buttonIsInTopHalf` has something to compare against, the width so
+    /// anything placed beside the bar can be kept on the screen.
     private(set) var windowHeight: CGFloat?
+    private(set) var windowWidth: CGFloat?
 
-    func updateWindowHeight(_ height: CGFloat) {
-        guard height != windowHeight else { return }
-        windowHeight = height
+    func updateWindowSize(_ size: CGSize) {
+        if size.height != windowHeight { windowHeight = size.height }
+        if size.width != windowWidth { windowWidth = size.width }
     }
 
     /// The tour overlay's own frame, in SwiftUI's global space.
@@ -340,9 +372,25 @@ struct SessionButtonProbe: UIViewRepresentable {
 
         func locate() {
             guard let window else { return }
-            locator.updateWindowHeight(window.bounds.height)
+            locator.updateWindowSize(window.bounds.size)
+            let bar = Self.findTabBar(in: window)
+            locator.updateBar(bar.map { window.convert($0.bounds, from: $0) })
+            locator.updateBarContent(bar.flatMap(Self.findBarContent)
+                .map { window.convert($0.bounds, from: $0) })
             let found = Self.findSessionButton(in: window)
             locator.update(found.map { window.convert($0.bounds, from: $0) })
+            // Debug-flag only: one dump as soon as there is a bar to describe.
+            // The failure dump below covers the button never being found; this
+            // covers everything else you might need to see about the bar, and
+            // it is the only way to read its real geometry without hardware.
+            if SessionButtonLocator.structuralOnly, bar != nil, !Self.hasDumped {
+                Self.hasDumped = true
+                let url = FileManager.default.temporaryDirectory
+                    .appending(path: "locator-dump.txt")
+                try? SessionButtonLocator.hierarchyDump()
+                    .write(to: url, atomically: true, encoding: .utf8)
+                NSLog("OPENBAT-LOCATOR-DUMP written to %@", url.path)
+            }
 
             // Scoped to the tab bar's own subtree where one can be found. The
             // section titles are ordinary words — "Sessions" and "Species" both
@@ -378,6 +426,20 @@ struct SessionButtonProbe: UIViewRepresentable {
                 stack.append(contentsOf: view.subviews)
             }
             return nil
+        }
+
+        /// The glass the bar actually draws, inside the full-width view that
+        /// holds it. See `SessionButtonLocator.barContentFrameInWindow`.
+        ///
+        /// Both bar shapes wrap their items in one container: the floating bar
+        /// calls it a selection container, the plain `UITabBar` calls it a
+        /// platter — and that one has a second platter for the detached button,
+        /// so the widest is the one holding the tabs. A miss falls back to the
+        /// bar itself, which is right on any bar whose view *is* its drawing.
+        static func findBarContent(in bar: UIView) -> UIView? {
+            let candidates = descendants(of: bar, named: "SelectionContainerView").filter(isDrawn)
+                + descendants(of: bar, named: "PlatterView").filter(isDrawn)
+            return candidates.max { $0.bounds.width < $1.bounds.width } ?? bar
         }
 
         /// A view's class name, for the structural matches below. Reading a name
@@ -566,7 +628,7 @@ struct SessionButtonProbe: UIViewRepresentable {
         /// The item inside that container is preferred over the container
         /// itself, because the container carries the bar's full height while the
         /// item is the button as drawn — and the glow, the menu's width and the
-        /// tap catcher's circle are all sized from what comes back. Measured on
+        /// menu's width are both sized from what comes back. Measured on
         /// an iPad on 26.6: container 46×44, item 46×36.
         static func structuralSessionButton(in root: UIView) -> UIView? {
             guard let bar = findTabBar(in: root) else { return nil }
@@ -611,7 +673,7 @@ struct SessionButtonProbe: UIViewRepresentable {
 ///
 /// Draws nothing until the button has been found. Every caller must be able to
 /// live with that: the alternative is drawing in a guessed position, which on
-/// iPad put an invisible tap catcher on the Settings gear.
+/// iPad landed on the Settings gear.
 struct SessionButtonAnchored<Content: View>: View {
     let locator: SessionButtonLocator
     @ViewBuilder let content: (CGSize) -> Content

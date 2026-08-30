@@ -9,20 +9,28 @@
 //    • iOS 26+  — a real `TabView`. Everything that makes the iOS 26 bar look
 //      like the iOS 26 bar (the glass and how it samples the spectrogram
 //      scrolling under it, the indicator travelling between tabs, the way it
-//      hands its height to each screen's safe area) is the system's. The
-//      session button is `Tab(role: .search)`, which the system renders as its
-//      own detached circle beside the bar rather than as another item inside
-//      it — the arrangement the App Store uses, and the only way to get a
-//      detached control without giving up the real bar.
+//      hands its height to each screen's safe area) is the system's.
 //
 //    • iOS 18–25 — `LegacyTabBar` below, a hand-built floating bar. There is no
 //      Liquid Glass to adopt on those systems and the stock bar is an opaque
 //      slab, which over a live spectrogram is worse than a material.
 //
-//  The session button is not a destination. Selecting it is intercepted in
-//  ContentView's `tabSelection` binding and turned into either starting a
+//  The session button, and why it is a tab on one idiom and not the other.
+//
+//  On iPhone it is `Tab(role: .search)`, which the system renders as its own
+//  detached circle beside the bar rather than as another item inside it — the
+//  arrangement the App Store uses, and the only way to get a detached control
+//  without giving up the real bar. It is not a destination: selecting it is
+//  intercepted in `ContentView.tabSelection` and turned into either starting a
 //  session or opening `TransportMenu`, so the selection never moves off the
 //  section you were on.
+//
+//  **On iPad the same tab is drawn as the last item *inside* the centred pill**,
+//  where it is indistinguishable from a fourth destination. App Review tapped
+//  it on 2026-08-29 expecting a screen, got none, and refused the build under
+//  2.1(a). So on iPad the tab is not declared at all and the button is ours,
+//  drawn beside the pill against its measured frame — see
+//  `ContentView.poppedSessionButton` and `SessionButtonLocator`.
 //
 
 import SwiftUI
