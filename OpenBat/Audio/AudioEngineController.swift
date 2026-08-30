@@ -441,6 +441,23 @@ final class AudioEngineController {
                                     message: message)
     }
 
+    /// Whether the microphone has already been refused, without asking for it.
+    ///
+    /// Exposed so a caller can find that out *before* it does anything else —
+    /// see `ContentView.startDetecting`, which has to know whether a session is
+    /// worth opening. Only `.denied` counts: `.undetermined` means the prompt
+    /// has not been shown yet, and that is `start()`'s job, not this one's.
+    var microphonePermissionIsDenied: Bool {
+        AVAudioApplication.shared.recordPermission == .denied
+    }
+
+    /// Report a refused microphone without touching the engine, so the refusal
+    /// still reaches the screen when the caller declined to start at all.
+    func reportMicrophonePermissionDenied() {
+        status = "Microphone permission denied. Enable it in Settings."
+        recordStartFailure(permissionDenied: true, message: status)
+    }
+
     func start() async {
         guard !isRunning else { return }
 

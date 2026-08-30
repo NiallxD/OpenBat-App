@@ -242,6 +242,10 @@ struct ContentView: View {
     /// putting real work in `init()` used to mean a synchronous ~328 KB
     /// `JSONDecoder` pass could land on the main thread at any of those points,
     /// not just once at launch.
+    /// Decides whether the bar draws the session button or we do — see
+    /// `drawsOwnSessionButton`. Read here rather than deeper down because it has
+    /// to reach `systemTabs`, which declares the tab.
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var speciesGuide = SpeciesGuideStore()
     @State private var speciesPresence = SpeciesPresenceStore()
 
@@ -1148,21 +1152,26 @@ struct ContentView: View {
 
     /// Whether the session button is ours to draw rather than the bar's.
     ///
-    /// **Why iPad.** `Tab(role: .search)` is rendered as a detached circle
-    /// *beside* the bar on iPhone, which is the arrangement the design wants and
-    /// the reason the button was ever a tab. On iPad the same tab is drawn as
-    /// the last item *inside* the centred pill, indistinguishable from a
-    /// destination — which is what App Review tapped on 2026-08-29, expecting a
-    /// screen, and reported as a bug when nothing opened. A control that starts
-    /// listening should not look like a fourth place to go.
+    /// **Exactly when the system would otherwise draw it inside the pill, and
+    /// not one case more.** `Tab(role: .search)` is rendered as a detached
+    /// circle *beside* the bar in a compact width — every iPhone, and an iPad in
+    /// a small window — which is the arrangement the design wants and the whole
+    /// reason the button was ever a tab. Give an iPad room, though, and the bar
+    /// becomes a centred pill at the top with the same tab drawn as the last
+    /// item *inside* it, indistinguishable from a fourth destination. That is
+    /// what App Review tapped on 2026-08-29, expecting a screen, and reported as
+    /// a bug when nothing opened. A control that starts listening should not
+    /// look like a place to go.
     ///
-    /// The idiom, deliberately, and not the bar's measured position: a `Tab`
-    /// cannot be added and removed as the window resizes without the bar
-    /// re-laying itself out under the user, and the idiom is the one thing here
-    /// that cannot change while the app runs. Where the button is *drawn* is
-    /// measured — see `poppedSessionButton`.
+    /// **The size class, not the idiom.** It was the idiom for a few hours, on
+    /// the reasoning that a `Tab` cannot be added and removed as a window
+    /// resizes without the bar re-laying itself out. True, but the alternative
+    /// is worse and Niall caught it immediately: in a resized iPad window the
+    /// system had already moved the bar to the bottom and spread the pill across
+    /// it, leaving nowhere for our button to sit, so it clamped back on top of
+    /// the last tab. Where the system detaches the button itself, let it.
     private var drawsOwnSessionButton: Bool {
-        UIDevice.current.userInterfaceIdiom == .pad
+        UIDevice.current.userInterfaceIdiom == .pad && horizontalSizeClass == .regular
     }
 
     /// Label for the system bar's detached circle. The system draws the glass
@@ -2707,33 +2716,47 @@ struct ContentView: View {
             classStore.endSession()
             pulseDetector.activeSessionID = nil
         }
+        // **Asked before anything is opened, and this ordering is the point.**
+        // A refused microphone used to open a Session row, arm the recorder,
+        // start the timer and put a Live Activity on the lock screen for a run
+        // with no audio in it — the screen said "Recording" while the button
+        // still said "Start", and the empty rows piled up one per tap.
+        //
+        // The first fix moved all of that to *after* `audio.start()` returned,
+        // which cured that and caused a worse one: every one of those writes is
+        // observed by this screen, so they landed as a body invalidation on a
+        // running detector and the spectrogram blinked black at the start of
+        // every session (Niall, on device, 2026-08-30). Asking first costs
+        // nothing — the permission is already known — and leaves the working
+        // path in exactly the order it always had.
+        guard !audio.microphonePermissionIsDenied else {
+            audio.reportMicrophonePermissionDenied()
+            return
+        }
+        beginSessionBookkeeping()
         // Seed the snippet processor before capture opens. `reset` clears DSP
         // state but not these, and the routing atomic is independent of the
         // settings object, so both have to be pushed here or a fresh launch
         // would run the defaults regardless of what was persisted.
         snippetSettings.apply(to: audio.snippetExpansion)
         audio.setSnippetRouting(snippetSettings.routing)
-        // Everything that says "a session is running" waits for capture to
-        // actually be running. It used to happen first, on the way in, which
-        // meant a start that failed — a refused microphone, most of all — still
-        // opened a Session row, armed the recorder, started the session timer
-        // and put a Live Activity on the lock screen for a run with no audio in
-        // it. The screen then said "Recording" while the button still said
-        // "Start", and the empty rows piled up one per tap.
-        //
-        // `audio.start()` reports its own failure through `startFailure`, which
-        // `startFailureAlert` puts on screen, so there is nothing to say here.
         Task {
             await audio.start()
-            guard audio.isRunning else { return }
-            beginSessionBookkeeping()
+            // A start that fails for any *other* reason — the engine, the audio
+            // session, a route that vanished — leaves nothing running behind it.
+            // `audio.start()` has already reported the failure through
+            // `startFailure`, which `startFailureAlert` puts on screen.
+            if !audio.isRunning { stopDetecting() }
         }
     }
 
-    /// Opens the session that a now-running capture belongs to: the Session row,
-    /// the prior snapshot, the recorder's arming, the timer and the Live
-    /// Activity. Split out of `startDetecting` so it can be deferred until
-    /// capture is known to have started — see there.
+    /// Opens the session this run belongs to: the Session row, the prior
+    /// snapshot, the recorder's arming, the timer and the Live Activity.
+    ///
+    /// Runs before capture starts, deliberately — see `startDetecting` for the
+    /// blink that came of running it after. It also means the very first buffers
+    /// arrive with a session already attached, so nothing detected in the first
+    /// moments of a run is filed outside it.
     private func beginSessionBookkeeping() {
         feedSessionStart = Date()
         // Demo mode is the one run that never opens a session: no Session row,
