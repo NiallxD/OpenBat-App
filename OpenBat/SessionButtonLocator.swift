@@ -45,6 +45,17 @@
 //  one — nothing is found, so nothing is drawn — and Diagnostics carries a
 //  "Session Button" card that says so and can share the tree again.
 //
+//  **There are two bar shapes, not one, and the structural search has to know
+//  both.** iPad on 26 gets a `_UIFloatingTabBar` — a centred pill at the top,
+//  with the session button as a *pinned item* beside the collection holding the
+//  tabs. iPhone on 26 gets a plain `UITabBar`, which looks like the floating one
+//  and shares none of its class names: the session button is a `_UITabButton`
+//  inside a `_UITabBarAuxiliaryView`, beside the platter holding the tabs. Only
+//  the iPad shape was implemented, so on every real iPhone the search found
+//  nothing and the glow, the transport menu and the tour's tab spotlights were
+//  all silently absent. `-locator.structuralOnly` exists so that class of bug
+//  can be seen in a simulator at all; see `structuralOnly` below.
+//
 
 import SwiftUI
 import UIKit
@@ -55,7 +66,36 @@ import UIKit
 /// an invisible tap catcher in the wrong place eats a control the user needs.
 @Observable
 final class SessionButtonLocator {
-    private(set) var frameInWindow: CGRect?
+    /// Where the session button is, whoever put it there.
+    ///
+    /// A frame the app set itself always wins: on the pre-26 bar the button is
+    /// an ordinary SwiftUI view we draw, so its own geometry is exact and there
+    /// is nothing to search for. See `updateSelfDrawn`.
+    var frameInWindow: CGRect? { selfDrawnFrameInWindow ?? searchedFrameInWindow }
+
+    /// The frame the view-tree search found, on the systems where the bar is
+    /// the system's and draws the button for us.
+    private(set) var searchedFrameInWindow: CGRect?
+
+    /// The frame the pre-26 bar reported for the button it drew itself.
+    ///
+    /// **Without this, nothing that hangs off the button was drawn at all on
+    /// iOS 18–25** — not the recording glow, and not the transport menu, which
+    /// is the only way to arm recording, change listening mode or end a session.
+    /// The search cannot find that button: SwiftUI draws ordinary views into the
+    /// hosting view's layer rather than as `UIView`s, so there is no view in the
+    /// tree carrying our identifier or label, and there is no `UITabBar` either
+    /// — the pre-26 bar is hand-built. Every caller therefore drew nothing,
+    /// exactly as documented, and the button turned into a cross that opened
+    /// nothing. Caught 2026-08-30 on an iPhone 16 Pro Max simulator on 18.
+    private(set) var selfDrawnFrameInWindow: CGRect?
+
+    /// Reported by the pre-26 bar as it lays the button out. `nil` when that bar
+    /// is not on screen, which hands the question back to the search.
+    func updateSelfDrawn(_ frame: CGRect?) {
+        guard frame != selfDrawnFrameInWindow else { return }
+        selfDrawnFrameInWindow = frame
+    }
 
     /// Where the bar put each ordinary tab, in window coordinates. Empty until
     /// found, and missing entries are normal — same contract as `frameInWindow`:
@@ -73,6 +113,19 @@ final class SessionButtonLocator {
     /// is a shared constant rather than two string literals that can drift.
     static let accessibilityIdentifier = "openbat.session-button"
 
+    /// Makes the search behave the way it does on real hardware: no
+    /// accessibility identifiers, no accessibility labels, structural matches
+    /// only. Set with the `-locator.structuralOnly YES` launch argument.
+    ///
+    /// **This exists because the simulator lies.** UIKit only materialises
+    /// accessibility attributes once an assistive technology asks for them, and
+    /// a simulator has accessibility switched on for UI automation — so the
+    /// identifier set on the `Tab` label is always found there and never found
+    /// on a device. Every bug in the structural fallback is therefore invisible
+    /// in a simulator by construction, which is how one shipped. With this on,
+    /// a simulator exercises exactly the path hardware takes.
+    static let structuralOnly = UserDefaults.standard.bool(forKey: "locator.structuralOnly")
+
     /// The labels `ContentView.sessionTabLabel` gives the button across its
     /// three states, used when the identifier doesn't survive the trip into the
     /// bar's own view tree.
@@ -87,8 +140,8 @@ final class SessionButtonLocator {
     }
 
     func update(_ frame: CGRect?) {
-        guard frame != frameInWindow else { return }
-        frameInWindow = frame
+        guard frame != searchedFrameInWindow else { return }
+        searchedFrameInWindow = frame
     }
 
     /// The last view-tree dump taken while the button could not be found, or
@@ -131,6 +184,32 @@ final class SessionButtonLocator {
                 + (window.isKeyWindow ? " key" : "")
                 + "\n" + SessionButtonProbe.ProbeView.describe(window)
         }.joined(separator: "\n\n")
+    }
+
+    /// Which half of the window the bar put the session button in, or `nil`
+    /// while the button has not been found.
+    ///
+    /// **Where the bar is has to be measured, not assumed from the idiom.** The
+    /// things that hang off the button — the transport menu, the export banner,
+    /// the not-recording nudge — each have to grow away from the bar or they
+    /// open off the edge of the screen, and the code that placed them asked
+    /// `UIDevice.current.userInterfaceIdiom == .pad`. That is right for an iPad
+    /// filling the screen, where the bar is a centred pill at the top, and wrong
+    /// for the same iPad in Split View, Slide Over or a small window, where the
+    /// width is compact and the bar drops to the bottom like an iPhone's. The
+    /// idiom does not change when the window does; this does.
+    var buttonIsInTopHalf: Bool? {
+        guard let frameInWindow, let windowHeight, windowHeight > 0 else { return nil }
+        return frameInWindow.midY < windowHeight / 2
+    }
+
+    /// Height of the window the button was found in, kept only so
+    /// `buttonIsInTopHalf` has something to compare against.
+    private(set) var windowHeight: CGFloat?
+
+    func updateWindowHeight(_ height: CGFloat) {
+        guard height != windowHeight else { return }
+        windowHeight = height
     }
 
     /// The tour overlay's own frame, in SwiftUI's global space.
@@ -233,6 +312,17 @@ struct SessionButtonProbe: UIViewRepresentable {
                         // Only interesting if we gave up. A dump taken after a
                         // success would describe a hierarchy that worked.
                         if self.locator.frameInWindow == nil {
+                            // Debug-flag only: under `-locator.structuralOnly` the
+                            // whole point is to see this failure, which is
+                            // otherwise invisible (nothing is drawn).
+                            if SessionButtonLocator.structuralOnly, !Self.hasDumped {
+                                Self.hasDumped = true
+                                let dump = SessionButtonLocator.hierarchyDump()
+                                let url = FileManager.default.temporaryDirectory
+                                    .appending(path: "locator-dump.txt")
+                                try? dump.write(to: url, atomically: true, encoding: .utf8)
+                                NSLog("OPENBAT-LOCATOR-DUMP written to %@", url.path)
+                            }
                             self.locator.recordFailureDump(
                                 "Session button not found after 30 s of retries.\n"
                                 + SessionButtonLocator.searchCriteria + "\n\n"
@@ -244,11 +334,13 @@ struct SessionButtonProbe: UIViewRepresentable {
             retryTimer = timer
         }
 
+        nonisolated(unsafe) static var hasDumped = false
         private var retryTimer: Timer?
         private var attemptsRemaining = 0
 
         func locate() {
             guard let window else { return }
+            locator.updateWindowHeight(window.bounds.height)
             let found = Self.findSessionButton(in: window)
             locator.update(found.map { window.convert($0.bounds, from: $0) })
 
@@ -323,17 +415,19 @@ struct SessionButtonProbe: UIViewRepresentable {
             var byLabel: [UIView] = []
             var stack = [root]
             while let view = stack.popLast() {
-                if view.accessibilityIdentifier == identifier {
-                    byIdentifier.append(view)
-                } else if view.accessibilityLabel == section.rawValue,
-                          !(view is UILabel), !(view is UIImageView) {
-                    byLabel.append(view)
+                if !SessionButtonLocator.structuralOnly {
+                    if view.accessibilityIdentifier == identifier {
+                        byIdentifier.append(view)
+                    } else if view.accessibilityLabel == section.rawValue,
+                              !(view is UILabel), !(view is UIImageView) {
+                        byLabel.append(view)
+                    }
                 }
                 stack.append(contentsOf: view.subviews)
             }
             let matches = byIdentifier.isEmpty ? byLabel : byIdentifier
             if let match = matches
-                .filter({ $0.bounds.width > 1 && $0.bounds.height > 1 })
+                .filter(isDrawn)
                 .min(by: { $0.bounds.width * $0.bounds.height < $1.bounds.width * $1.bounds.height }) {
                 return match
             }
@@ -353,15 +447,40 @@ struct SessionButtonProbe: UIViewRepresentable {
         /// item, outside the collection. See `structuralSessionButton`.
         static func structuralTab(_ section: AppSection, in root: UIView) -> UIView? {
             guard let index = AppSection.allCases.firstIndex(of: section) else { return nil }
-            let cells = descendants(of: root, named: "FloatingTabBarItemCell")
-                .filter { $0.bounds.width > 1 && $0.bounds.height > 1 }
-                .sorted { $0.convert($0.bounds, to: nil).minX < $1.convert($1.bounds, to: nil).minX }
+            var cells = descendants(of: root, named: "FloatingTabBarItemCell").filter(isDrawn)
+            if cells.isEmpty {
+                // The plain-`UITabBar` shape — see `structuralSessionButton`.
+                // The tabs are `_UITabButton`s; the session button is one too,
+                // so the auxiliary view's own is excluded. The bar also keeps a
+                // second, identically framed copy of the whole row behind the
+                // selection lens, which is what the de-dup by frame is for:
+                // without it there are six "tabs" and the count check below
+                // rejects the lot.
+                let auxiliary = descendants(of: root, named: "TabBarAuxiliaryView")
+                let buttons = descendants(of: root, named: "TabButton").filter { button in
+                    isDrawn(button) && !auxiliary.contains { button.isDescendant(of: $0) }
+                }
+                var seen: [CGRect] = []
+                for button in buttons {
+                    let frame = button.convert(button.bounds, to: nil)
+                    if seen.contains(frame) { continue }
+                    seen.append(frame)
+                    cells.append(button)
+                }
+            }
+            cells.sort { $0.convert($0.bounds, to: nil).minX < $1.convert($1.bounds, to: nil).minX }
             // A count mismatch means the bar is laid out in a way this doesn't
             // understand — paginated, collapsed, mid-transition. Guessing which
             // cell is which at that point is how the tour ends up spotlighting
             // the wrong tab, so it declines instead.
             guard cells.count == AppSection.allCases.count else { return nil }
             return cells[index]
+        }
+
+        /// A view big enough to be the thing itself rather than a zero-sized
+        /// label or a collapsed container.
+        static func isDrawn(_ view: UIView) -> Bool {
+            view.bounds.width > 1 && view.bounds.height > 1
         }
 
         /// The window's view tree as text: class, frame, and the two
@@ -416,18 +535,20 @@ struct SessionButtonProbe: UIViewRepresentable {
             var matches: [UIView] = []
             var stack = [root]
             while let view = stack.popLast() {
-                if view.accessibilityIdentifier == SessionButtonLocator.accessibilityIdentifier {
-                    matches.append(view)
-                } else if let label = view.accessibilityLabel,
-                          SessionButtonLocator.accessibilityLabels.contains(label) {
-                    matches.append(view)
+                if !SessionButtonLocator.structuralOnly {
+                    if view.accessibilityIdentifier == SessionButtonLocator.accessibilityIdentifier {
+                        matches.append(view)
+                    } else if let label = view.accessibilityLabel,
+                              SessionButtonLocator.accessibilityLabels.contains(label) {
+                        matches.append(view)
+                    }
                 }
                 stack.append(contentsOf: view.subviews)
             }
             // A zero-size match is a label with no drawing of its own; it tells
             // us nothing about where the button is.
             if let match = matches
-                .filter({ $0.bounds.width > 1 && $0.bounds.height > 1 })
+                .filter(isDrawn)
                 .min(by: { $0.bounds.width * $0.bounds.height < $1.bounds.width * $1.bounds.height }) {
                 return match
             }
@@ -449,11 +570,34 @@ struct SessionButtonProbe: UIViewRepresentable {
         /// an iPad on 26.6: container 46×44, item 46×36.
         static func structuralSessionButton(in root: UIView) -> UIView? {
             guard let bar = findTabBar(in: root) else { return nil }
-            guard let pinned = descendants(of: bar, named: "PinnedItems")
-                .first(where: { $0.bounds.width > 1 && $0.bounds.height > 1 }) else { return nil }
-            let item = descendants(of: pinned, named: "TabBarItemView")
-                .first { $0.bounds.width > 1 && $0.bounds.height > 1 }
-            return item ?? pinned
+
+            // The floating bar — an iPad on 26, and anywhere else the system
+            // chooses it. Measured on an iPad on 26.6: container 46×44, item
+            // 46×36.
+            if let pinned = descendants(of: bar, named: "PinnedItems").first(where: isDrawn) {
+                return descendants(of: pinned, named: "TabBarItemView")
+                    .first(where: isDrawn) ?? pinned
+            }
+
+            // **A plain `UITabBar`, which is what iPhone has on 26.** The bar
+            // looks like the floating one and is not one: it is a real
+            // `UITabBar`, and none of the floating bar's class names appear
+            // anywhere inside it. So this search found nothing on every iPhone —
+            // and, because a simulator always answers the accessibility match
+            // that runs first, nothing about that was visible until the
+            // `-locator.structuralOnly` flag was added to force the device path.
+            // The symptom on hardware was the session button turning into a
+            // cross that opened no menu, with no glow behind it while listening.
+            //
+            // The shape is the same idea as the floating bar's: the detached
+            // circle is the one item that is not one of the tabs, held in an
+            // *auxiliary* view beside the platter that holds them. Measured on
+            // an iPhone 17 Pro, iOS 26.5: auxiliary 62×62, the button inside it
+            // the same.
+            if let auxiliary = descendants(of: bar, named: "TabBarAuxiliaryView").first(where: isDrawn) {
+                return descendants(of: auxiliary, named: "TabButton").first(where: isDrawn) ?? auxiliary
+            }
+            return nil
         }
     }
 }

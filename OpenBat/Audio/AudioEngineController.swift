@@ -404,6 +404,43 @@ final class AudioEngineController {
 
     // MARK: Lifecycle
 
+    /// A start attempt that failed, as a discrete value the UI can act on.
+    ///
+    /// **Why this exists rather than the screen watching `status`.** The status
+    /// line is a string, and the string for a denied microphone is the same
+    /// string every time. ContentView surfaced the denial by watching `status`
+    /// for a *change*, so the very first refused tap put an alert up and every
+    /// tap after it did nothing at all: the session button became inert with no
+    /// explanation, which is exactly what App Review reported on 2026-08-29
+    /// (iPad, 0.9.3 build 111) as "unable to review the Play button tab".
+    /// `attempt` is what makes the second refusal different from the first.
+    ///
+    /// It also covers the case the status watch never covered: a start that
+    /// fails for any reason *other* than permission produced no alert at all,
+    /// only a line in Diagnostics that nobody in that position would think to
+    /// look at.
+    struct StartFailure: Equatable {
+        /// Which attempt this was. Distinguishes otherwise-identical failures.
+        let attempt: Int
+        /// Permission is the one failure with an action attached to it — the
+        /// Settings app — so it is the one the caller has to tell apart.
+        let isPermissionDenied: Bool
+        let message: String
+    }
+
+    /// The last failed start, or `nil` if the last attempt succeeded. Cleared on
+    /// success so a later failure is always a change.
+    private(set) var startFailure: StartFailure?
+
+    private var startAttempts = 0
+
+    private func recordStartFailure(permissionDenied: Bool, message: String) {
+        startAttempts += 1
+        startFailure = StartFailure(attempt: startAttempts,
+                                    isPermissionDenied: permissionDenied,
+                                    message: message)
+    }
+
     func start() async {
         guard !isRunning else { return }
 
@@ -414,6 +451,7 @@ final class AudioEngineController {
 
         guard await requestPermission() else {
             status = "Microphone permission denied. Enable it in Settings."
+            recordStartFailure(permissionDenied: true, message: status)
             return
         }
 
@@ -423,11 +461,13 @@ final class AudioEngineController {
             try startEngine()
             startStatsTimer()
             isRunning = true
+            startFailure = nil
             status = diagnostics.isNativeRate
                 ? "Capturing at \(Int(diagnostics.actualSampleRate)) Hz"
                 : "Running, but rate clamped to \(Int(diagnostics.actualSampleRate)) Hz"
         } catch {
             status = "Failed to start: \(error.localizedDescription)"
+            recordStartFailure(permissionDenied: false, message: error.localizedDescription)
             stop()
         }
     }
@@ -552,9 +592,11 @@ final class AudioEngineController {
 
             startStatsTimer()
             isRunning = true
+            startFailure = nil
             status = "Demo: \(demoFileName ?? url.lastPathComponent) at \(Int(rate)) Hz"
         } catch {
             status = "Demo failed to start: \(error.localizedDescription)"
+            recordStartFailure(permissionDenied: false, message: error.localizedDescription)
             stop()
         }
     }

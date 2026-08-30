@@ -2993,6 +2993,66 @@ leads to check, not as confirmed regressions.
   bar's own handling, so if the transport menu ever starts flicking open and
   shut on a single tap, that is two toggles racing and deleting the catcher is
   the fix.
+- **The App Review rejection of 2026-08-29, and what it actually was.** Apple
+  refused 0.9.3 (111) under 2.1(a) with one line — "unable to review the 'Play
+  button' tab", on an iPad Air 11-inch on iPadOS 26.6.1. It was not the tab bar,
+  the tap catcher or anything iPad-specific. **With microphone access refused,
+  the session button gave up after one attempt.** The alert was raised by
+  watching `audio.status` for a *change* containing "permission denied", and a
+  refused start always writes the same string — so the first tap explained
+  itself and every tap after it did nothing whatsoever. Reproduced end to end on
+  a simulator: fresh install → "Don't Allow" at onboarding's microphone prompt →
+  tap, alert, cancel, tap, nothing, forever.
+
+  Two things made it read as worse than a missing alert. Every dead tap still
+  opened a Session row, armed the recorder ("● Recording" in the corner),
+  started the session timer and fired a Live Activity, because `startDetecting`
+  did all its bookkeeping before `audio.start()` found out capture could not
+  run — so the screen claimed a session was live while the button still said
+  "start". And a start that failed for any reason *other* than permission
+  ("Failed to start: …") raised no alert at all, ever; it appeared only in
+  Diagnostics.
+
+  Fixed 2026-08-30: `AudioEngineController.StartFailure` carries an attempt
+  number, so the second refusal differs from the first and the alert is a value
+  to react to rather than a string to diff; session bookkeeping moved behind
+  `guard audio.isRunning`. **The general rule worth keeping: never surface a
+  repeatable failure by watching a status string change.** The second identical
+  failure is silence.
+
+- **The structural session-button search only ever knew the iPad's bar, and a
+  simulator could not show that — fixed 2026-08-30.** There are two bar shapes
+  on 26, not one. iPad gets a `_UIFloatingTabBar` with the session button as a
+  *pinned item*; iPhone gets a plain `UITabBar` that looks identical and shares
+  none of its class names, with the button as a `_UITabButton` inside a
+  `_UITabBarAuxiliaryView`. Only the iPad shape was implemented, so on every
+  real iPhone the search found nothing and the glow, the transport menu and the
+  tour's tab spotlights were all silently absent.
+
+  It survived because the accessibility match runs first and a simulator always
+  answers it (see §7). `-locator.structuralOnly YES` now forces the device path
+  in a simulator, which is the only way this class of bug is visible before
+  hardware. **Turn it on whenever anything near that search changes.**
+
+  The same run found the pre-26 bar had never been covered at all: it is
+  hand-built SwiftUI, so there is no `UIView` carrying our identifier or label
+  and no `UITabBar` either, and the search could never have found it on any
+  system. On iOS 18–25 the transport menu therefore never opened — no way to arm
+  recording, change listening mode or end a session from the button. That bar
+  now reports its own geometry (`SessionButtonLocator.updateSelfDrawn`), which
+  is exact rather than searched.
+
+- **Where the bar is, is measured now, not inferred from the idiom.** The
+  transport menu, the export banner and the not-recording nudge each have to
+  grow away from the bar, and they asked `userInterfaceIdiom == .pad`. That is
+  right for a full-screen iPad and wrong for the same iPad in Split View, Slide
+  Over or a small window, where the width is compact and the bar drops to the
+  bottom — the menu would have opened off the bottom of the screen. It now comes
+  from the button's measured frame (`buttonIsInTopHalf`). Verified indirectly
+  only: the same path is proven with the bar at the top (iPad) and at the bottom
+  (iPhone), but Split View itself was not reachable through simulator
+  automation. **Worth one check on a real iPad in Split View.**
+
 - **IUCN Red List range polygons — ruled out on licensing, 2026-08-16.** Worth
   recording so nobody researches it twice. Their expert-drawn mammal maps carry
   exactly the attributes this app wants — `presence`, `origin` (including

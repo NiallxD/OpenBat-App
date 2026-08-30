@@ -66,7 +66,11 @@ struct ContentView: View {
     // how the reference is held, so this still updates the view.
     private let consent = ConsentStore.shared
     @Environment(\.scenePhase) private var scenePhase
-    @State private var showMicDeniedAlert = false
+    /// The start failure currently being shown, if any. Holds the value rather
+    /// than a bool so the alert can word itself for the failure it is about —
+    /// and so a *second* failure while the first is up replaces it rather than
+    /// being dropped. See `startFailureAlert`.
+    @State private var shownStartFailure: AudioEngineController.StartFailure?
     // Easter eggs on the footer version number, both on the same tap counter:
     // 10 taps within the rolling window sends a swarm of bats across the screen
     // (see BatSwarmOverlay), carrying on to 15 toggles debug mode, which
@@ -322,7 +326,7 @@ struct ContentView: View {
                                  pulseDetector: pulseDetector, recorder: recorder,
                                  location: location, consent: consent, classStore: classStore,
                                  audio: audio, micCalSettings: micCalSettings,
-                                 haptics: haptics)
+                                 haptics: haptics, snippetExpansion: snippetSettings)
                 }
                 // Someone who opted in, then had the terms change under them,
                 // has silently stopped contributing. Settings carries the same
@@ -666,7 +670,7 @@ struct ContentView: View {
         // extension call (rather than chaining .onChange/.alert inline) because
         // this body's modifier chain is already long enough that the type
         // checker times out on any more inline closures added directly to it.
-        .micPermissionAlert(status: audio.status, isPresented: $showMicDeniedAlert)
+        .startFailureAlert(audio.startFailure, shown: $shownStartFailure)
         // audio.activeSampleRate / activeInputName (not diagnostics.*) in the
         // onChange reads below and in `nyquist`: the diagnostics struct churns at
         // the 15 Hz stats flush, and reading ANY of its fields here invalidates
@@ -1302,6 +1306,15 @@ struct ContentView: View {
         SessionButton(isSessionActive: audio.isActive,
                       isMenuOpen: showTransportMenu,
                       action: handleSessionButtonTap)
+            // The pre-26 bar draws this button itself, so it can simply say
+            // where it is rather than leaving the locator to hunt for a view
+            // that does not exist — see `SessionButtonLocator.updateSelfDrawn`.
+            // Without this the transport menu and the recording glow were never
+            // drawn on iOS 18–25 at all.
+            .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: {
+                sessionButtonLocator.updateSelfDrawn($0)
+            }
+            .onDisappear { sessionButtonLocator.updateSelfDrawn(nil) }
     }
 
     // MARK: Transport menu
@@ -1327,7 +1340,19 @@ struct ContentView: View {
     /// the window on iPhone and at the top on iPad, so the menu has to hang off
     /// the correct end of the screen or it opens off the edge.
     private var transportMenuIsBelowBar: Bool {
+        // Measured, whenever the button has been found: the system puts the bar
+        // at the top on a full-screen iPad and at the bottom everywhere else,
+        // and "everywhere else" includes an iPad in Split View, Slide Over or a
+        // small window, where the width is compact and the bar drops to the
+        // bottom. Asking the idiom got that case wrong and opened the menu off
+        // the bottom of the screen. See `SessionButtonLocator.buttonIsInTopHalf`.
+        if let inTopHalf = sessionButtonLocator.buttonIsInTopHalf {
+            return inTopHalf
+        }
         if #available(iOS 26.0, *) {
+            // Nothing measured yet — the full-screen iPad layout is the better
+            // guess, and it is only in force for the frame or two before the
+            // first search lands.
             return UIDevice.current.userInterfaceIdiom == .pad
         }
         // The legacy bar is hand-placed at the bottom on every idiom.
@@ -2573,13 +2598,41 @@ struct ContentView: View {
         pulseDetector.finalizePass()
         pulseDetector.resetStats()
         recorder.setInputName(audio.diagnostics.inputName)
-        feedSessionStart = Date()
         // Close any session that was left open by an unexpected audio stop (interruption,
         // route error) — the user is deliberately starting a new run.
         if classStore.activeSessionID != nil {
             classStore.endSession()
             pulseDetector.activeSessionID = nil
         }
+        // Seed the snippet processor before capture opens. `reset` clears DSP
+        // state but not these, and the routing atomic is independent of the
+        // settings object, so both have to be pushed here or a fresh launch
+        // would run the defaults regardless of what was persisted.
+        snippetSettings.apply(to: audio.snippetExpansion)
+        audio.setSnippetRouting(snippetSettings.routing)
+        // Everything that says "a session is running" waits for capture to
+        // actually be running. It used to happen first, on the way in, which
+        // meant a start that failed — a refused microphone, most of all — still
+        // opened a Session row, armed the recorder, started the session timer
+        // and put a Live Activity on the lock screen for a run with no audio in
+        // it. The screen then said "Recording" while the button still said
+        // "Start", and the empty rows piled up one per tap.
+        //
+        // `audio.start()` reports its own failure through `startFailure`, which
+        // `startFailureAlert` puts on screen, so there is nothing to say here.
+        Task {
+            await audio.start()
+            guard audio.isRunning else { return }
+            beginSessionBookkeeping()
+        }
+    }
+
+    /// Opens the session that a now-running capture belongs to: the Session row,
+    /// the prior snapshot, the recorder's arming, the timer and the Live
+    /// Activity. Split out of `startDetecting` so it can be deferred until
+    /// capture is known to have started — see there.
+    private func beginSessionBookkeeping() {
+        feedSessionStart = Date()
         // Demo mode is the one run that never opens a session: no Session row,
         // nothing in Sessions afterwards. Combined with the recorder block set
         // in `startDemo`, a demo leaves no trace in the user's data.
@@ -2612,13 +2665,6 @@ struct ContentView: View {
             isDemo: audio.isDemoMode,
             startDate: feedSessionStart ?? Date()
         )
-        // Seed the snippet processor before capture opens. `reset` clears DSP
-        // state but not these, and the routing atomic is independent of the
-        // settings object, so both have to be pushed here or a fresh launch
-        // would run the defaults regardless of what was persisted.
-        snippetSettings.apply(to: audio.snippetExpansion)
-        audio.setSnippetRouting(snippetSettings.routing)
-        Task { await audio.start() }
     }
 
     /// Fires once per run, 60 s into a listening session in which recording was
@@ -2895,21 +2941,50 @@ private struct CalibrationOfferSheet: View {
 }
 
 private extension View {
-    /// See the call site in `ContentView.body` for why this is a single extension
-    /// call rather than inline `.onChange`/`.alert` modifiers.
-    func micPermissionAlert(status: String, isPresented: Binding<Bool>) -> some View {
-        onChange(of: status) { _, newValue in
-            if newValue.contains("permission denied") { isPresented.wrappedValue = true }
+    /// Puts an explanation on screen every time a session refuses to start.
+    ///
+    /// See the call site in `ContentView.body` for why this is a single
+    /// extension call rather than inline `.onChange`/`.alert` modifiers.
+    ///
+    /// **It watches a failure value, not the status string, and that is the
+    /// whole point.** It used to watch `audio.status` for a *change* containing
+    /// "permission denied". With the microphone refused, the first tap on the
+    /// session button changed the status and raised the alert — and every tap
+    /// after it wrote the same string, so nothing changed, so nothing appeared.
+    /// The button was then silently inert for the rest of the run, which is what
+    /// App Review hit on an iPad on 2026-08-29. `StartFailure.attempt` differs
+    /// per attempt, so each refusal is a change.
+    ///
+    /// It also covers non-permission failures, which the status watch never did:
+    /// "Failed to start: …" raised no alert at all and lived only in
+    /// Diagnostics.
+    func startFailureAlert(_ failure: AudioEngineController.StartFailure?,
+                           shown: Binding<AudioEngineController.StartFailure?>) -> some View {
+        onChange(of: failure) { _, newValue in
+            guard let newValue else { return }
+            shown.wrappedValue = newValue
         }
-        .alert("Microphone Access Needed", isPresented: isPresented) {
-            Button("Open Settings") {
-                if let url = URL(string: UIApplication.openSettingsURLString) {
-                    UIApplication.shared.open(url)
+        .alert(shown.wrappedValue?.isPermissionDenied == false
+                   ? "Couldn't Start Listening"
+                   : "Microphone Access Needed",
+               isPresented: Binding(get: { shown.wrappedValue != nil },
+                                    set: { if !$0 { shown.wrappedValue = nil } })) {
+            if shown.wrappedValue?.isPermissionDenied != false {
+                Button("Open Settings") {
+                    if let url = URL(string: UIApplication.openSettingsURLString) {
+                        UIApplication.shared.open(url)
+                    }
                 }
+                Button("Cancel", role: .cancel) { }
+            } else {
+                Button("OK", role: .cancel) { }
             }
-            Button("Cancel", role: .cancel) { }
         } message: {
-            Text("OpenBat can't detect or record without microphone access. Enable it for OpenBat in the Settings app.")
+            if let shownFailure = shown.wrappedValue, !shownFailure.isPermissionDenied {
+                Text(shownFailure.message)
+            } else {
+                Text("OpenBat can't detect or record without microphone access. Enable it for OpenBat in the Settings app.")
+            }
         }
     }
 

@@ -35,6 +35,9 @@
 ## v0.9.5 (Build 130)
 
 ### Fixed
+- **The session button always answers now** — With microphone access refused, the button explained itself once and then went quiet: every tap after the first did nothing at all, with no way to tell whether the app had heard you. It now says what is wrong every time you ask, and says it for any other reason a session can't start too.
+- **No more empty sessions from a session that never started** — A refused start still opened a session, armed recording and started the timer, so the screen said it was recording while the button said it hadn't started. Nothing opens until listening is actually running.
+- **The session controls open on iPhone again** — On iOS 18 the second tap turned the button into a cross and opened nothing, leaving no way to arm recording, change listening mode or end a session from it.
 - **Calls now play in time with the playhead** — In a recording, the sound ran about a tenth of a second behind the picture, so every call was heard just after it had passed under the playhead. The playhead now follows what is actually coming out of the speaker.
 - **The gap in the sound before each call is gone** — With silence hidden, the recording's background hiss dropped away completely for a moment between calls, which came out as a lurch just before each one. The background now carries straight through the joins.
 - **Scrubbing lands where you put it** — Moving the playhead, or changing the playback speed, used to play a last moment of wherever you had just come from before the new position started.
