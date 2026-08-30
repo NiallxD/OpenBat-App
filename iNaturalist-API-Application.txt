@@ -1,0 +1,190 @@
+OPENBAT - iNATURALIST API ACCESS APPLICATION
+Draft, 27 August 2026
+
+Written as labelled blocks matching the likely form fields. Trim to fit.
+
+
+-------------------------------------------------------------------------------
+APPLICATION NAME
+-------------------------------------------------------------------------------
+
+OpenBat
+
+
+-------------------------------------------------------------------------------
+URL
+-------------------------------------------------------------------------------
+
+https://openbat.org
+(or the GitHub repository, whichever you would rather they land on)
+
+
+-------------------------------------------------------------------------------
+REDIRECT URI
+-------------------------------------------------------------------------------
+
+openbat://oauth-callback
+(custom scheme; native iOS app, OAuth 2 with PKCE)
+
+
+-------------------------------------------------------------------------------
+WHAT THE APPLICATION IS
+-------------------------------------------------------------------------------
+
+OpenBat is a free, open-source iOS app that turns an iPhone and a plug-in
+ultrasonic microphone into a bat detector. It shows a live spectrogram,
+identifies calls on-device using published models (NABat ML and BatDetect2 -
+no audio leaves the phone to be classified), and logs each night as a session
+with per-recording timestamps and coordinates.
+
+
+-------------------------------------------------------------------------------
+WHY WE WANT TO WRITE TO iNATURALIST
+-------------------------------------------------------------------------------
+
+Acoustic bat records are badly under-represented on iNaturalist, and the
+workflow is a large part of why. The iNaturalist iOS app can record a sound but
+cannot import one, so a person who has just recorded a bat call on their phone
+cannot get it onto iNaturalist from that phone - they have to move files to a
+computer and use the web uploader later that week, if at all.
+
+OpenBat already ships that detour: the app prepares the spectrogram, a
+time-expanded audible copy of the call and the original recording, and walks the
+user through pasting the details into the web uploader. It works, and almost
+nobody will do it. API access would let the observation be made at the moment
+the person is standing in the field looking at the call they just recorded,
+which is the only moment they reliably will.
+
+
+-------------------------------------------------------------------------------
+EXACTLY WHAT WE WOULD CALL
+-------------------------------------------------------------------------------
+
+  POST /v1/observations
+        Create one observation on the authenticated user's own account, one per
+        recording, only ever in response to an explicit tap on a confirmation
+        screen.
+
+  POST /v1/observation_photos, /v1/observation_sounds
+        Attach the spectrogram, a 10x time-expanded audible WAV, and the
+        original ultrasonic recording.
+
+  GET  /v1/observations
+        Check for an existing observation at the same time and place before
+        creating one, so a repeat tap cannot duplicate a record.
+
+  GET  /v1/taxa
+        Resolve a scientific name to a taxon ID, cached on device.
+
+Nothing else. No background or scheduled posting, no bulk upload of a night's
+recordings in one action, no writes to anyone else's records, no crawling or
+bulk export of observation data.
+
+
+-------------------------------------------------------------------------------
+EXPECTED VOLUME
+-------------------------------------------------------------------------------
+
+Low. A person surveying will typically log a handful of observations a night,
+and only on nights they are out. We would expect well under 50 requests per day
+per active user, concentrated into a few minutes. We will set a descriptive
+User-Agent, cache taxon lookups, and stay inside the published rate guidance.
+
+
+-------------------------------------------------------------------------------
+HOW WE PROTECT IDENTIFICATION QUALITY
+-------------------------------------------------------------------------------
+
+This is the part we have thought hardest about, because a tool that posts
+machine identifications at scale is a burden on identifiers rather than a
+contribution.
+
+  Nothing is ever posted automatically.
+        Every observation requires a tap on a screen that shows the proposed
+        identification, the model's confidence, and the runner-up species.
+
+  We deliberately under-claim.
+        The app does not simply post its own answer:
+          - Where the winning species belongs to an acoustically inseparable
+            complex and a complex-mate scored close behind, we post at GROUP
+            level, not species.
+          - Below a confidence threshold, we post as Chiroptera and say why.
+          - Where the classifier declined to identify the call, we post as
+            Chiroptera.
+        The user can always narrow it themselves, but the app will not do it
+        for them.
+
+  We publish the evidence, not just the verdict.
+        Each observation's description carries the classifier and model used,
+        the number of calls analysed, median peak frequency and call duration,
+        and - importantly - the model's RAW confidence before location
+        weighting. OpenBat weights identifications by which species are
+        plausible where the user is standing, which makes the headline
+        confidence non-comparable between observers; the raw figure is the one
+        an identifier can actually judge.
+
+  Observation fields follow existing convention.
+        We use the same fields already in use by bat2inat (Tom August's R
+        package for uploading Wildlife Acoustics recordings), so OpenBat records
+        sit alongside the acoustic records already on iNaturalist and can be
+        found by the same searches.
+
+  The audio is audible.
+        Bat calls are ultrasonic and a raw 384 kHz file will not play in a
+        browser, which makes the sound attachment on many existing acoustic
+        observations effectively unusable. We attach a time-expanded copy that
+        plays anywhere, alongside the original.
+
+
+-------------------------------------------------------------------------------
+LOCATION PRIVACY
+-------------------------------------------------------------------------------
+
+Bat roost locations are sensitive, and a precise acoustic record near a roost
+can disclose one. OpenBat defaults these observations to OBSCURED geoprivacy and
+tells the user why on the confirmation screen; posting at full precision is a
+deliberate choice they have to make.
+
+
+-------------------------------------------------------------------------------
+AUTHENTICATION
+-------------------------------------------------------------------------------
+
+OAuth 2 with PKCE via ASWebAuthenticationSession, so the user signs in on
+iNaturalist's own page and OpenBat never sees a password. Tokens are stored in
+the iOS Keychain and can be revoked from the user's iNaturalist account settings
+at any time.
+
+
+-------------------------------------------------------------------------------
+OPEN SOURCE
+-------------------------------------------------------------------------------
+
+OpenBat is open source, so this integration is auditable. We will credit
+iNaturalist in the app and link the community guidelines from the confirmation
+screen.
+
+
+-------------------------------------------------------------------------------
+CONTACT
+-------------------------------------------------------------------------------
+
+Niall Bell - niallbell@hotmail.co.uk
+
+
+-------------------------------------------------------------------------------
+NOTES ON USING THIS DRAFT (not for submission)
+-------------------------------------------------------------------------------
+
+1. The section that will do the most work is IDENTIFICATION QUALITY. The
+   recurring objection to automated-ID tools is exactly that, so if the form is
+   short, lead with the under-claiming rules - they are unusual enough to be
+   worth the space.
+
+2. Everything above is already true of the shipped hand-off except the API calls
+   themselves. None of it is a promise made on spec, and that is worth saying
+   explicitly if there is a free-text box for it.
+
+3. Check the endpoint paths against the current API docs before submitting
+   (api.inaturalist.org/v2/docs). The shapes are right; the exact photo/sound
+   attachment routes are worth confirming rather than quoting from memory.

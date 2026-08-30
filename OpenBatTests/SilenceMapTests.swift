@@ -67,14 +67,12 @@ struct SilenceMapTests {
         }
     }
 
-    /// Used by seek-forward-past-a-gap logic, so it must fire only when
-    /// actually inside a hidden gap, never inside an active segment.
-    @Test func nextActiveRealStartOnlyFiresInGaps() {
+    /// What playback actually walks — the pacing thread reads these ranges
+    /// and nothing between them (see PlaybackDriver.start's `regions`).
+    @Test func realRegionsAreTheSegmentsPlaybackReads() {
         let m = twoSegmentMap()
-        #expect(m.nextActiveRealStart(after: 0) == 1000)      // before first segment
-        #expect(m.nextActiveRealStart(after: 1500) == nil)    // inside an active segment
-        #expect(m.nextActiveRealStart(after: 3000) == 5000)   // inside the gap
-        #expect(m.nextActiveRealStart(after: 6000) == nil)    // past the last segment
+        #expect(m.realRegions == [1000..<2000, 5000..<6000])
+        #expect(m.keptFraction == 2000.0 / 7000.0)
     }
 
     /// A virtual span crossing a segment boundary must split into the
@@ -103,7 +101,7 @@ struct SilenceMapTests {
         }
         let map = SilenceMap.compute(grid: grid, nCols: nCols, binCount: bins,
                                      totalSamples: 100_000, sampleRate: 384_000,
-                                     sensitivity: 0.5, minFreqHz: 0, padSeconds: 0)
+                                     thresholdAboveFloorDB: 12, minFreqHz: 0, padSeconds: 0)
         #expect(map.segments.count == 1)
         // samplesPerCol = 1000; one column of pad each side -> ~[39k, 61k).
         #expect(map.segments[0].realStart == 39_000)
@@ -120,31 +118,33 @@ struct SilenceMapTests {
         let grid = [Float](repeating: -120, count: bins * nCols)   // all quiet
         let map = SilenceMap.compute(grid: grid, nCols: nCols, binCount: bins,
                                      totalSamples: 50_000, sampleRate: 384_000,
-                                     sensitivity: 0.5, minFreqHz: 0, padSeconds: 0)
+                                     thresholdAboveFloorDB: 12, minFreqHz: 0, padSeconds: 0)
         #expect(map.segments.count == 1)
         #expect(map.segments[0].realStart == 0)
         #expect(map.segments[0].realEnd == 50_000)
         #expect(map.virtualTotal == 50_000)
     }
 
-    /// The regression guard for "the slider did nothing": a relative
-    /// threshold must make higher sensitivity hide strictly more.
-    @Test func higherSensitivityHidesMore() {
+    /// The regression guard for "the slider did nothing": raising the
+    /// threshold must hide strictly more.
+    @Test func higherThresholdHidesMore() {
         let bins = STFTGrid.binCount
         let nCols = 100
         var grid = [Float](repeating: 0, count: bins * nCols)
         // Three tiers: deep silence, mid-level, loud.
         for bin in 0..<bins {
             for col in 0..<40 { grid[bin * nCols + col] = -100 }
-            for col in 40..<70 { grid[bin * nCols + col] = -50 }
+            for col in 40..<70 { grid[bin * nCols + col] = -70 }
             for col in 70..<100 { grid[bin * nCols + col] = 0 }
         }
-        func virtualTotal(_ s: Double) -> Int {
+        func virtualTotal(_ dB: Double) -> Int {
             SilenceMap.compute(grid: grid, nCols: nCols, binCount: bins,
                                totalSamples: 100_000, sampleRate: 384_000,
-                               sensitivity: s, minFreqHz: 0, padSeconds: 0).virtualTotal
+                               thresholdAboveFloorDB: dB, minFreqHz: 0, padSeconds: 0).virtualTotal
         }
-        #expect(virtualTotal(0.8) < virtualTotal(0.2))
+        // 12 dB over the floor keeps the mid tier as well as the loud one;
+        // 40 dB keeps only the loud one.
+        #expect(virtualTotal(40) < virtualTotal(12))
     }
 
     /// Two loud runs close enough together must merge into one segment via
@@ -161,7 +161,76 @@ struct SilenceMapTests {
         // samplesPerCol = 1000, padSeconds 0.01 @384k = 3840 samples ~ 4 cols.
         let map = SilenceMap.compute(grid: grid, nCols: nCols, binCount: bins,
                                      totalSamples: 100_000, sampleRate: 384_000,
-                                     sensitivity: 0.5, minFreqHz: 0, padSeconds: 0.01)
+                                     thresholdAboveFloorDB: 12, minFreqHz: 0, padSeconds: 0.01)
         #expect(map.segments.count == 1)
+    }
+
+    /// A one-column blip is shorter than any bat call — a handling knock, a
+    /// switch, a clipped sample. Before the minimum-duration floor each one
+    /// became its own padded region, so the compressed timeline filled with
+    /// chunks of noise the user could see were not calls.
+    @Test func singleColumnTicksAreNotKept() {
+        let bins = STFTGrid.binCount
+        let nCols = 100
+        // 384 samples per column, so the 3 ms floor is 3 columns.
+        let totalSamples = 38_400
+        var grid = [Float](repeating: -120, count: bins * nCols)
+        for bin in 0..<bins {
+            grid[bin * nCols + 10] = 0                                  // a tick
+            for col in 50..<60 { grid[bin * nCols + col] = 0 }          // a real call
+        }
+        let map = SilenceMap.compute(grid: grid, nCols: nCols, binCount: bins,
+                                     totalSamples: totalSamples, sampleRate: 384_000,
+                                     thresholdAboveFloorDB: 12, minFreqHz: 0, padSeconds: 0)
+        #expect(map.segments.count == 1)
+        // The call, padded one column each side — not the tick at column 10.
+        #expect(map.segments[0].realStart == 49 * 384)
+        #expect(map.segments[0].realEnd == 61 * 384)
+    }
+
+    /// The regression guard for the threshold's old top anchor: it
+    /// interpolated up to the file's LOUDEST column, so one broadband
+    /// artifact dragged the cut above every real call in the recording and
+    /// hid the lot. Anchored to the noise floor alone, the artifact has no
+    /// say in where the threshold sits.
+    @Test func oneLoudArtifactDoesNotHideFaintCalls() {
+        let bins = STFTGrid.binCount
+        let nCols = 100
+        let totalSamples = 38_400
+        var grid = [Float](repeating: -120, count: bins * nCols)
+        for bin in 0..<bins {
+            for col in 20..<40 { grid[bin * nCols + col] = -70 }        // faint calls
+            for col in 80..<83 { grid[bin * nCols + col] = 0 }          // a loud knock
+        }
+        let map = SilenceMap.compute(grid: grid, nCols: nCols, binCount: bins,
+                                     totalSamples: totalSamples, sampleRate: 384_000,
+                                     thresholdAboveFloorDB: 12, minFreqHz: 0, padSeconds: 0)
+        // Both survive: the faint calls are kept, not swamped by the knock.
+        #expect(map.segments.count == 2)
+        #expect(map.segments[0].realStart == 19 * 384)
+        #expect(map.segments[0].realEnd == 41 * 384)
+    }
+
+    /// "Found nothing" and "kept everything" produce the same single
+    /// whole-file segment and were indistinguishable to the UI, so the toggle
+    /// looked broken in the first case. The flag is what tells them apart.
+    @Test func fallbackIsFlaggedButARealDetectionIsNot() {
+        let bins = STFTGrid.binCount
+        let nCols = 50
+        let quiet = [Float](repeating: -120, count: bins * nCols)
+        let quietMap = SilenceMap.compute(grid: quiet, nCols: nCols, binCount: bins,
+                                          totalSamples: 50_000, sampleRate: 384_000,
+                                          thresholdAboveFloorDB: 12, minFreqHz: 0, padSeconds: 0)
+        #expect(quietMap.isFallback)
+
+        var loud = quiet
+        for bin in 0..<bins {
+            for col in 20..<30 { loud[bin * nCols + col] = 0 }
+        }
+        let loudMap = SilenceMap.compute(grid: loud, nCols: nCols, binCount: bins,
+                                         totalSamples: 50_000, sampleRate: 384_000,
+                                         thresholdAboveFloorDB: 12, minFreqHz: 0, padSeconds: 0)
+        #expect(!loudMap.isFallback)
+        #expect(SilenceMap.wholeFile(totalSamples: 100).isFallback == false)
     }
 }

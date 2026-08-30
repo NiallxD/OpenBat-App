@@ -36,8 +36,30 @@ final class SnippetExpansionSettings {
     /// Slowdown factor. 8× is the natural 384/48 ratio and costs no filtering;
     /// below it the processor installs an anti-alias low-pass (see
     /// `SnippetExpansionProcessor.expansion`), above it interpolates.
+    ///
+    /// Only the three values in `expansionSteps` are reachable (Niall,
+    /// 2026-08-28) — the setter snaps anything else to the nearest. Snapping
+    /// here rather than in the Settings card is what makes that true of every
+    /// writer: a tuning snapshot restored from before this change, or a value
+    /// left in UserDefaults by the old free 4–20 slider, lands on a step too,
+    /// so the card can never display a position the stored value isn't at.
     var expansion: Double {
-        didSet { UserDefaults.standard.set(expansion, forKey: Self.keyExpansion) }
+        didSet {
+            let snapped = Self.snap(expansion)
+            // Assigning inside didSet doesn't re-enter it, so this settles in
+            // one pass and only the snapped value is ever persisted.
+            if snapped != expansion { expansion = snapped; return }
+            UserDefaults.standard.set(expansion, forKey: Self.keyExpansion)
+        }
+    }
+
+    /// The speeds offered, slowest replay first. 8× is the free 384/48 ratio,
+    /// 16× is the shipped default (see `defaultExpansion`), 10× is the middle
+    /// step for anyone who finds 16× too far down in pitch.
+    static let expansionSteps: [Double] = [8, 10, 16]
+
+    static func snap(_ value: Double) -> Double {
+        expansionSteps.min(by: { abs($0 - value) < abs($1 - value) }) ?? defaultExpansion
     }
 
     /// Capture window. The replay occupies `memorySeconds × expansion` seconds,
@@ -95,8 +117,11 @@ final class SnippetExpansionSettings {
 
     init() {
         let d = UserDefaults.standard
-        expansion = d.object(forKey: Self.keyExpansion) != nil
-            ? d.double(forKey: Self.keyExpansion) : Self.defaultExpansion
+        // Snapped explicitly: property observers don't run during init, so a
+        // value stored by the old free slider would otherwise survive here
+        // unsnapped and the card would show a step the value isn't on.
+        expansion = Self.snap(d.object(forKey: Self.keyExpansion) != nil
+            ? d.double(forKey: Self.keyExpansion) : Self.defaultExpansion)
         memorySeconds = d.object(forKey: Self.keyMemory) != nil
             ? d.double(forKey: Self.keyMemory) : Self.defaultMemorySeconds
         gain = d.object(forKey: Self.keyGain) != nil

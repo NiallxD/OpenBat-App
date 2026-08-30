@@ -19,12 +19,6 @@ struct WavMinimapView: View {
     let overview: WavSpectrogramEngine.Overview
     let viewport: WavViewport
     let engine: PlaybackEngine
-    /// Non-nil while hide-silence is on: `overview` is then the COMPRESSED
-    /// overview and this strip's whole horizontal axis is VIRTUAL samples —
-    /// scrubbing maps back to real time for the engine, and the playhead
-    /// maps the engine's real position forward (same seams as everywhere
-    /// else; see SilenceMap).
-    let silenceMap: SilenceMap?
     /// Live playback-follow position — read here (instead of relying on
     /// `viewport`, which no longer updates during playback — see
     /// PlaybackFollowState's doc comment) so the position rectangle below
@@ -57,8 +51,7 @@ struct WavMinimapView: View {
                 BufferDebugOverlay(status: bufferDebugStatus, totalSamples: overview.totalSamples, geoSize: geo.size)
 
                 MinimapPlayheadOverlay(engine: engine, totalSamples: overview.totalSamples,
-                                       sampleRate: overview.sampleRate, silenceMap: silenceMap,
-                                       geoSize: geo.size)
+                                       sampleRate: overview.sampleRate, geoSize: geo.size)
             }
             .contentShape(Rectangle())
             .gesture(scrubGesture(geoSize: geo.size))
@@ -123,9 +116,11 @@ struct WavMinimapView: View {
         // those, throttling this would change what the user hears while
         // dragging (continuous audio feedback vs. silent-until-release),
         // a real UX tradeoff and not a pure bug fix.
-        let realSample = silenceMap?.virtualToReal(sample) ?? sample
+        // Seeks in the SAME domain this strip draws: while silence removal is
+        // on, both this overview and the engine's timeline are the compressed
+        // one, so there is nothing to map (see PlaybackEngine.setSilenceMap).
         WavPlayerDebugLog.time("WavMinimapView", "scrub -> engine.seek") {
-            engine.seek(toSeconds: Double(realSample) / max(overview.sampleRate, 1))
+            engine.seek(toSeconds: Double(sample) / max(overview.sampleRate, 1))
         }
     }
 }
@@ -141,7 +136,6 @@ private struct MinimapPlayheadOverlay: View {
     let engine: PlaybackEngine
     let totalSamples: Int
     let sampleRate: Double
-    let silenceMap: SilenceMap?
     let geoSize: CGSize
 
     var body: some View {
@@ -159,8 +153,7 @@ private struct MinimapPlayheadOverlay: View {
 
     private func playheadX() -> CGFloat? {
         guard totalSamples > 0, sampleRate > 0, geoSize.width > 0 else { return nil }
-        let realSample = engine.currentTimeSeconds * sampleRate
-        let currentSample = silenceMap.map { Double($0.realToVirtual(Int(realSample))) } ?? realSample
+        let currentSample = engine.currentTimeSeconds * sampleRate
         let frac = min(max(currentSample / Double(totalSamples), 0), 1)
         return CGFloat(frac) * geoSize.width
     }

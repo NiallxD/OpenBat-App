@@ -120,6 +120,27 @@ nonisolated final class HeterodyneProcessor: @unchecked Sendable {
     private var softTarget = 2_880 // ~60 ms at 48 kHz
     private var hardMax = 12_000   // ~250 ms
 
+    /// Samples fed into the ring but not yet rendered to the speaker — the
+    /// standing `softTarget` (~60 ms) plus whatever drift correction has
+    /// added. PlaybackDriver subtracts it from the playback position it
+    /// publishes so the playhead tracks what is being HEARD, not what has been
+    /// fed. Any thread: both indices are atomics and a snapshot is enough.
+    var queuedFrames: Int {
+        let cap = ring.count
+        let w = writeIndexA.load(ordering: .relaxed)
+        let r = readIndexA.load(ordering: .relaxed)
+        return (w - r + cap) % cap
+    }
+
+    /// Asks the output thread to drop what is still queued at its next
+    /// `render` — used when file playback restarts at a new position, so the
+    /// jump isn't preceded by leftover audio from the old one. A request, not
+    /// a direct store, because only the consumer may move `readIndexA`;
+    /// resetting it from the producer would race `render`.
+    private let flushRequestA = Atomic<Int>(0)
+    private var flushesHandled = 0   // consumer only
+    func requestFlush() { flushRequestA.wrappingAdd(1, ordering: .relaxed) }
+
     /// Reconfigure for a capture sample rate and reset all DSP/ring state. Call
     /// before installing the tap (no concurrent `process`/`render` at this point).
     func reset(inputSampleRate fs: Double) {
@@ -263,6 +284,15 @@ nonisolated final class HeterodyneProcessor: @unchecked Sendable {
         let w = writeIndexA.load(ordering: .acquiring)
         var r = readIndexA.load(ordering: .relaxed)
         var available = (w - r + cap) % cap
+
+        // Honoured here, on the consumer, for the reason `requestFlush` gives.
+        let flushes = flushRequestA.load(ordering: .relaxed)
+        if flushes != flushesHandled {
+            flushesHandled = flushes
+            r = w
+            readFrac = 0
+            available = 0
+        }
 
         // Runaway safety: if we've fallen way behind, jump forward.
         if available > hardMax {

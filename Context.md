@@ -70,6 +70,7 @@ Reconstructed from git history. Dates are commit dates.
 | 2026-08-17 | **Onboarding cut from eight screens to three** — welcome, the permissions ask, the ID caveat — on Niall's call. The five removed pages (echolocation, listening modes, mic calibration, the view-mode switch, "you're all set") are kept whole as `AboutAppTour`, a second tour offered on the Info & Tour screen beside the guided one. See §7. |
 | 2026-08-17 | **One card for "a model suits where you are", and the tour nudges.** The full-`Form` location-change sheet is deleted; both the post-onboarding offer and the after-a-move notice now use the same compact card. A clean install no longer raises that notice at all, and the tour's popover opens itself 15 s after the first arrival at the detector. See §7. |
 | 2026-08-16 | **Playback folds into Sessions.** The Playback tab and the recording detail page are both gone: a recording opens the player wherever you tap it, and its per-pulse IDs are a sheet over the player. Sessions loses its Sessions/Recordings segmented picker. See §7. |
+| 2026-08-28 | **Playback speed becomes a control (4×/8×/16×), and hiding silence starts applying to playback.** The compressed timeline used to be torn down the moment you pressed play, and the gap-skipping written for that case was unreachable dead code; the pacing thread now walks the kept segments directly, so every time the engine publishes is in the packed timeline. Detection reworked alongside: the threshold is dB above the file's own noise floor, runs need hysteresis and a minimum duration, and a "found nothing" fallback is flagged instead of silently showing the whole file. See §3. |
 
 ---
 
@@ -276,6 +277,72 @@ they are genuinely different techniques rather than two settings of one thing:
 - **Live capture** cannot pace itself slower than real time without falling
   permanently behind, so it must select *when* to listen. That's what makes it a
   different thing legally as well as technically — see §5.
+
+### Playback speed became a control, and silence removal became audible (2026-08-28)
+
+Two things the player believed that were wrong.
+
+**It thought the playback speed belonged to the listening mode.** 8× was never
+chosen — it fell out of the file being fed at 48 kHz into an output ring
+hardcoded to 48 kHz, so the ratio was fixed and there was no way to ask for
+anything else. The speed is now the ratio between two rates the player sets
+together: the pace file samples are released at, and the rate the output node
+declares. Both follow `PlaybackEngine.expansionFactor`, stopping at 4×, 8× and
+16×, and it is the player's own persisted setting — the detector's expansion
+settings still carry only gain. Nothing about the technique changed: every
+sample of the recording still plays, in order, against a slower clock, and the
+final conversion to the hardware rate is the OS mixer's.
+
+The one thing to know before widening the stops: the node's rate is
+`fileRate / factor`, clamped to 8–96 kHz. A *smaller* factor means a higher node
+rate, and the mixer then discards everything above the hardware's Nyquist — at
+4× on a 384 kHz file a 100 kHz harmonic lands at 25 kHz and is gone. That is
+physics, not a defect, but it is why the stops start at 4×.
+
+**It thought hiding silence was a way of drawing a recording, not of hearing
+one.** The compressed timeline was torn down the instant playback began
+(`rebuildSilenceMap` guarded on `!engine.isPlaying`), so the toggle stayed lit
+while you listened to the whole file, gaps and all. The gap-skipping written for
+that case — seek forward at 30 Hz whenever the playhead landed in a hidden
+stretch — could never run at all, because it read the very map that had just
+been set to nil. It was dead code from the day it was written and no test
+covered the path, which is why nobody noticed.
+
+Playback now walks the kept segments itself: `PlaybackEngine` holds the map, and
+the pacing thread jumps its read position at each boundary, so hidden audio is
+never read, never fed to a processor, and takes no time to play through. That
+also fixes what the seek-based version would still have done wrong — a full
+engine restart per gap, up to 33 ms of leaked silence before each jump, and the
+recording's dead tail playing out in full because there is no "next segment" to
+skip to after the last call.
+
+Consequently **every time the engine publishes is now in the timeline it is
+playing** — packed while silence removal is on. That is the contract worth
+keeping: the playhead, the minimap, the scrub bar and the elapsed readout all
+stopped mapping domains, because there is only one domain again. Only tile
+stitching and call analysis still cross, and they always did.
+
+Seams get a 2 ms fade. It has to stay well inside `SilenceMap`'s pulse margin
+(5 ms at its tightest) — a ramp longer than the pre-roll is exactly what put
+every call onset part-way down the fade in the adaptive-expansion work.
+
+**Detection was reworked at the same time**, because the tool was not
+trustworthy enough to hand to playback:
+
+- The threshold is now plain dB above the recording's own noise floor. Both
+  previous versions failed for the same reason — the number the user set had no
+  fixed meaning. An absolute dB threshold did nothing whenever it fell below a
+  given file's floor. A 0–1 "sensitivity" interpolated between the floor and the
+  file's *loudest* column moved with the file: one close pass or one broadband
+  knock put the midpoint 30 dB up and hid every real call, while a file of only
+  faint calls hid nothing. Anchored to the floor alone, 12 dB means the same
+  thing everywhere and no single artifact can move it.
+- A run needs hysteresis to close and a minimum duration to count. A
+  single-column blip is shorter than any bat call; each one used to become its
+  own padded region, which is why the packed timeline filled with visible noise.
+- `wholeFile` is flagged when it is a fallback. It was reachable three
+  different ways and looked identical to a broken toggle in all of them; the
+  panel now says what was kept, or why nothing was.
 
 ### The 96 kHz capture artifact is real and does not matter (2026-08-18)
 

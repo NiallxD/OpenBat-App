@@ -7,10 +7,12 @@
 //  technique there is (originally done by physically slowing tape playback).
 //  There is no per-sample selection or framing: `process` copies every input
 //  sample straight into the output ring (band-limited + gained, nothing
-//  more). The 8× slowdown comes entirely from PlaybackDriver pacing its file
-//  reads at the 48 kHz OUTPUT rate instead of the file's native 384 kHz rate
-//  when this mode is active (see `start()`'s `paceRate`) — this processor
-//  has no idea it's being fed slowly, it just passes through.
+//  more). The slowdown comes entirely from PlaybackDriver pacing its file
+//  reads at this processor's OUTPUT rate instead of the file's native
+//  384 kHz rate when this mode is active (see `start()`'s `paceRate`) — this
+//  processor has no idea it's being fed slowly, it just passes through. Both
+//  rates are chosen by PlaybackEngine.expansionFactor, so the factor is the
+//  player's setting rather than the accident of a fixed 48 kHz it once was.
 //
 //  This is deliberately playback-only. Live capture can't do this: pacing a
 //  live 384 kHz tap at 48 kHz-worth-per-second means falling permanently
@@ -47,14 +49,18 @@ import Synchronization
 
 nonisolated final class TimeExpansionProcessor: @unchecked Sendable {
 
-    let outputSampleRate: Double = 48_000
+    /// The rate this processor's ring is DRAINED at by the output node — set
+    /// by `reset`, because the player now chooses its own playback speed and
+    /// that speed is precisely the ratio between this rate and the rate the
+    /// pacing thread fills the ring at. It was a hardcoded 48 kHz, which is
+    /// why 8× used to be the only speed there was.
+    private(set) var outputSampleRate: Double = 48_000
 
-    /// The actual slowdown factor for the file this processor was last
-    /// `reset(inputSampleRate:)` for — 8× for a native 384 kHz file, but
-    /// computed rather than assumed, so a differently-rated file (or a future
-    /// change to `outputSampleRate`) can't silently drift out of sync with a
-    /// hardcoded "8×" label elsewhere. Read from the main thread (UI); set
-    /// from `reset(inputSampleRate:)`, same cross-thread contract as `gain`.
+    /// The actual slowdown factor for the file and output rate this processor
+    /// was last `reset` for — computed rather than assumed, so a
+    /// differently-rated file can't silently drift out of sync with the factor
+    /// the player is showing. Read from the main thread (UI); set from
+    /// `reset`, same cross-thread contract as `gain`.
     var slowdownFactor: Double {
         ctrlLock.lock(); defer { ctrlLock.unlock() }
         return _slowdownFactor
@@ -150,11 +156,49 @@ nonisolated final class TimeExpansionProcessor: @unchecked Sendable {
     private let overflowCountA = Atomic<Int>(0)
     var overflowCount: Int { overflowCountA.load(ordering: .relaxed) }
 
+    /// Samples sitting in the output ring: fed by the pacing thread but not
+    /// yet rendered to the speaker. The ring deliberately holds a standing
+    /// `softTarget` (~100 ms of listening time) so ordinary drift is absorbed
+    /// losslessly — which also means the sample being FED is ~100 ms ahead of
+    /// the sample being HEARD. PlaybackDriver subtracts this from the position
+    /// it publishes, so the playhead sits on the call you are hearing rather
+    /// than one that already went past. Readable from any thread (both indices
+    /// are atomics); a snapshot is all a latency figure needs.
+    var queuedFrames: Int {
+        let cap = ring.count
+        let w = writeIndexA.load(ordering: .relaxed)
+        let r = readIndexA.load(ordering: .relaxed)
+        return (w - r + cap) % cap
+    }
+
+    /// Asks the output thread to drop whatever is still queued, at its next
+    /// `render`. Used when playback restarts from a new position (a seek, a
+    /// speed or mode change): without it the first ~100 ms heard after the
+    /// jump is leftover audio from where the playhead used to be.
+    ///
+    /// Deliberately a REQUEST rather than a direct `readIndexA` store: the
+    /// consumer alone may move the read index, so a producer-side reset would
+    /// race `render` and could leave the queue looking almost a full ring
+    /// deep. Bumping a counter the consumer honours keeps the SPSC discipline
+    /// intact.
+    private let flushRequestA = Atomic<Int>(0)
+    private var flushesHandled = 0   // consumer only
+    func requestFlush() { flushRequestA.wrappingAdd(1, ordering: .relaxed) }
+
     /// Reconfigure for a file's sample rate and reset all DSP/ring state. Call
     /// before starting playback in this mode.
-    func reset(inputSampleRate fs: Double) {
+    func reset(inputSampleRate fs: Double, outputSampleRate outFs: Double = 48_000) {
         inputSampleRate = fs
-        ctrlLock.lock(); _slowdownFactor = fs / outputSampleRate; ctrlLock.unlock()
+        outputSampleRate = outFs
+        // Both scale with the drain rate, or "100 ms of slack" would mean a
+        // different amount of audio at every playback speed.
+        softTarget = Int(outFs * 0.1)
+        // 20 s of headroom where the ring can hold it — see the ring's own doc
+        // comment for why this is deliberately far beyond ordinary drift. A
+        // faster playback speed drains faster, so the same second count costs
+        // more of a fixed-size ring; leave a second spare either way.
+        hardMax = min(Int(outFs * 20), Self.ringCapacity - Int(outFs))
+        ctrlLock.lock(); _slowdownFactor = fs / outFs; ctrlLock.unlock()
         let (low, high) = bandFractions()
         reconfigureBand(low: low, high: high)
         writeIndexA.store(0, ordering: .relaxed)
@@ -239,6 +283,15 @@ nonisolated final class TimeExpansionProcessor: @unchecked Sendable {
         let w = writeIndexA.load(ordering: .acquiring)
         var r = readIndexA.load(ordering: .relaxed)
         var available = (w - r + cap) % cap
+
+        // Honoured here, on the consumer, for the reason `requestFlush` gives.
+        let flushes = flushRequestA.load(ordering: .relaxed)
+        if flushes != flushesHandled {
+            flushesHandled = flushes
+            r = w
+            readFrac = 0
+            available = 0
+        }
 
         if available > hardMax {
             // Same story as `enqueue`'s drop above: `hardMax` is 20 s, so

@@ -18,10 +18,6 @@ import SwiftUI
 struct WavPlayheadOverlay: View {
     let engine: PlaybackEngine
     let viewport: WavViewport
-    /// Non-nil while hide-silence is on: `viewport` is then in VIRTUAL
-    /// (compressed-timeline) samples, and the engine's real playback
-    /// position must be mapped into that domain before positioning the line.
-    let silenceMap: SilenceMap?
     /// Display-domain total (virtual while hide-silence is on) — lets the
     /// pinned-centre playback line detect when the viewport is clamped at a
     /// file edge and can't actually be centred (see `playheadX`).
@@ -57,8 +53,11 @@ struct WavPlayheadOverlay: View {
         if engine.isPlaying, viewport.startSample > 0, viewport.endSample < totalSamples {
             return width / 2
         }
-        let realSample = engine.currentTimeSeconds * engine.sampleRate
-        let currentSample = silenceMap.map { Double($0.realToVirtual(Int(realSample))) } ?? realSample
+        // No domain mapping: the engine reports its position on whichever
+        // timeline it is playing — compressed while silence removal is on —
+        // and that is the same timeline `viewport` is in. See
+        // PlaybackEngine.setSilenceMap.
+        let currentSample = engine.currentTimeSeconds * engine.sampleRate
         let frac = (currentSample - Double(viewport.startSample)) / Double(viewport.sampleSpan)
         guard frac >= 0, frac <= 1 else { return nil }   // playhead outside the visible window
         return CGFloat(frac) * width

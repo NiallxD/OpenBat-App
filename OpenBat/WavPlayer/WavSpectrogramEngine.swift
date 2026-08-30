@@ -89,9 +89,18 @@ nonisolated enum WavSpectrogramEngine {
               endSample - startSample >= STFTGrid.windowLen
         else { return nil }
         var scratch = STFTGrid.Scratch()
+        // Zoomed in far enough and the span holds fewer native-hop frames
+        // than the tile has columns — the image was then stretched to fit,
+        // which is what "blurry at some zoom levels" was. Analysing at a
+        // finer step fills those columns for free; at every wider zoom this
+        // returns the native hop and nothing changes. See
+        // `STFTGrid.effectiveHop`.
+        let frameHop = STFTGrid.effectiveHop(spanSamples: endSample - startSample,
+                                             targetColumns: targetColumns)
         guard let (rawDBGrid, nCols) = STFTGrid.streamPooledGridFromFile(
             wavURL: wavURL, startSample: startSample, endSample: endSample,
-            targetColumns: targetColumns, scratch: &scratch, calibrationCurve: calibrationCurve)
+            targetColumns: targetColumns, scratch: &scratch, frameHop: frameHop,
+            calibrationCurve: calibrationCurve)
         else { return nil }
         // The pooled columns span the native STFT FRAME grid, whose last
         // frame STARTS `windowLen`-short of `endSample` — so the image
@@ -104,8 +113,8 @@ nonisolated enum WavSpectrogramEngine {
         // near its centre (the "annotations / high-res tile don't line up"
         // bug), an error that scales with span so it was invisible on the
         // whole-file overview but visible on a zoomed-in tile.
-        let nFrames = 1 + (endSample - startSample - STFTGrid.windowLen) / STFTGrid.hop
-        let coveredEnd = startSample + nFrames * STFTGrid.hop
+        let nFrames = 1 + (endSample - startSample - STFTGrid.windowLen) / frameHop
+        let coveredEnd = startSample + nFrames * frameHop
         return RawTile(grid: rawDBGrid, nCols: nCols, startSample: startSample, endSample: coveredEnd)
     }
 
@@ -302,10 +311,17 @@ nonisolated enum WavSpectrogramEngine {
         for slice in slices {
             let cols = max(1, Int((Double(targetColumns) * Double(slice.virtual.count)
                                    / Double(totalVirtual)).rounded()))
+            // Per slice, not per tile: with silence removed a slice is one
+            // kept region, often only tens of ms, so it is precisely the case
+            // `effectiveHop` exists for — and a slice that came back narrower
+            // than its `cols` share also skewed the stitched tile's time
+            // geometry, not just its sharpness.
+            let frameHop = STFTGrid.effectiveHop(spanSamples: slice.real.count, targetColumns: cols)
             if slice.real.count >= STFTGrid.windowLen,
                let (grid, nCols) = STFTGrid.streamPooledGridFromFile(
                     wavURL: wavURL, startSample: slice.real.lowerBound, endSample: slice.real.upperBound,
-                    targetColumns: cols, scratch: &scratch, calibrationCurve: calibrationCurve) {
+                    targetColumns: cols, scratch: &scratch, frameHop: frameHop,
+                    calibrationCurve: calibrationCurve) {
                 parts.append((grid, nCols))
             } else {
                 // A slice clipped at the viewport edge can be shorter than

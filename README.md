@@ -40,7 +40,7 @@ connection with bats, and a bit more respect for them too.
 - **Listening** — two live modes: heterodyne tunes the ultrasound down to
   something audible, and slow replay captures a short snippet of a call and
   replays it at a fraction of speed (going deaf while it does). Recordings can
-  also be played back slowed for time expansion.
+  also be played back slowed for time expansion, at 4×, 8× or 16×.
 - **Sessions & map** — every outing is logged automatically, with each pass mapped where it was heard.
 - **Sun clock** — bats are busiest in the hours after sunset and before sunrise,
   so the detector screen always shows where in that night you are: time to
@@ -48,7 +48,9 @@ connection with bats, and a bit more respect for them too.
   your latitude, so it works with no signal.
 - **Offline review** — tap any recording in a session to open it in the WAV
   player: a static zoomable spectrogram, per-call measurements, and the
-  per-pulse IDs behind the species it was given.
+  per-pulse IDs behind the species it was given. Hide the silence and a long
+  recording packs down to just its calls — on screen and in playback, so you
+  hear the pass without the waiting.
 - **Species field guide** — a community-maintained species reference built into
   the app, covering morphology, echolocation, conservation status and habits.
 - **Simplified view** — the default: species, level and spectrogram, and little

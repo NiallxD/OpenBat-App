@@ -176,7 +176,17 @@ struct WavPlayerView: View {
     /// GUANO card's disclosure: it covers the screen, so a remembered "open" would
     /// mean every recording opens with its spectrogram hidden behind a sheet.
     @State private var showPulses = false
-    @AppStorage("display.wavPlayerSilenceSensitivity") private var silenceSensitivity = 0.5
+    /// dB above the recording's own noise floor — see SilenceMap.compute for
+    /// why the setting is in dB rather than the abstract 0...1 "sensitivity"
+    /// this replaced. A NEW key on purpose: the old one holds 0...1 values
+    /// that would read as a nonsense threshold here.
+    @AppStorage("display.wavPlayerSilenceThresholdDB") private var silenceThresholdDB = 12.0
+    /// Player-local playback speed for time expansion, independent of the
+    /// detector — see PlaybackEngine.expansionFactor.
+    @AppStorage("display.wavPlayerExpansionFactor") private var expansionFactor = 8.0
+    /// What the last detection run did, for the tuning panel (see
+    /// WavTuningControl.silenceSummary).
+    @State private var silenceSummary: String?
     /// Seconds of audio kept each side of a pulse before cutting silence —
     /// SilenceMap.compute's `padSeconds`. Small by default so silence is cut
     /// tight; larger keeps more context and merges nearby pulses.
@@ -313,9 +323,10 @@ struct WavPlayerView: View {
                 .accessibilityLabel("Heterodyne / time expansion tuning")
                 .popover(isPresented: $showTuning) {
                     WavTuningControl(timeExpSettings: timeExpSettings,
-                                     timeExpansionSlowdownFactor: engine.timeExpansion.slowdownFactor,
+                                     timeExpansionSlowdownFactor: engine.expansionFactor,
                                      logFrequency: $logFrequency, noiseFloor: $noiseFloor,
-                                     hideSilence: $hideSilence, silenceSensitivity: $silenceSensitivity,
+                                     hideSilence: $hideSilence, silenceThresholdDB: $silenceThresholdDB,
+                                     silenceSummary: silenceSummary,
                                      silencePadding: $silencePadding)
                 }
             }
@@ -330,18 +341,19 @@ struct WavPlayerView: View {
             engine.stop()
         }
         .onChange(of: hideSilence) { _, _ in rebuildSilenceMap() }
-        .onChange(of: silenceSensitivity) { _, _ in scheduleSilenceRebuildDebounced() }
+        .onChange(of: silenceThresholdDB) { _, _ in scheduleSilenceRebuildDebounced() }
+        .onChange(of: expansionFactor) { _, factor in engine.expansionFactor = factor }
+        .onChange(of: engine.expansionFactor) { _, factor in expansionFactor = factor }
         .onChange(of: silencePadding) { _, _ in scheduleSilenceRebuildDebounced() }
         .onChange(of: engine.isPlaying) { _, playing in
             if playing {
-                // Playback runs on the REAL, linear timeline: suspend
-                // hide-silence (rebuildSilenceMap tears the compressed
-                // timeline down while `isPlaying`, see its guard) and leave
-                // selection mode so a two-finger measurement drag can't fight
-                // the scrolling playhead.
+                // The compressed timeline now survives playback — the pacing
+                // thread walks its segments (see PlaybackEngine.setSilenceMap),
+                // so there is nothing to tear down here. Leave selection mode
+                // so a two-finger measurement drag can't fight the scrolling
+                // playhead.
                 isSelecting = false
                 selection = nil
-                rebuildSilenceMap()
                 startFollowingPlayhead()
             } else {
                 followTask?.cancel()
@@ -349,12 +361,8 @@ struct WavPlayerView: View {
                 // Commit the follow loop's last position into `viewport`
                 // ONCE — the only write to `viewport` playback ever causes
                 // now — so gestures/ticks resume from where playback left
-                // off instead of the stale pre-play position, and so the
-                // hide-silence rebuild right below preserves the right
-                // real-domain center (it reads `viewport` for that).
+                // off instead of the stale pre-play position.
                 recenter(sample: followState.displaySample)
-                // Restore the compressed timeline if hide-silence is on.
-                rebuildSilenceMap()
             }
         }
         .onChange(of: selection) { _, newValue in
@@ -457,7 +465,7 @@ struct WavPlayerView: View {
     @ViewBuilder private var minimapBlock: some View {
         if let displayOverview {
             WavMinimapView(overview: displayOverview, viewport: viewport, engine: engine,
-                          silenceMap: silenceMap, followState: followState,
+                          followState: followState,
                           // Explicit closure, not `recenter` by name: the span
                           // override is a domain-crossing concern and the minimap
                           // never crosses domains.
@@ -561,17 +569,12 @@ struct WavPlayerView: View {
                                        palette: palette, noiseFloor: effectiveNoiseFloor,
                                        logFrequency: logFrequency,
                                        isPlaying: engine.isPlaying, followState: followState,
-                                       onSeek: { displaySeconds in
-                                           // The spectrogram hands back a DISPLAY-domain
-                                           // time; map through the silence map (if any)
-                                           // to the real position the engine plays.
-                                           let sr = displayOverview.sampleRate
-                                           let displaySample = Int(displaySeconds * sr)
-                                           let realSample = silenceMap?.virtualToReal(displaySample) ?? displaySample
-                                           engine.seek(toSeconds: Double(realSample) / sr)
-                                       },
+                                       // A DISPLAY-domain time, which is the domain the
+                                       // engine seeks in too — nothing to map (see
+                                       // PlaybackEngine.setSilenceMap).
+                                       onSeek: { engine.seek(toSeconds: $0) },
                                        bufferDebugStatus: bufferDebugStatus)
-                    WavPlayheadOverlay(engine: engine, viewport: viewport, silenceMap: silenceMap,
+                    WavPlayheadOverlay(engine: engine, viewport: viewport,
                                        totalSamples: displayOverview.totalSamples)
                 }
                 .frame(maxHeight: .infinity)
@@ -708,6 +711,7 @@ struct WavPlayerView: View {
         // completion below rebuild it if hide-silence is (persisted) on.
         silenceMap = nil
         compressedOverview = nil
+        silenceSummary = nil
         downloadState = nil
 
         let pal = palette, floor = effectiveNoiseFloor
@@ -747,6 +751,7 @@ struct WavPlayerView: View {
             guard !Task.isCancelled else { return }
 
             engine.load(url: url)
+            engine.expansionFactor = expansionFactor
             timeExpSettings.apply(to: engine.timeExpansion)
             applyBand()
 
@@ -794,10 +799,12 @@ struct WavPlayerView: View {
 
     /// Builds (or tears down) the compressed timeline to match `hideSilence`,
     /// preserving the currently-centered REAL sample across the domain
-    /// switch so the view doesn't jump. Detection + the compressed-overview
-    /// colorize run off the main actor (the colorize is the same bounded
-    /// pixel pass the normal overview uses); generation-guarded against a
-    /// rapid toggle/sensitivity change superseding an in-flight build.
+    /// switch so the view doesn't jump, and handing the result to the engine
+    /// so playback follows the same timeline. Detection + the
+    /// compressed-overview colorize run off the main actor (the colorize is
+    /// the same bounded pixel pass the normal overview uses);
+    /// generation-guarded against a rapid toggle/threshold change superseding
+    /// an in-flight build.
     /// Debounced rebuild for the sensitivity/padding sliders — both fire
     /// continuously while dragging and each rebuild recomputes the map +
     /// compressed overview (cheap but not free).
@@ -824,14 +831,14 @@ struct WavPlayerView: View {
         let oldEndReal   = silenceMap?.virtualToReal(viewport.endSample) ?? viewport.endSample
         let centerReal = (oldStartReal + oldEndReal) / 2
 
-        // Suspended entirely while PLAYING — playback runs on the real,
-        // linear timeline (see the `engine.isPlaying` onChange). The map is
-        // rebuilt when playback stops.
-        guard hideSilence, !engine.isPlaying, let overview else {
-            // Turning OFF (or suspended for playback): drop the compressed
-            // timeline and recenter the real-domain viewport on the same audio.
+        // Playback is NOT a reason to drop the compressed timeline any more —
+        // the engine plays it (see PlaybackEngine.setSilenceMap), so the only
+        // way out of this domain is the user turning the toggle off.
+        guard hideSilence, let overview else {
             silenceMap = nil
             compressedOverview = nil
+            silenceSummary = nil
+            engine.setSilenceMap(nil)
             // Leaving the compressed domain: the preserved window is already in
             // real samples, so its span is the real span.
             if overview != nil {
@@ -844,15 +851,16 @@ struct WavPlayerView: View {
         let sr = overview.sampleRate
         let realTotal = overview.totalSamples
         let pal = palette, floor = effectiveNoiseFloor
-        let sensitivity = silenceSensitivity
+        let thresholdDB = silenceThresholdDB
         let padSeconds = silencePadding
         let minHz = Self.minAnalysisFrequencyHz
-        WavPlayerDebugLog.log("WavPlayer", "rebuildSilenceMap: sensitivity=\(sensitivity) padSeconds=\(padSeconds), generation=\(myGeneration)")
+        WavPlayerDebugLog.log("WavPlayer", "rebuildSilenceMap: thresholdDB=\(thresholdDB) padSeconds=\(padSeconds), generation=\(myGeneration)")
         Task.detached(priority: .userInitiated) {
             let map = WavPlayerDebugLog.time("WavPlayer", "SilenceMap.compute") {
                 SilenceMap.compute(grid: raw.grid, nCols: raw.nCols, binCount: STFTGrid.binCount,
                                    totalSamples: realTotal, sampleRate: sr,
-                                   sensitivity: sensitivity, minFreqHz: minHz, padSeconds: padSeconds)
+                                   thresholdAboveFloorDB: thresholdDB, minFreqHz: minHz,
+                                   padSeconds: padSeconds)
             }
             let compRaw = WavSpectrogramEngine.compressedOverviewRawTile(from: raw, map: map)
             let tile = WavPlayerDebugLog.time("WavPlayer", "compressed overview colorize \(compRaw.nCols) cols") {
@@ -864,10 +872,15 @@ struct WavPlayerView: View {
                     WavPlayerDebugLog.log("WavPlayer", "rebuildSilenceMap SUPERSEDED/cancelled (generation \(myGeneration))")
                     return
                 }
-                WavPlayerDebugLog.log("WavPlayer", "rebuildSilenceMap: \(map.segments.count) segments, virtualTotal=\(map.virtualTotal) (of \(map.realTotal)), \(String(format: "%.0f", Double(map.virtualTotal) / Double(max(map.realTotal, 1)) * 100))%")
+                WavPlayerDebugLog.log("WavPlayer", "rebuildSilenceMap: \(map.segments.count) segments, virtualTotal=\(map.virtualTotal) (of \(map.realTotal)), \(String(format: "%.0f", map.keptFraction * 100))%")
                 self.silenceMap = map
+                self.silenceSummary = Self.summary(for: map)
                 self.compressedOverview = WavSpectrogramEngine.Overview(
                     rawTile: compRaw, image: tile.image, sampleRate: sr, totalSamples: map.virtualTotal)
+                // Hand the SAME map to playback, so what is heard and what is
+                // drawn are one timeline. This also re-derives the play
+                // position, which is why it comes before the recenter below.
+                self.engine.setSilenceMap(map)
                 // Recenter on the preserved audio, now in the virtual domain
                 // (displayOverview already returns the compressed one). The span
                 // is re-derived by mapping both edges through the NEW map, so the
@@ -876,6 +889,18 @@ struct WavPlayerView: View {
                               span: map.realToVirtual(oldEndReal) - map.realToVirtual(oldStartReal))
             }
         }
+    }
+
+    /// One line saying what detection did to this recording. The fallback case
+    /// is called out explicitly: a map that hides nothing looks exactly like a
+    /// broken toggle otherwise, and there was no way at all to tell them apart.
+    private static func summary(for map: SilenceMap) -> String {
+        guard !map.isFallback else {
+            return "Nothing rose above the threshold — showing the whole recording. Try a lower dB setting."
+        }
+        let kept = Int((map.keptFraction * 100).rounded())
+        let regions = map.segments.count
+        return "Kept \(kept)% of the recording · \(regions) region\(regions == 1 ? "" : "s")."
     }
 
     /// While playing, keep `followState.displaySample` centred on the
@@ -905,17 +930,11 @@ struct WavPlayerView: View {
 
     private func updateFollowPosition() {
         guard engine.isPlaying, let displayOverview else { return }
-        let sr = displayOverview.sampleRate
-        let realSample = Int(engine.currentTimeSeconds * sr)
-        if let map = silenceMap, let skipTo = map.nextActiveRealStart(after: realSample) {
-            // In a hidden gap — jump to the next real activity. seek() sets
-            // currentTimeSeconds synchronously into that (active) segment,
-            // so the next tick sees an active position and this fires at
-            // most once per gap.
-            engine.seek(toSeconds: Double(skipTo) / sr)
-            return
-        }
-        followState.displaySample = silenceMap?.realToVirtual(realSample) ?? realSample
+        // Straight through: the engine reports its position on the same
+        // timeline this screen draws — compressed while silence removal is on,
+        // because the pacing thread is playing the compressed timeline rather
+        // than being scrubbed across the gaps of the full one.
+        followState.displaySample = Int(engine.currentTimeSeconds * displayOverview.sampleRate)
     }
 
     // MARK: Navigation + analysis

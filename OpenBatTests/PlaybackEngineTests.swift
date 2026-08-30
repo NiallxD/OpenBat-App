@@ -59,6 +59,44 @@ struct PlaybackEngineTests {
 
     /// Sanity check on the fixture itself: the header this test file writes
     /// parses back to the values it was given.
+    // MARK: The timeline playback actually walks
+
+    /// Playing the whole file is the one-region case, so the pacing thread has
+    /// a single code path either way.
+    @Test func wholeFilePlanIsOneRegion() {
+        let plan = PlayPlan(regions: [0..<1000], totalSamples: 1000)
+        #expect(plan.virtualTotal == 1000)
+        #expect(plan.regionIndex(forVirtual: 500) == 0)
+        #expect(plan.realSample(forVirtual: 500, regionIndex: 0) == 500)
+    }
+
+    /// The mapping that makes silence removal audible: a position in the
+    /// packed timeline has to resolve to the right byte offset in the file,
+    /// including exactly at a seam.
+    @Test func packedPositionsResolveToTheRightFileOffsets() {
+        // Two kept regions with 3000 samples of silence cut between them.
+        let plan = PlayPlan(regions: [1000..<2000, 5000..<6000], totalSamples: 7000)
+        #expect(plan.virtualTotal == 2000)
+        #expect(plan.realSample(forVirtual: 0, regionIndex: plan.regionIndex(forVirtual: 0)) == 1000)
+        #expect(plan.realSample(forVirtual: 999, regionIndex: plan.regionIndex(forVirtual: 999)) == 1999)
+        // The seam: the first sample of the second region, not of the gap.
+        #expect(plan.regionIndex(forVirtual: 1000) == 1)
+        #expect(plan.realSample(forVirtual: 1000, regionIndex: 1) == 5000)
+        #expect(plan.realSample(forVirtual: 1999, regionIndex: 1) == 5999)
+    }
+
+    /// An out-of-range or empty input must land somewhere valid rather than
+    /// off the end of the region array — the pacing thread indexes with this.
+    @Test func planClampsRatherThanRunningOffTheEnd() {
+        let plan = PlayPlan(regions: [1000..<2000, 5000..<6000], totalSamples: 7000)
+        #expect(plan.regionIndex(forVirtual: -50) == 0)
+        #expect(plan.regionIndex(forVirtual: 999_999) == 1)
+        // Empty or degenerate region lists fall back to the whole file — a
+        // timeline with no audio in it is something nothing downstream expects.
+        #expect(PlayPlan(regions: [], totalSamples: 500).regions == [0..<500])
+        #expect(PlayPlan(regions: [10..<10], totalSamples: 500).regions == [0..<500])
+    }
+
     @Test func wavHeaderParsesTestFile() {
         let url = makeTestWav()
         let header = WavHeader.read(url: url)
@@ -231,5 +269,51 @@ struct PlaybackEngineTests {
         out.withUnsafeMutableBufferPointer { het.render($0.baseAddress!, frames: $0.count) }
         let peak = out.map { abs($0) }.max() ?? 0
         #expect(peak < 0.01, "a call 15 kHz from a fixed 40 kHz LO should fall outside the ~4 kHz IF passband, got peak=\(peak)")
+    }
+
+    // MARK: Seam envelope (hide-silence splices)
+
+    /// The defect this replaced: both edges of every kept region were ramped
+    /// to true zero, so the recording's background hiss dropped out completely
+    /// twice per gap — at 8x expansion a ~32 ms hole shortly before every
+    /// call. Crossfading into the next region's own run-up instead must leave
+    /// no sample of the seam quieter than the material either side of it.
+    @Test func seamCrossfadeNeverDropsToSilence() {
+        let fade = 64
+        let region = 0..<1_000
+        var buf = [Float](repeating: 1, count: region.count)
+        let incoming = [Float](repeating: 1, count: fade)
+        incoming.withUnsafeBufferPointer { inc in
+            buf.withUnsafeMutableBufferPointer { b in
+                PlaybackDriver.applySeamEnvelope(b.baseAddress!, count: b.count, at: region.lowerBound,
+                                                 in: region, fade: fade,
+                                                 fadeInFromSilence: false, incoming: inc.baseAddress)
+            }
+        }
+        // Equal-power weights over two same-level sources: level is held or
+        // slightly raised through the splice, never dipped.
+        #expect(buf.allSatisfy { $0 >= 1 && $0.isFinite },
+                "seam dipped below the surrounding level: min \(buf.min() ?? 0)")
+        // A region start that follows another region's crossfade is arrived
+        // at, not faded into — its first sample is untouched.
+        #expect(buf[0] == 1)
+    }
+
+    /// With nothing to cross into — the last region of a run — the old fade to
+    /// silence is still the right ending, and the run's first region still
+    /// fades up from it.
+    @Test func firstAndLastEdgesStillFadeFromAndToSilence() {
+        let fade = 64
+        let region = 0..<1_000
+        var buf = [Float](repeating: 1, count: region.count)
+        buf.withUnsafeMutableBufferPointer { b in
+            PlaybackDriver.applySeamEnvelope(b.baseAddress!, count: b.count, at: region.lowerBound,
+                                             in: region, fade: fade,
+                                             fadeInFromSilence: true, incoming: nil)
+        }
+        #expect(buf[0] == 0)
+        #expect(buf[fade] == 1, "the ramp must not reach past `fade` samples into the call margin")
+        #expect(buf[region.count - 1] < 0.05)
+        #expect(buf[region.count - 1 - fade] == 1)
     }
 }

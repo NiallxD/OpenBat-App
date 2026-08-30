@@ -33,12 +33,9 @@ enum TuningHelp {
 
     // MARK: Slow replay
 
-    static let snippetExpansion = """
-        How much slower the captured snippet is replayed. Bat calls last only a \
-        few milliseconds, which is too short for the ear to resolve any detail; \
-        slowing them stretches that structure out. It lowers the pitch by the \
-        same factor, so a call heard at 8× also sounds three octaves down.
-        """
+    // `snippetExpansion` was here. Speed moved to Settings → Detecting
+    // (2026-08-28) and carries its own ControlNote there — two copies of the
+    // same explanation is how they drift apart.
 
     static let snippetMemory = """
         How much audio is captured around the trigger. Half of it is what \

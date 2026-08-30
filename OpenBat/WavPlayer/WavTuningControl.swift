@@ -22,16 +22,24 @@ import SwiftUI
 
 struct WavTuningControl: View {
     @Bindable var timeExpSettings: TimeExpansionSettings
-    /// `PlaybackEngine.timeExpansion.slowdownFactor` — computed from the
-    /// loaded file's actual sample rate rather than assumed, so this label
-    /// can't silently drift if a file isn't native 384 kHz.
+    /// `PlaybackEngine.expansionFactor` — the speed the player is set to. Read
+    /// from the engine (which is `@Observable`) rather than from the
+    /// processor's own `slowdownFactor`, which is lock-guarded and untracked,
+    /// so this label would not refresh when the speed changed.
     let timeExpansionSlowdownFactor: Double
     @Binding var logFrequency: Bool
     @Binding var noiseFloor: Double
     @Binding var hideSilence: Bool
-    /// 0 = only near-total quiet counts as silence, 1 = aggressive — see
-    /// SilenceMap.thresholdDB for the dB mapping.
-    @Binding var silenceSensitivity: Double
+    /// How far above the recording's own measured noise floor a sound has to
+    /// be to be kept, in dB. A real unit on purpose — the same number means
+    /// the same thing on every file, which the 0...1 "sensitivity" it replaced
+    /// did not; see SilenceMap.compute.
+    @Binding var silenceThresholdDB: Double
+    /// What the detection actually did to THIS recording, e.g. "Kept 19% ·
+    /// 49 regions" — or why it did nothing. Silence removal could previously
+    /// fall back to showing the whole file for three different reasons and
+    /// look identical to a broken toggle in all of them.
+    let silenceSummary: String?
     /// Seconds of audio kept on EACH side of every detected pulse before the
     /// silence is cut — larger keeps more context (and merges close pulses),
     /// smaller cuts tighter. See SilenceMap.compute's `padSeconds`.
@@ -53,16 +61,26 @@ struct WavTuningControl: View {
             Toggle("Hide silence", isOn: $hideSilence)
             if hideSilence {
                 VStack(alignment: .leading, spacing: 4) {
-                    LabeledContent("Silence sensitivity") {
-                        Text(String(format: "%.2f", silenceSensitivity)).monospacedDigit().foregroundStyle(.secondary)
+                    LabeledContent("Keep above") {
+                        Text(String(format: "%.0f dB", silenceThresholdDB)).monospacedDigit().foregroundStyle(.secondary)
                     }
-                    Slider(value: $silenceSensitivity, in: 0...1, step: 0.05)
+                    Slider(value: $silenceThresholdDB,
+                           in: SilenceMap.minThresholdAboveFloorDB...SilenceMap.maxThresholdAboveFloorDB,
+                           step: 1)
+                    Text("Above this recording's own noise floor. Lower keeps more faint calls; higher cuts harder.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
                 }
                 VStack(alignment: .leading, spacing: 4) {
                     LabeledContent("Pulse margin") {
                         Text(String(format: "%.0f ms", silencePadding * 1000)).monospacedDigit().foregroundStyle(.secondary)
                     }
                     Slider(value: $silencePadding, in: 0.005...0.1, step: 0.005)
+                }
+                if let silenceSummary {
+                    Text(silenceSummary)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
                 }
             }
 
@@ -75,7 +93,7 @@ struct WavTuningControl: View {
                     Text(String(format: "%.1f×", timeExpSettings.gain)).monospacedDigit().foregroundStyle(.secondary)
                 }
                 Slider(value: $timeExpSettings.gain, in: 1...16, step: 0.5)
-                Text("Plays the recording back \(Self.slowdownLabel(timeExpansionSlowdownFactor)) slower, at every sample — nothing is dropped or selected out, so pitch drops proportionally instead of being divided or mixed down.")
+                Text("Plays the recording back \(Self.slowdownLabel(timeExpansionSlowdownFactor)) slower, at every sample — nothing is dropped or selected out, so pitch drops proportionally instead of being divided or mixed down. Change the speed with the gauge button under the spectrogram.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }

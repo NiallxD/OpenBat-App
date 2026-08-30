@@ -23,6 +23,11 @@
 //  overview-column boundaries (~ms at typical file lengths) — display
 //  granularity, deliberately not sample-accurate.
 //
+//  The same segments drive PLAYBACK, not just the display: PlaybackEngine
+//  holds the map and its pacing thread walks these real ranges, so the
+//  hidden audio is never fed to the audio path at all and every published
+//  playback time is in the compressed domain. See PlaybackDriver.start.
+//
 
 import Foundation
 import Accelerate
@@ -42,6 +47,21 @@ struct SilenceMap: Equatable {
     let segments: [Segment]
     let virtualTotal: Int
     let realTotal: Int
+    /// True when detection found nothing and `compute` fell back to a single
+    /// whole-file segment — i.e. the map is real but it hides nothing. The UI
+    /// needs to tell that apart from a map that genuinely kept everything,
+    /// because to the user both look like the toggle doing nothing. See
+    /// `WavPlayerView.silenceSummary`.
+    var isFallback: Bool = false
+
+    /// The kept ranges in REAL samples, in order — what the playback pacing
+    /// thread walks (see PlaybackDriver.start's `regions`).
+    var realRegions: [Range<Int>] { segments.map { $0.realStart..<$0.realEnd } }
+
+    /// The share of the recording this map keeps, 0...1.
+    var keptFraction: Double {
+        realTotal > 0 ? Double(virtualTotal) / Double(realTotal) : 1
+    }
 
     // MARK: Domain mapping
 
@@ -75,29 +95,6 @@ struct SilenceMap: Equatable {
         return seg.virtualStart + min(max(r - seg.realStart, 0), seg.length)
     }
 
-    /// Non-nil ONLY when `r` falls inside a hidden gap (or before the first
-    /// segment): the real start of the next active segment, for playback to
-    /// skip to. Nil when `r` is inside an active segment or past the last one.
-    /// Binary search, like its two neighbours above — this was the one linear
-    /// scan left in the file, and it runs from the playhead follow loop at ~30 Hz
-    /// for the whole of playback whenever hide-silence is on, over a segment list
-    /// that grows with the number of detected pulses in the recording.
-    func nextActiveRealStart(after r: Int) -> Int? {
-        guard !segments.isEmpty else { return nil }
-        // First segment whose realEnd is strictly greater than `r` — i.e. the
-        // first one not already entirely behind the playhead.
-        var lo = 0, hi = segments.count
-        while lo < hi {
-            let mid = (lo + hi) / 2
-            if segments[mid].realEnd <= r { lo = mid + 1 } else { hi = mid }
-        }
-        guard lo < segments.count else { return nil }   // past the last segment
-        let seg = segments[lo]
-        // Inside that segment already: nothing to skip. Otherwise `r` is in the
-        // gap before it, and its start is where playback should jump to.
-        return r < seg.realStart ? seg.realStart : nil
-    }
-
     /// The real slices covering `[virtualStart, virtualEnd)`, each paired
     /// with the virtual sub-range it fills — what stitched tile rendering
     /// iterates (see WavSpectrogramEngine.renderRawTileStitched).
@@ -115,17 +112,55 @@ struct SilenceMap: Equatable {
 
     // MARK: Detection
 
+    /// How far a column's peak must fall BELOW the enter threshold before an
+    /// active run is closed. Without it a call whose level dithers around a
+    /// single threshold shatters into a burst of tiny runs, each of which then
+    /// gets its own `padSeconds` and merges back messily; with it a run ends
+    /// only once the signal has genuinely gone.
+    static let hysteresisDB: Float = 6
+
+    /// How long the ABOVE-ENTER part of a run must last to count as an event.
+    /// A bat pulse is milliseconds; a broadband tick (a handling knock, a
+    /// switch, a clipped sample) is shorter than one overview column. Without
+    /// this floor a single stray column became a kept region — padded on both
+    /// sides — so the compressed timeline filled up with noise the user could
+    /// see was not a call. Expressed in seconds and converted using the file's
+    /// own column density, since an overview column is ~1 ms on a short
+    /// recording and ~70 ms on a long one; on files coarse enough that one
+    /// column already exceeds this, the floor is one column and does nothing.
+    static let minEventSeconds: Double = 0.003
+
+    /// The narrowest and widest the threshold may sit above the file's own
+    /// noise floor. The floor stops `thresholdAboveFloorDB == 0` from treating
+    /// the noise itself as signal; the ceiling is a plain sanity bound on the
+    /// slider.
+    static let minThresholdAboveFloorDB: Double = 3
+    static let maxThresholdAboveFloorDB: Double = 40
+
     /// Builds a map from a whole-file overview raw grid (bin-major
     /// `[bin*nCols+col]`, RAW dB — the layout `WavSpectrogramEngine.RawTile`
-    /// stores). `sensitivity` (0...1) is turned into a dB threshold RELATIVE
-    /// to this file's own column-peak distribution (see `thresholdDB`) —
-    /// NOT an absolute dB value. The absolute approach an earlier version
-    /// used silently did nothing whenever the fixed threshold happened to
-    /// fall below a given recording's noise floor: every column then read as
-    /// "active", so the whole file was one segment and the slider had no
-    /// effect at any position. A relative threshold always sits between this
-    /// file's own quiet floor and its loudest call, so every sensitivity
-    /// value changes what's hidden.
+    /// stores).
+    ///
+    /// `thresholdAboveFloorDB` is exactly what it says: decibels above THIS
+    /// FILE's own measured noise floor (see `noiseFloorDB`). That unit is the
+    /// point. Two earlier versions were both unusable for the same underlying
+    /// reason — the number the user set did not mean anything fixed:
+    ///
+    ///   • An ABSOLUTE dB threshold silently did nothing whenever it happened
+    ///     to fall below a given recording's noise floor: every column read as
+    ///     active, the whole file became one segment, and the control had no
+    ///     effect at any position.
+    ///   • A 0...1 "sensitivity" interpolated between the floor and the file's
+    ///     LOUDEST column had no fixed meaning either, because the top anchor
+    ///     moved with the file. One close pass, or one broadband knock, put the
+    ///     midpoint 30 dB up and hid every real call in the recording; a file of
+    ///     only faint calls hid nothing. Same slider position, opposite result,
+    ///     and no way for the user to tell which they had got.
+    ///
+    /// Anchored to the noise floor alone, the setting is portable: 12 dB above
+    /// the floor means the same thing on every recording, and no single loud
+    /// artifact can move it, because the loudest column no longer participates.
+    ///
     /// `padSeconds` is kept SMALL on purpose (each active run is widened by
     /// it on both sides before merging). It only needs to cover a call's
     /// onset/tail plus a little visual breathing room — a couple of tens of
@@ -138,10 +173,10 @@ struct SilenceMap: Equatable {
     /// "hide silence" is meant to.
     static func compute(grid: [Float], nCols: Int, binCount: Int,
                         totalSamples: Int, sampleRate: Double,
-                        sensitivity: Double, minFreqHz: Double,
+                        thresholdAboveFloorDB: Double, minFreqHz: Double,
                         padSeconds: Double = 0.02) -> SilenceMap {
         guard nCols > 0, totalSamples > 0, grid.count >= nCols * binCount else {
-            return wholeFile(totalSamples: totalSamples)
+            return wholeFile(totalSamples: totalSamples, isFallback: true)
         }
         let hzPerBin = (sampleRate / 2) / Double(binCount)
         let minBin = min(max(Int(minFreqHz / max(hzPerBin, 1)), 0), binCount - 1)
@@ -160,24 +195,39 @@ struct SilenceMap: Equatable {
             }
         }
 
-        let thresholdDB = Self.thresholdDB(colPeak: colPeak, sensitivity: sensitivity)
+        let enterDB = thresholdDB(colPeak: colPeak, aboveFloorDB: thresholdAboveFloorDB)
+        let exitDB = enterDB - hysteresisDB
 
-        // Active runs, padded by padSeconds each side (in columns), merged
-        // where the padding makes them touch.
         let samplesPerCol = Double(totalSamples) / Double(nCols)
-        let padCols = max(1, Int((padSeconds * sampleRate / samplesPerCol).rounded()))
+        let minCoreCols = max(1, Int((minEventSeconds * sampleRate / samplesPerCol).rounded()))
+
+        // Active runs: a run OPENS on a column at or above `enterDB` and stays
+        // open until one falls below `exitDB`; it is kept only if enough of its
+        // columns cleared `enterDB` to be an event rather than a tick.
         var runs: [(start: Int, end: Int)] = []   // column ranges, end exclusive
         var runStart: Int? = nil
+        var coreCols = 0
+        func closeRun(at col: Int) {
+            if let start = runStart, coreCols >= minCoreCols { runs.append((start, col)) }
+            runStart = nil
+            coreCols = 0
+        }
         for col in 0..<nCols {
-            if colPeak[col] >= thresholdDB {
-                if runStart == nil { runStart = col }
-            } else if let start = runStart {
-                runs.append((start, col)); runStart = nil
+            let level = colPeak[col]
+            if runStart == nil {
+                if level >= enterDB { runStart = col; coreCols = 1 }
+            } else if level >= exitDB {
+                if level >= enterDB { coreCols += 1 }
+            } else {
+                closeRun(at: col)
             }
         }
-        if let start = runStart { runs.append((start, nCols)) }
-        guard !runs.isEmpty else { return wholeFile(totalSamples: totalSamples) }
+        closeRun(at: nCols)
+        guard !runs.isEmpty else { return wholeFile(totalSamples: totalSamples, isFallback: true) }
 
+        // Pad each run by `padSeconds` a side, merging where the padding makes
+        // neighbours touch.
+        let padCols = max(1, Int((padSeconds * sampleRate / samplesPerCol).rounded()))
         var merged: [(start: Int, end: Int)] = []
         for run in runs {
             let padded = (start: max(0, run.start - padCols), end: min(nCols, run.end + padCols))
@@ -197,36 +247,30 @@ struct SilenceMap: Equatable {
             segments.append(Segment(realStart: realStart, realEnd: realEnd, virtualStart: virtualCursor))
             virtualCursor += realEnd - realStart
         }
-        guard !segments.isEmpty else { return wholeFile(totalSamples: totalSamples) }
-        return SilenceMap(segments: segments, virtualTotal: virtualCursor, realTotal: totalSamples)
+        guard !segments.isEmpty else { return wholeFile(totalSamples: totalSamples, isFallback: true) }
+        return SilenceMap(segments: segments, virtualTotal: virtualCursor,
+                          realTotal: totalSamples, isFallback: false)
     }
 
-    static func wholeFile(totalSamples: Int) -> SilenceMap {
+    static func wholeFile(totalSamples: Int, isFallback: Bool = false) -> SilenceMap {
         SilenceMap(segments: [Segment(realStart: 0, realEnd: totalSamples, virtualStart: 0)],
-                   virtualTotal: totalSamples, realTotal: totalSamples)
+                   virtualTotal: totalSamples, realTotal: totalSamples, isFallback: isFallback)
     }
 
-    /// Maps `sensitivity` (0...1) to an absolute dB threshold by
-    /// interpolating between this file's own quiet floor (the 20th
-    /// percentile of column peaks — robustly below typical noise) and its
-    /// loudest column (the peak call). Higher sensitivity raises the cut
-    /// toward call level, hiding more. Returns `+inf` when the distribution
-    /// is flat (no range to separate), which makes every column read as
-    /// silent and the caller fall back to a single whole-file segment.
-    ///
-    /// `hi` is the MAX, not a high percentile: bat recordings are typically
-    /// sparse (mostly silence, calls in well under 5% of columns), so ANY
-    /// percentile short of the very top still sits in the noise floor —
-    /// making `hi ≈ lo`, collapsing the useful range, and (the reported bug)
-    /// hiding nothing at any sensitivity. The single loudest column is a
-    /// call by definition, so it's the one dependable "signal" anchor. A
-    /// lone broadband glitch column would be an unusual artifact in a
-    /// spectrogram and at worst nudges the threshold slightly high.
-    static func thresholdDB(colPeak: [Float], sensitivity: Double) -> Float {
-        guard let hi = colPeak.max() else { return .greatestFiniteMagnitude }
-        let lo = percentile(colPeak.sorted(), 0.20)
-        guard hi > lo else { return .greatestFiniteMagnitude }
-        return lo + Float(min(max(sensitivity, 0), 1)) * (hi - lo)
+    /// The absolute dB a column must reach to open a run: the file's own noise
+    /// floor plus `aboveFloorDB` (clamped to the supported range).
+    static func thresholdDB(colPeak: [Float], aboveFloorDB: Double) -> Float {
+        let margin = min(max(aboveFloorDB, minThresholdAboveFloorDB), maxThresholdAboveFloorDB)
+        return noiseFloorDB(colPeak: colPeak) + Float(margin)
+    }
+
+    /// This file's own quiet floor: the 20th percentile of the per-column
+    /// peaks. A percentile, not the minimum, so one anomalously dead column
+    /// can't drag it down; low enough that in a sparse recording — which is
+    /// most of them, calls in well under 5% of columns — it lands squarely in
+    /// the noise rather than in the calls.
+    static func noiseFloorDB(colPeak: [Float]) -> Float {
+        percentile(colPeak.sorted(), 0.20)
     }
 
     private static func percentile(_ sorted: [Float], _ p: Double) -> Float {

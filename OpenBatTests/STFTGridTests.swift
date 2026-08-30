@@ -118,4 +118,53 @@ struct STFTGridTests {
         #expect(grid.count == STFTGrid.binCount * nCols)
         #expect(grid.allSatisfy { $0 > -1000 && $0.isFinite })
     }
+
+    /// `effectiveHop` must leave every zoom level that already has enough
+    /// native frames completely alone — it only steps finer BELOW the
+    /// crossover, so no wider view can change appearance because of it.
+    @Test func effectiveHopOnlyGoesFinerBelowTheNativeCrossover() {
+        let target = 1536
+        // A 1 s span at 384 kHz holds ~12 000 native frames — far more than
+        // the target, so the native hop stands.
+        #expect(STFTGrid.effectiveHop(spanSamples: 384_000, targetColumns: target) == STFTGrid.hop)
+        // Right at the crossover (target columns' worth of native hops) it is
+        // still the native hop, not one sample less.
+        #expect(STFTGrid.effectiveHop(spanSamples: STFTGrid.windowLen + target * STFTGrid.hop,
+                                      targetColumns: target) == STFTGrid.hop)
+        // A 20 ms span (7 680 samples) has only ~224 native frames for 1 536
+        // columns — this is the case that was being stretched.
+        let deep = STFTGrid.effectiveHop(spanSamples: 7_680, targetColumns: target)
+        #expect(deep < STFTGrid.hop && deep >= 1)
+        // Never zero or negative, however extreme the zoom.
+        #expect(STFTGrid.effectiveHop(spanSamples: STFTGrid.windowLen + 1, targetColumns: target) >= 1)
+    }
+
+    /// The point of the finer hop: a zoomed-in span now fills the tile's
+    /// columns with real analysis instead of handing back a few hundred to be
+    /// stretched across the view.
+    @Test func deepZoomSpanFillsItsColumnsWithTheFinerHop() {
+        let sampleRate = 384_000.0
+        let url = TestWavFactory.make(sampleRate: UInt32(sampleRate), seconds: 0.2, toneFrequency: 45_000)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let span = 7_680      // 20 ms
+        let target = 1536
+        var scratch = STFTGrid.Scratch()
+        let nativeFrames = 1 + (span - STFTGrid.windowLen) / STFTGrid.hop
+        #expect(nativeFrames < target, "test premise: this span is below the native crossover")
+
+        guard let (_, nativeCols) = STFTGrid.streamPooledGridFromFile(
+            wavURL: url, startSample: 0, endSample: span, targetColumns: target, scratch: &scratch)
+        else { Issue.record("native-hop render returned nil"); return }
+        #expect(nativeCols == nativeFrames, "the native hop can't do better than its own frame count")
+
+        let hop = STFTGrid.effectiveHop(spanSamples: span, targetColumns: target)
+        guard let (grid, cols) = STFTGrid.streamPooledGridFromFile(
+            wavURL: url, startSample: 0, endSample: span, targetColumns: target,
+            scratch: &scratch, frameHop: hop)
+        else { Issue.record("fine-hop render returned nil"); return }
+        #expect(cols == target, "expected a full-width tile, got \(cols)")
+        #expect(grid.count == STFTGrid.binCount * cols)
+        // Every column carries real analysis — no untouched sentinel buckets.
+        #expect(grid.allSatisfy { $0 > -1000 && $0.isFinite })
+    }
 }

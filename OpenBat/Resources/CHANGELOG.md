@@ -32,6 +32,14 @@
   interrupts everybody, before they reach the detector.
 -->
 
+## v0.9.5 (Build 130)
+
+### Fixed
+- **Calls now play in time with the playhead** — In a recording, the sound ran about a tenth of a second behind the picture, so every call was heard just after it had passed under the playhead. The playhead now follows what is actually coming out of the speaker.
+- **The gap in the sound before each call is gone** — With silence hidden, the recording's background hiss dropped away completely for a moment between calls, which came out as a lurch just before each one. The background now carries straight through the joins.
+- **Scrubbing lands where you put it** — Moving the playhead, or changing the playback speed, used to play a last moment of wherever you had just come from before the new position started.
+- **A sharper spectrogram when zoomed right in** — Past roughly a tenth of a second on screen, the picture was being stretched rather than redrawn, which left calls looking soft and smeared at the zoom levels where you are looking hardest at them. They are now drawn at full detail at every zoom.
+
 ## v0.9.4 (Build 119)
 
 ### New

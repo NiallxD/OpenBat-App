@@ -53,6 +53,7 @@ struct SettingsView: View {
     let audio: AudioEngineController
     @Bindable var micCalSettings: MicCalibrationSettings
     @Bindable var haptics: PulseHaptics
+    @Bindable var snippetExpansion: SnippetExpansionSettings
     @State private var showMicCalibration = false
     @Environment(\.dismiss) private var dismiss
     @State private var selectedTab = "general"
@@ -384,6 +385,7 @@ struct SettingsView: View {
             microphoneSection
             hapticSections
             triggerSections
+            slowReplaySection
             recordingSections
         }
         .sheet(isPresented: $showMicCalibration) {
@@ -566,6 +568,72 @@ struct SettingsView: View {
                            "Stops one call being counted several times, and clicks being counted at all.")
             }
             .advancedOnly(simplifiedMode)
+        }
+    }
+
+    // MARK: Slow replay
+
+    /// Replay speed for the live slow-replay mode, and only the speed. Buffer
+    /// length, hiss reduction, fade and gain stay in the live tuning overlay:
+    /// those are judged by ear against a pass that is happening right now,
+    /// which is what the overlay is for. Speed is decided once and left, so it
+    /// belongs where a user goes looking for a setting.
+    ///
+    /// Three snapped steps, not the overlay's old 4–20 continuum (Niall,
+    /// 2026-08-28). The snapping lives in `SnippetExpansionSettings.expansion`
+    /// so this card can't be the only thing enforcing it.
+    private var slowReplaySteps: [Double] { SnippetExpansionSettings.expansionSteps }
+
+    /// The slider moves in step indices — 8, 10 and 16 aren't evenly spaced, so
+    /// a slider over the values themselves couldn't snap to them. The readout
+    /// beside it shows the real factor, which is why this needs an explicit
+    /// `accessibilityValue`: VoiceOver would otherwise read the index.
+    private var slowReplayIndex: Binding<Double> {
+        Binding(
+            get: {
+                let i = slowReplaySteps.firstIndex(of: snippetExpansion.expansion) ?? 0
+                return Double(i)
+            },
+            set: { newIndex in
+                let i = min(max(Int(newIndex.rounded()), 0), slowReplaySteps.count - 1)
+                snippetExpansion.expansion = slowReplaySteps[i]
+                // Settings are pushed into the processor at `start()`, so a
+                // change made mid-session would otherwise not be heard until the
+                // next run. The processor snapshots its playback parameters at
+                // each trigger, so writing it here takes effect on the next
+                // replay rather than warping one already sounding.
+                audio.snippetExpansion.expansion = snippetExpansion.expansion
+            }
+        )
+    }
+
+    private var slowReplaySpeedLabel: String {
+        String(format: "%.0f× slower", snippetExpansion.expansion)
+    }
+
+    @ViewBuilder
+    private var slowReplaySection: some View {
+        Section {
+            LabeledContent("Speed") {
+                Text(slowReplaySpeedLabel)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
+            ControlNote("A bat call is a few thousandths of a second long — too short to hear any detail in. Slowing it down stretches that detail out, and drops the pitch by the same amount.")
+            Slider(value: slowReplayIndex,
+                   in: 0...Double(slowReplaySteps.count - 1),
+                   step: 1)
+                .accessibilityLabel("Slow replay speed")
+                .accessibilityValue(slowReplaySpeedLabel)
+        } header: {
+            CardHeader("Slow replay",
+                       "How far a captured call is slowed down so you can hear its shape.")
+        } footer: {
+            // The cost of a higher speed is deafness, and from Settings — with
+            // no live readout beside it — that is invisible. The overlay shows
+            // it as "Replay length"; here it has to be said in the footer, in
+            // the terms it actually costs the listener.
+            Text("While a call is replaying, OpenBat isn't listening for new ones. At this speed each one takes about \(Int(snippetExpansion.replaySeconds.rounded())) seconds to play back.")
         }
     }
 

@@ -99,13 +99,16 @@ struct HeterodyneTuningTab: View {
 
 // MARK: - Slow replay (live snippet expansion)
 
-/// Speed, buffer length and output routing for the D240x-pattern live mode.
+/// Buffer length, replay shaping and output routing for the D240x-pattern live
+/// mode. Speed lives in Settings → Detecting; see the note beside the Buffer
+/// slider.
 ///
-/// **The number that matters is neither slider — it is their product.** Buffer
-/// length × speed is how long a replay lasts, and the mode captures nothing new
+/// **The number that matters is not the buffer slider — it is buffer × speed.**
+/// That product is how long a replay lasts, and the mode captures nothing new
 /// for that whole time, so a generous buffer at a high factor quietly turns into
 /// half a minute of deafness per trigger. It is shown as its own readout for
-/// that reason rather than left for the user to multiply.
+/// that reason rather than left for the user to multiply — and now that speed
+/// isn't on this screen, the readout is the only place the two are combined.
 struct SnippetExpansionTuningTab: View {
     let audio: AudioEngineController
     let settings: SnippetExpansionSettings
@@ -121,16 +124,15 @@ struct SnippetExpansionTuningTab: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            TuningSlider(
-                label: "Speed", explanation: TuningHelp.snippetExpansion,
-                initial: settings.expansion,
-                range: 4...20,
-                step: 0.5,
-                format: { String(format: "%.1f× slower", $0) },
-                onLive: { audio.snippetExpansion.expansion = $0 },
-                onCommit: { settings.expansion = $0 },
-                disabledReason: inactive
-            )
+            // Speed moved to Settings → Detecting (2026-08-28), snapped to
+            // 8/10/16 rather than the free 4–20 it had here. It was the one
+            // control in this tab you don't judge by ear against a live pass,
+            // and leaving a second writer here would mean a value set in
+            // Settings could be silently dragged off its step.
+            //
+            // It still appears in `LiveTuningSnapshot`, so Revert continues to
+            // put speed back with everything else — the snapshot restores
+            // through the settings object, which snaps.
             TuningSlider(
                 label: "Buffer", explanation: TuningHelp.snippetMemory,
                 initial: settings.memorySeconds,

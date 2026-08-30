@@ -189,6 +189,28 @@ nonisolated enum STFTGrid {
     /// means one pipeline now covers every zoom level, whole file included —
     /// see WavSpectrogramEngine's doc comment for the rest of that story.
     ///
+    /// The window step a span should be analysed at to fill `targetColumns`
+    /// columns. The native `hop` is 32 samples — 12 000 columns/second at
+    /// 384 kHz — so any span longer than ~128 ms already has more native
+    /// frames than a tile has columns and pools DOWN to them; this returns
+    /// the native hop unchanged there, leaving every wider zoom exactly as
+    /// it was. Below that crossover the native grid has FEWER frames than
+    /// the tile is wide, and the difference was being made up by stretching
+    /// the image — the soft, smeared look at deep zoom. Stepping the window
+    /// finer instead (down to one sample) fills those columns with real
+    /// analysis. It costs nothing extra: the work is bounded by the column
+    /// count, which is unchanged — a finer hop only means the frames that
+    /// ARE computed sit closer together.
+    ///
+    /// What this cannot buy is time resolution finer than the 512-sample
+    /// analysis window itself (~1.3 ms at 384 kHz); past that, neighbouring
+    /// columns genuinely do share content.
+    static func effectiveHop(spanSamples: Int, targetColumns: Int) -> Int {
+        guard targetColumns > 1, spanSamples > windowLen else { return hop }
+        let needed = (spanSamples - windowLen) / (targetColumns - 1)
+        return min(hop, max(1, needed))
+    }
+
     /// Pools each frame's per-bin dB peak (max, not average — preserves a
     /// brief loud call instead of smearing it into quiet neighbours) directly
     /// into `targetColumns` buckets. Returns RAW (non peak-normalized) dB
@@ -201,8 +223,16 @@ nonisolated enum STFTGrid {
     /// actually spans. Each bucket still visits AT LEAST one frame
     /// (`bucketStart`), so every bucket is guaranteed to be written
     /// regardless of how coarse the stride gets.
+    ///
+    /// `frameHop` is the step between analysis windows. It defaults to the
+    /// shared native `hop`, which is the right density for any span wide
+    /// enough to have more native frames than `targetColumns`; a caller
+    /// rendering a span SHORTER than that passes a finer hop (see
+    /// `effectiveHop`) so the grid still comes back `targetColumns` wide
+    /// instead of a few hundred columns stretched across the view.
     static func streamPooledGridFromFile(wavURL: URL, startSample: Int, endSample: Int,
                                          targetColumns: Int, scratch: inout Scratch,
+                                         frameHop: Int = STFTGrid.hop,
                                          oversample: Int = 8,
                                          calibrationCurve: MicCalibrationCurve? = nil) -> (dBGrid: [Float], nCols: Int)? {
         guard endSample > startSample, targetColumns > 0 else {
@@ -221,9 +251,10 @@ nonisolated enum STFTGrid {
             return nil
         }
         let bins = binCount
-        let nFrames = 1 + (spanSamples - windowLen) / hop
+        let stepHop = max(1, frameHop)
+        let nFrames = 1 + (spanSamples - windowLen) / stepHop
         let width = min(nFrames, targetColumns)
-        WavPlayerDebugLog.log("STFTGrid", "streamPooledGridFromFile: \(wavURL.lastPathComponent) \(startSample)-\(endSample), nFrames=\(nFrames) -> width=\(width), oversample=\(oversample)")
+        WavPlayerDebugLog.log("STFTGrid", "streamPooledGridFromFile: \(wavURL.lastPathComponent) \(startSample)-\(endSample), nFrames=\(nFrames) -> width=\(width), hop=\(stepHop), oversample=\(oversample)")
 
         var accum = [Float](repeating: -.greatestFiniteMagnitude, count: bins * width)
         var windowed = scratch.windowed; scratch.windowed = []
@@ -254,7 +285,7 @@ nonisolated enum STFTGrid {
                 let stride = max(1, bucketFrameCount / oversample)
                 var frame = bucketStart
                 while frame < bucketEnd {
-                    let sampleOffset = startSample + frame * hop
+                    let sampleOffset = startSample + frame * stepHop
                     guard (try? handle.seek(toOffset: UInt64(44 + sampleOffset * 2))) != nil,
                           let data = try? handle.read(upToCount: windowLen * 2), data.count == windowLen * 2
                     else {

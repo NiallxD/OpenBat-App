@@ -6,14 +6,16 @@ Renders raw GBIF against BOTH filter chains — the one that ships and the
 candidate in presence_algorithms — so the rewrite can be judged by looking at
 it rather than by reading threshold numbers.
 
-Three panels per species:
+Three panels per species, read left to right as the pipeline runs:
 
-    RAW        every GBIF density bin, unfiltered
-    CURRENT    generate_species_presence_data's chain, as shipped
-    PROPOSED   presence_algorithms' buffer -> bridge -> group chain,
-               with what it ADDS in green and what it REMOVES in red
+    1 RAW        every GBIF density bin, unfiltered
+    2 OUTLIERS   the same observations, with the groups that fail both floors
+                 ringed and filled in red — what is about to be thrown away
+    3 RANGE      the buffer -> bridge -> group result as the app ships it,
+                 with everything INFERRED (no records of its own) ringed green
 
-Green is the interesting colour: it is range the app currently denies exists.
+The middle panel is the one to argue with: every red cell is a judgement that
+a cluster of real records is not a distribution.
 
 Also runs the four cases that decide the thresholds (Hawaii and the BC run must
 survive; Bogota and Alaska must not) and fails loudly if any of them regress —
@@ -23,6 +25,7 @@ in a comment so that changing a threshold has to answer to them.
 Usage:
     python3 presence_lab.py --out ~/Desktop/"OpenBat Range Rebuild"
     python3 presence_lab.py --only EUMA,LACI --bridge 2 --out ...
+    python3 presence_lab.py --only EUMA --stages --out ...
 """
 
 import argparse
@@ -150,6 +153,16 @@ def boundary_segments(cells):
             segments.append([(lon + 1, lat), (lon + 1, lat + 1)])
     return segments
 
+def group_centres(groups, raw):
+    """Mid-point of each group's observation cells, as (lons, lats) for scatter."""
+    lons, lats = [], []
+    for group in groups:
+        inside = [i for i in group["cells"] if i in raw] or list(group["cells"])
+        lons.append(sum(i % pa.COLS - 180 for i in inside) / len(inside) + 0.5)
+        lats.append(sum(i // pa.COLS - 90 for i in inside) / len(inside) + 0.5)
+    return lons, lats
+
+
 # The cases that decide the thresholds. (code, lat/lon box, must-survive).
 REGRESSION_CASES = [
     ("LACI", (15, 25, -165, -150), True, "Hawaiian hoary bat"),
@@ -160,13 +173,13 @@ REGRESSION_CASES = [
 
 
 def current_chain(raw: dict[int, int]) -> set[int]:
-    """The observations panel: the cells that actually hold records.
+    """The cells that actually hold records — the observations the rules judge.
 
     This used to run the old filter chain so the rewrite could be compared
     against what shipped. That chain is gone — presence_algorithms replaced it —
-    so the useful second panel is now the one the APP itself offers: the raw
-    observations behind the modelled range. These three panels are a desktop
-    preview of the species page's Records/Range toggle.
+    so this is now simply the seed set, drawn in panel 2 with the groups about
+    to be dropped ringed in red, and differenced against the final range to get
+    `gained` and `lost`.
     """
     if sum(raw.values()) < gen.MIN_RECORDS_FOR_PRESENCE:
         return set()
@@ -198,26 +211,33 @@ def render(path, basemap, extent, code, label, scientific, raw, old, new, params
     # same cell differently between them and make the comparison meaningless.
     breaks = tier_breaks(list(raw.values()))
 
+    dropped_groups = [g for g in new["groups"] if not g["kept"]]
     panels = [
-        ("raw", new["seeds"], "Raw GBIF — unfiltered",
+        ("raw", new["seeds"], "1 · Raw GBIF — every record",
          f"{len(new['seeds']):,} cells · {new['total_records']:,} records"),
-        ("current", old, "Records — observations only",
-         f"{len(old):,} cells hold records"),
-        ("proposed", new["kept"], "Range — modelled, as the app ships it",
+        ("outliers", old, "2 · Outliers identified — under both floors",
+         (f"{len(dropped_groups)} group{'' if len(dropped_groups) == 1 else 's'} "
+          f"dropped · {len(lost):,} cell{'' if len(lost) == 1 else 's'}")
+         if dropped_groups else "no outlying groups — every cluster survives"),
+        ("range", new["kept"], "3 · Range — buffered, bridged, as the app ships it",
          f"{len(new['kept']):,} cells · {len(gained):,} inferred · "
          f"{sum(1 for g in new['groups'] if g['kept'])}/{len(new['groups'])} groups kept"),
     ]
 
     for axes, (panel, cells, title, subtitle) in zip(axes_row, panels):
         shade_by_density(axes, cells, raw, breaks)
-        if panel == "proposed":
-            if gained:
-                axes.add_collection(LineCollection(
-                    boundary_segments(gained), linewidths=1.4,
-                    colors=GAINED_COLOUR, zorder=8))
-            if lost:
-                axes.add_collection(
-                    rr.cell_patches(lost, LOST_COLOUR, 0.9, 9))
+        if panel == "outliers" and lost:
+            # Filled red, then ringed. A dropped group is usually a single
+            # cell, which at continental zoom is a few pixels and invisible
+            # unless something circles it.
+            axes.add_collection(rr.cell_patches(lost, LOST_COLOUR, 0.95, 9))
+            axes.scatter(*group_centres(dropped_groups, raw),
+                         s=260, facecolors="none", edgecolors=LOST_COLOUR,
+                         linewidths=1.2, zorder=10)
+        if panel == "range" and gained:
+            axes.add_collection(LineCollection(
+                boundary_segments(gained), linewidths=1.4,
+                colors=GAINED_COLOUR, zorder=8))
         # Basemap LAST and above the fills: a border under a dark tier is
         # invisible, and these maps are read by asking which side of a border a
         # cell sits on.
@@ -240,7 +260,7 @@ def render(path, basemap, extent, code, label, scientific, raw, old, new, params
                               label="inferred — buffer and bridge"))
     if lost:
         handles.append(Line2D([], [], marker="s", linestyle="", markersize=10,
-                              color=LOST_COLOUR, label="removed by the rewrite"))
+                              color=LOST_COLOUR, label="outlier — dropped as too small and too thin"))
     total_height = panel_height + 2.4
     figure.legend(handles=handles, loc="lower center", ncol=len(handles),
                   fontsize=8, frameon=False,
@@ -251,6 +271,71 @@ def render(path, basemap, extent, code, label, scientific, raw, old, new, params
     figure.text(0.01, 0.10 / total_height, params, fontsize=7, color="#888888")
     figure.tight_layout(rect=(0, 0.85 / total_height, 1,
                               1 - 0.55 / total_height))
+    figure.savefig(path, dpi=130)
+    plt.close(figure)
+
+
+def render_stages(path, basemap, code, label, scientific, raw, new, params):
+    """The algorithm itself, one step per panel: raw -> buffered -> bridged.
+
+    The comparison figure answers "what changed"; this one answers "how", which
+    is the question anyone meeting buffer/bridge/group for the first time
+    actually has. Each panel rings in green what THAT step added, so the two
+    morphological operations can be told apart — buffering thickens an outline
+    everywhere, bridging only fills between things.
+
+    Group judging is deliberately not a fourth panel: it removes rather than
+    adds, and the comparison figure already shows it.
+    """
+    seeds, buffered, mass = new["seeds"], new["buffered"], new["mass"]
+    extent = rr.extent_for(mass)
+    west, east, south, north = extent
+    panel_width = 24 / 3
+    scale = 1 / max(0.2, math.cos(math.radians((south + north) / 2)))
+    panel_height = min(9.0, max(3.5,
+        panel_width * ((north - south) * scale) / (east - west)))
+    figure, axes_row = plt.subplots(1, 3, figsize=(24, panel_height + 2.4))
+    breaks = tier_breaks(list(raw.values()))
+
+    panels = [
+        (seeds, None, "1 · Raw — cells holding records",
+         f"{len(seeds):,} cells · {new['total_records']:,} records"),
+        (buffered, buffered - seeds, "2 · Buffered — one cell in every direction",
+         f"{len(buffered):,} cells · +{len(buffered - seeds):,} added (~111 km)"),
+        (mass, mass - buffered, "3 · Bridged — short gaps closed",
+         f"{len(mass):,} cells · +{len(mass - buffered):,} added"
+         if mass - buffered else f"{len(mass):,} cells · nothing left to bridge"),
+    ]
+
+    for axes, (cells, added, title, subtitle) in zip(axes_row, panels):
+        shade_by_density(axes, cells, raw, breaks)
+        if added:
+            axes.add_collection(LineCollection(
+                boundary_segments(added), linewidths=1.4,
+                colors=GAINED_COLOUR, zorder=8))
+        rr.draw_basemap(axes, basemap, extent)
+        for collection in axes.collections:
+            if collection.get_zorder() == 1:
+                collection.set_zorder(7)
+        rr.style_axes(axes, extent, title, subtitle)
+
+    handles = [Line2D([], [], marker="s", linestyle="", markersize=10,
+                      color=INFERRED_COLOUR, label="inferred — no records of its own")]
+    smallest = min(raw.values())
+    handles += [Line2D([], [], marker="s", linestyle="", markersize=10,
+                       color=DENSITY_COLOURS[i],
+                       label=tier_label(breaks, smallest, i))
+                for i in range(len(breaks) + 1)]
+    handles.append(Line2D([], [], color=GAINED_COLOUR, linewidth=2,
+                          label="added by this step"))
+    total_height = panel_height + 2.4
+    figure.legend(handles=handles, loc="lower center", ncol=len(handles),
+                  fontsize=8, frameon=False,
+                  bbox_to_anchor=(0.5, 0.30 / total_height))
+    figure.suptitle(f"{label}  ({scientific})  ·  {code}  —  how the range is built",
+                    fontsize=15, fontweight="bold")
+    figure.text(0.01, 0.10 / total_height, params, fontsize=7, color="#888888")
+    figure.tight_layout(rect=(0, 0.85 / total_height, 1, 1 - 0.55 / total_height))
     figure.savefig(path, dpi=130)
     plt.close(figure)
 
@@ -287,6 +372,9 @@ def main() -> int:
     parser.add_argument("--cache", type=Path,
                         default=Path(os.environ.get("TMPDIR", "/tmp")) / "openbat-range-cache")
     parser.add_argument("--only", help="comma-separated species codes")
+    parser.add_argument("--stages", action="store_true",
+                        help="also write <species>_stages.png — raw, buffered, "
+                             "bridged, one panel per step of the algorithm")
     parser.add_argument("--buffer", type=int, default=pa.BUFFER_CELLS)
     parser.add_argument("--bridge", type=int, default=pa.BRIDGE_CELLS)
     parser.add_argument("--min-group-cells", type=int, default=pa.MIN_GROUP_CELLS)
@@ -327,6 +415,9 @@ def main() -> int:
         stem = f"{code}_{label.replace(' ', '-').replace('/', '-')}"
         render(args.out / f"{stem}.png", basemap, extent, code, label,
                scientific, raw, old, new, params)
+        if args.stages:
+            render_stages(args.out / f"{stem}_stages.png", basemap, code, label,
+                          scientific, raw, new, params)
 
         gained, lost = new["kept"] - old, old - new["kept"]
         report.append({

@@ -42,13 +42,51 @@ struct PlaybackControlsView: View {
     /// spacing.
     var compact: Bool = false
 
+    /// The slowdowns the speed button cycles. Discrete stops rather than a
+    /// slider: each is a clean ratio, and a stop you can tap through beats a
+    /// value you have to aim at while listening.
+    static let expansionFactors: [Double] = [4, 8, 16]
+
     var body: some View {
-        HStack(spacing: 40) {
+        // The speed stop only appears in time expansion, which is the only
+        // mode a slowdown means anything in — heterodyne's downconversion is a
+        // real-time operation. Spacing tightens when it does, so a four-item
+        // row still fits a small phone.
+        let showsSpeed = engine.listenMode == .timeExpansion
+        HStack(spacing: showsSpeed ? 24 : 40) {
             listenModeButton
+            if showsSpeed { speedButton }
             playPauseButton
             shareButton
         }
         .padding(.vertical, compact ? 6 : 16)
+    }
+
+    /// Cycles 4× → 8× → 16×. Changing it while playing is fine: the engine
+    /// restarts its pacing from the current position (see
+    /// PlaybackEngine.expansionFactor).
+    private var speedButton: some View {
+        Button {
+            let factors = Self.expansionFactors
+            let index = factors.firstIndex(of: engine.expansionFactor) ?? factors.firstIndex(of: 8) ?? 0
+            engine.expansionFactor = factors[(index + 1) % factors.count]
+        } label: {
+            VStack(spacing: 4) {
+                Image(systemName: "gauge.with.dots.needle.33percent").font(.title2)
+                Text(Self.speedLabel(engine.expansionFactor)).font(.caption2)
+                    .monospacedDigit()
+            }
+            .frame(width: 64)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(Color.batAccent)
+        .accessibilityLabel("Playback speed: \(Self.speedLabel(engine.expansionFactor)) slower than real time. Tap to change.")
+    }
+
+    /// Short enough for the 64pt button slot — the full phrase goes to
+    /// VoiceOver instead.
+    static func speedLabel(_ factor: Double) -> String {
+        factor == factor.rounded() ? "\(Int(factor))×" : String(format: "%.1f×", factor)
     }
 
     /// A menu once there are two destinations for a recording: the raw bundle
