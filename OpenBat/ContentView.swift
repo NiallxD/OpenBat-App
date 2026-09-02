@@ -392,7 +392,8 @@ struct ContentView: View {
                         }
                     }
                 }) {
-                    AppInfoView(startTour: { tourPending = true })
+                    AppInfoView(startTour: { tourPending = true },
+                                classStore: classStore, startDemo: startDemo)
                 }
         // Collects the `.tourTarget` anchors from the controls below and, while the
         // tour is active, resolves them to on-screen rects for the spotlight overlay.
@@ -2140,7 +2141,7 @@ struct ContentView: View {
     /// it reads `audio.diagnostics`, which mutates at the 15 Hz stats flush — same
     /// scoping rationale as the amplitude meters.
     private var micStatusPill: some View {
-        MicStatusPill(audio: audio)
+        MicStatusPill(audio: audio, onEndDemo: endDemo)
             .tourTarget(.micStatus)
     }
 
@@ -2150,7 +2151,8 @@ struct ContentView: View {
     /// tour for the same reason as `speakerFeedbackWarning` below — the tour is
     /// normally taken with detection off.
     private var sessionStatusPill: some View {
-        SessionStatusPillView(audio: audio, classStore: classStore, tourDemo: tourActive)
+        SessionStatusPillView(audio: audio, classStore: classStore, tourDemo: tourActive,
+                              onEndDemo: endDemo)
             .tourTarget(.sessionStatus)
     }
 
@@ -2684,7 +2686,24 @@ struct ContentView: View {
         // here. It's also the only way to exercise this on the simulator, where there's
         // no mic (see Context.md §6).
         liveActivity.start(sessionTitle: "Demo", isDemo: true, startDate: feedSessionStart ?? Date())
+        seedSnippetProcessor()
         Task { await audio.startDemo(url: url, name: name) }
+    }
+
+    /// Push the persisted snippet-expansion settings into the processor, and
+    /// the routing into its atomic. **Every path that opens capture has to do
+    /// this**, which is what went wrong: `startDetecting` did and `startDemo`
+    /// did not, so a demo ran the processor's own built-in defaults — 8×
+    /// replay against the 16× the Settings card was displaying, plus default
+    /// gain, hiss reduction and fade. Nothing on screen contradicted the
+    /// setting, so the replay just sounded less slowed-down than it claimed
+    /// (Niall, 2026-09-01).
+    ///
+    /// Before capture opens: `reset` clears DSP state but not these, and the
+    /// routing atomic is independent of the settings object.
+    private func seedSnippetProcessor() {
+        snippetSettings.apply(to: audio.snippetExpansion)
+        audio.setSnippetRouting(snippetSettings.routing)
     }
 
     /// Leave demo mode and hand the pipeline back to the microphone. Detection
@@ -2734,12 +2753,7 @@ struct ContentView: View {
             return
         }
         beginSessionBookkeeping()
-        // Seed the snippet processor before capture opens. `reset` clears DSP
-        // state but not these, and the routing atomic is independent of the
-        // settings object, so both have to be pushed here or a fresh launch
-        // would run the defaults regardless of what was persisted.
-        snippetSettings.apply(to: audio.snippetExpansion)
-        audio.setSnippetRouting(snippetSettings.routing)
+        seedSnippetProcessor()
         Task {
             await audio.start()
             // A start that fails for any *other* reason — the engine, the audio

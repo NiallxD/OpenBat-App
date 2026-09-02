@@ -104,6 +104,13 @@ struct GuideSpecies: Codable, Identifiable, Hashable {
     var id: String            // stable slug, e.g. "pipistrellus-pipistrellus"
     var commonName: String
     var scientificName: String
+    /// Common name of the broader group the species belongs to, shown
+    /// verbatim above `commonName` on the species page — write the full
+    /// display text a contributor wants shown, e.g. `"Vesper Bat"`,
+    /// `"Horseshoe Bat"`, `"Flying Fox"`, `"Leaf-nosed Bat"`. Not derived or
+    /// suffixed by the app, since not every group name takes "Bat" the same
+    /// way ("Flying Fox" already reads as one without it).
+    var group: String?
     /// Taxonomic order, e.g. "Chiroptera" — always the same for bats, but
     /// included for the breadcrumb. A stopgap until the full taxonomic-tree
     /// JSON (see Context.md §16) replaces this and

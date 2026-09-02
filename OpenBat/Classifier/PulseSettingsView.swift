@@ -56,7 +56,13 @@ struct PulseSettingsView: View {
                                 .foregroundStyle(.secondary)
                         }
                         Slider(value: minFreqKHz, in: 5...150, step: 5)
-                        Text("Peak frequency must be at or above this value. 15–20 kHz rejects wind and handling noise; raise to 30–40 kHz to target common pipistrelle ranges.")
+                        // The old copy suggested raising this to 30–40 kHz "to
+                        // target common pipistrelle ranges", which is advice
+                        // that silently deafens the detector to every bat
+                        // calling below the gate — noctules, serotines and
+                        // free-tailed bats sit at 20–30 kHz — with no
+                        // indication on screen that anything is being dropped.
+                        Text("Peak frequency must be at or above this value. 15–20 kHz rejects wind and handling noise without excluding any bat. Raise it only to ignore a species you know is there: a 35 kHz gate hears nothing from noctules, serotines or free-tailed bats, which call between 20 and 30 kHz.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     } header: {

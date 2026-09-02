@@ -2230,6 +2230,155 @@ under VoiceOver and in UI tests.
   one; five segments were also too wide for a phone, which is why "Recordings"
   had already been shortened to "Storage" to stop it truncating.
 
+### Playing a recording fixes the zoom (2026-09-01)
+
+Niall: "currently not happy with this part of the app." The player's spectrogram
+was smooth to pan and blurry to play, and every attempt to fix the playing half
+was a fresh guess at a moving target.
+
+**The false belief was that playback should scroll whatever zoom you happened to
+leave behind.** It could be the whole file or a single call, so every mechanism
+keeping a sharp picture under a moving playhead had to work at an unknown scale:
+the pyramid level changed underfoot, a tile's span in real seconds changed with
+it, and the race between "how long a render takes" and "how much runway is left"
+had to be solved from live measurements taken on the device, because nothing
+about the situation was known in advance (see the measured-threshold machinery in
+`WavSpectrogramView.scheduleDetailRenderThrottled` — all of it was there to cope
+with not knowing).
+
+Playing now clamps the time axis to a fixed window of **listening**, default
+1.5 s, adjustable from the player's tuning panel. That is one number and exactly
+two zoom levels, because heterodyne plays at the file's own rate (1.5 s of
+recording) and time expansion is N times slower (1.5/N seconds of recording,
+which is the zoom you want there anyway). Pausing hands the zoom straight back —
+analyse mode pans and zooms exactly as before, at whatever the playthrough left
+you at.
+
+What that buys, and the reason the clamp is worth having at all: a play-through
+now sits at ONE pyramid level for its whole duration, so the tiles under it are a
+bounded set that is rendered once and then only read — including on a replay, a
+scrub back, or a second pass at the same speed. Playback therefore always takes
+the tile pyramid, regardless of the A/B toggle (which still selects the path for
+analyse mode — removed the same day, once there was nothing left for it to
+select between), and a background prefill keeps a few spans' worth of tiles ahead
+of and behind the playhead at `.utility`, below the render the view itself is
+asking for.
+
+Two smaller things fell out of it. The frequency axis is deliberately NOT
+clamped — playback owns the time axis and nothing else, so a pinch still adjusts
+the band while playing and simply has no effect on time. And with two fillers
+now working the same grid, a caller asking for a tile another thread is already
+rendering has to WAIT for it rather than be handed nil: dropping it from the
+batch left `assemble` finding a hole, and the view fell back to the coarse
+overview crop until the next throttle tick.
+
+**The lead margin was a precondition, not an optimisation** (2026-09-01, same
+day). Niall, on time expansion: "it only loads them right as it is about to need
+it, which means we see low res." He was right, and the cause was not the fill
+rate. `assemble` is all-or-nothing over whatever range it is handed, and the
+display handed it the visible frame PLUS three screens of runway — so nothing
+sharp appeared until the last of that runway had rendered, while the tiles
+directly under the frame sat cached and unused. In time expansion, where a tile
+is 0.17 s of recording (hop is 32 here, not the live view's 256) and the runway
+is several tiles, that was most of the time.
+
+Three things were wrong together and all three are fixed:
+- **Display and fill are now separate questions.** The picture is assembled
+  against the visible frame only (`assembleCovering`), and carries as margin
+  whatever contiguous tiles happen to be cached beyond it — growing on its own
+  as the fill lands, never waiting on it.
+- **The fill ran in tile-index order**, so a window reaching behind the playhead
+  as well as ahead rendered all of the history first: the thing needed next was
+  built last. It now runs forward from the playhead's own tile
+  (`missingTilesFromPlayhead`).
+- **The pyramid was behind the per-render path's runway throttle**, which by
+  design holds off until the buffer is nearly spent — sensible when a render is
+  expensive and speculative, exactly wrong for a cache lookup. Playback ticks
+  now refresh the pyramid directly.
+
+The one thing to be careful of if this is touched again: joining tiles is memcpy
+but it is megabytes of it, so the rebuild is gated on the showing picture having
+actually stopped being good enough (no longer covers the frame, or less than a
+tile of forward margin left). Re-joining on every tick, or on every tile that
+lands, costs more than the coarse crop ever did.
+
+**Both renderers stay, for now.** Hide-silence is the one thing still on the old
+path, and — the correction that settled this — it PLAYS THROUGH: the pacing
+thread walks the compressed timeline, so that path is still doing the full
+moving-playhead job and cannot be stripped back to a static render. Losing it
+means either teaching the pyramid the compressed timeline (a stitched assemble,
+gathering cached tiles into a picture linear in virtual samples and aligned to
+its own fixed grid so it still caches) or making hide-silence look-only. Niall's
+call on 2026-09-01 was to leave both and see how the new playback zoom feels in
+the field first.
+
+The minimap's red/green buffer overlay moved behind `debugModeEnabled` in the
+same change. It was the instrument for the A/B — it is how the playhead was
+caught overrunning the buffered region — and it was being drawn for every user.
+
+### The blur was a cliff, not a shortage of runway (2026-09-02)
+
+Niall, on a screen recording at 16×: "we're still not buffering the next slice
+till right at the end giving a sudden blurry view." The debug overlay showed the
+green ready-region ending exactly at the playhead with red still rendering ahead
+of it — so the fill *was* being asked for in advance, and the picture still
+collapsed the moment the playhead crossed into it.
+
+**The false belief was that a spectrogram either has its tiles or it doesn't.**
+The player had a pyramid but only ever displayed one level of it: if any tile
+under the visible frame was missing, the whole join failed and the view fell all
+the way back to cropping the 4096-column whole-file overview. On a five-second
+recording at 16× that is about 77 real columns stretched across the screen —
+roughly a 25× collapse in detail, arriving in one frame. What looks like "it
+buffers too late" is really "the only two states are sharp and hopeless."
+
+There is now a ladder. A frame whose own level isn't ready comes back at the
+finest *coarser* level that is, up to two steps out, and the fill renders that
+coarse level **first** — one coarse tile covers four sharp ones at the same cost,
+so a single render buys the whole window a floor. Falling behind now softens the
+picture instead of destroying it, and the display keeps trying to climb back as
+sharp tiles land. Two other things were making the tiles late:
+
+- **A priority inversion between two fillers.** The view filled tiles at
+  `.userInitiated`; a second, near-identical filler ran from the player screen at
+  `.utility`. The tile store serialises per key on an `NSCondition`, which donates
+  no priority — so whenever the background filler won the race for a tile, the
+  foreground one *blocked behind a background-priority render of the very tile
+  the playhead was about to reach.* The `.utility` filler is gone; it was doing
+  duplicate work even when it wasn't inverting.
+- **The picture only ever grew at the last moment.** A re-join was triggered only
+  once the forward margin fell below one tile, so tiles that landed before then
+  sat in the cache unused until the next cliff. It now also re-joins when there
+  is a newly-cached tile ahead to gain by it.
+
+Three things found in the same read and fixed alongside, all of the same shape as
+the §13 isolation rule:
+
+- The transport row claimed in its own doc comment not to read
+  `currentTimeSeconds`, and then did — its replay-vs-play test compared the
+  position against the duration, so the whole row re-evaluated 30 times a second
+  while playing. The engine publishes a `didFinish` flag now.
+- The minimap's playhead `TimelineView` had no `paused:` argument, so it drove a
+  30 Hz redraw for the entire life of the screen whether or not anything was
+  playing. `WavPlayheadOverlay` had been fixed for exactly this; this one was
+  missed.
+- A progress callback already handed to the main queue could land *after* a seek
+  and put the old position back, snapping the playhead backwards. Each pacing run
+  is stamped now and stale callbacks are discarded.
+
+The player's unreachable iPhone-landscape layout went too — the app has been
+portrait-only on iPhone since 2026-08-16 and iPad reports a regular vertical size
+class in every orientation, so the branch selecting it could never be taken.
+
+**Still open, and deliberately not touched here:** dragging the minimap calls
+`engine.seek` on every gesture frame, and each seek stops and restarts the pacing
+thread — a synchronous bounded wait on the main thread, a new `Thread`, a new
+file handle, and a flushed output ring, sixty times a second. Throttling it is a
+real UX trade (continuous audio under the finger versus silence until release),
+so it is Niall's call, not a bug fix. Likewise the log-frequency warp, which
+re-copies the whole displayed bitmap twice per frame during playback and only
+costs anything for people who turn that toggle on.
+
 ---
 
 ## 8. Detection tuning

@@ -55,6 +55,24 @@ struct HeterodyneTuningTab: View {
                 onLive: { audio.heterodyne.gain = Float($0) },
                 disabledReason: audio.listenMode == .heterodyne ? nil : "Heterodyne is not the active listen mode"
             )
+            // Same three choices, the same machinery and the same help text as
+            // the replay path's — see `SnippetDenoiseMode`. Kept as two
+            // independent settings rather than one app-wide one because the two
+            // channels are listened to for different things: the replay is
+            // where you study a call, the live channel is where you notice a
+            // bat exists, and silence means something different in each.
+            VStack(alignment: .leading, spacing: 4) {
+                TuningInfoLabel(text: "Background", explanation: TuningHelp.heterodyneDenoise)
+                Picker("", selection: Binding(
+                    get: { audio.heterodyne.denoiseMode },
+                    set: { audio.heterodyne.denoiseMode = $0 }
+                )) {
+                    ForEach(SnippetDenoiseMode.allCases) { Text($0.label).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+            }
+            .disabled(audio.listenMode != .heterodyne && audio.listenMode != .snippetExpansion)
             TuningSlider(
                 label: "Audible offset", explanation: TuningHelp.audibleOffset,
                 initial: audio.audibleOffsetHz,
@@ -143,14 +161,34 @@ struct SnippetExpansionTuningTab: View {
                 onCommit: { settings.memorySeconds = $0 },
                 disabledReason: inactive
             )
+            // A switch, not a depth slider. The expander this replaced had a
+            // dial because it was always a compromise — more reduction bought
+            // more pumping — so the right amount had to be found by ear. The
+            // spectral version measures the noise and subtracts it; there is no
+            // dial because there is no trade to make.
+            VStack(alignment: .leading, spacing: 4) {
+                TuningInfoLabel(text: "Background", explanation: TuningHelp.snippetDenoise)
+                Picker("", selection: Binding(
+                    get: { settings.denoiseMode },
+                    set: {
+                        settings.denoiseMode = $0
+                        audio.snippetExpansion.denoiseMode = $0
+                    }
+                )) {
+                    ForEach(SnippetDenoiseMode.allCases) { Text($0.label).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+            }
+            .disabled(inactive != nil)
             TuningSlider(
-                label: "Hiss reduction", explanation: TuningHelp.snippetHiss,
-                initial: settings.hissReductionDB,
-                range: 0...40,
-                step: 1,
-                format: { $0 < 0.5 ? "off" : String(format: "−%.0f dB", $0) },
-                onLive: { audio.snippetExpansion.hissReductionDB = $0 },
-                onCommit: { settings.hissReductionDB = $0 },
+                label: "Pause after", explanation: TuningHelp.snippetRearm,
+                initial: settings.rearmSeconds,
+                range: 0...3,
+                step: 0.1,
+                format: { $0 < 0.05 ? "none" : String(format: "%.1f s", $0) },
+                onLive: { audio.snippetExpansion.rearmSeconds = $0 },
+                onCommit: { settings.rearmSeconds = $0 },
                 disabledReason: inactive
             )
             TuningSlider(
@@ -163,13 +201,19 @@ struct SnippetExpansionTuningTab: View {
                 onCommit: { settings.fadeMS = $0 },
                 disabledReason: inactive
             )
+            // A trim around an automatic level, not the absolute gain it
+            // replaced — see `SnippetExpansionProcessor.trimDB`. The same
+            // control also lives in Settings now: this one is here because it
+            // is judged by ear against a live pass, which is this overlay's
+            // whole criterion.
             TuningSlider(
-                label: "Replay gain", explanation: TuningHelp.snippetGain,
-                initial: Double(settings.gain),
-                range: 0.5...30,
-                format: { String(format: "%.1f×", $0) },
-                onLive: { audio.snippetExpansion.gain = Float($0) },
-                onCommit: { settings.gain = Float($0) },
+                label: "Volume trim", explanation: TuningHelp.snippetTrim,
+                initial: settings.trimDB,
+                range: -18...18,
+                step: 1,
+                format: { String(format: "%+.0f dB", $0) },
+                onLive: { audio.snippetExpansion.trimDB = $0 },
+                onCommit: { settings.trimDB = $0 },
                 disabledReason: inactive
             )
 

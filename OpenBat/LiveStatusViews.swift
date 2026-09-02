@@ -99,6 +99,19 @@ struct SessionStatusPillView: View {
     /// "Listening" instead of "Off", since the tour is usually taken before
     /// the user ever starts detection. See `SessionTimerPill.tourDemo`.
     var tourDemo: Bool = false
+    /// Leaves demo mode. **This pill is the badge Info & Tour tells the user to
+    /// end the demo from** ("End it from the Demo badge on the detector"), and
+    /// for a while that instruction was wrong: the exit was built on the mic
+    /// pill next door, so the one thing on screen actually reading "Demo" did
+    /// nothing when tapped. Both doors are kept — see `MicStatusExplainer`,
+    /// which explains why the pill is the right home for this.
+    ///
+    /// Optional because not every host has a demo to end: the tour's stand-in
+    /// pill passes nothing, and a pill with no handler stays inert rather than
+    /// offering a button that can't work.
+    var onEndDemo: (() -> Void)? = nil
+
+    @State private var showDemoExit = false
 
     private var isRunning: Bool { tourDemo || audio.isRunning }
     private var isSession: Bool { audio.isRunning && classStore.activeSessionID != nil }
@@ -124,7 +137,29 @@ struct SessionStatusPillView: View {
         return isRunning ? .toggleOn : .secondary
     }
 
-    var body: some View {
+    @ViewBuilder var body: some View {
+        // Only a button while there is a demo to end — outside demo mode this
+        // pill is a readout with nothing to say when tapped, and a button that
+        // opens nothing is worse than plain text.
+        if isDemo, let onEndDemo {
+            Button { showDemoExit = true } label: { pill }
+                .buttonStyle(.plain)
+                .popover(isPresented: $showDemoExit) {
+                    DemoExitPopover(audio: audio) {
+                        // Dismissed before the teardown for the same reason as
+                        // the mic pill's copy of this button: ending a demo
+                        // relays out the anchor underneath the popover.
+                        showDemoExit = false
+                        onEndDemo()
+                    }
+                    .presentationCompactAdaptation(.popover)
+                }
+        } else {
+            pill
+        }
+    }
+
+    private var pill: some View {
         HStack(spacing: 4) {
             Image(systemName: icon)
                 .font(.system(size: 10, weight: .semibold))
@@ -135,7 +170,47 @@ struct SessionStatusPillView: View {
         .padding(.horizontal, 7)
         .frame(height: StatusPillMetrics.height)
         .background(.ultraThinMaterial, in: Capsule())
-        .accessibilityLabel(isRunning ? (isSession ? "Recording a session" : "Listening, not in a session") : "Not detecting")
+        .accessibilityLabel(accessibilityText)
+    }
+
+    private var accessibilityText: String {
+        if isDemo { return "Demo mode, audio from a file" }
+        guard isRunning else { return "Not detecting" }
+        return isSession ? "Recording a session" : "Listening, not in a session"
+    }
+}
+
+/// What tapping the Demo badge opens: what a demo is, and the way out of it.
+/// Deliberately shorter than `MicStatusExplainer`'s demo case — that one has to
+/// explain why the *microphone* pill looks the way it does during a demo, while
+/// this one is opened by a badge that already says "Demo".
+private struct DemoExitPopover: View {
+    let audio: AudioEngineController
+    let onEndDemo: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Demo mode").font(.subheadline.weight(.semibold))
+            Text("Audio is coming from \(audio.demoFileName ?? "a recording") instead of the microphone, through the same detection pipeline as a live capture. Recording is disabled.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Button(role: .destructive, action: onEndDemo) {
+                Label("End demo", systemImage: "stop.circle")
+                    .font(.caption)
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .padding(.top, 2)
+
+            Text("Returns to the microphone. It does not start detecting.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(12)
+        .frame(width: 240, alignment: .leading)
     }
 }
 
@@ -259,6 +334,9 @@ private let micStatusRequiredRate: Double = 384_000
 
 struct MicStatusPill: View {
     let audio: AudioEngineController
+    /// Leaves demo mode. Handed down to the explainer, which is where the only
+    /// user-facing way out of a demo lives — see `MicStatusExplainer`.
+    let onEndDemo: () -> Void
     @State private var showExplainer = false
 
     var body: some View {
@@ -270,7 +348,7 @@ struct MicStatusPill: View {
         Button { showExplainer = true } label: { MicStatusPillContent(audio: audio) }
             .buttonStyle(.plain)
             .popover(isPresented: $showExplainer) {
-                MicStatusExplainer(audio: audio)
+                MicStatusExplainer(audio: audio, onEndDemo: onEndDemo)
                     .presentationCompactAdaptation(.popover)
             }
     }
@@ -381,8 +459,20 @@ private struct MicStatusPillContent: View {
     }
 }
 
+/// **Also the way out of demo mode**, which is why it takes `onEndDemo`.
+/// Demo used to be started and ended entirely inside the Debug sheet, so the
+/// message below could just point there — and once demo moved to Info & Tour
+/// (2026-08-31) that instruction named a sheet most users can't see, stranding
+/// them in a mode which, by design, never ends on its own.
+///
+/// The pill is the right home for the exit: it is the thing on screen that says
+/// "Demo", so it is what someone taps to ask what that means and how to stop it.
+/// The Debug sheet keeps its own End Demo button — two doors into one action,
+/// which is fine; the failure mode being avoided is zero doors.
 private struct MicStatusExplainer: View {
     let audio: AudioEngineController
+    let onEndDemo: () -> Void
+    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         let d = audio.diagnostics
@@ -398,8 +488,8 @@ private struct MicStatusExplainer: View {
             title = "Demo mode"
             let name = audio.demoFileName ?? "a recording"
             message = rateKnown
-                ? "The microphone is not in use. Audio is coming from \(name), played at \(Int((rate / 1000).rounded())) kHz through the same detection pipeline as a live capture. Recording is disabled. End the demo from the Debug menu."
-                : "The microphone is not in use. Audio will come from \(name) instead, through the same detection pipeline as a live capture. Recording is disabled. End the demo from the Debug menu."
+                ? "The microphone is not in use. Audio is coming from \(name), played at \(Int((rate / 1000).rounded())) kHz through the same detection pipeline as a live capture. Recording is disabled."
+                : "The microphone is not in use. Audio will come from \(name) instead, through the same detection pipeline as a live capture. Recording is disabled."
         } else if !connected {
             title = "No ultrasonic microphone"
             message = "Only the built-in mic is available, which hears up to about 24 kHz — most bat calls are far above that. Plug in an ultrasonic USB microphone (such as the Griff) to detect bats."
@@ -424,6 +514,28 @@ private struct MicStatusExplainer: View {
                 // wrapping boundary (a compact popover otherwise sizes to the text's
                 // intrinsic single-line width).
                 .fixedSize(horizontal: false, vertical: true)
+
+            if audio.isDemoMode {
+                // Dismissed first, then the teardown: ending a demo hands the
+                // pipeline back to the microphone and churns `audio.diagnostics`,
+                // and a popover still open over an anchor that is relaying out
+                // can lose the interaction mid-tap.
+                Button(role: .destructive) {
+                    dismiss()
+                    onEndDemo()
+                } label: {
+                    Label("End demo", systemImage: "stop.circle")
+                        .font(.caption)
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .padding(.top, 2)
+
+                Text("Returns to the microphone. It does not start detecting.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .padding(12)
         .frame(width: 240, alignment: .leading)

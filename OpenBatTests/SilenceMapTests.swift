@@ -103,11 +103,60 @@ struct SilenceMapTests {
                                      totalSamples: 100_000, sampleRate: 384_000,
                                      thresholdAboveFloorDB: 12, minFreqHz: 0, padSeconds: 0)
         #expect(map.segments.count == 1)
-        // samplesPerCol = 1000; one column of pad each side -> ~[39k, 61k).
-        #expect(map.segments[0].realStart == 39_000)
-        #expect(map.segments[0].realEnd == 61_000)
-        #expect(map.virtualTotal == 22_000)
+        // samplesPerCol = 1000, so the run itself is [40k, 60k). Padding is
+        // applied in SAMPLES now, and `minPadSeconds` (3 ms @ 384 kHz =
+        // 1152 samples) is the floor a request of 0 lands on. It used to be
+        // "at least one column", which on a long recording meant up to 146 ms
+        // a side — see SilenceMap.compute.
+        let pad = Int(SilenceMap.minPadSeconds * 384_000)
+        #expect(map.segments[0].realStart == 40_000 - pad)
+        #expect(map.segments[0].realEnd == 60_000 + pad)
+        #expect(map.virtualTotal == 20_000 + 2 * pad)
         #expect(map.realTotal == 100_000)
+    }
+
+    /// The regression guard for the padding floor: a margin asked for in
+    /// milliseconds must be that many milliseconds on a long recording as
+    /// well as a short one. Two files of very different lengths, the same
+    /// detection column count, the same request — the same margin.
+    @Test func paddingIsTheRequestedDurationRegardlessOfFileLength() {
+        // One active column in the middle of an otherwise quiet scan.
+        var peaks = [Float](repeating: -120, count: 4096)
+        peaks[2000] = 0
+        let padSeconds = 0.005
+        let sr = 384_000.0
+        for durationSeconds in [10.0, 600.0] {
+            let total = Int(sr * durationSeconds)
+            let map = SilenceMap.compute(colPeak: peaks, totalSamples: total, sampleRate: sr,
+                                         thresholdAboveFloorDB: 12, padSeconds: padSeconds)
+            #expect(map.segments.count == 1)
+            let samplesPerCol = Double(total) / 4096
+            let runStart = Int((2000.0 * samplesPerCol).rounded())
+            let runEnd = Int((2001.0 * samplesPerCol).rounded())
+            #expect(map.segments[0].realStart == runStart - Int(padSeconds * sr))
+            #expect(map.segments[0].realEnd == runEnd + Int(padSeconds * sr))
+        }
+    }
+
+    /// The threshold has to account for how much the background's own level
+    /// wanders, not just where its floor sits: on a real recording the column
+    /// peaks span ~9 dB between the 20th and 80th percentiles, so a fixed
+    /// 12 dB over the floor landed inside the top decile of ordinary
+    /// background and called it activity.
+    @Test func thresholdRisesWithABackgroundThatWanders() {
+        // Same floor, same margin — one background is steady, the other
+        // varies over 10 dB.
+        var steady = [Float](repeating: -100, count: 1000)
+        var wandering = [Float](repeating: -100, count: 1000)
+        for i in 0..<1000 where i % 2 == 0 { wandering[i] = -90 }
+        // A handful of real events in each, well clear of both.
+        for i in 400..<410 { steady[i] = -20; wandering[i] = -20 }
+        let steadyEnter = SilenceMap.thresholdDB(colPeak: steady, aboveFloorDB: 12)
+        let wanderingEnter = SilenceMap.thresholdDB(colPeak: wandering, aboveFloorDB: 12)
+        #expect(wanderingEnter > steadyEnter)
+        // ...but never by more than the cap, so a busy recording can't have
+        // its threshold pushed above the calls themselves.
+        #expect(wanderingEnter - steadyEnter <= SilenceMap.maxSpreadAllowanceDB + 0.001)
     }
 
     /// A recording with nothing loud enough to hide-silence against must
@@ -183,9 +232,11 @@ struct SilenceMapTests {
                                      totalSamples: totalSamples, sampleRate: 384_000,
                                      thresholdAboveFloorDB: 12, minFreqHz: 0, padSeconds: 0)
         #expect(map.segments.count == 1)
-        // The call, padded one column each side — not the tick at column 10.
-        #expect(map.segments[0].realStart == 49 * 384)
-        #expect(map.segments[0].realEnd == 61 * 384)
+        // The call at columns 50..<60 — not the tick at column 10. Padding
+        // is the `minPadSeconds` floor, in samples.
+        let pad = Int(SilenceMap.minPadSeconds * 384_000)
+        #expect(map.segments[0].realStart == 50 * 384 - pad)
+        #expect(map.segments[0].realEnd == 60 * 384 + pad)
     }
 
     /// The regression guard for the threshold's old top anchor: it
@@ -207,8 +258,9 @@ struct SilenceMapTests {
                                      thresholdAboveFloorDB: 12, minFreqHz: 0, padSeconds: 0)
         // Both survive: the faint calls are kept, not swamped by the knock.
         #expect(map.segments.count == 2)
-        #expect(map.segments[0].realStart == 19 * 384)
-        #expect(map.segments[0].realEnd == 41 * 384)
+        let pad = Int(SilenceMap.minPadSeconds * 384_000)
+        #expect(map.segments[0].realStart == 20 * 384 - pad)
+        #expect(map.segments[0].realEnd == 40 * 384 + pad)
     }
 
     /// "Found nothing" and "kept everything" produce the same single

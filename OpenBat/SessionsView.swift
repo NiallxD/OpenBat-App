@@ -50,6 +50,37 @@ struct SessionsView: View {
     /// Sessions queued by a swipe-delete, pending user confirmation (deleting a
     /// session irreversibly removes all its IDs and thumbnails).
     @State private var sessionsPendingDelete: [RecordingSession] = []
+
+    // MARK: Multi-select
+    //
+    // One list holds two kinds of row — sessions grouped by day, and the
+    // recordings belonging to no session — so a selection has to say WHICH,
+    // not just which id. Both are UUID-identified and a raw `Set<UUID>` would
+    // work by luck; naming the kind means a delete can never reach for the
+    // wrong collection.
+    private enum Selected: Hashable {
+        case session(UUID)
+        case recording(UUID)
+    }
+    @State private var selection = Set<Selected>()
+    @State private var editMode: EditMode = .inactive
+    /// What a confirmed bulk delete will remove. Held rather than acted on
+    /// immediately because it is irreversible in both directions: a session
+    /// takes every ID and thumbnail logged in it, a recording takes its WAV.
+    @State private var bulkPendingDelete: BulkDelete?
+    private struct BulkDelete {
+        var sessions: [RecordingSession]
+        var recordings: [Recording]
+        var isEmpty: Bool { sessions.isEmpty && recordings.isEmpty }
+    }
+
+    /// Recordings belonging to no session, newest first. A computed property
+    /// so the toolbar can resolve a selection without the list body having to
+    /// hand it down; the body still evaluates it once into a local, which is
+    /// what the note in `sessionsContent` is about.
+    private var looseRecordingsSorted: [Recording] {
+        store.listeningRecordings.sorted { $0.date > $1.date }
+    }
     var body: some View {
         sessionsContent
         .navigationTitle("Sessions")
@@ -94,6 +125,28 @@ struct SessionsView: View {
         } message: {
             Text("Every ID and recording logged in this session will be removed. This can't be undone.")
         }
+        .confirmationDialog("Delete the selected items?",
+                            isPresented: Binding(
+                                get: { !(bulkPendingDelete?.isEmpty ?? true) },
+                                set: { if !$0 { bulkPendingDelete = nil } }
+                            ),
+                            titleVisibility: .visible) {
+            Button("Delete", role: .destructive) {
+                guard let pending = bulkPendingDelete else { return }
+                pending.sessions.forEach(store.deleteSession)
+                // The batch overload, not one call per recording: deleting
+                // singly rewrites the store's index each time.
+                if !pending.recordings.isEmpty { store.delete(pending.recordings) }
+                bulkPendingDelete = nil
+                withAnimation {
+                    selection.removeAll()
+                    editMode = .inactive
+                }
+            }
+            Button("Cancel", role: .cancel) { bulkPendingDelete = nil }
+        } message: {
+            Text(bulkPendingDelete.map(bulkDeleteMessage) ?? "")
+        }
     }
 
     @ToolbarContentBuilder private var toolbarContent: some ToolbarContent {
@@ -101,24 +154,107 @@ struct SessionsView: View {
         // through the listening modes without a live bat, since WavPlayerView
         // drives the real DSP from the file at its native rate. See
         // RecordingImporter. Came here when the Playback tab was folded in.
+        //
+        // Hidden while selecting: importing during a multi-select would land a
+        // new row in a list the user is part-way through choosing from.
+        if editMode == .inactive {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    showImporter = true
+                } label: {
+                    if isImporting {
+                        ProgressView()
+                    } else {
+                        Image(systemName: "plus")
+                    }
+                }
+                .disabled(isImporting)
+                .accessibilityLabel("Import a recording")
+            }
+        }
+        // Not `EditButton()`: leaving selection has to drop the selection with
+        // it, or the next Select starts with rows already ticked from last
+        // time and a Delete is one tap from removing them.
         ToolbarItem(placement: .topBarTrailing) {
-            Button {
-                showImporter = true
-            } label: {
-                if isImporting {
-                    ProgressView()
-                } else {
-                    Image(systemName: "plus")
+            Button(editMode == .inactive ? "Select" : "Done") {
+                withAnimation {
+                    if editMode == .inactive {
+                        editMode = .active
+                    } else {
+                        editMode = .inactive
+                        selection.removeAll()
+                    }
                 }
             }
-            .disabled(isImporting)
-            .accessibilityLabel("Import a recording")
+            .disabled(store.sessions.isEmpty && looseRecordingsSorted.isEmpty)
+        }
+        if editMode == .active {
+            ToolbarItemGroup(placement: .bottomBar) {
+                Button(allSelected ? "Deselect All" : "Select All") {
+                    if allSelected { selection.removeAll() } else { selectAll() }
+                }
+                Spacer()
+                Text(selection.isEmpty
+                     ? "Nothing selected"
+                     : "\(selection.count) selected")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button(role: .destructive) {
+                    bulkPendingDelete = resolveSelection()
+                } label: {
+                    Text("Delete")
+                }
+                .disabled(selection.isEmpty)
+            }
         }
         // No unclassified-recordings filter here (Niall, 2026-08-16). This screen
         // is a list of outings, not of classifications; the filter belongs where
         // the recordings are, which is inside a session — SessionDetailView carries
         // it. Nothing on this screen reads `display.showNoID` at all now.
 
+    }
+
+    // MARK: Selection
+
+    private var allSelectableCount: Int {
+        store.sessions.count + looseRecordingsSorted.count
+    }
+
+    private var allSelected: Bool {
+        !selection.isEmpty && selection.count == allSelectableCount
+    }
+
+    private func selectAll() {
+        selection = Set(store.sessions.map { Selected.session($0.id) })
+            .union(looseRecordingsSorted.map { Selected.recording($0.id) })
+    }
+
+    /// Turns the selection back into the objects to delete. Anything that has
+    /// gone since it was selected (a sync, an upload sweep) simply isn't
+    /// found, rather than being deleted by index into a list that has moved.
+    private func resolveSelection() -> BulkDelete {
+        var sessionIDs = Set<UUID>()
+        var recordingIDs = Set<UUID>()
+        for item in selection {
+            switch item {
+            case .session(let id): sessionIDs.insert(id)
+            case .recording(let id): recordingIDs.insert(id)
+            }
+        }
+        return BulkDelete(sessions: store.sessions.filter { sessionIDs.contains($0.id) },
+                          recordings: looseRecordingsSorted.filter { recordingIDs.contains($0.id) })
+    }
+
+    /// Spelled out per kind, because the two costs are different and the
+    /// difference matters: a session takes every ID and thumbnail logged in
+    /// it, a loose recording takes its audio.
+    private func bulkDeleteMessage(_ pending: BulkDelete) -> String {
+        let s = pending.sessions.count, r = pending.recordings.count
+        var parts: [String] = []
+        if s > 0 { parts.append("\(s) session\(s == 1 ? "" : "s"), with every ID and recording logged in \(s == 1 ? "it" : "them")") }
+        if r > 0 { parts.append("\(r) recording\(r == 1 ? "" : "s")") }
+        return "This removes " + parts.joined(separator: ", and ") + ". It can't be undone."
     }
 
     /// One list: sessions by day, then whatever recordings belong to no session.
@@ -149,7 +285,7 @@ struct SessionsView: View {
                 description: Text("Tap Start to begin detecting. Every outing is logged here automatically.")
             )
         } else {
-            List {
+            List(selection: $selection) {
                 ForEach(groupSessionsByDay(store.sessions), id: \.key) { group in
                     Section(group.title) {
                         ForEach(group.sessions) { session in
@@ -159,6 +295,7 @@ struct SessionsView: View {
                             } label: {
                                 SessionRow(session: session, store: store)
                             }
+                            .tag(Selected.session(session.id))
                         }
                         .onDelete { offsets in
                             sessionsPendingDelete = offsets.map { group.sessions[$0] }
@@ -174,6 +311,7 @@ struct SessionsView: View {
                             } label: {
                                 RecordingRow(recording: recording, store: store, consent: consent)
                             }
+                            .tag(Selected.recording(recording.id))
                         }
                         .onDelete { offsets in offsets.map { looseRecordings[$0] }.forEach(store.delete) }
                     } header: {
@@ -184,6 +322,7 @@ struct SessionsView: View {
                 }
             }
             .listStyle(.insetGrouped)
+            .environment(\.editMode, $editMode)
         }
     }
 

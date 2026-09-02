@@ -27,8 +27,56 @@ nonisolated final class HeterodyneProcessor: @unchecked Sendable {
 
     private let ctrlLock = NSLock()
     private var _loFrequency: Double = 40_000
-    private var _gain: Float = 6
+    /// Was 6, which was 15 dB too hot (Niall, 2026-09-01, listening on device
+    /// at half volume). The number in isolation looked reasonable; what it
+    /// misses is that everything here then passes through the output stage's
+    /// fixed ×4 makeup (`ListenOutputStage`), so 6 was really 24× and a
+    /// heterodyne output of 0.03 already reached the soft clipper. Measured off
+    /// a heterodyne-only stretch at the old default, 0.78% of output samples
+    /// were pinned at full scale.
+    ///
+    /// Not persisted anywhere — this is a live-only knob (the tuning overlay's
+    /// "Output gain"), so it returns to this value every launch and changing it
+    /// here is the whole change.
+    private var _gain: Float = 1
     private var _bandLowFraction: Double = 0   // fraction of Nyquist
+    private var _denoiseMode: SnippetDenoiseMode = .off
+
+    /// How much background the LIVE channel keeps — same three choices, and the
+    /// same machinery, as the slow-replay path. Off by default here and not
+    /// there: this is the channel a listener uses to notice that a bat is
+    /// around at all, and Scrub deliberately produces silence whenever nothing
+    /// clears the gate.
+    var denoiseMode: SnippetDenoiseMode {
+        get { ctrlLock.lock(); defer { ctrlLock.unlock() }; return _denoiseMode }
+        set {
+            ctrlLock.lock(); _denoiseMode = newValue; ctrlLock.unlock()
+            // **Requested, not performed.** The delay line and the running
+            // noise estimate belong to whatever was playing before the switch
+            // and have to be cleared — but this setter runs on the main thread
+            // while `process` may be inside the denoiser on the capture thread,
+            // and `resetStreaming` rewrites the very buffers it is reading. The
+            // capture thread picks this up at a frame boundary instead.
+            denoiserNeedsReset.store(true, ordering: .releasing)
+        }
+    }
+
+    /// Set by `denoiseMode`'s setter, consumed by `process` — see there.
+    private let denoiserNeedsReset = Atomic<Bool>(false)
+
+    /// Streaming, because this is a live channel with no end — the noise is
+    /// tracked as it arrives rather than measured up front.
+    private let denoiser = SpectralDenoiser(maxOfflineSamples: 0)
+    /// Private copy of the incoming buffer, so cleaning what is HEARD cannot
+    /// reach what is measured, detected or recorded. Sized once, well past any
+    /// plausible capture buffer; `process` falls back to the raw input rather
+    /// than growing it on the realtime thread.
+    ///
+    /// Manually managed for the same reason `ring` is, and not merely for
+    /// symmetry: a pointer taken from a Swift `Array` is only valid inside the
+    /// `withUnsafeMutableBufferPointer` call that produced it, so holding one
+    /// across buffers would be undefined behaviour on the realtime thread.
+    private let cleanScratch: UnsafeMutableBufferPointer<Float>
     private var _bandHighFraction: Double = 1
 
     /// Restrict heterodyne listening to a frequency band (fractions of Nyquist):
@@ -101,14 +149,27 @@ nonisolated final class HeterodyneProcessor: @unchecked Sendable {
     // each other. Manually managed memory (not a Swift Array): both realtime
     // threads touch elements concurrently, which Array's exclusivity/CoW rules
     // don't permit.
-    private let ring: UnsafeMutableBufferPointer<Float>  // ~0.5 s at 48 kHz
+    /// ~1 s at 48 kHz. Was 0.5 s, with a 60 ms standing queue and a 250 ms
+    /// runaway limit — a third of the slack the time-expansion path has, on
+    /// the mode whose producer does eight times as much work per real second
+    /// (it feeds the file at its native 384 kHz rather than at a slowed
+    /// 48 kHz). That asymmetry is exactly why file playback stuttered badly
+    /// in heterodyne and only occasionally in time expansion: the same
+    /// scheduling hiccup underran one and was absorbed by the other
+    /// (Niall, 2026-09-01).
+    private let ring: UnsafeMutableBufferPointer<Float>
 
     init() {
-        ring = .allocate(capacity: 24_000)
+        ring = .allocate(capacity: 48_000)
         ring.initialize(repeating: 0)
+        cleanScratch = .allocate(capacity: 1 << 15)
+        cleanScratch.initialize(repeating: 0)
     }
 
-    deinit { ring.deallocate() }
+    deinit {
+        ring.deallocate()
+        cleanScratch.deallocate()
+    }
 
     private let writeIndexA = Atomic<Int>(0)
     private let readIndexA = Atomic<Int>(0)
@@ -117,8 +178,8 @@ nonisolated final class HeterodyneProcessor: @unchecked Sendable {
     // so the queue slowly drifts. The consumer reads at a slightly varying
     // fractional rate (linear interpolation) to steer the queue toward
     // `softTarget` — inaudible. `hardMax` is a runaway safety net.
-    private var softTarget = 2_880 // ~60 ms at 48 kHz
-    private var hardMax = 12_000   // ~250 ms
+    private var softTarget = 5_760 // ~120 ms at 48 kHz
+    private var hardMax = 24_000   // ~500 ms
 
     /// Samples fed into the ring but not yet rendered to the speaker — the
     /// standing `softTarget` (~60 ms) plus whatever drift correction has
@@ -162,8 +223,12 @@ nonisolated final class HeterodyneProcessor: @unchecked Sendable {
         readFrac = 0
         gateOpenA.store(false, ordering: .relaxed)
         gateLevel = 0
-        softTarget = Int(outputSampleRate * 0.06)
-        hardMax = Int(outputSampleRate * 0.25)
+        // 120 ms of standing slack, 500 ms before a runaway is cut. The
+        // playhead already corrects for whatever is standing in here (see
+        // PlaybackDriver's `audibleLead`), so buying headroom costs nothing
+        // visible; underrunning costs a click.
+        softTarget = Int(outputSampleRate * 0.12)
+        hardMax = Int(outputSampleRate * 0.5)
     }
 
     /// Rebuild the input band-limit filters for the given band (fractions of
@@ -194,6 +259,30 @@ nonisolated final class HeterodyneProcessor: @unchecked Sendable {
         guard let channel = buffer.floatChannelData?[0] else { return }
         let n = Int(buffer.frameLength)
         guard n > 0 else { return }
+
+        // Cleaned BEFORE downconversion, into a private copy.
+        //
+        // Before, because that is the only place the separation is easy: up
+        // here a call occupies a narrow band and the hiss occupies everything,
+        // whereas after mixing down they are both spread across the same few
+        // audible kHz. Into a copy, because this same buffer goes on to the
+        // spectrogram, the pulse detector and the recorder — what a listener
+        // hears may be cleaned up, but what the app measures and saves must
+        // stay exactly what the microphone delivered.
+        let source: UnsafeMutablePointer<Float>
+        let mode = denoiseMode
+        // Between buffers, never during one — see `denoiseMode`'s setter.
+        if denoiserNeedsReset.exchange(false, ordering: .acquiringAndReleasing) {
+            denoiser.resetStreaming()
+        }
+        if mode != .off, n <= cleanScratch.count {
+            let p = cleanScratch.baseAddress!
+            p.update(from: channel, count: n)
+            denoiser.denoiseStreaming(p, count: n, strength: mode.strength)
+            source = p
+        } else {
+            source = channel
+        }
 
         let lo = loFrequency
         let g = gain
@@ -228,7 +317,7 @@ nonisolated final class HeterodyneProcessor: @unchecked Sendable {
 
         for i in 0..<n {
             // Band-limit the input so only in-band ultrasound is heterodyned.
-            var x = channel[i]
+            var x = source[i]
             if applyHP { x = bandHPb.process(bandHPa.process(x)) }
             if applyLP { x = bandLPb.process(bandLPa.process(x)) }
 

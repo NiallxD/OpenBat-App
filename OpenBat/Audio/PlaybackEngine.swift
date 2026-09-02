@@ -5,10 +5,14 @@
 //  Plays back a saved Recording WAV through the SAME listening DSPs the live
 //  detector uses (HeterodyneProcessor) — a raw ultrasonic
 //  WAV played straight through the speaker is inaudible (and gets lowpassed by the
-//  hardware's DAC anyway), same reason live listening needs downconversion. Also
-//  feeds a SpectrogramProcessor so PlaybackView can show the SAME live-style
-//  scrolling Metal spectrogram the Detector screen uses, just fed from file
-//  playback instead of the mic tap.
+//  hardware's DAC anyway), same reason live listening needs downconversion.
+//
+//  It does NOT build a spectrogram. It used to feed a full SpectrogramProcessor
+//  on the pacing thread, from when playback drew a live-style scrolling Metal
+//  view; both players now render a static, whole-file spectrogram from disk
+//  instead, so every column that processor produced was drained and discarded.
+//  All that survived of it was one number — the dominant frequency heterodyne
+//  auto-tunes to — which `TuningPeakDetector` now measures ~100x more cheaply.
 //
 //  Split into two pieces, mirroring AudioEngineController's own split between a
 //  @MainActor wrapper and the nonisolated, audio-thread-safe processors it owns:
@@ -78,19 +82,97 @@ nonisolated struct PlayPlan: Sendable {
 nonisolated final class PlaybackDriver: @unchecked Sendable {
     private let heterodyne: HeterodyneProcessor
     private let timeExpansion: TimeExpansionProcessor
-    private let spectrogramProcessor: SpectrogramProcessor
+    /// The whole of what playback needs a spectrogram for — see
+    /// `TuningPeakDetector`, which replaced running the live Detector's full
+    /// column pipeline on this thread to extract a single frequency.
+    private let tuner = TuningPeakDetector()
 
     nonisolated(unsafe) var mode: ListenMode = .heterodyne
 
+    /// How much background the audio keeps on its way to the ear — see
+    /// `SpectralDenoiser`. The same three choices as the live paths, and for
+    /// the same reason: slowing a recording down stretches its background along
+    /// with the calls, and a 16× hiss is a much bigger part of what you hear
+    /// than the original ever was.
+    ///
+    /// **The picture is deliberately untouched.** This sits between the file
+    /// and the listening processors only, so the static spectrogram, the
+    /// selection analysis and the exported audio all still come from the
+    /// original samples. What is being cleaned up is the listening, not the
+    /// evidence.
+    nonisolated(unsafe) var denoiseMode: SnippetDenoiseMode = .off
+
+    /// Streaming rather than the snippet path's offline pass: playback arrives
+    /// a block at a time and can start anywhere in a file, so there is no
+    /// finite buffer to measure first. Scrub works here too — it needs two
+    /// frames of lookahead, not the whole recording.
+    private let denoiser = SpectralDenoiser(maxOfflineSamples: 0)
+
+    /// The slice of the recording waiting to be measured, and whether a
+    /// measurement has been taken yet — both guarded, because `seedNoise` is
+    /// called from a background task while the pacing thread may be running.
+    private let seedLock = NSLock()
+    private var pendingSeed: [Float]?
+    /// Whether the background has been measured yet. When it has, a seek keeps
+    /// that measurement instead of starting from nothing — the playhead moved,
+    /// the room did not.
+    private var noiseSeeded = false
+
+    /// Hand the driver a slice of the recording so playback starts already
+    /// filtering — see `SpectralDenoiser.seedStreamingNoise`. Called once when
+    /// a recording is opened, off the main thread.
+    ///
+    /// **Stored, not applied.** This used to reach straight into the denoiser,
+    /// which is documented as single-threaded and holds one set of FFT scratch
+    /// buffers — and it runs from a detached task at `.utility` while the
+    /// pacing thread may already be inside `denoiseStreaming` on the very same
+    /// instance. Both call `analyze()`, so both write `realp`/`imagp`/`frame`;
+    /// seeding also rewrites the noise estimate mid-stream. Opening a
+    /// recording and pressing play straight away is the ordinary case, not an
+    /// unlucky one. The pacing thread now applies this itself, where it is the
+    /// only writer.
+    func seedNoise(_ samples: [Float]) {
+        guard !samples.isEmpty else { return }
+        seedLock.lock()
+        pendingSeed = samples
+        seedLock.unlock()
+    }
+
+    /// Applies a stored seed, if one has arrived since the last run. Called on
+    /// the pacing thread only.
+    private func applyPendingSeedOnPacingThread() -> Bool {
+        seedLock.lock()
+        let samples = pendingSeed
+        pendingSeed = nil
+        let alreadySeeded = noiseSeeded
+        seedLock.unlock()
+        guard let samples else { return alreadySeeded }
+        samples.withUnsafeBufferPointer { p in
+            denoiser.seedStreamingNoise(p.baseAddress!, count: p.count)
+        }
+        seedLock.lock()
+        noiseSeeded = true
+        seedLock.unlock()
+        return true
+    }
+
+    /// Which pacing run is current. Bumped by every `start()`, and reported
+    /// back with each callback below so the main actor can tell a callback
+    /// from the run it is watching apart from one left over from a run it has
+    /// already replaced — `stop()` waits for the thread to exit, but a
+    /// callback that thread had ALREADY handed to the main queue is still in
+    /// flight, and applying it lands an old position on top of a new one.
+    private(set) var runID = 0
+
     /// Called off the main thread as playback advances; the caller hops to main.
-    var onProgress: ((Double) -> Void)?
+    var onProgress: ((Double, Int) -> Void)?
     /// Called off the main thread once the file's last sample has been fed.
-    var onFinished: (() -> Void)?
+    var onFinished: ((Int) -> Void)?
     /// Called off the main thread if the pacing thread can't open `url` at all —
     /// distinct from `onFinished` so the caller can tell "played to the end" apart
     /// from "never actually started" and surface the latter as an error instead of
     /// silently sitting at isPlaying == true with no progress.
-    var onOpenFailed: (() -> Void)?
+    var onOpenFailed: ((Int) -> Void)?
 
     private final class StopBox { var stopped = false }
     private var stopBox = StopBox()
@@ -116,11 +198,48 @@ nonisolated final class PlaybackDriver: @unchecked Sendable {
     /// Matches AudioEngineController.audibleOffsetHz's default.
     private static let audibleOffsetHz: Double = 1_500
 
-    init(heterodyne: HeterodyneProcessor,
-        timeExpansion: TimeExpansionProcessor, spectrogramProcessor: SpectrogramProcessor) {
+    /// How often the oscillator is re-tuned, in seconds of real time.
+    ///
+    /// **The slew factor below was tuned against the live Detector's 15 Hz
+    /// stats timer, and this thread was applying it once per fed block.** At
+    /// the old block rate that was ~500 times a second, so instead of easing
+    /// toward a call's frequency over ~200 ms the oscillator snapped to
+    /// whatever the last 1.3 ms of audio happened to peak at, every 2 ms.
+    /// That is heard as the listening pitch warbling — a jitter with no CPU
+    /// cause at all, which is why it survived every previous attempt to fix
+    /// the stutter by making things faster (Niall, 2026-09-01).
+    private static let tuneInterval: Double = 1.0 / 15.0
+    /// How long the squelch stays open after the last detection. Matches
+    /// AudioEngineController.gateHoldDuration, which is 8 ticks at 15 Hz;
+    /// expressed in seconds here because detection no longer runs on the
+    /// tuning tick — see the pacing loop.
+    private static let gateHoldSeconds: Double = 8.0 / 15.0
+    /// Same slew AudioEngineController.updateAutoTune uses, now at the same
+    /// cadence it was chosen for.
+    private static let tuneSlew: Double = 0.3
+
+    /// How much audio one feed hands the listening processors, in seconds of
+    /// PLAYBACK time (so it is the same amount of listening at any speed).
+    ///
+    /// The loop used to feed whatever the wall clock said was due after a
+    /// 2 ms sleep — ~500 wake-ups a second, each allocating an
+    /// `AVAudioPCMBuffer`, re-running auto-tune and posting a position to the
+    /// main actor. 20 ms lumps cut all three by a factor of ten and sit
+    /// comfortably inside the output ring's standing queue.
+    private static let blockSeconds: Double = 0.02
+
+    /// How often the play position is published to the main actor.
+    ///
+    /// It used to be published once per fed block, i.e. ~500 times a second.
+    /// Every publish is a main-actor hop that invalidates the playhead, the
+    /// minimap and the elapsed readout, and that flood is most of what made
+    /// the spectrogram scroll stutter. Three separate comments in the player
+    /// describe this as "~20-25 Hz"; it never was (found 2026-09-01).
+    private static let progressPublishInterval: Double = 1.0 / 30.0
+
+    init(heterodyne: HeterodyneProcessor, timeExpansion: TimeExpansionProcessor) {
         self.heterodyne = heterodyne
         self.timeExpansion = timeExpansion
-        self.spectrogramProcessor = spectrogramProcessor
     }
 
     // MARK: Output engine
@@ -259,13 +378,14 @@ nonisolated final class PlaybackDriver: @unchecked Sendable {
     /// `mode` is captured once per `start()` call, not re-read per tick —
     /// PlaybackEngine restarts playback from the current position on any mode
     /// or speed change specifically so this pacing rate can never go stale
-    /// mid-run. Feeds every buffer to `spectrogramProcessor` (display) and to
-    /// heterodyne/timeExpansion regardless of which `mode` currently selects
-    /// for audible output (keeps heterodyne warm so switching into it is
-    /// instant); `.off` still advances the spectrogram, just renders silence.
+    /// mid-run. Feeds every buffer to heterodyne regardless of which `mode`
+    /// currently selects for audible output (keeps it warm so switching into
+    /// it is instant); `.off` still walks the file, just renders silence.
     func start(url: URL, sampleRate: Double, totalSamples: Int,
                fromVirtual: Int, paceRate: Double, regions: [Range<Int>]) {
         stop()
+        runID += 1
+        let myRun = runID
         let box = StopBox()
         stopBox = box
         let semaphore = DispatchSemaphore(value: 0)
@@ -273,7 +393,10 @@ nonisolated final class PlaybackDriver: @unchecked Sendable {
         let hetero = heterodyne
         let timeExp = timeExpansion
         let paceMode = mode
-        let spec = spectrogramProcessor
+        let peakTuner = tuner
+        let cleaner = denoiser
+        let cleaning = denoiseMode
+        let applySeed = { [weak self] in self?.applyPendingSeedOnPacingThread() ?? false }
         let onProgress = onProgress
         let onFinished = onFinished
         let onOpenFailed = onOpenFailed
@@ -288,19 +411,31 @@ nonisolated final class PlaybackDriver: @unchecked Sendable {
         // call was heard just AFTER it had passed under the playhead, with
         // what looked like a silent gap in front of it.
         let drainRate = outputSampleRate > 0 ? outputSampleRate : sampleRate
+        // Algorithmic delay the cleanup adds ahead of the listening
+        // processors, in file samples. Zero when it is off.
+        let denoiseLead = cleaning == .off ? 0 : SpectralDenoiser.algorithmicDelay(for: cleaning.strength)
         let session = AVAudioSession.sharedInstance()
         let hardwareLatency = session.outputLatency + session.ioBufferDuration
 
         let t = Thread {
             defer { semaphore.signal() }
+            // Both of these touch the denoiser's single-threaded state, so
+            // they belong here rather than on whatever thread called `start`:
+            // the previous pacing thread may still have been inside
+            // `denoiseStreaming` when it did (`stop()`'s wait is bounded, not
+            // guaranteed). Every start is a seek as far as the denoiser is
+            // concerned — the overlap tail belongs to wherever the playhead
+            // used to be — but the measured background does not, so it is kept.
+            let seeded = applySeed()
+            cleaner.resetStreaming(keepingNoise: seeded)
             guard let handle = try? FileHandle(forReadingFrom: url) else {
-                if !box.stopped { onOpenFailed?() }
+                if !box.stopped { onOpenFailed?(myRun) }
                 return
             }
             defer { try? handle.close() }
             guard let pcmFormat = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1)
             else {
-                if !box.stopped { onOpenFailed?() }
+                if !box.stopped { onOpenFailed?(myRun) }
                 return
             }
 
@@ -328,17 +463,42 @@ nonisolated final class PlaybackDriver: @unchecked Sendable {
             func audibleLead() -> Int {
                 let queued = queuedFrames()
                 guard queued > 0 else { return 0 }
+                // `denoiseLead` is in FILE samples already — it is a delay
+                // imposed before the listening processors, at the file's own
+                // rate — so it is added after the pace conversion rather than
+                // inside it. Small (a window, plus two hops for Scrub) but it
+                // is a real offset between what has been fed and what is
+                // audible, and leaving it out biases the playhead early by
+                // exactly that much whenever cleaning is on.
                 return Int((Double(queued) / drainRate + hardwareLatency) * paceRate)
+                     + denoiseLead
             }
-            // Monotonic guard on top of that estimate: the queue depth is a
-            // snapshot of two independently-clocked threads, so a tick where
-            // it happens to grow faster than the feed would otherwise walk the
-            // playhead backwards.
+            // The queue depth is a snapshot of two independently-clocked
+            // threads, so the raw lead wobbles by a few milliseconds from one
+            // reading to the next. Smoothing the LEAD — not the position it
+            // is subtracted from — is what keeps the playhead moving at a
+            // steady rate: the position then advances with the feed and the
+            // correction eases in behind it, instead of arriving as a step.
+            //
+            // Clamping the POSITION to its own maximum (which is what this
+            // used to do, and all it did) stopped it running backwards but
+            // froze it outright whenever the estimate dipped, then let it
+            // jump when the estimate recovered. The spectrogram scroll
+            // inherited that sawtooth directly — it is the second half of
+            // "the scroll is jittery", the first being the publish rate
+            // (Niall, 2026-09-01). The monotonic floor is kept underneath as
+            // a guarantee, but with the lead smoothed it rarely binds.
+            var smoothedLead = -1.0
             var lastPublished = 0
-            func publishHeard(fed: Int) {
-                let heard = max(fed - audibleLead(), 0)
+            var lastPublishElapsed = -Double.greatestFiniteMagnitude
+            func publishHeard(fed: Int, elapsed: Double, force: Bool = false) {
+                let lead = Double(audibleLead())
+                smoothedLead = smoothedLead < 0 ? lead : smoothedLead + (lead - smoothedLead) * 0.1
+                let heard = max(fed - Int(smoothedLead), 0)
                 lastPublished = max(lastPublished, heard)
-                onProgress?(Double(lastPublished) / sampleRate)
+                guard force || elapsed - lastPublishElapsed >= Self.progressPublishInterval else { return }
+                lastPublishElapsed = elapsed
+                onProgress?(Double(lastPublished) / sampleRate, myRun)
             }
 
             var virtualFed = min(max(fromVirtual, 0), plan.virtualTotal)
@@ -390,23 +550,54 @@ nonisolated final class PlaybackDriver: @unchecked Sendable {
             let startWall = Date()
             let maxChunk = 1 << 14   // ~16k samples (~43 ms @ 384 kHz) per read
             var int16Buf = [Int16](repeating: 0, count: maxChunk)
+            // One buffer for the whole run, re-lengthened per feed, rather
+            // than a fresh allocation per feed — at the old wake-up rate that
+            // was ~500 object allocations a second on the thread that has to
+            // hand the audio path samples on time.
+            guard let buffer = AVAudioPCMBuffer(pcmFormat: pcmFormat,
+                                                frameCapacity: AVAudioFrameCount(maxChunk)),
+                  let floatCh = buffer.floatChannelData?[0]
+            else {
+                if !box.stopped { onOpenFailed?(myRun) }
+                return
+            }
+            // How many FILE samples one feed carries. Derived from the pace,
+            // so it is the same amount of LISTENING at every playback speed —
+            // 20 ms of it. See `blockSeconds`.
+            let blockFrames = max(256, min(maxChunk, Int(paceRate * Self.blockSeconds)))
             // Heterodyne auto-tune state — local to this pacing run, same as
             // `virtualFed` above, so every fresh play()/seek() restart re-tunes
             // from scratch rather than carrying over a stale target.
             var tunedFrequency: Double = 0
-            var gateHoldSamplesRemaining = 0
-            // ~530 ms, matching AudioEngineController's gateHoldDuration (8 ticks @ ~67 ms).
-            let gateHoldSamples = Int(sampleRate * 0.53)
+            /// The loudest peak seen since the last tuning tick — detection
+            /// runs every block, tuning consumes the best of them at 15 Hz.
+            var pendingPeak: Double = 0
+            var gateOpenUntil = -Double.greatestFiniteMagnitude
+            var nextTuneElapsed = 0.0
 
             while !box.stopped, virtualFed < plan.virtualTotal, regionIndex < plan.regions.count {
                 let region = plan.regions[regionIndex]
                 let elapsed = Date().timeIntervalSince(startWall)
                 let shouldHaveFed = fromVirtual + Int(elapsed * paceRate)
-                guard shouldHaveFed > virtualFed else { usleep(2_000); continue }
+                let due = shouldHaveFed - virtualFed
+                // Wait until a whole block is due rather than dribbling out
+                // whatever the clock says every 2 ms. The tail of the file is
+                // the one case that never accumulates a full block, so it is
+                // let through regardless; a region tail shorter than a block
+                // needs no special case, because `want` is clamped to the
+                // region below and the surplus is simply fed on the next pass
+                // once the read head has moved to the next region.
+                let atFileTail = virtualFed + blockFrames >= plan.virtualTotal
+                guard due > 0, due >= blockFrames || atFileTail else {
+                    // Sleep for roughly the shortfall rather than a fixed
+                    // 2 ms, so the thread wakes about once per block.
+                    let deficit = Double(max(blockFrames - due, 1))
+                    usleep(useconds_t(min(20_000, max(500, Int(deficit / paceRate * 1_000_000)))))
+                    continue
+                }
                 // Never read past the end of the region being played — the
                 // rest of it is silence that is not going to be heard.
-                let want = min(shouldHaveFed - virtualFed,
-                               min(maxChunk, region.upperBound - realCursor))
+                let want = min(min(due, maxChunk), region.upperBound - realCursor)
                 // Unreachable as written (the region is advanced the moment
                 // its cursor reaches the end, and the pace guard above already
                 // rules out a zero from the other term) — but sleep rather
@@ -421,9 +612,6 @@ nonisolated final class PlaybackDriver: @unchecked Sendable {
                         for i in 0..<n { dst[i] = src[i] }
                     }
                 }
-                guard let buffer = AVAudioPCMBuffer(pcmFormat: pcmFormat, frameCapacity: AVAudioFrameCount(n)),
-                      let floatCh = buffer.floatChannelData?[0]
-                else { break }
                 buffer.frameLength = AVAudioFrameCount(n)
                 int16Buf.withUnsafeBufferPointer { srcBuf in
                     vDSP_vflt16(srcBuf.baseAddress!, 1, floatCh, 1, vDSP_Length(n))
@@ -436,33 +624,52 @@ nonisolated final class PlaybackDriver: @unchecked Sendable {
                                            incoming: hasIncoming ? inc.baseAddress : nil)
                 }
 
-                spec.process(buffer)
-                // Nothing drains `spec`'s pending FFT columns here (unlike the live
-                // Detector screen, whose SpectrogramView.drain()s every frame to feed
-                // the Metal renderer) — WavPlayerView shows a static, whole-file
-                // spectrogram instead, so `pending` would otherwise grow forever
-                // (~6 MB/sec) for the lifetime of playback. `peakBin`/`peakLevel`
-                // (read via `spec.peakFrequency` below) are written directly inside
-                // `process()`/`makeColumn`, not sourced from `pending`, so discarding
-                // the drained columns doesn't affect auto-tune.
-                _ = spec.drain()
+                // Measured BEFORE the cleanup below, so the tuner reads the
+                // real recording rather than a filtered version of it.
+                //
+                // **Detection and tuning run at different rates on purpose,
+                // and conflating them broke both in turn.** Detection has to
+                // be dense: a bat call is 2-5 ms, so anything that samples
+                // the recording less often than that simply misses calls —
+                // running it on the 15 Hz tuning tick looked at 2% of the
+                // audio and let through about one call in sixteen. Tuning has
+                // to be sparse: its slew factor assumes a 15 Hz cadence, and
+                // running it per block made the oscillator chase each block's
+                // loudest bin instead of easing toward the call.
+                //
+                // So every block is scanned in full for the gate, and the
+                // loudest thing seen since the last tuning tick is what the
+                // oscillator eases toward.
+                //
+                // A nil means "no full window in this block", which is not
+                // the same as "nothing there": the gate is left alone rather
+                // than closed, or the short tail of a kept region would mute
+                // the start of the next one.
+                if let peak = peakTuner.strongestPeak(floatCh, count: n, sampleRate: sampleRate) {
+                    if peak > 0 {
+                        if peak > pendingPeak { pendingPeak = peak }
+                        gateOpenUntil = elapsed + Self.gateHoldSeconds
+                        hetero.setGate(true)
+                    } else if elapsed >= gateOpenUntil {
+                        hetero.setGate(false)
+                    }
+                }
+                if elapsed >= nextTuneElapsed {
+                    nextTuneElapsed = elapsed + Self.tuneInterval
+                    if pendingPeak > 0 {
+                        tunedFrequency = tunedFrequency <= 0
+                            ? pendingPeak
+                            : tunedFrequency + (pendingPeak - tunedFrequency) * Self.tuneSlew
+                        hetero.loFrequency = max(tunedFrequency - Self.audibleOffsetHz, 100)
+                        pendingPeak = 0
+                    }
+                }
 
-                // Auto-tune the heterodyne LO from this same buffer's dominant
-                // frequency — see the doc comment on `Self.audibleOffsetHz` above.
-                // Only matters while `mode == .heterodyne`, but cheap enough to
-                // skip unconditionally rather than add another mode branch.
-                let peak = spec.peakFrequency
-                if peak > 0 {
-                    tunedFrequency = tunedFrequency <= 0
-                        ? peak
-                        : tunedFrequency + (peak - tunedFrequency) * 0.3
-                    hetero.loFrequency = max(tunedFrequency - Self.audibleOffsetHz, 100)
-                    gateHoldSamplesRemaining = gateHoldSamples
-                    hetero.setGate(true)
-                } else if gateHoldSamplesRemaining > 0 {
-                    gateHoldSamplesRemaining -= n
-                } else {
-                    hetero.setGate(false)
+                // The listening processors are the only things that should
+                // hear a cleaned-up version — the picture, the measurements
+                // and the tuning above all come from the original samples.
+                if cleaning != .off {
+                    cleaner.denoiseStreaming(floatCh, count: n, strength: cleaning.strength)
                 }
 
                 hetero.process(buffer)       // kept warm regardless of `mode`, so
@@ -488,7 +695,7 @@ nonisolated final class PlaybackDriver: @unchecked Sendable {
                         loadIncoming(forRegionAfter: regionIndex)
                     }
                 }
-                if !box.stopped { publishHeard(fed: virtualFed) }
+                if !box.stopped { publishHeard(fed: virtualFed, elapsed: elapsed) }
             }
             // Everything is fed but not everything has been heard yet: let the
             // ring drain before declaring the file finished, or the playhead
@@ -500,10 +707,14 @@ nonisolated final class PlaybackDriver: @unchecked Sendable {
             // exactly zero, which never arrives.
             let drainDeadline = Date().addingTimeInterval(2)
             while !box.stopped, queuedFrames() > 64, Date() < drainDeadline {
-                publishHeard(fed: plan.virtualTotal)
+                // Already a 20 ms cadence, so this publishes unthrottled —
+                // the ring emptying is exactly when the playhead needs to
+                // keep moving to reach the end cleanly.
+                publishHeard(fed: plan.virtualTotal,
+                             elapsed: Date().timeIntervalSince(startWall), force: true)
                 usleep(20_000)
             }
-            if !box.stopped { onFinished?() }
+            if !box.stopped { onFinished?(myRun) }
         }
         t.qualityOfService = .userInitiated
         t.name = "bat.PlaybackDriver"
@@ -580,6 +791,17 @@ nonisolated final class PlaybackDriver: @unchecked Sendable {
 final class PlaybackEngine {
 
     private(set) var isPlaying = false
+    /// True once a play-through has run to the end and stopped, cleared by
+    /// anything that moves the playhead off it.
+    ///
+    /// The transport button used to ask `currentTimeSeconds >= durationSeconds`
+    /// instead. That reads a field the pacing thread republishes 30 times a
+    /// second, and `@Observable` tracks dependencies per body evaluation — so
+    /// the whole controls row (share menu included) re-evaluated at the
+    /// progress rate, which is precisely the isolation `PlaybackControlsView`'s
+    /// own doc comment says it maintains. A flag written twice per playthrough
+    /// answers the same question without the dependency.
+    private(set) var didFinish = false
     private(set) var currentTimeSeconds: Double = 0
     private(set) var durationSeconds: Double = 0
     /// Which Recording is loaded — nil when nothing's been picked yet.
@@ -588,6 +810,21 @@ final class PlaybackEngine {
     /// out of the file — surfaced by PlaybackView instead of leaving play() a
     /// silent no-op (see the WavHeader/FileHandle guards below).
     private(set) var loadError: String?
+
+    /// How much background the playback keeps — see `PlaybackDriver.denoiseMode`,
+    /// which explains why the spectrogram and the call measurements deliberately
+    /// don't change with it.
+    ///
+    /// Restarts playback like a mode change does, for the same reason: the
+    /// setting is snapshotted for the life of one pacing run, so a mid-run
+    /// change would otherwise not be heard until the next seek.
+    var denoiseMode: SnippetDenoiseMode = .off {
+        didSet {
+            guard oldValue != denoiseMode else { return }
+            driver.denoiseMode = denoiseMode
+            restartIfPlaying()
+        }
+    }
 
     var listenMode: ListenMode = .heterodyne {
         didSet {
@@ -649,7 +886,6 @@ final class PlaybackEngine {
 
     let heterodyne = HeterodyneProcessor()
     let timeExpansion = TimeExpansionProcessor()
-    let spectrogramProcessor = SpectrogramProcessor()
 
     // Not part of the @Observable-tracked UI state — an internal implementation
     // detail SwiftUI never reads directly, so it's excluded from observation.
@@ -660,23 +896,33 @@ final class PlaybackEngine {
     private var totalSamples: Int = 0
 
     init() {
-        driver = PlaybackDriver(heterodyne: heterodyne,
-                                timeExpansion: timeExpansion, spectrogramProcessor: spectrogramProcessor)
+        driver = PlaybackDriver(heterodyne: heterodyne, timeExpansion: timeExpansion)
         driver.mode = listenMode
-        driver.onProgress = { [weak self] t in
-            DispatchQueue.main.async { self?.currentTimeSeconds = t }
-        }
-        driver.onFinished = { [weak self] in
+        driver.denoiseMode = denoiseMode
+        // Stamped with the run it belongs to. `driver.stop()` waits for the
+        // pacing thread to exit, but a progress callback it had ALREADY handed
+        // to the main queue is still in flight — so a seek could set the new
+        // position and then have the old thread's last publish land on top of
+        // it, snapping the playhead backwards. Comparing the stamp discards
+        // those instead of applying them.
+        driver.onProgress = { [weak self] t, run in
             DispatchQueue.main.async {
-                guard let self else { return }
+                guard let self, self.driver.runID == run else { return }
+                self.currentTimeSeconds = t
+            }
+        }
+        driver.onFinished = { [weak self] run in
+            DispatchQueue.main.async {
+                guard let self, self.driver.runID == run else { return }
                 WavPlayerDebugLog.log("PlaybackEngine", "onFinished: reached end of file")
                 self.isPlaying = false
                 self.currentTimeSeconds = self.durationSeconds
+                self.didFinish = true
             }
         }
-        driver.onOpenFailed = { [weak self] in
+        driver.onOpenFailed = { [weak self] run in
             DispatchQueue.main.async {
-                guard let self else { return }
+                guard let self, self.driver.runID == run else { return }
                 WavPlayerDebugLog.log("PlaybackEngine", "onOpenFailed: pacing thread couldn't open the file")
                 self.isPlaying = false
                 self.loadError = "Couldn't open the recording for playback."
@@ -686,8 +932,15 @@ final class PlaybackEngine {
 
     /// Loads a Recording's WAV — resets playback to the start. Call `play()`
     /// afterward to start listening.
+    /// How much of a recording is measured to characterise its background. Half
+    /// a second is thousands of analysis frames — far more than the estimator
+    /// needs — and short enough that it is read and measured long before anyone
+    /// presses play.
+    private static let noiseSeedSeconds: Double = 0.5
+
     func load(url: URL) {
         stop()
+        didFinish = false
         guard FileManager.default.fileExists(atPath: url.path) else {
             WavPlayerDebugLog.log("PlaybackEngine", "load: file missing at \(url.path)")
             loadError = "Recording file is missing on disk: \(url.lastPathComponent)"
@@ -699,12 +952,23 @@ final class PlaybackEngine {
             return
         }
         loadError = nil
+        // Measure the background ONCE, from the start of the recording, so
+        // playback never has to warm up — not on the first play and not after a
+        // seek. Off the main thread: this reads and transforms half a second of
+        // 384 kHz audio.
+        let seedURL = url
+        Task.detached(priority: .utility) { [driver] in
+            let wanted = Int(sr * Self.noiseSeedSeconds)
+            guard wanted > 0,
+                  let pcm = WavPCMReader.readSamples(wavURL: seedURL, startSample: 0, count: wanted)
+            else { return }
+            driver?.seedNoise(pcm)
+        }
         loadedURL = url
         sampleRate = sr
         totalSamples = total
         durationSeconds = sr > 0 ? Double(total) / sr : 0
         currentTimeSeconds = 0
-        spectrogramProcessor.sampleRate = sr
         heterodyne.reset(inputSampleRate: sr)
         timeExpansion.reset(inputSampleRate: sr, outputSampleRate: expansionOutputRate)
         WavPlayerDebugLog.log("PlaybackEngine", "load: OK \(url.lastPathComponent) sampleRate=\(sr) duration=\(String(format: "%.1f", durationSeconds))s")
@@ -749,6 +1013,7 @@ final class PlaybackEngine {
         // onFinished) — treat play() as "play again" rather than a silent no-op
         // that leaves the button looking unresponsive once a file has ended.
         if currentTimeSeconds >= durationSeconds { currentTimeSeconds = 0 }
+        didFinish = false
         WavPlayerDebugLog.log("PlaybackEngine", "play: from \(String(format: "%.2f", currentTimeSeconds))s, mode=\(listenMode), \(expansionFactor)x, regions=\(playRegions.count)")
         isPlaying = true
         startDriver()
@@ -767,6 +1032,7 @@ final class PlaybackEngine {
     func seek(toSeconds t: Double) {
         WavPlayerDebugLog.log("PlaybackEngine", "seek: to \(String(format: "%.2f", t))s (wasPlaying=\(isPlaying))")
         currentTimeSeconds = min(max(0, t), durationSeconds)
+        didFinish = currentTimeSeconds >= durationSeconds && durationSeconds > 0
         restartIfPlaying()
     }
 

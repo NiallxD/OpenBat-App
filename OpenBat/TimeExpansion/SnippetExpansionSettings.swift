@@ -30,6 +30,29 @@ enum SnippetOutputRouting: Int, CaseIterable {
     }
 }
 
+/// How much of the background a replay keeps.
+enum SnippetDenoiseMode: Int, CaseIterable, Identifiable {
+    /// The snippet exactly as captured.
+    case off = 0
+    /// Measure the noise per frequency band and subtract it, leaving a quiet
+    /// steady bed. Nothing is silenced outright.
+    case reduce = 1
+    /// Keep only what is plainly a call and silence everything else.
+    case scrub = 2
+
+    var id: Int { rawValue }
+
+    var label: String {
+        switch self {
+        case .off:    "Off"
+        case .reduce: "Reduce"
+        case .scrub:  "Scrub"
+        }
+    }
+
+    var strength: DenoiseStrength { self == .scrub ? .scrub : .reduce }
+}
+
 @Observable
 final class SnippetExpansionSettings {
 
@@ -73,17 +96,28 @@ final class SnippetExpansionSettings {
         didSet { UserDefaults.standard.set(routing.rawValue, forKey: Self.keyRouting) }
     }
 
-    /// Output makeup gain for the replay path.
-    var gain: Float {
-        didSet { UserDefaults.standard.set(gain, forKey: Self.keyGain) }
+    /// Volume trim in dB, on top of the automatic snippet-to-snippet level
+    /// match. **Stored under a new key**, deliberately: the value this
+    /// replaced was a raw multiplier defaulting to 4, and reading that back as
+    /// a dB trim would give every existing install +4 dB on top of an already
+    /// correct level.
+    var trimDB: Double {
+        didSet { UserDefaults.standard.set(trimDB, forKey: Self.keyTrim) }
     }
 
-    /// Depth of the background expander, in dB. 0 plays the snippet exactly as
-    /// captured. See SnippetExpansionProcessor's expander section and
-    /// Context.md §3 — expander, not gate, so quiet material is pushed down
-    /// rather than cut out.
-    var hissReductionDB: Double {
-        didSet { UserDefaults.standard.set(hissReductionDB, forKey: Self.keyHiss) }
+    /// How much background a replay keeps — see `SpectralDenoiser`. Replaced a
+    /// `hissReductionDB` depth, which was a broadband expander and had to be
+    /// tuned because it was always a compromise between hiss and artefacts.
+    /// These are not points on that dial: each is a different decision about
+    /// what counts as a call.
+    var denoiseMode: SnippetDenoiseMode {
+        didSet { UserDefaults.standard.set(denoiseMode.rawValue, forKey: Self.keyDenoise) }
+    }
+
+    /// Deliberate pause after each replay before the mode will trigger again —
+    /// see `SnippetExpansionProcessor.rearmSeconds`.
+    var rearmSeconds: Double {
+        didSet { UserDefaults.standard.set(rearmSeconds, forKey: Self.keyRearm) }
     }
 
     /// Fade in/out at each end of a replay, ms of output time.
@@ -93,14 +127,33 @@ final class SnippetExpansionSettings {
 
     // Field tuning session, 2026-08-17: 16x over a 0.5 s buffer. Deliberately
     // NOT the 8x that costs no filtering — the pair is chosen for the product
-    // this type's own doc calls the number that matters. 16 x 0.5 s = 8 s of
-    // replay per trigger, where the old 8 x 1.5 s was 12 s, so the mode is deaf
-    // for a third less of the night while each call is slowed twice as far.
+    // this type's own doc calls the number that matters.
+    //
+    // The buffer came down again to 0.1 s (Niall, 2026-09-01). The window
+    // straddles the trigger, so 0.5 s wrapped a 2–20 ms call in half a second
+    // of room tone and then stretched all of it 16× — most of what a listener
+    // heard was the gap, not the bat. 0.1 s keeps 50 ms either side, and the
+    // replay drops from 8 s to 1.6 s, so the mode is deaf for a fifth as long
+    // per trigger. "Fewer calls heard completely beats more calls heard
+    // partially" cuts this way too: the call is still whole, there is simply
+    // less nothing around it.
     static let defaultExpansion: Double = 16
-    static let defaultMemorySeconds: Double = 0.5
-    static let defaultGain: Float = 4
+    static let defaultMemorySeconds: Double = 0.1
+    static let defaultTrimDB: Double = 0
+    /// Scrub, not Reduce. Measured against the demo file the two are
+    /// indistinguishable on every figure that describes the CALL — peak within
+    /// 0.0 dB, total call energy within 0.3 dB, onset frame within 0.02 dB —
+    /// and they differ only in what happens to the gap between calls, which
+    /// Scrub makes digitally silent (2026-09-01). Given that, the quieter one
+    /// is the better default and Reduce is there for anyone who finds silence
+    /// between calls disconcerting.
+    static let defaultDenoiseMode: SnippetDenoiseMode = .scrub
     static let defaultRouting: SnippetOutputRouting = .both
-    static let defaultHissReductionDB: Double = 10
+    /// Half a second, which at the 0.1 s buffer is five buffer-lengths of quiet
+    /// after each replay. Long enough that the echoes of the call just played
+    /// have died away; short enough that a bat working an area still gets
+    /// caught two or three times a pass.
+    static let defaultRearmSeconds: Double = 0.5
     static let defaultFadeMS: Double = 30
 
     /// How long a replay lasts at the current settings — shown next to the
@@ -111,8 +164,13 @@ final class SnippetExpansionSettings {
     private static let keyExpansion = "SnippetExp.expansion"
     private static let keyMemory = "SnippetExp.memorySeconds"
     private static let keyRouting = "SnippetExp.routing"
-    private static let keyGain = "SnippetExp.gain"
-    private static let keyHiss = "SnippetExp.hissReductionDB"
+    private static let keyTrim = "SnippetExp.trimDB"
+    /// New key: the old one held a Bool and `integer(forKey:)` would read a
+    /// stored `true` as 1, which happens to be Reduce — right by luck, but only
+    /// by luck, and a stored `false` would read as 0/Off which is wrong for
+    /// someone who never touched the setting.
+    private static let keyDenoise = "SnippetExp.denoiseMode"
+    private static let keyRearm = "SnippetExp.rearmSeconds"
     private static let keyFade = "SnippetExp.fadeMS"
 
     init() {
@@ -124,10 +182,14 @@ final class SnippetExpansionSettings {
             ? d.double(forKey: Self.keyExpansion) : Self.defaultExpansion)
         memorySeconds = d.object(forKey: Self.keyMemory) != nil
             ? d.double(forKey: Self.keyMemory) : Self.defaultMemorySeconds
-        gain = d.object(forKey: Self.keyGain) != nil
-            ? d.float(forKey: Self.keyGain) : Self.defaultGain
-        hissReductionDB = d.object(forKey: Self.keyHiss) != nil
-            ? d.double(forKey: Self.keyHiss) : Self.defaultHissReductionDB
+        trimDB = d.object(forKey: Self.keyTrim) != nil
+            ? d.double(forKey: Self.keyTrim) : Self.defaultTrimDB
+        denoiseMode = d.object(forKey: Self.keyDenoise) != nil
+            ? (SnippetDenoiseMode(rawValue: d.integer(forKey: Self.keyDenoise))
+               ?? Self.defaultDenoiseMode)
+            : Self.defaultDenoiseMode
+        rearmSeconds = d.object(forKey: Self.keyRearm) != nil
+            ? d.double(forKey: Self.keyRearm) : Self.defaultRearmSeconds
         fadeMS = d.object(forKey: Self.keyFade) != nil
             ? d.double(forKey: Self.keyFade) : Self.defaultFadeMS
         routing = d.object(forKey: Self.keyRouting) != nil
@@ -139,16 +201,18 @@ final class SnippetExpansionSettings {
     func apply(to processor: SnippetExpansionProcessor) {
         processor.expansion = expansion
         processor.memorySeconds = memorySeconds
-        processor.gain = gain
-        processor.hissReductionDB = hissReductionDB
+        processor.trimDB = trimDB
+        processor.denoiseMode = denoiseMode
+        processor.rearmSeconds = rearmSeconds
         processor.fadeMS = fadeMS
     }
 
     func reset() {
         expansion = Self.defaultExpansion
         memorySeconds = Self.defaultMemorySeconds
-        gain = Self.defaultGain
-        hissReductionDB = Self.defaultHissReductionDB
+        trimDB = Self.defaultTrimDB
+        denoiseMode = Self.defaultDenoiseMode
+        rearmSeconds = Self.defaultRearmSeconds
         fadeMS = Self.defaultFadeMS
         routing = Self.defaultRouting
     }

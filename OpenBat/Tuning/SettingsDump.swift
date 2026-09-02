@@ -73,9 +73,10 @@ enum SettingsDump {
         root["slowReplay"] = [
             "snippet.expansion": tuning.snippetExpansion,
             "snippet.memorySeconds": tuning.snippetMemorySeconds,
-            "snippet.hissReductionDB": tuning.snippetHissReductionDB,
+            "snippet.rearmSeconds": tuning.snippetRearmSeconds,
+            "snippet.denoiseMode": tuning.snippetDenoiseMode.label,
             "snippet.fadeMS": tuning.snippetFadeMS,
-            "snippet.gain": tuning.snippetGain,
+            "snippet.trimDB": tuning.snippetTrimDB,
             "snippet.routing": tuning.snippetRouting.rawValue,
             "snippet.routingLabel": tuning.snippetRouting.label,
         ]

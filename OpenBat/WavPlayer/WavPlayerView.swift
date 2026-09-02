@@ -29,13 +29,6 @@ struct WavPlayerView: View {
     /// to keep in sync with.
     @State private var timeExpSettings = TimeExpansionSettings()
 
-    /// iPhone landscape reports a compact vertical size class — the signal we
-    /// use to switch from the stacked portrait layout to the two-column
-    /// landscape one (spectrogram/minimap/controls left, stats/metadata right).
-    /// iPad (regular in both classes) and portrait phones keep the single
-    /// column.
-    @Environment(\.verticalSizeClass) private var verticalSizeClass
-
     @State private var engine = PlaybackEngine()
     /// Holds both the whole-file raw dB grid AND its colorized `image`
     /// together (see WavSpectrogramEngine's doc comment for why one
@@ -99,6 +92,40 @@ struct WavPlayerView: View {
     @State private var shareItem: ShareItem?
     @State private var inatObservation: INatObservation?
     private struct ShareItem: Identifiable { let id = UUID(); let url: URL }
+
+    /// The fixed tile pyramid, built once the overview exists (it measures
+    /// the recording-wide contrast from that same grid). How the spectrogram
+    /// is drawn, full stop — the A/B toggle that used to select between this
+    /// and the per-render path it replaced was removed on 2026-09-01 once the
+    /// fixed playback zoom settled the comparison. See Context.md §7.
+    @State private var tileStore: SpectrogramTileStore?
+
+    /// The store, but only where it can actually serve the view. It addresses
+    /// REAL samples; while hide-silence is on the display works in the
+    /// compressed virtual timeline, so the two do not line up and the
+    /// per-render path (which already stitches across the gaps) stays in
+    /// charge there — the ONLY thing that path is still for.
+    private var activeTileStore: SpectrogramTileStore? {
+        silenceMap == nil ? tileStore : nil
+    }
+
+    /// Seconds of LISTENING across the screen while playing — the one number
+    /// behind both playback zoom levels; see PlaybackZoom. Stored, and
+    /// exposed as a slider in the tuning panel so it can be set by feel
+    /// against a real recording.
+    @AppStorage("display.wavPlayerPlaybackWindowSeconds") private var playbackWindowSeconds
+        = PlaybackZoom.defaultWindowSeconds
+
+    /// The viewport span playback clamps to, in display-domain samples, or nil
+    /// when nothing is playing (analyse mode: pan and zoom are free).
+    private var playbackTimeSpan: Int? {
+        guard engine.isPlaying, let display = displayOverview else { return nil }
+        return PlaybackZoom.spanSamples(windowSeconds: playbackWindowSeconds,
+                                        mode: engine.listenMode,
+                                        expansionFactor: engine.expansionFactor,
+                                        sampleRate: display.sampleRate,
+                                        totalSamples: display.totalSamples)
+    }
 
     @State private var silenceMap: SilenceMap?
     @State private var compressedOverview: WavSpectrogramEngine.Overview?
@@ -184,13 +211,32 @@ struct WavPlayerView: View {
     /// Player-local playback speed for time expansion, independent of the
     /// detector — see PlaybackEngine.expansionFactor.
     @AppStorage("display.wavPlayerExpansionFactor") private var expansionFactor = 8.0
+    /// Hiss removal on the listening path only — see
+    /// `PlaybackDriver.denoiseMode`. Off by default here, unlike the live
+    /// snippet replay: a recording being reviewed is evidence, and what a
+    /// listener hears should start out as exactly what was recorded.
+    ///
+    /// Stored as the enum's raw value under a new key — the old one held a Bool
+    /// and would read back as Off/Reduce by coincidence rather than intent.
+    @AppStorage("display.wavPlayerDenoiseMode") private var denoiseModeRaw = SnippetDenoiseMode.off.rawValue
+    private var denoiseMode: SnippetDenoiseMode {
+        SnippetDenoiseMode(rawValue: denoiseModeRaw) ?? .off
+    }
     /// What the last detection run did, for the tuning panel (see
     /// WavTuningControl.silenceSummary).
     @State private var silenceSummary: String?
     /// Seconds of audio kept each side of a pulse before cutting silence —
     /// SilenceMap.compute's `padSeconds`. Small by default so silence is cut
     /// tight; larger keeps more context and merges nearby pulses.
-    @AppStorage("display.wavPlayerSilencePadding") private var silencePadding = 0.02
+    ///
+    /// A NEW key, holding the same unit. The old one's 20 ms was chosen when
+    /// padding was applied in whole display columns and its real effect was
+    /// mostly whatever that quantisation produced; now that a few ms means a
+    /// few ms, 20 ms per side is a lot of retained silence per pulse (on the
+    /// demo recording, 133 regions x 40 ms = a fifth of the file). Keeping
+    /// the old key would have left anyone who has ever opened this control
+    /// stuck on the old value with no sign of it.
+    @AppStorage("display.wavPlayerSilenceMargin") private var silencePadding = 0.005
 
     /// Calls below this frequency are excluded from analysis search — matches
     /// PulseDetector's own default floor for rejecting wind/handling rumble.
@@ -265,13 +311,7 @@ struct WavPlayerView: View {
     }
 
     var body: some View {
-        Group {
-            if verticalSizeClass == .compact {
-                landscapeLayout
-            } else {
-                portraitLayout
-            }
-        }
+        mainLayout
         .sheet(item: $shareItem) { item in
             ShareSheet(items: [item.url])
         }
@@ -327,7 +367,9 @@ struct WavPlayerView: View {
                                      logFrequency: $logFrequency, noiseFloor: $noiseFloor,
                                      hideSilence: $hideSilence, silenceThresholdDB: $silenceThresholdDB,
                                      silenceSummary: silenceSummary,
-                                     silencePadding: $silencePadding)
+                                     silencePadding: $silencePadding,
+                                     denoiseMode: $denoiseModeRaw,
+                                     playbackWindowSeconds: $playbackWindowSeconds)
                 }
             }
         }
@@ -343,7 +385,12 @@ struct WavPlayerView: View {
         .onChange(of: hideSilence) { _, _ in rebuildSilenceMap() }
         .onChange(of: silenceThresholdDB) { _, _ in scheduleSilenceRebuildDebounced() }
         .onChange(of: expansionFactor) { _, factor in engine.expansionFactor = factor }
+        .onChange(of: denoiseModeRaw) { _, _ in engine.denoiseMode = denoiseMode }
+        // The speed and the listen mode ARE the zoom in time expansion (1.5 s of
+        // listening is 1.5/N seconds of recording), so changing either mid-play
+        // has to re-clamp and re-level the prefill — as does the window slider.
         .onChange(of: engine.expansionFactor) { _, factor in expansionFactor = factor }
+        .onChange(of: playbackZoomInputs) { _, _ in reapplyPlaybackZoomWhilePlaying() }
         .onChange(of: silencePadding) { _, _ in scheduleSilenceRebuildDebounced() }
         .onChange(of: engine.isPlaying) { _, playing in
             if playing {
@@ -354,6 +401,10 @@ struct WavPlayerView: View {
                 // playhead.
                 isSelecting = false
                 selection = nil
+                // Snap to the playback zoom BEFORE the follow loop starts, so
+                // the first tile rendered is already at the level the whole
+                // play-through will use — see PlaybackZoom.
+                applyPlaybackZoomAtPlayhead()
                 startFollowingPlayhead()
             } else {
                 followTask?.cancel()
@@ -380,8 +431,12 @@ struct WavPlayerView: View {
 
     // MARK: Layouts
 
-    /// Portrait / iPad: everything stacked in one column, the original layout.
-    @ViewBuilder private var portraitLayout: some View {
+    /// One column, everything stacked. There is no second layout: the app is
+    /// portrait-only on iPhone (`INFOPLIST_KEY_UISupportedInterfaceOrientations`)
+    /// and iPad reports a regular vertical size class in every orientation, so
+    /// the two-column landscape variant this used to choose between was
+    /// unreachable on every device the app runs on.
+    @ViewBuilder private var mainLayout: some View {
         VStack(spacing: 8) {
             // Above the spectrogram, not below: the stat grid is now a
             // fixed-height card regardless of whether a selection has been
@@ -409,50 +464,6 @@ struct WavPlayerView: View {
             PlaybackControlsView(engine: engine, onShare: shareRecording,
                                  onAddToINaturalist: addToINaturalist)
                 .padding(.bottom, 8)
-        }
-    }
-
-    /// iPhone landscape: two columns. Left is the interactive half —
-    /// spectrogram (taking all the vertical room), then the minimap scrub bar,
-    /// time readout, and transport controls stacked beneath it. Right is the
-    /// reference half — the call-analysis stat grid and the file metadata card,
-    /// scrollable since together they can exceed the short landscape height.
-    @ViewBuilder private var landscapeLayout: some View {
-        GeometryReader { geo in
-            HStack(alignment: .top, spacing: 8) {
-                // Left column. Every card carries the SAME 8pt horizontal inset
-                // (the minimap/file cards already used it) so the spectrogram,
-                // minimap and transport row all line up on both edges instead
-                // of the spectrogram bleeding wider than the rest. The
-                // spectrogram takes all the vertical slack, pushing the (now
-                // compact) transport row snug to the bottom.
-                VStack(spacing: 6) {
-                    spectrogramSection
-                        .frame(maxHeight: .infinity)
-                        .padding(.horizontal, 8)
-                    minimapBlock
-                    PlaybackControlsView(engine: engine, onShare: shareRecording,
-                                     onAddToINaturalist: addToINaturalist, compact: true)
-                }
-                .frame(maxWidth: .infinity)
-
-                // Right column. `statsPanel` gets the same 8pt inset the file
-                // card already has so both align; `.top` on the HStack + no top
-                // padding here means the stats card's top edge lines up with the
-                // spectrogram card's.
-                ScrollView {
-                    VStack(spacing: 8) {
-                        statsPanel
-                            .padding(.horizontal, 8)
-                        fileInfoBlock
-                    }
-                    .padding(.bottom, 8)
-                }
-                // A fixed-ish sidebar: enough for the stat grid to read, but
-                // capped so the spectrogram keeps the majority of the width.
-                .frame(width: min(max(geo.size.width * 0.34, 260), 360))
-            }
-            .padding(.top, 4)
         }
     }
 
@@ -573,9 +584,11 @@ struct WavPlayerView: View {
                                        // engine seeks in too — nothing to map (see
                                        // PlaybackEngine.setSilenceMap).
                                        onSeek: { engine.seek(toSeconds: $0) },
-                                       bufferDebugStatus: bufferDebugStatus)
+                                       bufferDebugStatus: bufferDebugStatus, tileStore: activeTileStore,
+                                       playbackTimeSpan: playbackTimeSpan)
                     WavPlayheadOverlay(engine: engine, viewport: viewport,
-                                       totalSamples: displayOverview.totalSamples)
+                                       totalSamples: displayOverview.totalSamples,
+                                       followState: followState)
                 }
                 .frame(maxHeight: .infinity)
                 .padding(8)
@@ -666,6 +679,11 @@ struct WavPlayerView: View {
     /// racing concurrently) and generation-guarded against whichever still
     /// manages to overlap.
     private func recolorOverviewIfPossible() {
+        // The tiles' MEASUREMENTS survive a palette or noise-floor change —
+        // only their colouring is stale, and recolouring is milliseconds. That
+        // separation is the reason tiles store quantised dB rather than
+        // pixels; see SpectrogramTileStore.
+        tileStore?.invalidatePictures()
         guard let raw = overview?.rawTile else { return }
         recolorGeneration += 1
         let myGeneration = recolorGeneration
@@ -713,6 +731,7 @@ struct WavPlayerView: View {
         compressedOverview = nil
         silenceSummary = nil
         downloadState = nil
+        tileStore = nil          // belongs to the outgoing recording
 
         let pal = palette, floor = effectiveNoiseFloor
         calibrationCurve = nil          // belongs to the outgoing recording
@@ -752,6 +771,7 @@ struct WavPlayerView: View {
 
             engine.load(url: url)
             engine.expansionFactor = expansionFactor
+            engine.denoiseMode = denoiseMode
             timeExpSettings.apply(to: engine.timeExpansion)
             applyBand()
 
@@ -781,6 +801,16 @@ struct WavPlayerView: View {
             }
             WavPlayerDebugLog.log("WavPlayer", "renderOverview OK: \(Int(result.image.size.width))x\(Int(result.image.size.height)), totalSamples=\(result.totalSamples), sampleRate=\(result.sampleRate)")
             overview = result
+            // The contrast track is measured from this same grid — no extra
+            // file IO, no extra FFT — and fixes the dB-to-colour mapping for
+            // the whole recording, which is what lets a tile be rendered once
+            // and cropped for any view. See SpectrogramContrast.
+            tileStore = SpectrogramTileStore(
+                wavURL: url, sampleRate: result.sampleRate, totalSamples: result.totalSamples,
+                calibrationCurve: calCurve,
+                contrast: SpectrogramContrast(overview: result.rawTile,
+                                              sampleRate: result.sampleRate,
+                                              binCount: STFTGrid.binCount))
             // Default to a half-zoomed view rather than the whole file —
             // most recordings are long enough that "whole file" shows no
             // usable call detail at all until the user zooms in manually;
@@ -854,13 +884,27 @@ struct WavPlayerView: View {
         let thresholdDB = silenceThresholdDB
         let padSeconds = silencePadding
         let minHz = Self.minAnalysisFrequencyHz
+        let url = store.wavURL(for: recording)
+        let calCurve = calibrationCurve
         WavPlayerDebugLog.log("WavPlayer", "rebuildSilenceMap: thresholdDB=\(thresholdDB) padSeconds=\(padSeconds), generation=\(myGeneration)")
         Task.detached(priority: .userInitiated) {
+            // Detect against a scan fine enough to see the gaps between
+            // pulses, falling back to the display overview's own grid when
+            // that is already fine enough (short recordings) so nothing extra
+            // is read or transformed. See `detectionColumnPeaks`.
+            let detection = WavSpectrogramEngine.detectionColumnPeaks(
+                wavURL: url, totalSamples: realTotal, sampleRate: sr,
+                minFreqHz: minHz, overviewColumns: raw.nCols, calibrationCurve: calCurve)
             let map = WavPlayerDebugLog.time("WavPlayer", "SilenceMap.compute") {
-                SilenceMap.compute(grid: raw.grid, nCols: raw.nCols, binCount: STFTGrid.binCount,
-                                   totalSamples: realTotal, sampleRate: sr,
-                                   thresholdAboveFloorDB: thresholdDB, minFreqHz: minHz,
-                                   padSeconds: padSeconds)
+                if let detection {
+                    SilenceMap.compute(colPeak: detection.peaks, totalSamples: realTotal, sampleRate: sr,
+                                       thresholdAboveFloorDB: thresholdDB, padSeconds: padSeconds)
+                } else {
+                    SilenceMap.compute(grid: raw.grid, nCols: raw.nCols, binCount: STFTGrid.binCount,
+                                       totalSamples: realTotal, sampleRate: sr,
+                                       thresholdAboveFloorDB: thresholdDB, minFreqHz: minHz,
+                                       padSeconds: padSeconds)
+                }
             }
             let compRaw = WavSpectrogramEngine.compressedOverviewRawTile(from: raw, map: map)
             let tile = WavPlayerDebugLog.time("WavPlayer", "compressed overview colorize \(compRaw.nCols) cols") {
@@ -944,6 +988,42 @@ struct WavPlayerView: View {
     private func recenter(sample: Int, span: Int? = nil) {
         guard let total = displayOverview?.totalSamples else { return }
         viewport = WavViewportMath.recentered(viewport, on: sample, totalSamples: total, span: span)
+    }
+
+    // MARK: Playback zoom (see PlaybackZoom)
+
+    /// Everything the playback span is derived from, as one comparable value —
+    /// so a single `.onChange` covers the speed stop, the listen mode and the
+    /// window slider rather than three (which is enough extra work in a view
+    /// body this size for the type checker to give up on it).
+    private var playbackZoomInputs: [Double] {
+        [playbackWindowSeconds, engine.expansionFactor, Double(engine.listenMode.rawValue)]
+    }
+
+    /// The play-start clamp: snap to the playback window around wherever the
+    /// engine is about to resume from.
+    private func applyPlaybackZoomAtPlayhead() {
+        guard let display = displayOverview else { return }
+        let center = Int(engine.currentTimeSeconds * display.sampleRate)
+        applyPlaybackZoom(center: center)
+    }
+
+    /// Snaps the time axis to the playback window, centred on `center`.
+    /// The frequency window is carried through untouched — playback fixes how
+    /// much TIME is on screen and nothing else.
+    private func applyPlaybackZoom(center: Int) {
+        guard let display = displayOverview, let span = playbackTimeSpan else { return }
+        viewport = PlaybackZoom.clamped(viewport, center: center, spanSamples: span,
+                                        totalSamples: display.totalSamples)
+    }
+
+    /// Re-clamps to a playback window that has just changed underneath a
+    /// play-through (the speed stop, the listen mode, or the tuning slider).
+    /// A no-op when nothing is playing, which is what leaves analyse mode's
+    /// zoom entirely the user's.
+    private func reapplyPlaybackZoomWhilePlaying() {
+        guard engine.isPlaying else { return }
+        applyPlaybackZoom(center: followState.displaySample)
     }
 
     private func requestAnalysis(startSample: Int, endSample: Int,

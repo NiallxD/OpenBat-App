@@ -82,6 +82,21 @@ struct WavSpectrogramView: View {
     /// Debug-only red/green buffer visualization surfaced on the minimap —
     /// see `renderChunkedStep` (writer) and `WavMinimapView` (reader).
     let bufferDebugStatus: BufferDebugStatus
+    /// The fixed tile pyramid, when it is switched on and usable — see
+    /// `refreshPyramidTile`. Nil means the per-render path this is being
+    /// compared against.
+    let tileStore: SpectrogramTileStore?
+    /// The time span, in display samples, that playback has clamped the view
+    /// to — nil in analyse mode, where zoom is entirely the user's.
+    ///
+    /// Playback owns the time axis while it runs: the follow loop's
+    /// re-centring, a pinch's live preview, and the viewport a settled pinch
+    /// commits all come back to exactly this span (see `timeLocked`). A
+    /// two-finger pinch therefore still adjusts the FREQUENCY window while
+    /// playing — the axis playback says nothing about — and simply has no
+    /// effect on time, rather than briefly stretching the view and having it
+    /// snap back on the next follow tick.
+    let playbackTimeSpan: Int?
 
     // Live pan state — transient, reset to identity every time a new
     // viewport commits (see `commitPan`). `DragGesture.translation` is
@@ -227,7 +242,21 @@ struct WavSpectrogramView: View {
     private static let axisLockThreshold: CGFloat = 8
 
     private static let liveDebounceSeconds = 0.2
-    private static let targetColumns = 1536
+    /// Columns rendered across the visible viewport.
+    ///
+    /// Raised from 1536 once `colorize` stopped costing 478 ms per tile (it
+    /// writes an 8-bit indexed image now — see there). Where this actually
+    /// buys detail is MEDIUM and WIDE zoom, which is where the native frame
+    /// grid is pooled hardest: a 2 s viewport holds 24 000 native frames, so
+    /// 1536 columns threw away most of it. At deep zoom it buys nothing real
+    /// and is not meant to — the 512-sample analysis window caps time
+    /// resolution at ~1.3 ms regardless, so a 0.2 s viewport has only ~150
+    /// genuinely independent columns and everything past that is
+    /// interpolation. Sharpening THAT end means a shorter window, which costs
+    /// frequency resolution; it is not a column-count decision.
+    /// Not private: `PlaybackZoom`'s consumers level against the same number,
+    /// so the tile a span implies is the one the view will actually ask for.
+    static let targetColumns = 2048
     /// Hard ceiling on a rendered tile's column count, margin included. The
     /// margin logic below sizes the buffer in SECONDS of audio
     /// (`minBufferSeconds`), but every step renders at `targetColumns`-per-
@@ -243,6 +272,13 @@ struct WavSpectrogramView: View {
     /// stays cheap enough (~150-400ms raw render) that the prefetch
     /// re-centers fast enough to keep up with a drag anyway, which the
     /// multi-second unbounded tiles never could.
+    ///
+    /// **This ceiling is set by memory, not by time.** The raw grid keeps all
+    /// 1024 frequency bins (so a frequency-only pan can recolor without
+    /// re-rendering), so a tile costs `columns x 1024 x 4` bytes — 33 MB at
+    /// this value, and briefly twice that while a replacement renders beside
+    /// the resident one. Raising it further to buy playback runway is the
+    /// wrong trade: the render got ~5x cheaper instead.
     private static let maxTileColumns = targetColumns * 4
     /// Coast distance = `dragVelocityX * coastTimeConstant` — how many
     /// seconds' worth of the release-moment velocity the momentum carries
@@ -388,11 +424,15 @@ struct WavSpectrogramView: View {
         // `isLivePreviewing` already covers `isPlaying`, so `displayedImage`
         // warps inline from `currentSourceImage()` on every body pass
         // instead of relying on the (not-kept-current-during-play) cache.
-        .onChange(of: followState.displaySample) { _, _ in
+        .onChange(of: followState.displaySample) { _, newValue in
             guard isPlaying else { return }
+            noteFollowRate(newValue)
             scheduleDetailRenderThrottled()
         }
         .onChange(of: isPlaying) { _, nowPlaying in
+            // Whatever was in flight for the old state is no longer a reason
+            // to hold off starting a render for the new one.
+            inFlightPlaybackRender = nil
             // Playback just stopped: the last scroll position was rendered
             // via the throttle (which may have a trailing render pending or
             // none), so kick a normal debounced render to guarantee a final
@@ -438,6 +478,7 @@ struct WavSpectrogramView: View {
             // the debounced render below picks up the new domain.
             cachedRawTile = nil
             detailTile = nil
+            detailTileLevel = nil
             scheduleDetailRenderDebounced(for: viewport)
             rebuildWarpedImage()
         }
@@ -557,11 +598,22 @@ struct WavSpectrogramView: View {
     /// reveals earlier time, drag down reveals higher frequency (top =
     /// high frequency throughout this view).
     private func liveViewport() -> WavViewport {
-        WavViewportMath.resolvedViewport(
+        let live = WavViewportMath.resolvedViewport(
             committed: viewport,
             timeScale: pinchScaleX, timeOffset: Double(gestureOffsetX) + pinchOffsetX,
             freqScale: pinchScaleY, freqOffset: Double(gestureOffsetY) + pinchOffsetY,
             totalSamples: overview.totalSamples, nyquistHz: sampleRate / 2)
+        return timeLocked(live)
+    }
+
+    /// `v` with its time span forced back to whatever playback has clamped to
+    /// — the identity in analyse mode. The single place the clamp is applied,
+    /// so the preview, the commit and the follow loop cannot disagree about
+    /// it; see `playbackTimeSpan`.
+    private func timeLocked(_ v: WavViewport) -> WavViewport {
+        guard let span = playbackTimeSpan, v.sampleSpan != span else { return v }
+        return PlaybackZoom.clamped(v, center: (v.startSample + v.endSample) / 2,
+                                    spanSamples: span, totalSamples: overview.totalSamples)
     }
 
     private func liveSampleRange() -> (start: Int, end: Int) {
@@ -580,7 +632,8 @@ struct WavSpectrogramView: View {
     /// its math with WavPlayerView's `recenter(sample:)` and
     /// WavMinimapView's own copy of this same call.
     private func liveTargetViewport(center: Int) -> WavViewport {
-        WavViewportMath.recentered(viewport, on: center, totalSamples: overview.totalSamples)
+        WavViewportMath.recentered(viewport, on: center, totalSamples: overview.totalSamples,
+                                   span: playbackTimeSpan)
     }
 
     /// True whenever the source image is changing every frame (a live pan/
@@ -677,13 +730,155 @@ struct WavSpectrogramView: View {
     private static let playbackRenderThrottleSeconds = 0.3
     @State private var lastPlaybackRenderTime: Date?
     @State private var playbackRenderTask: Task<Void, Never>?
+    /// The span a playback-lead render currently in flight will cover, with
+    /// the generation it belongs to. Read by `scheduleDetailRenderThrottled`,
+    /// which treats it exactly like a resident tile — see the comment there
+    /// for why leaving it out made the whole fix inert.
+    @State private var inFlightPlaybackRender: (generation: Int, start: Int, end: Int)?
+    /// How long the last playback tile actually took to build on THIS device,
+    /// and how fast the playhead is actually moving through the recording.
+    ///
+    /// Both are measured rather than assumed, because both vary by more than
+    /// a constant can absorb: a render is several times slower on a phone
+    /// than on the machine these thresholds were originally picked on, and
+    /// the playhead moves at the file's own rate in heterodyne but eight or
+    /// sixteen times slower in time expansion. A fixed fraction of the tile
+    /// therefore fired far too late in heterodyne on device (the playhead
+    /// overran the buffered spectrogram, visible directly on the minimap's
+    /// red/green overlay — Niall, 2026-09-01) while re-rendering constantly
+    /// for no reason during slow playback.
+    @State private var lastPlaybackRenderSeconds: Double = 0.4
+    @State private var followSamplePerSecond: Double = 0
+    @State private var lastFollowMark: (sample: Int, time: Date)?
     /// Set by `commitPan` (a settled gesture) so the next `viewport`
     /// `.onChange` renders the sharp tile immediately instead of debouncing
     /// — see that `.onChange` for why this is safe now that the ticker
     /// wheels are gone.
     @State private var renderImmediatelyOnCommit = false
 
+    /// How close the playhead may get to the end of the resident tile's
+    /// forward margin, as a fraction of the visible span, before a
+    /// re-centered render is started. Same idea as
+    /// `prefetchMarginFraction` for drags — fire while there is still runway
+    /// left, so the replacement lands before it is needed.
+    private static let playbackMarginFraction: Double = 0.5
+    /// The share of the resident tile's own span that must still lie ahead of
+    /// the playhead before a replacement is started. 0.35 leaves roughly
+    /// double the measured render time at every zoom level — see the trigger
+    /// itself for why this is expressed against the tile rather than the
+    /// viewport.
+    private static let playbackTileFraction: Double = 0.35
+    /// How many times the last render's duration of runway to insist on
+    /// before starting the next one. Two-and-a-half covers a render that
+    /// happens to run longer than the last, plus the scheduling latency
+    /// either side of it.
+    private static let playbackRenderSafety: Double = 2.5
+    /// Flat allowance on top, for the main-actor hops a render makes on its
+    /// way in and out — those do not scale with the render itself.
+    private static let playbackRenderSlack: Double = 0.2
+
+    /// Keeps a sharp, forward-margined tile under the playhead while playback
+    /// scrolls the view.
+    ///
+    /// **This used to fire unconditionally every 0.3 s**, which meant every
+    /// render abandoned the previous one (they share `renderGeneration`) and
+    /// restarted the staged chain from its zero-margin first step — see
+    /// `scheduleDetailRender`. The tile therefore almost never became usable,
+    /// and the view sat on the whole-file overview crop: at a typical zoom
+    /// that is a few dozen pixels stretched across the screen, which is what
+    /// "the quality goes poor when playing, it goes all blurry" was.
+    ///
+    /// Now it asks the question the drag path already asks: does the tile we
+    /// have still cover where the playhead is about to be? While it does,
+    /// this does nothing at all and the scroll rides the resident tile
+    /// sharply. The throttle stays as a floor on how often a genuinely
+    /// needed render can be started.
+    /// Tracks how fast the playhead is actually crossing the recording, in
+    /// display samples per real second. Smoothed, and ignoring the jumps a
+    /// seek produces.
+    private func noteFollowRate(_ sample: Int) {
+        let now = Date()
+        defer { lastFollowMark = (sample, now) }
+        guard let last = lastFollowMark else { return }
+        let dt = now.timeIntervalSince(last.time)
+        let ds = sample - last.sample
+        // Forward, plausible, and not a seek.
+        guard dt > 0.01, ds > 0, Double(ds) / dt < Double(sampleRate) * 64 else { return }
+        let instant = Double(ds) / dt
+        followSamplePerSecond = followSamplePerSecond <= 0
+            ? instant
+            : followSamplePerSecond * 0.8 + instant * 0.2
+    }
+
     private func scheduleDetailRenderThrottled() {
+        let live = liveTargetViewport(center: followState.displaySample)
+        // **The pyramid does not belong behind this.** Everything below is a
+        // race between how long a render takes and how much runway is left,
+        // and it exists because the per-render path's renders are expensive
+        // and speculative — so it holds off until the buffer is nearly spent,
+        // which is exactly "load it as you reach it". A fixed grid has no such
+        // race: refreshing is a cache lookup and, when the covering tiles have
+        // not changed, a returned pointer (`lastAssembly`). Asking every tick
+        // is what keeps the next tiles rendering while the current ones are
+        // still on screen, which is the whole point of a fixed grid.
+        if let tileStore {
+            refreshPyramidTile(for: live, store: tileStore)
+            return
+        }
+        if let tile = detailTile,
+           tileCovers(tile, start: live.startSample, end: live.endSample,
+                      minHz: live.minFreqHz, maxHz: live.maxFreqHz) {
+            // Playback only ever moves forward, so the runway that matters is
+            // the margin ahead of the visible frame.
+            //
+            // **The trigger is a question about time, not about distance:
+            // will the runway left outlast the render needed to replace it?**
+            //
+            // Every fixed threshold tried here was wrong on some axis. A
+            // fraction of the viewport fired with 0.1 s of runway against a
+            // render that took longer than that. A fraction of the tile was
+            // tuned against renders timed on a Mac, and a phone's are several
+            // times slower, so it still fired too late in heterodyne — the
+            // playhead visibly overran the buffered region on the minimap
+            // overlay. Neither could be right in both heterodyne and time
+            // expansion anyway, where the same tile lasts eight or sixteen
+            // times longer in real time.
+            //
+            // Measuring both sides removes the guesswork: how long the last
+            // render actually took on this device, and how fast the playhead
+            // is actually moving. Start the replacement when the runway is
+            // down to a comfortable multiple of the render it has to cover,
+            // which in slow playback is rarely and in heterodyne is early.
+            let remaining = tile.endSample - live.endSample
+            let tileSpan = tile.endSample - tile.startSample
+            let floorThreshold = max(Int(Double(max(live.sampleSpan, 1)) * Self.playbackMarginFraction),
+                                     Int(Double(tileSpan) * Self.playbackTileFraction))
+            var threshold = floorThreshold
+            if followSamplePerSecond > 0 {
+                let needSeconds = lastPlaybackRenderSeconds * Self.playbackRenderSafety
+                    + Self.playbackRenderSlack
+                let needSamples = Int(needSeconds * followSamplePerSecond)
+                // The measured requirement, but never LESS eager than the
+                // static floor — a first render with no measurement behind it
+                // still has to start somewhere sensible.
+                threshold = max(threshold, min(needSamples, tileSpan))
+            }
+            guard remaining < threshold else { return }
+        }
+        // **A render already on its way counts as coverage.** Without this the
+        // guard above is useless in exactly the case it was written for: while
+        // no valid tile exists, "the tile doesn't cover us" is true on every
+        // tick, so this fired every 0.3 s, and each fire bumps
+        // `renderGeneration` and abandons the render in flight. A tile wide
+        // enough to be worth having takes longer than the throttle to build,
+        // so it was killed and restarted forever and the view never left the
+        // coarse overview crop. That is why the first attempt at this fix
+        // changed nothing (Niall, 2026-09-01).
+        //
+        // A render still ahead of the playhead will be useful when it lands,
+        // so leave it alone. One that the playhead has already overtaken is
+        // dead, and starting a fresh one is right.
+        if let flight = inFlightPlaybackRender, flight.end > live.endSample { return }
         let now = Date()
         if let last = lastPlaybackRenderTime, now.timeIntervalSince(last) < Self.playbackRenderThrottleSeconds {
             // Too soon — schedule a single trailing render for the position
@@ -696,12 +891,13 @@ struct WavSpectrogramView: View {
                 guard !Task.isCancelled else { return }
                 await MainActor.run {
                     lastPlaybackRenderTime = Date()
-                    scheduleDetailRender(for: liveTargetViewport(center: followState.displaySample))
+                    scheduleDetailRender(for: liveTargetViewport(center: followState.displaySample),
+                                         isPlaybackLead: true)
                 }
             }
         } else {
             lastPlaybackRenderTime = now
-            scheduleDetailRender(for: liveTargetViewport(center: followState.displaySample))
+            scheduleDetailRender(for: live, isPlaybackLead: true)
         }
     }
 
@@ -742,7 +938,7 @@ struct WavSpectrogramView: View {
         // viewport — otherwise `.onChange` won't fire and the flag would
         // leak onto the next (possibly non-settle) viewport change.
         if resolved != viewport { renderImmediatelyOnCommit = true }
-        viewport = resolved   // triggers .onChange -> scheduleDetailRender
+        viewport = timeLocked(resolved)   // triggers .onChange -> scheduleDetailRender
     }
 
     /// Single place responsible for detail-tile fetching, reacting to ANY
@@ -768,7 +964,15 @@ struct WavSpectrogramView: View {
     ///    change never needs a new FFT either),
     ///  - a horizontal pan/prefetch that's still within the cached tile's
     ///    time margin.
-    private func scheduleDetailRender(for target: WavViewport, isPrefetch: Bool = false) {
+    private func scheduleDetailRender(for target: WavViewport, isPrefetch: Bool = false,
+                                      isPlaybackLead: Bool = false) {
+        // The pyramid answers from cache when it can, so it takes over the
+        // whole of this function rather than being threaded through it — the
+        // two schemes are being compared, not blended.
+        if let tileStore {
+            refreshPyramidTile(for: target, store: tileStore)
+            return
+        }
         renderGeneration += 1
         let myGeneration = renderGeneration
 
@@ -874,8 +1078,13 @@ struct WavSpectrogramView: View {
         // margin behind as ahead — wasted, since "behind" is the ground
         // already scrolled past. No prior tile (the very first render) means
         // no known direction, so the split stays even, same as before.
-        var bias: Double = 0
-        if let raw = cachedRawTile {
+        // Playback is the one case where the direction is not inferred but
+        // known: a recording never plays backwards, and the view cannot be
+        // dragged while it does. So nearly all of the margin goes ahead (1.6
+        // here works out to 90/10) instead of the 75/25 a pan gets, where a
+        // reversal has to stay sharp. That is runway bought for free.
+        var bias: Double = isPlaybackLead ? 1.6 : 0
+        if !isPlaybackLead, let raw = cachedRawTile {
             let oldCenter = (raw.startSample + raw.endSample) / 2
             if center > oldCenter { bias = 1 } else if center < oldCenter { bias = -1 }
         }
@@ -920,8 +1129,31 @@ struct WavSpectrogramView: View {
         // lands, rather than gating on the full margin finishing before
         // anything sharper than the overview shows. See `renderChunkedStep`
         // for how each subsequent step grows it further.
+        //
+        // **Except under playback, where the first step is worthless and the
+        // staging was the bug.** A zero-margin tile is immediately valid for
+        // a gesture: the view is where the user left it, so a tile matching
+        // its exact bounds covers what is on screen. Under playback the tile
+        // lands 150-400 ms after it was asked for, by which time the playhead
+        // has moved past its right edge — `tileCovers` rejects it, and the
+        // display stays on the coarse whole-file overview crop. Worse, the
+        // playback throttle then abandoned the chain and started again from
+        // that same useless first step every 0.3 s, so the later steps that
+        // WOULD have carried a margin mostly never ran. That is the "goes all
+        // blurry while playing" report, and the reason it looked like a
+        // resolution problem rather than a scheduling one (found 2026-09-01).
+        //
+        // The margin computed above is already capped to `maxTileColumns` at
+        // the requested density, so rendering all of it in one step is a
+        // single bounded render, not the unbounded one staging was introduced
+        // to break up.
+        let firstStart = isPlaybackLead ? finalStart : target.startSample
+        let firstEnd = isPlaybackLead ? finalEnd : target.endSample
+        if isPlaybackLead {
+            inFlightPlaybackRender = (generation: myGeneration, start: finalStart, end: finalEnd)
+        }
         renderChunkedStep(myGeneration: myGeneration, isPrefetch: isPrefetch, target: target,
-                          currentStart: target.startSample, currentEnd: target.endSample,
+                          currentStart: firstStart, currentEnd: firstEnd,
                           finalStart: finalStart, finalEnd: finalEnd)
     }
 
@@ -956,6 +1188,214 @@ struct WavSpectrogramView: View {
     /// change or a fresh zoom cleanly abandons whatever was left of the old
     /// buffer plan instead of continuing to spend background work on a
     /// buffer nobody wants anymore.
+    // MARK: Fixed tile pyramid
+
+    /// True while a background fill is working through missing tiles, so a
+    /// burst of viewport changes queues one fill rather than a dozen.
+    @State private var pyramidFillInFlight = false
+
+    /// How far past the visible frame the background FILL reaches, as a
+    /// multiple of the viewport span. Weighted forwards because playback only
+    /// goes that way.
+    ///
+    /// This is a fill target, not a display requirement — the two used to be
+    /// the same number, and conflating them is what made the picture wait for
+    /// runway it did not need yet. See `SpectrogramTileStore.assembleCovering`.
+    private static let pyramidLeadBehind: Double = 1.0
+    private static let pyramidLeadAhead: Double = 3.0
+    /// A floor on the same reach, in whole tiles, so the fill is always at
+    /// least a tile or two ahead of the one being displayed.
+    ///
+    /// The multiples above are a fraction of a tile at some zoom levels and
+    /// several at others — in time expansion a viewport is barely wider than
+    /// one tile, so "three spans ahead" was three tiles, while in heterodyne
+    /// it is a third of one. Expressed only as a multiple of the span, the
+    /// runway silently shrinks to nothing exactly where tiles are crossed
+    /// fastest.
+    ///
+    /// Six ahead, not four: this is now the ONLY thing filling the runway.
+    /// A second filler used to run alongside it from `WavPlayerView` at
+    /// `.utility`, and the two did the same work — worse than redundantly,
+    /// because `SpectrogramTileStore.dataTile` serialises per key on an
+    /// `NSCondition`, which donates no priority. Whenever the utility filler
+    /// won the race for a tile, this `.userInitiated` one BLOCKED behind a
+    /// background-priority render of the tile the playhead was about to reach.
+    /// That is a plain priority inversion, and it shows up exactly as a tile
+    /// landing the instant it is needed instead of ahead of time.
+    private static let pyramidLeadTilesAhead = 6
+    private static let pyramidLeadTilesBehind = 1
+    /// Cap on how many tiles the displayed image joins — see
+    /// `assembleCovering`. Eight tiles of margin is more runway than any zoom
+    /// needs and keeps the join itself bounded.
+    private static let pyramidMaxAssembledTiles = 8
+
+    /// How many levels coarser the display may fall back to before it gives up
+    /// and crops the whole-file overview — see
+    /// `SpectrogramTileStore.assembleBestCovering`. Two steps is 4x the audio
+    /// per tile, which is a visible softening rather than the ~25x collapse
+    /// dropping straight to the overview was.
+    private static let pyramidFallbackLevels = 2
+    /// The level the picture currently on screen was assembled at. Equal to
+    /// the level the viewport wants in the ordinary case; higher while a
+    /// fallback is showing, which is what tells `refreshPyramidDisplay` to
+    /// keep trying to upgrade instead of settling.
+    @State private var detailTileLevel: Int?
+    /// Forward margin, in tiles, below which a re-join is worth doing IF there
+    /// is a newly-cached tile to gain by it. The hard floor stays one tile;
+    /// this is the opportunistic case, which is what keeps the assembly
+    /// growing as the fill lands instead of only ever being extended at the
+    /// last possible moment.
+    private static let pyramidRebuildTiles = 2
+
+    /// Assembles the visible span from cached tiles, and fills in whatever is
+    /// missing in the background.
+    ///
+    /// The whole point of the fixed grid shows up here: this normally does no
+    /// rendering at all. Panning, playing, scrubbing back, and returning to a
+    /// zoom level you have already used all resolve out of the cache, because
+    /// a tile's identity depends only on (level, index) and never on the
+    /// viewport that asked for it. Only genuinely new ground costs anything.
+    private func refreshPyramidTile(for target: WavViewport, store: SpectrogramTileStore) {
+        let span = max(target.sampleSpan, 1)
+        let level = SpectrogramPyramid.level(forSpanSamples: span, targetColumns: Self.targetColumns)
+        let tile = SpectrogramPyramid.tileSamples(level: level)
+        // The fill window: whichever of the two reaches further, so it is a
+        // useful distance at every zoom (see `pyramidLeadTilesAhead`).
+        let behind = max(Int(Double(span) * Self.pyramidLeadBehind), tile * Self.pyramidLeadTilesBehind)
+        let ahead = max(Int(Double(span) * Self.pyramidLeadAhead), tile * Self.pyramidLeadTilesAhead)
+        let start = max(0, target.startSample - behind)
+        let end = min(overview.totalSamples, target.endSample + ahead)
+        guard end > start else { return }
+        let pal = palette, floor = noiseFloor
+
+        // Display FIRST, and only against what is on screen: the picture goes
+        // sharp as soon as the tiles under the frame exist, carrying whatever
+        // margin happens to be cached beyond them. Waiting on the fill window
+        // is what this used to do, and why the view sat blurry with the tiles
+        // it needed already in hand.
+        refreshPyramidDisplay(target: target, level: level, tileSamples: tile, store: store)
+
+        // Then top the runway up, forward from the playhead, whether or not
+        // anything is showing yet — the two are now independent.
+        let pivot = target.startSample
+        // **Coarse first.** The fallback level covers four times the audio per
+        // tile at the same cost per tile, so one render buys the whole window a
+        // floor — and it is the tile that decides whether crossing into new
+        // ground softens or collapses. Rendering it after the sharp tiles would
+        // mean the safety net arrives once it is no longer needed.
+        let fallbackLevel = SpectrogramPyramid.clampLevel(level + Self.pyramidFallbackLevels)
+        let coarseMissing = fallbackLevel == level ? [] : store.missingTilesFromPlayhead(
+            level: fallbackLevel, startSample: start, endSample: end, pivot: pivot)
+        let missing = coarseMissing + store.missingTilesFromPlayhead(
+            level: level, startSample: start, endSample: end, pivot: pivot)
+        guard !missing.isEmpty, !pyramidFillInFlight else {
+            if missing.isEmpty { bufferDebugStatus.isRendering = false }
+            return
+        }
+        pyramidFillInFlight = true
+        bufferDebugStatus.renderingStart = start
+        bufferDebugStatus.renderingEnd = end
+        bufferDebugStatus.isRendering = true
+        WavPlayerDebugLog.log("WavSpectrogram", "pyramid: level \(level), filling \(missing.count) tile(s) for \(start)-\(end)")
+        Task.detached(priority: .userInitiated) {
+            for key in missing {
+                _ = store.picture(for: key, palette: pal, noiseFloor: floor)
+                // Show each tile as it lands rather than at the end of the
+                // batch: the first one is usually the one under the frame, and
+                // there is no reason to keep the coarse crop up while the rest
+                // of the runway renders behind it.
+                //
+                // Against where the playhead is NOW, not against the `target`
+                // this batch started from — a batch outlives several seconds of
+                // scroll, so the captured one is stale by the second tile.
+                await MainActor.run {
+                    refreshPyramidDisplay(target: currentTarget(), level: level,
+                                          tileSamples: tile, store: store)
+                }
+            }
+            await MainActor.run {
+                pyramidFillInFlight = false
+                bufferDebugStatus.isRendering = false
+            }
+        }
+    }
+
+    /// Puts the widest currently-cached picture around `target` on screen —
+    /// but only when the one already showing has stopped being good enough,
+    /// which is what keeps the cost of doing this on every playback tick at
+    /// nothing.
+    ///
+    /// **Joining tiles is not free**, even though it is only memcpy: the
+    /// assembled image is up to eight tiles of 1024 bins, so rebuilding it is
+    /// megabytes of copying plus a new CGImage. Re-joining every time another
+    /// tile lands (or on every one of the ~30 follow ticks a second) would
+    /// spend more than the coarse crop ever cost. So the rebuild is triggered
+    /// by one of two things only: the picture no longer covers the frame, or
+    /// its forward margin has fallen below a tile — meaning a boundary is
+    /// coming and the next join should happen now rather than under the
+    /// playhead. Between those, `lastAssembly` hands the same image straight
+    /// back anyway.
+    @MainActor
+    private func refreshPyramidDisplay(target: WavViewport, level: Int, tileSamples: Int,
+                                       store: SpectrogramTileStore) {
+        // Keep what is showing only if it is genuinely finished work: the right
+        // level, covering the frame, with a tile of runway ahead — AND nothing
+        // newly cached that a re-join would pick up. That last clause is what
+        // makes the assembly grow as the fill lands. Without it the picture's
+        // forward margin was whatever happened to be cached at the single
+        // moment the margin fell below one tile, and tiles rendered after that
+        // sat in the cache unused until the next cliff.
+        if let showing = detailTile, detailTileLevel == level,
+           showing.startSample <= target.startSample, showing.endSample >= target.endSample {
+            let margin = showing.endSample - target.endSample
+            let nextForward = SpectrogramPyramid.Key(
+                level: level, index: SpectrogramPyramid.tileIndex(level: level, sample: showing.endSample))
+            let canGrow = margin < tileSamples * Self.pyramidRebuildTiles && store.hasPicture(nextForward)
+            if margin >= tileSamples, !canGrow {
+                bufferDebugStatus.readyStart = showing.startSample
+                bufferDebugStatus.readyEnd = showing.endSample
+                bufferDebugStatus.hasReady = true
+                return
+            }
+        }
+        // The sharp level if it is ready, else the finest coarser one that is —
+        // see `assembleBestCovering`. Returning nil here leaves the previous
+        // picture up, which is right: a stale sharp tile still beats the
+        // whole-file crop, and `tileCovers` decides whether it can be used.
+        guard let (assembled, usedLevel) = store.assembleBestCovering(
+            preferredLevel: level, requiredStart: target.startSample, requiredEnd: target.endSample,
+            maxTiles: Self.pyramidMaxAssembledTiles, coarserLevels: Self.pyramidFallbackLevels,
+            palette: palette, noiseFloor: noiseFloor)
+        else { return }
+        bufferDebugStatus.readyStart = assembled.startSample
+        bufferDebugStatus.readyEnd = assembled.endSample
+        bufferDebugStatus.hasReady = true
+        guard usedLevel != detailTileLevel
+                || assembled.startSample != detailTile?.startSample
+                || assembled.endSample != detailTile?.endSample else { return }
+        detailTile = assembled
+        detailTileLevel = usedLevel
+        rebuildWarpedImage()
+    }
+
+    /// The viewport the pyramid should be answering for right now — the live
+    /// playback position while playing, the committed viewport otherwise. Used
+    /// by the background fill, whose captured `target` goes stale within a tile
+    /// or two of scroll.
+    @MainActor
+    private func currentTarget() -> WavViewport {
+        isPlaying ? liveTargetViewport(center: followState.displaySample) : viewport
+    }
+
+    /// Forgets the in-flight playback render if the one finishing (or being
+    /// abandoned) is the one recorded. Guarded by generation so a step from an
+    /// older, already-superseded chain can't clear the record of the render
+    /// that replaced it.
+    @MainActor
+    private func clearInFlightPlayback(_ generation: Int) {
+        if inFlightPlaybackRender?.generation == generation { inFlightPlaybackRender = nil }
+    }
+
     private func renderChunkedStep(myGeneration: Int, isPrefetch: Bool, target: WavViewport,
                                    currentStart: Int, currentEnd: Int, finalStart: Int, finalEnd: Int) {
         let span = max(target.sampleSpan, 1)
@@ -973,6 +1413,10 @@ struct WavSpectrogramView: View {
         let minHz = target.minFreqHz, maxHz = target.maxFreqHz
         let map = silenceMap
         let curve = calibrationCurve
+        // Wall clock across the whole step — what the playback trigger uses to
+        // decide how much runway a replacement needs. Started here rather than
+        // inside the task so it includes the hop onto it.
+        let startedAt = Date()
         bufferDebugStatus.renderingStart = currentStart
         bufferDebugStatus.renderingEnd = currentEnd
         bufferDebugStatus.isRendering = true
@@ -986,6 +1430,7 @@ struct WavSpectrogramView: View {
                 WavPlayerDebugLog.log("WavSpectrogram", "renderRawTile step FAILED for span \(currentStart)-\(currentEnd)")
                 await MainActor.run {
                     self.bufferDebugStatus.isRendering = false
+                    self.clearInFlightPlayback(myGeneration)
                     if isPrefetch { self.prefetchInFlight = false }
                 }
                 return
@@ -1002,6 +1447,7 @@ struct WavSpectrogramView: View {
                 guard myGeneration == self.renderGeneration else {
                     WavPlayerDebugLog.log("WavSpectrogram", "detail tile step SUPERSEDED before colorize (generation \(myGeneration) != \(self.renderGeneration)) — chain abandoned")
                     self.bufferDebugStatus.isRendering = false
+                    self.clearInFlightPlayback(myGeneration)
                     if isPrefetch { self.prefetchInFlight = false }
                     return false
                 }
@@ -1013,6 +1459,15 @@ struct WavSpectrogramView: View {
             }
             await MainActor.run {
                 self.bufferDebugStatus.isRendering = false
+                if self.inFlightPlaybackRender?.generation == myGeneration {
+                    // Smoothed, so one unlucky render doesn't make the trigger
+                    // permanently paranoid, and one lucky one doesn't make it
+                    // permanently late.
+                    let took = Date().timeIntervalSince(startedAt)
+                    self.lastPlaybackRenderSeconds =
+                        self.lastPlaybackRenderSeconds * 0.5 + took * 0.5
+                }
+                self.clearInFlightPlayback(myGeneration)
                 guard myGeneration == self.renderGeneration else {
                     WavPlayerDebugLog.log("WavSpectrogram", "detail tile step SUPERSEDED (generation \(myGeneration) != \(self.renderGeneration)) — chain abandoned")
                     if isPrefetch { self.prefetchInFlight = false }

@@ -24,6 +24,21 @@ enum TuningHelp {
         much brings the background up with the calls.
         """
 
+    static let heterodyneDenoise = """
+        What happens to the background on the LIVE channel. Reduce measures the \
+        hiss in each frequency band and subtracts it; Scrub keeps only what is \
+        plainly a call and silences the rest.
+
+        Off by default here, unlike the slow replay. This is the channel you \
+        use to notice a bat is around at all, and on Scrub it says nothing \
+        whenever nothing clears the gate — cleaner to listen to, but a quiet \
+        detector and a broken one sound alike.
+
+        Cleaning happens before the sound is mixed down, and only on the way to \
+        the speaker: the spectrogram, the detector and anything recorded still \
+        see exactly what the microphone delivered.
+        """
+
     static let audibleOffset = """
         How far below the detected call the oscillator sits. The difference \
         between the two is what you actually hear, so this sets the pitch of \
@@ -41,15 +56,33 @@ enum TuningHelp {
         How much audio is captured around the trigger. Half of it is what \
         happened BEFORE the pulse that fired it, so the call that triggered the \
         capture is never clipped. Longer holds more of a pass; shorter gets you \
-        back to listening sooner.
+        back to listening sooner — and because the gap around a call is where \
+        the hiss lives, shorter is also cleaner. At the 0.1 s minimum the \
+        window is 50 ms either side of the trigger, which is a whole call and \
+        very little else.
         """
 
-    static let snippetHiss = """
-        How far the background between calls is pushed down. Slowing a snippet \
-        stretches its background hiss along with the calls, which is what makes \
-        it noticeable. This lowers quiet material rather than cutting it out, so \
-        faint calls and call tails survive instead of being chopped. Too much \
-        makes the level pump between calls.
+    static let snippetDenoise = """
+        What happens to the background between calls. A bat call occupies a \
+        narrow band for a few thousandths of a second; hiss covers everything, \
+        all the time — so it can be removed band by band, leaving the call \
+        untouched even while the call is sounding.
+
+        Reduce measures the hiss and subtracts it, leaving a quiet steady bed. \
+        Scrub keeps only the parts that are plainly a call and silences the \
+        rest, so you hear the call and nothing at all around it. Both leave the \
+        call itself measurably intact; they differ in what fills the gaps.
+        """
+
+    static let snippetRearm = """
+        How long the mode waits after a replay before it will capture again. \
+        Zero means it re-arms the moment it can, and the next thing loud \
+        enough takes the slot — very often an echo of the call you just heard, \
+        or another call from the same pass. A pause lets the air go quiet first.
+
+        It does not reject echoes: an echo is a call, just a reflected one. It \
+        only makes one less likely to be what gets caught. Longer means fewer \
+        calls caught overall.
         """
 
     static let snippetFade = """
@@ -59,9 +92,12 @@ enum TuningHelp {
         as a fade.
         """
 
-    static let snippetGain = """
-        Makeup gain on the replayed snippet only — the live heterodyne channel \
-        has its own. Raise it if replays sit too quietly under the live sound.
+    static let snippetTrim = """
+        Volume trim on the replayed snippet only — the live heterodyne channel \
+        has its own. Every snippet is already matched to the same level from \
+        its own measured peak, so a bat at 40 m and a bat overhead come back \
+        equally loud; this shifts all of them together if replays sit too \
+        quietly or too loudly against the live sound.
         """
 
     static let snippetReplayLength = """

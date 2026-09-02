@@ -313,6 +313,12 @@ struct AppInfoView: View {
     /// Requests the guided tour. Called before the sheet dismisses itself; the
     /// host launches the tour from the sheet's onDismiss, once it's actually gone.
     var startTour: () -> Void
+    /// For the demo picker's "Your Recordings" list — see `DemoModeView`.
+    let classStore: ClassificationStore
+    /// Feeds a file through the detector in place of the microphone. Owned by
+    /// ContentView, which is the only place that can stop detection and clear
+    /// the session first — see `startDemo` there.
+    let startDemo: (URL, String) -> Void
     @Environment(\.dismiss) private var dismiss
     /// The second tour — the retired middle of onboarding. Presented from here
     /// rather than flagged-and-dismissed like the guided one: it has nothing to
@@ -335,6 +341,44 @@ struct AppInfoView: View {
 
                     section("Getting started",
                             "Connect the mic, tap the round button beside the tab bar, and point it at the sky. Every run is a session: detected passes are logged with their species, confidence, and a spectrogram of the pulses, and mapped where they were heard.")
+
+                    // **Demo lives here because this is the screen someone
+                    // without a microphone reaches.** It used to be reachable
+                    // only through the Debug sheet, which is behind a hidden
+                    // fifteen-tap unlock on the version footer — so the one
+                    // feature that answers "what does this app actually do
+                    // before I buy hardware?" was invisible to everyone who
+                    // needed it, App Review included (an app that can't be
+                    // evaluated without hardware is a Guideline 2.1 rejection).
+                    //
+                    // A NavigationLink rather than a sheet: this view already
+                    // has a NavigationStack, and DemoModeView is written to be
+                    // pushed onto an enclosing one (it carries no stack, no
+                    // Cancel, and no title bar of its own).
+                    NavigationLink {
+                        DemoModeView(classStore: classStore) { url, name in
+                            // Same order as the Debug sheet's picker: close the
+                            // whole sheet first, because the demo runs on the
+                            // detector behind it and there is nothing to see
+                            // from in here. `dismiss` is this view's, not the
+                            // pushed page's, so it takes the sheet down rather
+                            // than popping back to the About screen.
+                            dismiss()
+                            startDemo(url, name)
+                        }
+                    } label: {
+                        Label("Try it without a microphone", systemImage: "play.rectangle")
+                            .font(.headline)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 6)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.batAccent)
+
+                    Text("Plays a real night's recording through the detector so you can see it work. End it from the Demo badge on the detector.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .center)
 
                     // Two tours, and they answer different questions — see
                     // `AboutAppTour`'s header. The guided one is prominent

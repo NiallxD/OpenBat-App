@@ -70,9 +70,10 @@ struct LiveTuningSnapshot {
     // from this struct entirely until 2026-08-15 — see the type doc.
     var snippetExpansion: Double
     var snippetMemorySeconds: Double
-    var snippetHissReductionDB: Double
+    var snippetDenoiseMode: SnippetDenoiseMode
+    var snippetRearmSeconds: Double
     var snippetFadeMS: Double
-    var snippetGain: Float
+    var snippetTrimDB: Double
     var snippetRouting: SnippetOutputRouting
 
     // Pulse detector, continued: which trigger the detector is using. A picker,
@@ -119,9 +120,10 @@ struct LiveTuningSnapshot {
             // survives a restart, and the two agree except mid-drag.
             snippetExpansion: snippet.expansion,
             snippetMemorySeconds: snippet.memorySeconds,
-            snippetHissReductionDB: snippet.hissReductionDB,
+            snippetDenoiseMode: snippet.denoiseMode,
+            snippetRearmSeconds: snippet.rearmSeconds,
             snippetFadeMS: snippet.fadeMS,
-            snippetGain: snippet.gain,
+            snippetTrimDB: snippet.trimDB,
             snippetRouting: snippet.routing,
             triggerMode: pulse.triggerMode,
             bandLow: bandLow,
@@ -173,9 +175,10 @@ struct LiveTuningSnapshot {
         // is audible on the next replay rather than after a restart.
         snippet.expansion = snippetExpansion
         snippet.memorySeconds = snippetMemorySeconds
-        snippet.hissReductionDB = snippetHissReductionDB
+        snippet.denoiseMode = snippetDenoiseMode
+        snippet.rearmSeconds = snippetRearmSeconds
         snippet.fadeMS = snippetFadeMS
-        snippet.gain = snippetGain
+        snippet.trimDB = snippetTrimDB
         snippet.apply(to: audio.snippetExpansion)
         // Routing lives in an atomic on the controller, not on the processor, so
         // `apply(to:)` doesn't carry it — it needs its own write.

@@ -154,7 +154,9 @@ private struct SpeciesFeedRow: View {
         .contentShape(RoundedRectangle(cornerRadius: 10))
         .onTapGesture { showDetail = true }
         .task(id: representativePulse?.id) {
-            guard let pulse = representativePulse else { return }
+            // Nothing to decode when the guide photo is what's on screen — the
+            // pulse image is only ever the fallback now.
+            guard guidePage == nil, let pulse = representativePulse else { return }
             image = await store.loadImage(for: pulse)
         }
         .sheet(item: $profile) { page in
@@ -254,8 +256,22 @@ private struct SpeciesFeedRow: View {
         }
     }
 
+    /// **The guide photo, when the guide has one — the bat, not the sound it
+    /// made.** This used to be the pulse spectrogram unconditionally, which is
+    /// the evidence rather than the answer: at 44pt a pulse reads as a smear,
+    /// and a row that says "Common Pipistrelle" is far better illustrated by a
+    /// picture of one (Niall, 2026-09-01). The spectrogram hasn't gone anywhere
+    /// — it's still what the pass-detail screen a tap away is made of.
+    ///
+    /// Falls back to the pulse for a species the guide doesn't describe, which
+    /// is the common case rather than the exceptional one: the models name far
+    /// more bats than the community guide covers (see `guidePage`). A row with
+    /// no photo available keeps showing what it always did instead of a blank
+    /// tile.
     @ViewBuilder private var thumbnail: some View {
-        if let image {
+        if let guidePage {
+            GuideSpeciesThumbnail(species: guidePage, size: 44, cornerRadius: 8)
+        } else if let image {
             Image(uiImage: image)
                 .resizable()
                 .interpolation(.high)

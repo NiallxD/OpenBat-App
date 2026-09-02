@@ -111,9 +111,9 @@ actor SpeciesImageCache {
     }()
 
     /// Wikimedia's User-Agent policy requires a descriptive agent for non-WMF
-    /// clients — same string `WikipediaSpeciesImageService` sends.
-    private static let userAgent =
-        "OpenBat/1.0 (https://github.com/search?q=OpenBat+bat+detector; open-source, non-commercial iOS app)"
+    /// clients. Referenced rather than repeated: this was a second copy of the
+    /// literal, which is one edit away from the two disagreeing.
+    private static let userAgent = WikipediaSpeciesImageService.userAgent
 
     /// Application Support, not Caches, and deliberately so: this app is used
     /// in a field at night with no signal, and Caches is exactly what iOS

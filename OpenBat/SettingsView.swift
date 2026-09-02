@@ -625,6 +625,39 @@ struct SettingsView: View {
                    step: 1)
                 .accessibilityLabel("Slow replay speed")
                 .accessibilityValue(slowReplaySpeedLabel)
+
+            // Volume had no setting at all outside the tuning overlay, and was
+            // a fixed multiplier applied to every snippet regardless of how
+            // loud the pass was (Niall, 2026-09-01).
+            LabeledContent("Volume") {
+                Text(String(format: "%+.0f dB", snippetExpansion.trimDB))
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
+            ControlNote("Every replay is already matched to the same level, so a distant bat comes back as loud as a close one. This shifts them all together.")
+            Slider(value: Binding(
+                get: { snippetExpansion.trimDB },
+                set: {
+                    snippetExpansion.trimDB = $0
+                    // Settings are pushed into the processor at start(), so a
+                    // change made mid-session would otherwise not be heard
+                    // until the next run — same reasoning as the speed slider.
+                    audio.snippetExpansion.trimDB = $0
+                }
+            ), in: -18...18, step: 1)
+                .accessibilityLabel("Replay volume trim")
+
+            Picker("Background", selection: Binding(
+                get: { snippetExpansion.denoiseMode },
+                set: {
+                    snippetExpansion.denoiseMode = $0
+                    audio.snippetExpansion.denoiseMode = $0
+                }
+            )) {
+                ForEach(SnippetDenoiseMode.allCases) { Text($0.label).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            ControlNote("Slowing a recording down stretches its background hiss along with the bat. Reduce measures that hiss in each frequency band and subtracts it. Scrub goes further and silences everything that isn't plainly a call, so you hear the call and nothing else.")
         } header: {
             CardHeader("Slow replay",
                        "How far a captured call is slowed down so you can hear its shape.")

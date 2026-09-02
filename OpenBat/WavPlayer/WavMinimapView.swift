@@ -29,6 +29,15 @@ struct WavMinimapView: View {
     /// Debug-only red/green pan-buffer visualization — see its own doc
     /// comment and `WavSpectrogramView.renderChunkedStep` (the writer).
     let bufferDebugStatus: BufferDebugStatus
+    /// The same fifteen-taps-on-the-version-string unlock the rest of the
+    /// app's diagnostics sit behind (`ContentView.debugModeEnabled`). The
+    /// buffer overlay was drawn for everyone while the two render paths were
+    /// being compared — it is how the playhead was caught overrunning the
+    /// buffered region — but that comparison is settled, and a red and green
+    /// bar across the scrub track means nothing to someone reviewing a
+    /// recording. The plumbing stays: hide-silence still uses the path it
+    /// instruments (see Context.md §7).
+    @AppStorage("debugModeEnabled") private var debugModeEnabled = false
 
     var body: some View {
         GeometryReader { geo in
@@ -48,7 +57,9 @@ struct WavMinimapView: View {
                     .position(x: (x0 + x1) / 2, y: geo.size.height / 2)
                     .allowsHitTesting(false)
 
-                BufferDebugOverlay(status: bufferDebugStatus, totalSamples: overview.totalSamples, geoSize: geo.size)
+                if debugModeEnabled {
+                    BufferDebugOverlay(status: bufferDebugStatus, totalSamples: overview.totalSamples, geoSize: geo.size)
+                }
 
                 MinimapPlayheadOverlay(engine: engine, totalSamples: overview.totalSamples,
                                        sampleRate: overview.sampleRate, geoSize: geo.size)
@@ -139,7 +150,12 @@ private struct MinimapPlayheadOverlay: View {
     let geoSize: CGSize
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30)) { _ in
+        // Paused when nothing is playing, same as `WavPlayheadOverlay` — this
+        // one was missed, and drove a 30 Hz redraw for the entire life of the
+        // screen whether or not anything was moving. A seek still moves the
+        // line, because `playheadX` reads `currentTimeSeconds` directly and
+        // observes it.
+        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !engine.isPlaying)) { _ in
             if let x = playheadX() {
                 Rectangle()
                     .fill(Color.batAccent)

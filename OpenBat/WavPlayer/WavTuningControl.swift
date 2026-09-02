@@ -44,8 +44,31 @@ struct WavTuningControl: View {
     /// silence is cut — larger keeps more context (and merges close pulses),
     /// smaller cuts tighter. See SilenceMap.compute's `padSeconds`.
     @Binding var silencePadding: Double
+    /// How much background the speaker plays — see `PlaybackDriver.denoiseMode`.
+    /// Sits under "Listening", not "Display", because that is the whole point:
+    /// the picture and the call measurements are untouched by it. Bound as the
+    /// raw value so the player can keep it in `@AppStorage`.
+    @Binding var denoiseMode: Int
+    /// Seconds of LISTENING across the screen while playing — see PlaybackZoom.
+    /// One number, two zoom levels: heterodyne plays at the file's own rate so
+    /// it shows that much recording, and time expansion shows N times less of
+    /// it, because it takes N times longer to hear.
+    @Binding var playbackWindowSeconds: Double
 
     var body: some View {
+        // Scrolls, because this panel grows: it is a fixed-width popover with
+        // no height to spare, and hide-silence alone adds three controls when
+        // it is on. Anything past the bottom edge was simply clipped and
+        // unreachable — which is how a control added at the end of the stack
+        // could be present, correct, and invisible.
+        ScrollView {
+            content
+        }
+        .frame(width: 270)
+        .presentationCompactAdaptation(.popover)
+    }
+
+    private var content: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Display").font(.headline)
 
@@ -58,6 +81,17 @@ struct WavTuningControl: View {
                 Slider(value: $noiseFloor, in: 0...0.9, step: 0.05)
             }
 
+            VStack(alignment: .leading, spacing: 4) {
+                LabeledContent("Playback window") {
+                    Text(String(format: "%.2f s", playbackWindowSeconds))
+                        .monospacedDigit().foregroundStyle(.secondary)
+                }
+                Slider(value: $playbackWindowSeconds, in: PlaybackZoom.windowRange, step: 0.05)
+                Text("How much you hear at once, across the screen, while playing. Time expansion shows proportionally less of the recording in the same window, since it takes that much longer to listen to. Pausing hands the zoom back to you.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
             Toggle("Hide silence", isOn: $hideSilence)
             if hideSilence {
                 VStack(alignment: .leading, spacing: 4) {
@@ -67,7 +101,7 @@ struct WavTuningControl: View {
                     Slider(value: $silenceThresholdDB,
                            in: SilenceMap.minThresholdAboveFloorDB...SilenceMap.maxThresholdAboveFloorDB,
                            step: 1)
-                    Text("Above this recording's own noise floor. Lower keeps more faint calls; higher cuts harder.")
+                    Text("Above this recording's own background, including how much that background wanders. Lower keeps more faint calls; higher cuts harder.")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
@@ -75,13 +109,36 @@ struct WavTuningControl: View {
                     LabeledContent("Pulse margin") {
                         Text(String(format: "%.0f ms", silencePadding * 1000)).monospacedDigit().foregroundStyle(.secondary)
                     }
-                    Slider(value: $silencePadding, in: 0.005...0.1, step: 0.005)
+                    // A few ms is the point: enough to carry a call's onset
+                    // and tail across the join, and to give the playback
+                    // crossfade somewhere to sit. The old range went to
+                    // 100 ms, which is longer than the gap between a bat's
+                    // pulses — every setting past about half way merged the
+                    // whole pass back into one block.
+                    Slider(value: $silencePadding, in: 0.003...0.03, step: 0.001)
+                    Text("Audio kept each side of every call. The join between kept regions is crossfaded inside this margin, so there is no drop in the background as it passes.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
                 }
                 if let silenceSummary {
                     Text(silenceSummary)
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
+            }
+
+            Divider()
+
+            Text("Listening").font(.headline)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Picker("Background", selection: $denoiseMode) {
+                    ForEach(SnippetDenoiseMode.allCases) { Text($0.label).tag($0.rawValue) }
+                }
+                .pickerStyle(.segmented)
+                Text("Reduce measures the background hiss in each frequency band and subtracts it. Scrub keeps only what is plainly a call and silences the rest. The spectrogram and the call measurements still come from the original recording either way.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
 
             Divider()
@@ -106,8 +163,7 @@ struct WavTuningControl: View {
             }
         }
         .padding()
-        .frame(width: 270)
-        .presentationCompactAdaptation(.popover)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     /// Whole-number factors (the expected case — 8× for a native 384 kHz

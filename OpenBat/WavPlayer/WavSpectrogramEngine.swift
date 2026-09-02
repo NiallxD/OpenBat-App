@@ -206,14 +206,33 @@ nonisolated enum WavSpectrogramEngine {
         // after a scalar multiply, rather than the single scalar-multiply-add
         // (vDSP_vsmsa) this used to be — same call count (two per bin row
         // instead of one), still no per-pixel scalar loop.
+        // The palette becomes the IMAGE'S OWN colour table rather than
+        // something this function looks up per pixel.
+        //
+        // **The per-pixel gather was the single most expensive thing in the
+        // whole player.** Writing one 32-bit RGBA value per pixel meant a
+        // Swift loop of `nCols x croppedBins` iterations — 3.7 million for a
+        // 6144-column tile — and at `-Onone` every iteration costs around
+        // 100 ns however it is written (measured: 478 ms with array
+        // subscripts, 379 ms with raw pointers, against 140 ms for the FFT
+        // and file IO of the same tile). A render that takes half a second
+        // cannot keep ahead of a playhead that has half a second of runway,
+        // which is what "it buffers for a second when it reaches the end of
+        // the window" was (Niall, 2026-09-01).
+        //
+        // An 8-bit indexed image removes the loop entirely: `vDSP_vfixu8`
+        // already produces exactly the palette index, so it can write
+        // straight into the destination row and CoreGraphics does the colour
+        // lookup at draw time. Four bytes per pixel become one, and the last
+        // per-pixel Swift code in the path is gone.
         let lut = DisplayColormap.makeLUT(palette: palette)
         let lutSteps = lut.count
-        var lut32 = [UInt32](repeating: 0, count: lutSteps)
+        var colorTable = [UInt8](repeating: 0, count: lutSteps * 3)
         for i in 0..<lutSteps {
             let (r, g, b) = lut[i]
-            // Little-endian byte order r,g,b,a — identical memory layout to the
-            // old per-byte writes, so the CGImage bitmapInfo below is unchanged.
-            lut32[i] = UInt32(r) | (UInt32(g) << 8) | (UInt32(b) << 16) | 0xFF00_0000
+            colorTable[i * 3] = r
+            colorTable[i * 3 + 1] = g
+            colorTable[i * 3 + 2] = b
         }
 
         // Slope is constant across columns (dynamicRangeDB doesn't vary, only
@@ -228,26 +247,19 @@ nonisolated enum WavSpectrogramEngine {
         var lo: Float = 0
         var hi = Float(lutSteps - 1)
 
-        var pixels = [UInt32](repeating: 0, count: nCols * croppedBins)
+        var pixels = [UInt8](repeating: 0, count: nCols * croppedBins)
         var tmpRow = [Float](repeating: 0, count: nCols)
-        var idxRow = [UInt8](repeating: 0, count: nCols)
         raw.grid.withUnsafeBufferPointer { g in
             pixels.withUnsafeMutableBufferPointer { px in
-                lut32.withUnsafeBufferPointer { lutBuf in
-                    for bin in minBin...maxBin {
-                        let src = g.baseAddress! + bin * nCols
-                        vDSP_vsmul(src, 1, &slope, &tmpRow, 1, vDSP_Length(nCols))
-                        vDSP_vadd(tmpRow, 1, interceptPerCol, 1, &tmpRow, 1, vDSP_Length(nCols))
-                        vDSP_vclip(tmpRow, 1, &lo, &hi, &tmpRow, 1, vDSP_Length(nCols))
-                        tmpRow.withUnsafeBufferPointer { t in
-                            idxRow.withUnsafeMutableBufferPointer { ix in
-                                vDSP_vfixu8(t.baseAddress!, 1, ix.baseAddress!, 1, vDSP_Length(nCols))
-                            }
-                        }
-                        let dstBase = (maxBin - bin) * nCols   // row 0 = top = high frequency
-                        for col in 0..<nCols {
-                            px[dstBase + col] = lutBuf[Int(idxRow[col])]
-                        }
+                for bin in minBin...maxBin {
+                    let src = g.baseAddress! + bin * nCols
+                    vDSP_vsmul(src, 1, &slope, &tmpRow, 1, vDSP_Length(nCols))
+                    vDSP_vadd(tmpRow, 1, interceptPerCol, 1, &tmpRow, 1, vDSP_Length(nCols))
+                    vDSP_vclip(tmpRow, 1, &lo, &hi, &tmpRow, 1, vDSP_Length(nCols))
+                    // Row 0 = top = high frequency, same as before.
+                    let dstBase = (maxBin - bin) * nCols
+                    tmpRow.withUnsafeBufferPointer { t in
+                        vDSP_vfixu8(t.baseAddress!, 1, px.baseAddress! + dstBase, 1, vDSP_Length(nCols))
                     }
                 }
             }
@@ -255,13 +267,16 @@ nonisolated enum WavSpectrogramEngine {
 
         let pixelData = pixels.withUnsafeBufferPointer { Data(buffer: $0) }
         guard
+            let baseSpace = CGColorSpace(name: CGColorSpace.sRGB),
+            let indexedSpace = CGColorSpace(indexedBaseSpace: baseSpace,
+                                            last: lutSteps - 1, colorTable: &colorTable),
             let provider = CGDataProvider(data: pixelData as CFData),
             let cgImage = CGImage(
                 width: nCols, height: croppedBins,
-                bitsPerComponent: 8, bitsPerPixel: 32,
-                bytesPerRow: nCols * 4,
-                space: CGColorSpaceCreateDeviceRGB(),
-                bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                bitsPerComponent: 8, bitsPerPixel: 8,
+                bytesPerRow: nCols,
+                space: indexedSpace,
+                bitmapInfo: CGBitmapInfo(rawValue: 0),
                 provider: provider, decode: nil,
                 shouldInterpolate: true, intent: .defaultIntent)
         else { return nil }
@@ -288,6 +303,49 @@ nonisolated enum WavSpectrogramEngine {
         else { return nil }
         return colorize(raw, sampleRate: sampleRate, minFreqHz: minFreqHz, maxFreqHz: maxFreqHz,
                         palette: palette, noiseFloor: noiseFloor)
+    }
+
+    // MARK: Hide-silence detection resolution
+
+    /// How wide a detection column should be, in seconds of the recording.
+    /// A bat pulse is a few ms and the gaps that matter are tens of ms, so
+    /// 5 ms columns resolve both.
+    private static let detectionSecondsPerColumn: Double = 0.005
+    /// Ceiling on the detection scan's column count. At 5 ms a column this is
+    /// reached by a recording over ~2 minutes; past that, columns simply get
+    /// wider. Chosen so the scan costs about what the overview render already
+    /// costs (24 576 columns x 2 frames each vs the overview's 4096 x 8).
+    private static let maxDetectionColumns = 24_576
+
+    /// One peak-dB value per detection column for the whole file, or nil if
+    /// the overview's own columns are already fine enough to detect against
+    /// (in which case the caller should reuse the overview grid it has and do
+    /// no extra work at all).
+    ///
+    /// **Detection resolution used to be whatever the display overview
+    /// happened to be**, which is a fixed 4096 columns for the whole file
+    /// regardless of length. That is 6.5 ms per column on a 26-second
+    /// recording — fine — but 146 ms on a ten-minute one, and a recording can
+    /// run to ten minutes (`AudioRecorder.maxSegmentSeconds`). At 146 ms a
+    /// column, the gaps between a bat's pulses are not resolvable at all, so
+    /// there was nothing hide-silence could have removed from a long
+    /// recording however it was tuned.
+    static func detectionColumnPeaks(wavURL: URL, totalSamples: Int, sampleRate: Double,
+                                     minFreqHz: Double, overviewColumns: Int,
+                                     calibrationCurve: MicCalibrationCurve? = nil) -> (peaks: [Float], nCols: Int)? {
+        guard totalSamples > 0, sampleRate > 0 else { return nil }
+        let duration = Double(totalSamples) / sampleRate
+        let wanted = min(maxDetectionColumns,
+                         max(1, Int((duration / detectionSecondsPerColumn).rounded())))
+        // The overview already resolves this finely — nothing to gain.
+        guard wanted > overviewColumns else { return nil }
+        var scratch = STFTGrid.Scratch()
+        return WavPlayerDebugLog.time("WavPlayer", "detection scan (\(wanted) cols)") {
+            STFTGrid.streamColumnPeaksFromFile(
+                wavURL: wavURL, startSample: 0, endSample: totalSamples,
+                targetColumns: wanted, minFreqHz: minFreqHz, sampleRate: sampleRate,
+                scratch: &scratch, calibrationCurve: calibrationCurve)
+        }
     }
 
     // MARK: Hide-silence (compressed virtual timeline — see SilenceMap)

@@ -147,17 +147,21 @@ struct PlaybackEngineTests {
         #expect(engine.currentTimeSeconds > 0,
                 "currentTimeSeconds still 0 after 400ms of playback — PlaybackDriver never fed a buffer")
 
-        // Asserted via `peakFrequency`, not by draining columns: `PlaybackDriver`
-        // already drains and discards every column itself (see PlaybackEngine's
-        // `_ = spec.drain()`), so a test draining from another thread would be
-        // racing it for columns already thrown away — flaky by construction.
-        // `peakBin`/`peakLevel` are written directly inside `process()` and
-        // survive that drain, so they're the honest signal that audio is
-        // reaching the processor. Checking the VALUE (not just non-zero)
-        // confirms the bin→Hz conversion is right, not merely that something fed.
-        let peak = engine.spectrogramProcessor.peakFrequency
-        #expect(peak > 38_000 && peak < 42_000,
-                "peakFrequency = \(peak) Hz after 400ms of playing a 40 kHz tone — audio isn't reaching spectrogramProcessor, which is why the spectrogram and heterodyne auto-tune show nothing")
+        // Asserted through the heterodyne oscillator the auto-tuner drives,
+        // which is the end of the chain that actually matters: it can only be
+        // parked here if the pacing thread read the file, handed a full window
+        // to `TuningPeakDetector`, and that detector resolved the tone. The LO
+        // sits `audibleOffsetHz` (1500 Hz) below the detected frequency.
+        //
+        // This used to read the playback `SpectrogramProcessor`'s own
+        // `peakFrequency`. That processor is gone from the playback path —
+        // it ran the whole live column pipeline on the pacing thread to
+        // produce this one number, and nothing drew the columns (see
+        // TuningPeakDetector). The measurement itself is covered directly and
+        // deterministically in `TuningPeakDetectorTests`.
+        let lo = engine.heterodyne.loFrequency
+        #expect(lo > 36_500 && lo < 40_500,
+                "heterodyne LO = \(lo) Hz after 400ms of playing a 40 kHz tone — auto-tune never saw the audio, so the file isn't reaching the listening path")
 
         engine.stop()
         try? FileManager.default.removeItem(at: url)

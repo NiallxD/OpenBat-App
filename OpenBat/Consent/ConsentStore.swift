@@ -5,8 +5,14 @@
 //  Current consent state for uploading recordings to the community science
 //  project — stored as a single current record (granted/revoked), not an
 //  append-only log, since a log of "granted" events alone can't represent
-//  withdrawal. Persisted in the Keychain next to DeviceIdentity so it survives
-//  reinstall the same way the device ID does.
+//  withdrawal. Persisted in the Keychain, so it survives reinstall — a
+//  withdrawal in particular must not be forgotten by deleting the app.
+//
+//  It no longer survives *alongside* the device id, which moved to UserDefaults
+//  on 2026-08-31 (see `DeviceIdentity`) and so is now erased with the app. A
+//  reinstall therefore has a record but a new id and no token, which is exactly
+//  the case `ConsentSync.pushIsDue` already treats as due: it re-pushes, the
+//  Worker registers the new id, and a fresh token comes back.
 //
 
 import Foundation

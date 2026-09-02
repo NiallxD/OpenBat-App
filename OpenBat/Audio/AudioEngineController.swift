@@ -224,11 +224,19 @@ final class AudioEngineController {
     ///
     /// `+12 dB`, with the soft clip below rather than a hard clamp so a close
     /// pass distorts gracefully instead of buzzing. The processors' own gains
-    /// (heterodyne 6×, replay 4×) are unchanged and remain the knobs to tune per
-    /// bat; this is a fixed correction for a fixed attenuation.
-    private static let listenOutputMakeupGain: Float = 4.0
+    /// this is a fixed correction for a fixed attenuation, not a level control.
+    ///
+    /// The sentence that used to end this paragraph — "the processors' own
+    /// gains (heterodyne 6×, replay 4×) are unchanged and remain the knobs to
+    /// tune per bat" — is why both of those were later found to be far too hot:
+    /// it treats this multiplier as something happening elsewhere. It isn't.
+    /// Everything downstream of a processor's own gain is multiplied by this,
+    /// so a processor gain of 6 is really 24. The replay path now derives its
+    /// target from `ListenOutputStage` instead of naming a number, and the
+    /// heterodyne default came down from 6 to 1 for the same reason.
+    private static let listenOutputMakeupGain = ListenOutputStage.makeupGain
     /// Where the soft clip starts. Below this the makeup gain is exactly linear.
-    private static let listenSoftClipThreshold: Float = 0.7
+    private static let listenSoftClipThreshold = ListenOutputStage.softClipKnee
 
     /// Output-thread-only duck level, boxed so the render closure can carry it
     /// across callbacks without capturing `self` (main-actor) or allocating.

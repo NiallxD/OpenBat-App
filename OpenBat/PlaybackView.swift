@@ -37,11 +37,6 @@ struct PlaybackControlsView: View {
     /// so the older `PlaybackView` call site, which has no recording context to
     /// build an observation from, keeps a plain Share button.
     var onAddToINaturalist: (() -> Void)? = nil
-    /// Landscape uses a tighter vertical footprint so the short-height
-    /// spectrogram keeps as much room as possible; portrait keeps the roomier
-    /// spacing.
-    var compact: Bool = false
-
     /// The slowdowns the speed button cycles. Discrete stops rather than a
     /// slider: each is a clean ratio, and a stop you can tap through beats a
     /// value you have to aim at while listening.
@@ -59,7 +54,7 @@ struct PlaybackControlsView: View {
             playPauseButton
             shareButton
         }
-        .padding(.vertical, compact ? 6 : 16)
+        .padding(.vertical, 16)
     }
 
     /// Cycles 4× → 8× → 16×. Changing it while playing is fine: the engine
@@ -131,10 +126,14 @@ struct PlaybackControlsView: View {
     /// True once playback has run to the end and stopped — the transport
     /// button then offers "replay" (tapping `togglePlaying`/`play` restarts
     /// from 0, see PlaybackEngine.play) rather than a plain play.
-    private var atEnd: Bool {
-        !engine.isPlaying && engine.durationSeconds > 0
-            && engine.currentTimeSeconds >= engine.durationSeconds
-    }
+    ///
+    /// Reads the engine's `didFinish` flag rather than comparing
+    /// `currentTimeSeconds` against the duration, which is what it used to do
+    /// — and which quietly broke the isolation this view's own doc comment
+    /// promises. `currentTimeSeconds` is republished 30 times a second while
+    /// playing, so asking it here made THIS body an observer of it, and the
+    /// whole row (share menu included) re-evaluated at the progress rate.
+    private var atEnd: Bool { !engine.isPlaying && engine.didFinish }
 
     private var playPauseButton: some View {
         Button {
@@ -200,9 +199,4 @@ struct PlaybackControlsView: View {
         }
     }
 
-    private static func timeString(_ seconds: Double) -> String {
-        guard seconds.isFinite, seconds >= 0 else { return "0:00" }
-        let total = Int(seconds)
-        return String(format: "%d:%02d", total / 60, total % 60)
-    }
 }

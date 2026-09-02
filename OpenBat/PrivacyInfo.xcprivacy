@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Apple's privacy manifest (required since 2024-05-01). Two things live
+	     here: what the app collects, and why it calls the handful of common
+	     APIs Apple designates "required reason". Omitting it gets the build a
+	     rejection email (ITMS-91053) rather than a review rejection, so it has
+	     to be right before the first upload, not after.
+
+	     Kept in sync by hand — nothing checks it. If you add a call to a
+	     required-reason API (volume capacity, system boot time, active
+	     keyboards) or start sending anything off-device, this file has to
+	     grow to match, or the next upload is refused. -->
+
+	<!-- No tracking: nothing is shared with a data broker, nothing is linked
+	     to identity across apps or websites, and there is no ad network or
+	     analytics SDK in the build. -->
+	<key>NSPrivacyTracking</key>
+	<false/>
+	<key>NSPrivacyTrackingDomains</key>
+	<array/>
+
+	<!-- Empty, and accurate as of the launch build: contribution uploads are
+	     severed (UploadClient/ConsentAPIClient baseURL == "", see
+	     ConsentStore.uploadContributionEnabled), so no recording, coordinate
+	     or identifier leaves the device. Location, audio and photos are all
+	     used on-device only.
+
+	     When contribution is switched back on this needs entries — at minimum
+	     NSPrivacyCollectedDataTypeAudioData and
+	     NSPrivacyCollectedDataTypePreciseLocation (coarsened, but declare what
+	     is sent) — and the App Store Connect nutrition label has to say the
+	     same thing. -->
+	<key>NSPrivacyCollectedDataTypes</key>
+	<array/>
+
+	<key>NSPrivacyAccessedAPITypes</key>
+	<array>
+		<!-- @AppStorage and UserDefaults throughout: settings, tuning values,
+		     onboarding/release state. All of it is this app's own data, read
+		     back by this app only. -->
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryUserDefaults</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>CA92.1</string>
+			</array>
+		</dict>
+		<!-- File creation/modification dates, every one of them on a file in
+		     the app's own container: recording timestamps when a WAV carries no
+		     usable date of its own (RecordingMigration, RecordingImporter), and
+		     cache age for the species image cache (SpeciesImageCache) and the
+		     upload sweep (RecordingUploader). C617.1 is the in-container reason.
+
+		     Note .fileSizeKey (SessionExport, SpeciesImageCache) is NOT
+		     declared: the disk-space category covers volume capacity APIs
+		     (volumeAvailableCapacity*, systemFreeSize), not the size of an
+		     individual file. Nothing here calls those. -->
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryFileTimestamp</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>C617.1</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

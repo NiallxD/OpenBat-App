@@ -205,6 +205,12 @@ nonisolated enum STFTGrid {
     /// What this cannot buy is time resolution finer than the 512-sample
     /// analysis window itself (~1.3 ms at 384 kHz); past that, neighbouring
     /// columns genuinely do share content.
+    /// Longest span `streamPooledGridFromFile` will pull into memory in one
+    /// read rather than seeking per frame — 2M samples is ~5 s at 384 kHz and
+    /// 8 MB as floats, which covers any detail tile and excludes every
+    /// whole-file overview.
+    static let maxBulkReadSamples = 2_000_000
+
     static func effectiveHop(spanSamples: Int, targetColumns: Int) -> Int {
         guard targetColumns > 1, spanSamples > windowLen else { return hop }
         let needed = (spanSamples - windowLen) / (targetColumns - 1)
@@ -271,6 +277,32 @@ nonisolated enum STFTGrid {
         // slice into a pre-loaded `pcm` array.
         var frameBuf = [Float](repeating: 0, count: windowLen)
 
+        // For a span small enough to hold, read it ONCE and window from
+        // memory instead of seeking per frame.
+        //
+        // The per-frame read is what makes a whole-file overview affordable,
+        // and it stays for that. But a detail tile at native hop visits
+        // frames 32 samples apart with a 512-sample window, so it reads every
+        // sample **sixteen times**, one syscall per window — ~9600 seek+read
+        // pairs for a 0.8 s tile. Bulk-reading the same span is one read of
+        // 614 KB. The limit keeps this off the whole-file path, where the
+        // array would be hundreds of megabytes.
+        var bulk: [Float]?
+        if spanSamples <= Self.maxBulkReadSamples,
+           (try? handle.seek(toOffset: UInt64(44 + startSample * 2))) != nil,
+           let data = try? handle.read(upToCount: spanSamples * 2), data.count == spanSamples * 2 {
+            var b = [Float](repeating: 0, count: spanSamples)
+            data.withUnsafeBytes { raw in
+                let src = raw.bindMemory(to: Int16.self)
+                b.withUnsafeMutableBufferPointer { dst in
+                    vDSP_vflt16(src.baseAddress!, 1, dst.baseAddress!, 1, vDSP_Length(spanSamples))
+                }
+            }
+            var pcmScale: Float = 1.0 / 32767.0
+            vDSP_vsmul(b, 1, &pcmScale, &b, 1, vDSP_Length(spanSamples))
+            bulk = b
+        }
+
         WavPlayerDebugLog.time("STFTGrid", "streamPooledGridFromFile (\(width) buckets x oversample \(oversample))") {
             // Iterate by OUTPUT bucket (not by native frame) so each bucket's
             // own native-frame range can be strided independently — a fixed
@@ -285,7 +317,17 @@ nonisolated enum STFTGrid {
                 let stride = max(1, bucketFrameCount / oversample)
                 var frame = bucketStart
                 while frame < bucketEnd {
-                    let sampleOffset = startSample + frame * stepHop
+                    let frameOffset = frame * stepHop
+                    if let bulk {
+                        // Already in memory and already scaled — window
+                        // straight out of it.
+                        guard frameOffset + windowLen <= spanSamples else { frame += stride; continue }
+                        bulk.withUnsafeBufferPointer { b in
+                            vDSP_vmul(b.baseAddress! + frameOffset, 1, hannWindow, 1,
+                                      &windowed, 1, vDSP_Length(windowLen))
+                        }
+                    } else {
+                    let sampleOffset = startSample + frameOffset
                     guard (try? handle.seek(toOffset: UInt64(44 + sampleOffset * 2))) != nil,
                           let data = try? handle.read(upToCount: windowLen * 2), data.count == windowLen * 2
                     else {
@@ -308,6 +350,7 @@ nonisolated enum STFTGrid {
                     vDSP_vsmul(frameBuf, 1, &pcmScale, &frameBuf, 1, vDSP_Length(windowLen))
 
                     vDSP_vmul(frameBuf, 1, hannWindow, 1, &windowed, 1, vDSP_Length(windowLen))
+                    }
                     windowed.withUnsafeBufferPointer { wBuf in
                         wBuf.baseAddress!.withMemoryRebound(to: DSPComplex.self, capacity: bins) { cplx in
                             realp.withUnsafeMutableBufferPointer { rp in
@@ -357,5 +400,114 @@ nonisolated enum STFTGrid {
         scratch.mags = mags
         WavPlayerDebugLog.log("STFTGrid", "streamPooledGridFromFile: done, width=\(width)")
         return (accum, width)
+    }
+
+    /// The same disk-native pooled scan as `streamPooledGridFromFile`, but
+    /// keeping only each column's PEAK dB above `minFreqHz` instead of all
+    /// 1024 bins.
+    ///
+    /// **This exists because of memory, not speed.** Silence detection wants
+    /// far finer time resolution than the display overview can offer — that
+    /// overview is a fixed 4096 columns for the whole file, so a column is
+    /// 6.5 ms on a 26-second recording but 146 ms on a ten-minute one, and at
+    /// 146 ms the gaps between a bat's pulses are not resolvable at all.
+    /// Asking `streamPooledGridFromFile` for 24 576 columns instead would
+    /// allocate `1024 bins x 24 576 x 4 bytes` = ~100 MB, which is not
+    /// something to do on a phone to answer a yes/no question per column.
+    /// Reducing each frame to one number as it is computed costs ~98 KB for
+    /// the same span.
+    ///
+    /// `oversample` defaults lower than the grid version's 8 for the same
+    /// reason: a call spans many frames, so visiting a couple per column is
+    /// enough to notice one, and the columns are already much narrower.
+    static func streamColumnPeaksFromFile(wavURL: URL, startSample: Int, endSample: Int,
+                                          targetColumns: Int, minFreqHz: Double,
+                                          sampleRate: Double, scratch: inout Scratch,
+                                          oversample: Int = 2,
+                                          calibrationCurve: MicCalibrationCurve? = nil) -> (peaks: [Float], nCols: Int)? {
+        guard endSample > startSample, targetColumns > 0, sampleRate > 0 else { return nil }
+        guard let handle = try? FileHandle(forReadingFrom: wavURL) else {
+            WavPlayerDebugLog.log("STFTGrid", "streamColumnPeaksFromFile: FileHandle open FAILED for \(wavURL.lastPathComponent)")
+            return nil
+        }
+        defer { try? handle.close() }
+
+        let spanSamples = endSample - startSample
+        guard spanSamples >= windowLen else { return nil }
+        let bins = binCount
+        let hzPerBin = (sampleRate / 2) / Double(bins)
+        // Bin 0 is DC and Nyquist packed together, so the floor is at least 1
+        // whatever `minFreqHz` asks for — the same skip the live trigger scan
+        // and `colorize` both make.
+        let minBin = min(max(Int(minFreqHz / max(hzPerBin, 1)), 1), bins - 1)
+        let nFrames = 1 + (spanSamples - windowLen) / hop
+        let width = min(nFrames, targetColumns)
+
+        var peaks = [Float](repeating: -.greatestFiniteMagnitude, count: width)
+        var windowed = scratch.windowed; scratch.windowed = []
+        if windowed.count != fftLen { windowed = [Float](repeating: 0, count: fftLen) }
+        var realp = scratch.realp; scratch.realp = []
+        var imagp = scratch.imagp; scratch.imagp = []
+        var mags  = scratch.mags;  scratch.mags  = []
+        if realp.count != bins { realp = [Float](repeating: 0, count: bins) }
+        if imagp.count != bins { imagp = [Float](repeating: 0, count: bins) }
+        if mags.count  != bins { mags  = [Float](repeating: 0, count: bins) }
+        let scale: Float = 1.0 / Float(fftLen)
+        var frameBuf = [Float](repeating: 0, count: windowLen)
+
+        WavPlayerDebugLog.time("STFTGrid", "streamColumnPeaksFromFile (\(width) cols x oversample \(oversample))") {
+            for bucket in 0..<width {
+                let bucketStart = bucket * nFrames / width
+                let bucketEnd = (bucket + 1) * nFrames / width
+                let stride = max(1, max(1, bucketEnd - bucketStart) / oversample)
+                var frame = bucketStart
+                var best = -Float.greatestFiniteMagnitude
+                while frame < bucketEnd {
+                    let sampleOffset = startSample + frame * hop
+                    guard (try? handle.seek(toOffset: UInt64(44 + sampleOffset * 2))) != nil,
+                          let data = try? handle.read(upToCount: windowLen * 2), data.count == windowLen * 2
+                    else { frame += stride; continue }
+                    data.withUnsafeBytes { raw in
+                        let src = raw.bindMemory(to: Int16.self)
+                        frameBuf.withUnsafeMutableBufferPointer { dst in
+                            vDSP_vflt16(src.baseAddress!, 1, dst.baseAddress!, 1, vDSP_Length(windowLen))
+                        }
+                    }
+                    var pcmScale: Float = 1.0 / 32767.0
+                    vDSP_vsmul(frameBuf, 1, &pcmScale, &frameBuf, 1, vDSP_Length(windowLen))
+                    vDSP_vmul(frameBuf, 1, hannWindow, 1, &windowed, 1, vDSP_Length(windowLen))
+                    windowed.withUnsafeBufferPointer { wBuf in
+                        wBuf.baseAddress!.withMemoryRebound(to: DSPComplex.self, capacity: bins) { cplx in
+                            realp.withUnsafeMutableBufferPointer { rp in
+                                imagp.withUnsafeMutableBufferPointer { ip in
+                                    var split = DSPSplitComplex(realp: rp.baseAddress!, imagp: ip.baseAddress!)
+                                    vDSP_ctoz(cplx, 2, &split, 1, vDSP_Length(bins))
+                                    vDSP_fft_zrip(fftSetup, &split, 1, log2n, FFTDirection(FFT_FORWARD))
+                                    vDSP_zvabs(&split, 1, &mags, 1, vDSP_Length(bins))
+                                }
+                            }
+                        }
+                    }
+                    calibrationCurve?.apply(to: &mags)
+                    // One magnitude reduced to dB, rather than the whole
+                    // row — the log is the expensive part and only the peak
+                    // survives, so take the max first.
+                    var peak: Float = 0
+                    mags.withUnsafeBufferPointer { m in
+                        vDSP_maxv(m.baseAddress! + minBin, 1, &peak, vDSP_Length(bins - minBin))
+                    }
+                    let db = 20 * log10(max(peak * scale, 1e-9))
+                    if db > best { best = db }
+                    frame += stride
+                }
+                peaks[bucket] = best
+            }
+        }
+
+        scratch.windowed = windowed
+        scratch.realp = realp
+        scratch.imagp = imagp
+        scratch.mags = mags
+        return (peaks, width)
     }
 }

@@ -41,12 +41,27 @@ enum WikipediaSpeciesImageService {
         }
     }
 
+    /// The one User-Agent every Wikimedia request in the app sends — this
+    /// service's and `SpeciesImageCache`'s image fetches both. Owned here
+    /// because this is the file that documents the policy it satisfies.
+    ///
+    /// Wikimedia's policy wants a descriptive agent naming the client and a
+    /// way to reach whoever runs it. It used to point at a *GitHub search
+    /// query* for "OpenBat bat detector", which is not a contact and not even
+    /// a stable page; the project's own site is both.
+    ///
+    /// The version is read from the bundle rather than hardcoded, so the agent
+    /// can't quietly go on claiming 1.0 forever the way the old string did
+    /// while the app shipped 0.9.5.
+    static let userAgent: String = {
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
+        return "OpenBat/\(version) (https://openbat.app; open-source, non-commercial iOS app)"
+    }()
+
     private static let session: URLSession = {
         let cfg = URLSessionConfiguration.default
         cfg.timeoutIntervalForRequest = 15
-        cfg.httpAdditionalHeaders = [
-            "User-Agent": "OpenBat/1.0 (https://github.com/search?q=OpenBat+bat+detector; open-source, non-commercial iOS app)"
-        ]
+        cfg.httpAdditionalHeaders = ["User-Agent": userAgent]
         return URLSession(configuration: cfg)
     }()
 

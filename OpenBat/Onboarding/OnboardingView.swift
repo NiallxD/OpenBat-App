@@ -66,6 +66,11 @@ struct OnboardingView: View {
     // so the permissions step's status row reads this instead, refreshed after
     // the request resolves.
     @State private var micStatus = AVAudioApplication.shared.recordPermission
+    /// The same key as Settings › Storage and the default registered in
+    /// `OpenBatApp.init` — this screen is just the first place it gets asked.
+    /// Nothing needs migrating when it changes here (there are no recordings
+    /// yet), so unlike Settings this doesn't raise the restart alert.
+    @AppStorage(CloudStorage.keepInICloudKey) private var keepInICloud = true
     // Drives the direction of the step transition, so going Back slides the
     // opposite way to going forward rather than both looking like "forward".
     @State private var isMovingBackward = false
@@ -229,7 +234,7 @@ struct OnboardingView: View {
                 OnboardingStepView(
                     systemImage: "checkmark.shield.fill",
                     title: "Two things to allow",
-                    message: "OpenBat needs both to record a pass and tell you what it was.")
+                    message: "OpenBat needs both to record a pass and tell you what it was. One choice to make, too.")
 
                 VStack(spacing: 10) {
                     PermissionRow(
@@ -246,6 +251,7 @@ struct OnboardingView: View {
                         // one-shot uses, all of them listed here.
                         detail: "Shows tonight's sunset and sunrise times so you know when to head out, tags where each call was heard, picks the right species model for your region and weights the identification by what lives near you.",
                         state: locationRowState)
+                    StorageChoiceRow(keepInICloud: $keepInICloud)
                 }
 
                 VStack(spacing: 8) {
@@ -257,7 +263,7 @@ struct OnboardingView: View {
                     // will have been told the opposite. This wording stays true
                     // either way, and promises the thing that actually matters —
                     // that it never happens without being asked.
-                    Text("Recordings stay yours — on this device, and in your own iCloud if you leave that on in Settings. Nothing leaves your device unless you choose to contribute it, and you'll be asked first, every time.")
+                    Text("Recordings stay yours — on this device, and in your own iCloud if you leave that on above. Nothing leaves your device unless you choose to contribute it, and you'll be asked first, every time.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
@@ -717,6 +723,49 @@ private struct PermissionRow: View {
         case .denied:
             Image(systemName: "slash.circle").foregroundStyle(.secondary)
         }
+    }
+}
+
+/// The iCloud storage choice, styled to sit in the same list as `PermissionRow`
+/// but deliberately not one: nothing is being asked of iOS here, and there is no
+/// status glyph to fill in because the answer is whatever the switch says.
+///
+/// **It is on this screen because it was previously never asked at all.** The
+/// default is on, a night of 384 kHz audio runs to several GB, and the container
+/// is not document-scope public — so recordings were silently consuming a user's
+/// iCloud quota in a place they could not see, browse or clear from the Files
+/// app. Defaulting to on is defensible; doing it without ever saying so is what
+/// wasn't. The same toggle stays in Settings › Storage for changing it later.
+private struct StorageChoiceRow: View {
+    @Binding var keepInICloud: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Toggle(isOn: $keepInICloud) {
+                HStack(alignment: .top, spacing: 12) {
+                    Image(systemName: "icloud.fill")
+                        .font(.system(size: 20))
+                        .foregroundStyle(Color.batAccent)
+                        .frame(width: 28)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Keep recordings in iCloud")
+                            .font(.subheadline.weight(.semibold))
+                        // Both halves of the trade, the cost included — same
+                        // reasoning as the Settings footer this mirrors.
+                        Text(keepInICloud
+                             ? "They survive deleting the app and follow you to a new device, in your own iCloud. Bat audio is large: a busy night can use several GB of your iCloud storage."
+                             : "They stay on this device only, and are lost for good if you delete OpenBat.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+            .tint(.batAccent)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
     }
 }
 

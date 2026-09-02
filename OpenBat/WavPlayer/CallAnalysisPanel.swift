@@ -8,16 +8,19 @@
 //  `filledPanelCard`/`PanelTitle` (PanelCard.swift) for the same "STATS"
 //  card look the Detector screen's own stats strip uses.
 //
-//  The stat grid and hint line are ALWAYS present, at a fixed height,
-//  whether or not `result` is nil — cells show "–" placeholders and the hint
-//  reads the same instructional text regardless (same "persist, don't
-//  disappear" pattern PulseStatsViews.PulseStatValues already uses for a
-//  stale/no-data pulse). Previously the whole panel collapsed to a single
-//  short placeholder line when `result` was nil and expanded to the full
-//  two-row grid once a selection was measured — since this panel sat in the
-//  same VStack as the spectrogram (`frame(maxHeight: .infinity)`), that
-//  height change visibly resized the spectrogram every time a selection was
-//  made or cleared.
+//  The card is ALWAYS the same height, whether or not `result` is nil.
+//  Previously the whole panel collapsed to a single short placeholder line
+//  when `result` was nil and expanded to the full grid once a selection was
+//  measured — since this panel sits in the same VStack as the spectrogram
+//  (`frame(maxHeight: .infinity)`), that height change visibly resized the
+//  spectrogram every time a selection was made or cleared. So the grid is
+//  always laid out; with no result it is merely invisible, and a prompt sits
+//  over the space it holds.
+//
+//  That prompt replaced a grid of eleven "–" placeholders (Niall,
+//  2026-09-01), which reserved the height correctly but read as a broken
+//  readout: it said there was no data without saying why, or that the user
+//  has to select a region before there can be any.
 //
 
 import SwiftUI
@@ -32,6 +35,35 @@ struct CallAnalysisPanel: View {
                 .padding(.top, 8)
                 .padding(.bottom, 4)
 
+            statGrid
+                // Kept in the layout, not removed, when there is nothing to
+                // show — see the note at the top of this file: this panel
+                // shares a VStack with the spectrogram, so any height change
+                // here resizes the spectrogram. Hiding it and laying the
+                // prompt over the space it reserves keeps the card the exact
+                // same size in both states.
+                .opacity(result == nil ? 0 : 1)
+                .overlay { if result == nil { emptyPrompt } }
+                .padding(.horizontal, 8)
+                .padding(.bottom, 8)
+        }
+        .filledPanelCard()
+    }
+
+    /// Eleven dashes said "there is no data" without saying why or what to do
+    /// about it — and the selection tool that produces the data is a toolbar
+    /// glyph a user has no particular reason to have tried. The icon is the
+    /// one on that button (`WavPlayerView`'s Select Region toggle), so the
+    /// sentence points at something findable rather than naming it.
+    private var emptyPrompt: some View {
+        Text("Use the \(Image(systemName: "rectangle.dashed")) tool to reveal call data")
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+            .multilineTextAlignment(.center)
+            .padding(.horizontal, 16)
+    }
+
+    private var statGrid: some View {
             VStack(spacing: 8) {
                 HStack(spacing: 0) {
                     InfoStatCell(title: "Peak", value: values.peak, unit: "",
@@ -63,10 +95,6 @@ struct CallAnalysisPanel: View {
                     StatCell(title: "", value: "", unit: "")
                 }
             }
-            .padding(.horizontal, 8)
-            .padding(.bottom, 8)
-        }
-        .filledPanelCard()
     }
 
     private var values: Values { Values(result) }

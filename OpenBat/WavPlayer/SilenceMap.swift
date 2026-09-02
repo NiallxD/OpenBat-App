@@ -137,6 +137,21 @@ struct SilenceMap: Equatable {
     static let minThresholdAboveFloorDB: Double = 3
     static let maxThresholdAboveFloorDB: Double = 40
 
+    /// The most the threshold may be lifted to account for how much the
+    /// background's own level varies across the recording — see
+    /// `spreadAllowanceDB`. A cap rather than the raw measurement, because on
+    /// a recording that is mostly activity the measurement stops describing
+    /// the background at all.
+    static let maxSpreadAllowanceDB: Float = 12
+
+    /// The least margin that may be left around a kept run, whatever the
+    /// slider says. Playback crossfades the join between two kept regions
+    /// over a 2 ms window that has to land inside this margin and never reach
+    /// the call — see `PlaybackDriver.applySeamEnvelope`, and the
+    /// adaptive-expansion failure its doc comment cites, where a ramp longer
+    /// than the margin put every call onset part-way down a fade.
+    static let minPadSeconds: Double = 0.003
+
     /// Builds a map from a whole-file overview raw grid (bin-major
     /// `[bin*nCols+col]`, RAW dB — the layout `WavSpectrogramEngine.RawTile`
     /// stores).
@@ -194,6 +209,24 @@ struct SilenceMap: Equatable {
                 }
             }
         }
+        return compute(colPeak: colPeak, totalSamples: totalSamples, sampleRate: sampleRate,
+                       thresholdAboveFloorDB: thresholdAboveFloorDB, padSeconds: padSeconds)
+    }
+
+    /// The detection itself, over one peak-dB value per column.
+    ///
+    /// Split out from the grid version above because the grid a detection
+    /// wants is not the grid the display wants: a whole-file scan fine enough
+    /// to resolve the gaps between pulses would be ~100 MB if it carried all
+    /// 1024 bins, and detection only ever reduces each column to this one
+    /// number anyway. See `STFTGrid.streamColumnPeaksFromFile`.
+    static func compute(colPeak: [Float], totalSamples: Int, sampleRate: Double,
+                        thresholdAboveFloorDB: Double,
+                        padSeconds: Double = 0.02) -> SilenceMap {
+        let nCols = colPeak.count
+        guard nCols > 0, totalSamples > 0 else {
+            return wholeFile(totalSamples: totalSamples, isFallback: true)
+        }
 
         let enterDB = thresholdDB(colPeak: colPeak, aboveFloorDB: thresholdAboveFloorDB)
         let exitDB = enterDB - hysteresisDB
@@ -225,12 +258,31 @@ struct SilenceMap: Equatable {
         closeRun(at: nCols)
         guard !runs.isEmpty else { return wholeFile(totalSamples: totalSamples, isFallback: true) }
 
-        // Pad each run by `padSeconds` a side, merging where the padding makes
-        // neighbours touch.
-        let padCols = max(1, Int((padSeconds * sampleRate / samplesPerCol).rounded()))
+        // Convert to SAMPLES first, then pad, then merge.
+        //
+        // **Padding used to be applied in columns, with a floor of one**, and
+        // that floor quietly became the dominant term on any recording longer
+        // than a minute or so. A column is `duration / 4096` of the file, so
+        // the smallest padding the slider could produce was 15 ms on a
+        // 60-second recording, 73 ms on a five-minute one and 146 ms on a
+        // ten-minute one — per side. At the far end that is wider than the
+        // gap between a bat's pulses, so every pass merged into a single
+        // block no matter where the slider sat, and "hide silence" trimmed
+        // the ends of the recording and nothing else (Niall, 2026-09-01).
+        // In samples, a few ms means a few ms on every file.
+        //
+        // Never shorter than the splice window playback crossfades over, or
+        // the crossfade would reach past the margin and into the call itself
+        // — see `PlaybackDriver.seamFadeSeconds`, which is deliberately sized
+        // against this floor.
+        let padSamples = max(Int(max(padSeconds, minPadSeconds) * sampleRate), 1)
         var merged: [(start: Int, end: Int)] = []
         for run in runs {
-            let padded = (start: max(0, run.start - padCols), end: min(nCols, run.end + padCols))
+            let rawStart = Int((Double(run.start) * samplesPerCol).rounded())
+            let rawEnd = run.end == nCols ? totalSamples : Int((Double(run.end) * samplesPerCol).rounded())
+            let padded = (start: max(0, rawStart - padSamples),
+                          end: min(totalSamples, rawEnd + padSamples))
+            guard padded.end > padded.start else { continue }
             if let last = merged.last, padded.start <= last.end {
                 merged[merged.count - 1].end = max(last.end, padded.end)
             } else {
@@ -241,11 +293,9 @@ struct SilenceMap: Equatable {
         var segments: [Segment] = []
         var virtualCursor = 0
         for run in merged {
-            let realStart = Int((Double(run.start) * samplesPerCol).rounded())
-            let realEnd = run.end == nCols ? totalSamples : Int((Double(run.end) * samplesPerCol).rounded())
-            guard realEnd > realStart else { continue }
-            segments.append(Segment(realStart: realStart, realEnd: realEnd, virtualStart: virtualCursor))
-            virtualCursor += realEnd - realStart
+            guard run.end > run.start else { continue }
+            segments.append(Segment(realStart: run.start, realEnd: run.end, virtualStart: virtualCursor))
+            virtualCursor += run.end - run.start
         }
         guard !segments.isEmpty else { return wholeFile(totalSamples: totalSamples, isFallback: true) }
         return SilenceMap(segments: segments, virtualTotal: virtualCursor,
@@ -258,10 +308,45 @@ struct SilenceMap: Equatable {
     }
 
     /// The absolute dB a column must reach to open a run: the file's own noise
-    /// floor plus `aboveFloorDB` (clamped to the supported range).
+    /// floor, plus how much that background varies across the recording, plus
+    /// `aboveFloorDB` (clamped to the supported range).
+    ///
+    /// **The spread term is the fix for "hide silence keeps nearly
+    /// everything".** Anchoring to the 20th percentile alone assumes the
+    /// background sits tightly around that figure. Measured on the app's own
+    /// demo recording it does not: the column peaks run from −87.5 dB at the
+    /// 20th percentile to −78.7 dB at the 80th, so a 12 dB margin landed at
+    /// roughly the 86th percentile of the file's OWN ordinary background — it
+    /// classified the top seventh of the noise as activity. With padding and
+    /// merging on top, the default setting kept 43.6% of a recording whose
+    /// unmistakable call energy occupies 4.1% of it.
+    ///
+    /// Adding the measured spread moves the same 12 dB setting up to about
+    /// the 90th percentile, which on that file cuts the kept share to 17.4%
+    /// with 100% of the call energy still inside a kept region (measured
+    /// 2026-09-01, both against columns 35 dB over the floor and against the
+    /// fainter 25 dB set). What the slider means is unchanged in spirit and
+    /// sharper in practice: dB above the background, where "the background"
+    /// now includes how much it wanders.
     static func thresholdDB(colPeak: [Float], aboveFloorDB: Double) -> Float {
         let margin = min(max(aboveFloorDB, minThresholdAboveFloorDB), maxThresholdAboveFloorDB)
-        return noiseFloorDB(colPeak: colPeak) + Float(margin)
+        let sorted = colPeak.sorted()
+        return percentile(sorted, 0.20) + spreadAllowanceDB(sorted: sorted) + Float(margin)
+    }
+
+    /// How far the background's own level wanders, in dB — the 20th-to-80th
+    /// percentile span of the column peaks, capped.
+    ///
+    /// The cap is what keeps this honest on a busy recording. The measurement
+    /// only describes the background while most of the file IS background; on
+    /// one that is (say) half activity, the 80th percentile is sitting inside
+    /// the calls and the raw span would push the threshold above them. Capped,
+    /// the worst case is that a busy file is treated a fixed 12 dB more
+    /// strictly, which the slider can undo.
+    static func spreadAllowanceDB(sorted: [Float]) -> Float {
+        guard !sorted.isEmpty else { return 0 }
+        let spread = percentile(sorted, 0.80) - percentile(sorted, 0.20)
+        return min(max(spread, 0), maxSpreadAllowanceDB)
     }
 
     /// This file's own quiet floor: the 20th percentile of the per-column

@@ -707,9 +707,20 @@ enum IUCNStatusStyle {
 /// species detail pages, see WikipediaSpeciesImageService). Falls back to a
 /// themed silhouette icon (tinted per-family) while loading, on a species
 /// with neither, or if the Wikipedia request fails.
-private struct GuideSpeciesThumbnail: View {
+///
+/// Not private any more: the Detector's species feed shows the same photo
+/// against a live identification (`SpeciesFeedRow`), and a second copy of the
+/// URL-resolution-plus-family-tinted-placeholder logic is exactly the thing
+/// that drifts.
+struct GuideSpeciesThumbnail: View {
     let species: GuideSpecies
-    static let size: CGFloat = 50
+    /// Caller-set, because the two hosts differ: 50 for a guide row, 44 to
+    /// match the pulse thumbnail it stands in for on the feed.
+    var size: CGFloat = 50
+    /// Follows the size — a 10pt radius on a 44pt tile reads rounder than the
+    /// same radius on a 50pt one, and these sit next to each other in neither
+    /// place, so matching the host matters more than matching each other.
+    var cornerRadius: CGFloat = 10
 
     @State private var imageURL: URL?
 
@@ -727,8 +738,8 @@ private struct GuideSpeciesThumbnail: View {
                 placeholder
             }
         }
-        .frame(width: Self.size, height: Self.size)
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .frame(width: size, height: size)
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
         .task(id: species.scientificName) {
             // Contributor-set URL first — see its doc comment on `GuideSpecies`
             // for why that's preferred over the live Wikipedia lookup below,
@@ -746,8 +757,8 @@ private struct GuideSpeciesThumbnail: View {
             .resizable()
             .scaledToFit()
             .foregroundStyle(.white)
-            .padding(10)
-            .frame(width: Self.size, height: Self.size)
+            .padding(size / 5)
+            .frame(width: size, height: size)
             .background(tint.gradient)
     }
 }

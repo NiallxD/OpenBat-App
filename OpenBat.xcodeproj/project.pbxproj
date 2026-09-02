@@ -266,7 +266,6 @@
 				506664C410FD4FF2166C1F89 /* XCRemoteSwiftPackageReference "flac-binary-xcframework" */,
 				6B5E4A071775BAEC2965DFB7 /* XCRemoteSwiftPackageReference "ogg-binary-xcframework" */,
 				C0FFEE0000000000AAAAAA01 /* XCRemoteSwiftPackageReference "lottie-spm" */,
-				69AE2C79302972A20072DDEC /* XCRemoteSwiftPackageReference "lottie-spm" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 693CA94A2FF0506B002CD4C1 /* Products */;
@@ -470,14 +469,14 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = OpenBat/OpenBat.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 130;
+				CURRENT_PROJECT_VERSION = 159;
 				DEVELOPMENT_TEAM = 57P8LD6GWD;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = OpenBat;
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = NO;
-				INFOPLIST_KEY_NSLocationAlwaysAndWhenInUseUsageDescription = "OpenBat records a GPS course for your session and saves accurate coordinates to each recorded audio file, including while the screen is off.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "OpenBat pins where each species was detected on a map, shows tonight's sunset and sunrise times, and picks the species model for your region. It takes occasional one-shot fixes and never tracks you continuously.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "OpenBat needs microphone access to receive the ultrasonic audio stream from your bat detector microphone.";
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "OpenBat saves a call's spectrogram to your photos so you can attach it to an iNaturalist observation. It only ever adds images, and never reads your library.";
@@ -516,14 +515,14 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = OpenBat/OpenBat.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 130;
+				CURRENT_PROJECT_VERSION = 159;
 				DEVELOPMENT_TEAM = 57P8LD6GWD;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = OpenBat;
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = NO;
-				INFOPLIST_KEY_NSLocationAlwaysAndWhenInUseUsageDescription = "OpenBat records a GPS course for your session and saves accurate coordinates to each recorded audio file, including while the screen is off.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "OpenBat pins where each species was detected on a map, shows tonight's sunset and sunrise times, and picks the species model for your region. It takes occasional one-shot fixes and never tracks you continuously.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "OpenBat needs microphone access to receive the ultrasonic audio stream from your bat detector microphone.";
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "OpenBat saves a call's spectrogram to your photos so you can attach it to an iNaturalist observation. It only ever adds images, and never reads your library.";
@@ -709,14 +708,6 @@
 				minimumVersion = 0.2.0;
 			};
 		};
-		69AE2C79302972A20072DDEC /* XCRemoteSwiftPackageReference "lottie-spm" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/airbnb/lottie-spm.git";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 4.6.1;
-			};
-		};
 		6B5E4A071775BAEC2965DFB7 /* XCRemoteSwiftPackageReference "ogg-binary-xcframework" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/sbooth/ogg-binary-xcframework";
@@ -730,7 +721,7 @@
 			repositoryURL = "https://github.com/airbnb/lottie-spm.git";
 			requirement = {
 				kind = upToNextMajorVersion;
-				minimumVersion = 4.5.0;
+				minimumVersion = 4.6.1;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */

@@ -171,6 +171,11 @@ struct SpeciesDetailView: View {
     /// Only for orienting the compare glyph — see `compareButton`.
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var photo: SpeciesPhoto?
+    /// A small "i" glyph rather than the credit text itself sitting over the
+    /// hero photo — the old always-on capsule covered a large slice of the
+    /// image whenever a credit ran long (photographer name + source + licence
+    /// adds up). Tapping it opens the full text in a popover instead.
+    @State private var showPhotoCredit = false
     @State private var showConservationInfoPopover = false
     /// Measured width of the quick-facts row — see `leftQuickFactsColumnWidth`.
     @State private var quickFactsRowWidth: CGFloat = 0
@@ -192,8 +197,30 @@ struct SpeciesDetailView: View {
             cardLayoutBody
         } else {
             cardLayoutBody
+                // **This is the modifier that actually moves the photo up, and
+                // it has to be on the scroll view, not on the image.** A
+                // `ScrollView` lays its content out inside a container that has
+                // already had the safe area applied, so `ignoresSafeArea` on a
+                // child *inside* the content (which `cardHeroPhoto` also has)
+                // has nothing left to escape — the photo still began at the
+                // bottom of the status bar and the page read as a black strip
+                // above the image. Ignoring the top edge here starts the content
+                // at y = 0, and the photo then runs under the (transparent, see
+                // below) bar the way the map on Birding_Data's trip report page
+                // does.
+                .ignoresSafeArea(edges: .top)
                 .navigationTitle(species.commonName)
                 .navigationBarTitleDisplayMode(.inline)
+                // The hero photo runs up under this bar (see `cardHeroPhoto`'s
+                // `.ignoresSafeArea(edges: .top)`) rather than stopping at it —
+                // same fix as the guide globe, see `clearNavigationBarBackground()`.
+                // `flatTopScrollEdge()` matters just as much here: without it,
+                // iOS 26's automatic scroll-edge glass paints its own scrim
+                // over the top of the scrolling content, which over a bright
+                // photo reads as a solid gap between the bar and the image —
+                // the bar background being hidden isn't enough on its own.
+                .clearNavigationBarBackground()
+                .flatTopScrollEdge()
                 .toolbar {
                     // Gated outside the item for the same reason as the
                     // sources button below: an item whose content resolves to
@@ -546,25 +573,65 @@ struct SpeciesDetailView: View {
     /// this arrangement is immune to that regardless of image aspect (and of
     /// how long a credit string ends up being).
     private func cardHeroPhoto(_ photo: SpeciesPhoto) -> some View {
+        Group {
+            if isEmbedded {
+                heroImage(photo, height: Self.embeddedHeroHeight)
+            } else {
+                // Bleeds the photo up under the (now-transparent, see `page`)
+                // navigation bar instead of stopping short of it — only on the
+                // page's own screen: the embedded comparison pane has no bar
+                // to bleed under, and sits below its own title strip instead.
+                heroImage(photo, height: Self.pageHeroHeight)
+                    .ignoresSafeArea(edges: .top)
+            }
+        }
+        .overlay(alignment: .bottomTrailing) {
+            creditDisclosureButton(photo)
+        }
+    }
+
+    /// Deeper than the 260 this used to be, because the photo now starts at the
+    /// top of the window rather than below the status bar: the top ~60 of it
+    /// sits behind the transparent navigation bar, so the extra depth is what
+    /// keeps the *visible* photo the size it was and then some. It crops the
+    /// source further — accepted (Niall, 2026-09-01), the aim being something
+    /// near square on a phone.
+    private static let pageHeroHeight: CGFloat = 380
+    /// The comparison pane keeps the original depth. It sits below its own
+    /// title strip with nothing to bleed under, so it loses no height to a bar,
+    /// and there are two of these side by side.
+    private static let embeddedHeroHeight: CGFloat = 260
+
+    private func heroImage(_ photo: SpeciesPhoto, height: CGFloat) -> some View {
         Color.clear
             .frame(maxWidth: .infinity)
-            .frame(height: 260)
+            .frame(height: height)
             .overlay {
                 CachedSpeciesImage(url: photo.url, size: .hero) {
                     Color(.systemGray5)
                 }
             }
             .clipped()
-            .overlay(alignment: .bottomTrailing) {
-                Text(photo.creditText)
-                    .font(.caption2)
-                    .foregroundStyle(.white)
-                    .multilineTextAlignment(.trailing)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 4)
-                    .background(Color.black.opacity(0.8), in: Capsule())
-                    .padding(10)
-            }
+    }
+
+    private func creditDisclosureButton(_ photo: SpeciesPhoto) -> some View {
+        Button {
+            showPhotoCredit = true
+        } label: {
+            Image(systemName: "info.circle.fill")
+                .font(.title)
+                .foregroundStyle(.white, Color.black.opacity(0.55))
+                .symbolRenderingMode(.palette)
+        }
+        .padding(10)
+        .accessibilityLabel("Photo credit")
+        .accessibilityHint(photo.creditText)
+        .popover(isPresented: $showPhotoCredit) {
+            Text(photo.creditText)
+                .font(.footnote)
+                .padding(12)
+                .presentationCompactAdaptation(.popover)
+        }
     }
 
     /// The hero photo actually shown, resolved from either source — a plain
@@ -596,6 +663,11 @@ struct SpeciesDetailView: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 4) {
+                    if let group = species.group {
+                        Text(group)
+                            .font(.headline)
+                            .foregroundStyle(.orange)
+                    }
                     Text(species.commonName)
                         .font(.title2.bold())
                     Text(species.scientificName)

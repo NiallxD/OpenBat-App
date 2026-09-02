@@ -52,12 +52,16 @@ enum BundledDemoRecording {
     }
 }
 
-/// Pushed onto the Diagnostics sheet's own `NavigationStack` rather than
-/// presented as a second sheet — a sheet over a sheet re-animates the one
-/// underneath and reads as a glitch. So this deliberately carries no
-/// `NavigationStack`, no `presentationDetents` and no Cancel button: the
-/// enclosing stack supplies the bar and the back button, and dismissing the
-/// whole sheet on selection is the caller's job (see `DiagnosticsView`).
+/// Pushed onto an enclosing `NavigationStack` rather than presented as a second
+/// sheet — a sheet over a sheet re-animates the one underneath and reads as a
+/// glitch. So this deliberately carries no `NavigationStack`, no
+/// `presentationDetents` and no Cancel button: the enclosing stack supplies the
+/// bar and the back button, and dismissing the whole sheet on selection is the
+/// caller's job.
+///
+/// Two callers push it, and the ordinary one is `AppInfoView` — Info & Tour is
+/// where someone who hasn't got a microphone yet goes looking. `DiagnosticsView`
+/// keeps its own entry for support work.
 struct DemoModeView: View {
     let classStore: ClassificationStore
     /// Called with the file to feed and the name to display for it.
