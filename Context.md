@@ -70,6 +70,7 @@ Reconstructed from git history. Dates are commit dates.
 | 2026-08-17 | **Onboarding cut from eight screens to three** — welcome, the permissions ask, the ID caveat — on Niall's call. The five removed pages (echolocation, listening modes, mic calibration, the view-mode switch, "you're all set") are kept whole as `AboutAppTour`, a second tour offered on the Info & Tour screen beside the guided one. See §7. |
 | 2026-08-17 | **One card for "a model suits where you are", and the tour nudges.** The full-`Form` location-change sheet is deleted; both the post-onboarding offer and the after-a-move notice now use the same compact card. A clean install no longer raises that notice at all, and the tour's popover opens itself 15 s after the first arrival at the detector. See §7. |
 | 2026-08-16 | **Playback folds into Sessions.** The Playback tab and the recording detail page are both gone: a recording opens the player wherever you tap it, and its per-pulse IDs are a sheet over the player. Sessions loses its Sessions/Recordings segmented picker. See §7. |
+| 2026-09-01 | **The player stops stuttering, stops blurring and starts actually cutting silence.** Three unrelated causes: the pacing thread was running a whole live spectrogram to extract one number and re-tuning the oscillator 500×/s with a slew meant for 15 Hz; the detail-tile chain restarted every 0.3 s from a step that can never be used during playback; and silence detection measured no spread, padded in display columns, and inherited the overview's resolution (146 ms/column on a ten-minute recording). Measured on the demo file: kept share 43.6% → 17.4% with no call energy lost. See §3. |
 | 2026-08-28 | **Playback speed becomes a control (4×/8×/16×), and hiding silence starts applying to playback.** The compressed timeline used to be torn down the moment you pressed play, and the gap-skipping written for that case was unreachable dead code; the pacing thread now walks the kept segments directly, so every time the engine publishes is in the packed timeline. Detection reworked alongside: the threshold is dB above the file's own noise floor, runs need hysteresis and a minimum duration, and a "found nothing" fallback is flagged instead of silently showing the whole file. See §3. |
 
 ---
@@ -322,9 +323,12 @@ keeping: the playhead, the minimap, the scrub bar and the elapsed readout all
 stopped mapping domains, because there is only one domain again. Only tile
 stitching and call analysis still cross, and they always did.
 
-Seams get a 2 ms fade. It has to stay well inside `SilenceMap`'s pulse margin
-(5 ms at its tightest) — a ramp longer than the pre-roll is exactly what put
-every call onset part-way down the fade in the adaptive-expansion work.
+Seams get a 2 ms crossfade. It has to stay well inside `SilenceMap`'s pulse
+margin — a ramp longer than the pre-roll is exactly what put every call onset
+part-way down the fade in the adaptive-expansion work. That margin is now
+floored at 3 ms in `SilenceMap.minPadSeconds` rather than left to whatever the
+slider allowed; see the 2026-09-01 entry below, which also moved padding out of
+display columns and into samples.
 
 **Detection was reworked at the same time**, because the tool was not
 trustworthy enough to hand to playback:
@@ -336,13 +340,265 @@ trustworthy enough to hand to playback:
   file's *loudest* column moved with the file: one close pass or one broadband
   knock put the midpoint 30 dB up and hid every real call, while a file of only
   faint calls hid nothing. Anchored to the floor alone, 12 dB means the same
-  thing everywhere and no single artifact can move it.
+  thing everywhere and no single artifact can move it. **Superseded
+  2026-09-01** — anchoring to the floor *alone* was still not enough, because
+  the floor says nothing about how far the background wanders above it; the
+  threshold now adds that measured spread. See the 2026-09-01 entry below.
 - A run needs hysteresis to close and a minimum duration to count. A
   single-column blip is shorter than any bat call; each one used to become its
   own padded region, which is why the packed timeline filled with visible noise.
 - `wholeFile` is flagged when it is a fallback. It was reachable three
   different ways and looked identical to a broken toggle in all of them; the
   panel now says what was kept, or why nothing was.
+
+### The player was jittery, blurry and barely cut any silence — three unrelated causes (2026-09-01)
+
+Reported together, so they looked like one performance problem. They were not,
+and two of them had nothing to do with speed at all.
+
+**Nothing on the playback path ever needed a spectrogram.** The pacing thread
+ran the live Detector's whole `SpectrogramProcessor` — 1500 zero-padded
+2048-point FFTs a second, every sample copied into a 15 MB PCM ring under a
+lock, ~1500 freshly allocated 1024-float columns a second — and then drained
+and discarded every column, because both players draw a static whole-file
+spectrogram from disk. A search of the app finds no other reader of that
+processor. All that survived of it was one number: the dominant frequency
+heterodyne tunes to. `TuningPeakDetector` now measures exactly that, with the
+same window, the same FFT size, the same band floor and the same −55 dBFS
+gate, at 15 Hz instead of 1500 Hz.
+
+**Detection and tuning are not the same job, and merging them broke each in
+turn.** The fix below moved auto-tune onto a 15 Hz tick, correctly — but it
+moved DETECTION there too, and looked at a single 1.33 ms window per tick.
+That is a 2% duty cycle against a bat call lasting 2–5 ms, so the squelch gate
+stopped opening and heterodyne playback went nearly silent ("really
+insensitive, most calls don't trigger it"). On a synthetic pass of 89 calls
+90 ms apart it caught **none of them** — the sampling and the call rate simply
+never aligned.
+
+The two rates are now separate, because they want opposite things. Detection
+scans every fed block in full, at the same 256-sample hop the live Detector
+examines its own input at: 89/89 on the same test, and it costs **0.3% of a
+core** at `-Onone` — the expensive part of the old `SpectrogramProcessor` was
+never the FFTs, it was the ring copy, the per-column allocation and the
+display-column work. Tuning still runs at 15 Hz, easing toward the loudest
+peak seen since the previous tick.
+
+**Heterodyne's oscillator was chasing noise, not calls.** The 0.3 slew factor
+was copied from `AudioEngineController.updateAutoTune`, where it runs on a
+15 Hz timer. The pacing thread applied it once per fed block — about 500 times
+a second — so instead of easing toward a call's frequency over ~200 ms the
+oscillator snapped to whatever the last 1.3 ms of audio peaked at. That is
+heard as the listening pitch warbling, and it is why "make it faster" never
+fixed the jitter: there was no CPU cause. Tuning is now on a wall-clock tick at
+the cadence the constant was chosen for.
+
+**The playhead was published ~500 times a second, and could only move
+forwards.** Three separate comments in the player describe `onProgress` as
+"~20-25 Hz"; it never was — it fired once per fed block, each one a main-actor
+hop invalidating the playhead, the minimap and the elapsed readout. Worse, the
+position subtracts an estimate of what is queued in the output ring, that
+estimate wobbles between two independently clocked threads, and clamping the
+POSITION to its own maximum froze the playhead whenever the estimate dipped and
+let it jump when it recovered. The scroll inherited that sawtooth directly.
+Publishing is now 30 Hz and the LEAD is smoothed rather than the position
+clamped.
+
+**Feeding is now in 20 ms blocks**, not "whatever the clock says after a 2 ms
+sleep", which also retires ~500 `AVAudioPCMBuffer` allocations a second.
+Heterodyne's own slack went from 60 ms standing / 250 ms runaway to 120 / 500,
+with a 1 s ring. That asymmetry was the whole reason the same hiccup stuttered
+heterodyne and not time expansion: time expansion had 100 ms standing and 20 s
+of runway while doing an eighth of the work per real second, because it feeds
+the file at a slowed 48 kHz rather than its native 384 kHz.
+
+**The blur was scheduling, not resolution.** During playback the detail-tile
+chain restarted every 0.3 s from its zero-margin first step. That step is fine
+for a gesture — the view is where the user left it — but useless under
+playback: it lands 150–400 ms later, by which time the playhead has passed its
+right edge, `tileCovers` rejects it, and the display falls back to the
+whole-file overview crop, which at a typical zoom is a few dozen pixels
+stretched across the screen. The later steps that would have carried a margin
+mostly never ran, because the next throttle fire abandoned the chain. Playback
+now renders the full planned margin in one bounded step (it is already capped
+to `maxTileColumns`) and only re-renders when the playhead is running out of
+runway inside the tile it has — the same question `maybePrefetchTile` already
+asked for drags.
+
+Worth keeping, because it came up while explaining this: **Audacity does the
+same thing we do** — visible-window spectrogram, cached per clip, recomputed on
+scroll. It feels effortless because its audio is 48 kHz rather than 384, its
+columns are far coarser than our 32-sample hop, and its view does not chase a
+playhead at all, so a cached picture stays valid for a whole playthrough.
+
+**Hide silence kept 43.6% of a recording whose calls occupy 4.1% of it.**
+Measured on the app's own demo file (26.5 s, 384 kHz) at the shipped defaults —
+12 dB, 20 ms margin — 133 segments, 43.6% kept. Three causes, all
+quantifiable:
+
+- **The threshold had no idea how variable the background is.** Anchored to the
+  20th percentile of the column peaks plus a fixed margin, it assumed the
+  background sits tightly around that figure. On that file the peaks run
+  −87.5 dB at the 20th percentile to −78.7 at the 80th, so 12 dB landed at
+  roughly the **86th percentile of the file's own ordinary background**. The
+  threshold now adds the measured 20-to-80 spread, capped at 12 dB so a busy
+  recording (where the 80th percentile sits inside the calls) cannot have its
+  threshold pushed above them.
+- **Padding was applied in whole display columns with a floor of one.** A
+  column is `duration / 4096` of the file, so the smallest margin the slider
+  could produce was 15 ms on a one-minute recording, 73 ms on a five-minute one
+  and 146 ms on a ten-minute one — per side, and a recording can run to ten
+  minutes. Past a few minutes that is wider than the gap between a bat's
+  pulses, so every pass merged into a single block whatever the slider said,
+  and the toggle trimmed the ends of the recording and nothing else. Padding is
+  now in samples, floored at 3 ms so the 2 ms seam crossfade still lands inside
+  it.
+- **Detection resolution was whatever the display overview happened to be** —
+  a fixed 4096 columns for the whole file. 6.5 ms per column at 26 s, 146 ms at
+  ten minutes, at which point inter-pulse gaps are not resolvable at all.
+  Detection now takes its own scan at ~5 ms per column, capped at 24 576
+  columns, and reuses the overview when that is already fine enough. It keeps
+  only each column's peak rather than all 1024 bins, because the full grid at
+  that width would be ~100 MB.
+
+Measured after: **17.4% kept, with 100% of the call energy still inside a kept
+region** — checked against both columns 35 dB over the floor and the fainter
+25 dB set.
+
+One thing that was tried and rejected: requiring two consecutive columns over
+the threshold instead of one. It cuts a further 3 points off the kept share and
+**loses 4–11% of real call energy**, because a 5 ms pulse can occupy a single
+column. Fewer calls heard completely beats more calls heard partially, so the
+minimum-duration floor stays where it is. Note it is inert at overview
+resolution anyway — it works out to `round(12.3 / duration-in-seconds)`
+columns, so it is ≥2 only on recordings under about six seconds.
+
+Also checked and **not** a bug, so nobody re-chases it: the streaming denoiser
+does not drop audio at block boundaries. Simulated across randomised block
+sizes, the loss is a one-off 511 samples at startup, exactly as its comment
+claims.
+
+#### And then none of it helped, because the real cause was the build configuration
+
+All of the above is real and all of it stands, but Niall reported the player
+was **no better**: still stuttering in heterodyne, and disabling background
+removal fixed it. Playback was "chugging", the spectrogram moving *slower than
+real time*, and in Reduce or Scrub no sound came out at all — with the
+severity ordering off < Reduce < Scrub.
+
+"Slower than real time" is a throughput statement, so the denoiser had to be
+missing its deadline. It measured at 2.2% of a core (Reduce) and 3.7% (Scrub),
+which is why this was dismissed. **Those numbers were taken from an optimised
+build.** Measured again at `-Onone`, which is what runs during development:
+
+| | Release `-O` | Debug `-Onone` |
+|---|---|---|
+| Reduce | 2.2% of a core | **64.9%** |
+| Scrub | 3.7% | **169%** |
+
+A 30–45× penalty, on a Mac — so on a phone Scrub simply cannot run in real
+time, which is exactly the reported symptom and exactly the reported ordering.
+Nothing else on that thread showed it because everything else there is either
+vDSP or trivial; this file was almost entirely scalar Swift loops over Swift
+arrays, which is precisely what `-Onone` destroys (bounds checks, no inlining,
+retain/release traffic).
+
+**The lesson worth keeping: a DSP hot path that is scalar Swift has two
+completely different performance characters, and the one you develop against
+is the slow one.** vDSP is precompiled and does not care how this file is
+optimised, so moving the per-bin arithmetic into it removes the cliff rather
+than relocating it. The per-bin work is now `vDSP_zvmags`/`vdiv`/`vsmsma`/
+`vthr` for the gain rule and the noise estimator, shifted `vDSP_vadd`s for the
+scrub mask's neighbourhood counting, and `memmove` for the stream buffers.
+Scrub also built a fresh Swift Array **per bin** (`for base in [a, b, c]`) —
+about 768 000 heap allocations a second on the pacing thread.
+
+After, on the demo file, with byte-identical output (same RMS, same 25.3%
+non-zero for Scrub) and the gain maths verified equivalent to the scalar
+version to within float rounding across 2000 frames:
+
+| | Release `-O` | Debug `-Onone` |
+|---|---|---|
+| Reduce | 0.5% of a core | **1.1%** |
+| Scrub | 0.5% | **14.1%** |
+
+Two further things this pass found, both real independent of the above:
+
+- **The blur fix above was inert as first written.** It only re-rendered when
+  the resident tile stopped covering the playhead — but while no valid tile
+  exists that condition is true on every tick, so it fired every 0.3 s and each
+  fire abandoned the render in flight. A tile worth having takes longer than
+  the throttle to build, so it was killed and restarted forever. A render
+  already on its way now counts as coverage.
+- **`seedNoise` raced the pacing thread.** It reached straight into the
+  denoiser — documented as single-threaded, one set of FFT scratch buffers —
+  from a detached `.utility` task, while the pacing thread could already be
+  inside `denoiseStreaming` on the same instance. Opening a recording and
+  pressing play straight away is the ordinary case. The seed is now stored and
+  applied by the pacing thread itself.
+
+#### Tile renders, and the one-second stall at the end of the buffer (2026-09-01)
+
+With the audio fixed, what remained was the picture pausing for about a second
+whenever playback reached the end of the buffered window. Measured at
+`-Onone`, one tile (0.8 s span, 6144 columns) cost **140 ms of FFT and file IO
+and 478 ms in `colorize`** — against roughly 0.45 s of runway ahead of the
+playhead. A render that takes longer than the runway it replaces cannot ever
+catch up.
+
+- **`colorize` wrote one 32-bit RGBA value per pixel in a Swift loop** — 3.7
+  million iterations for a 6144-column tile, and at `-Onone` each costs about
+  100 ns however it is written (478 ms with array subscripts, 379 ms with raw
+  pointers). It now emits an **8-bit indexed image**: `vDSP_vfixu8` already
+  produces exactly the palette index, so it writes straight into the
+  destination row and CoreGraphics does the colour lookup at draw time. No
+  per-pixel Swift code, and a quarter of the bytes. **478 ms → 2 ms.**
+  Verified: an indexed image drawn scaled 6× is pixel-identical to the RGBA
+  equivalent, so CoreGraphics converts before interpolating rather than
+  blending indices. `LogFrequencyWarp` needed no change — it copies whole rows
+  by the image's own `bytesPerRow` and rebuilds from its own format.
+- **A detail tile read every sample about sixteen times.** At native hop the
+  windows are 32 samples apart and 512 long, one seek+read syscall each —
+  ~9600 of them for a 0.8 s tile. Spans under 2M samples are now read once and
+  windowed from memory. The per-frame path stays for whole-file overviews,
+  which is what it was written for. 140 ms → 90 ms.
+- **The re-render trigger asks a question about time, and measures both
+  sides of it.** Every fixed threshold tried here was wrong on some axis. A
+  fraction of the VIEWPORT fired with 0.1 s of runway left against a render
+  that took longer than that. A fraction of the TILE was tuned against
+  renders timed on a Mac, and a phone's are several times slower, so it still
+  fired too late in heterodyne — the playhead visibly overran the buffered
+  region on the minimap's red/green overlay, which is the instrument that
+  found it (Niall, 2026-09-01). And neither could be right in both heterodyne
+  and time expansion, where the same tile lasts eight or sixteen times longer
+  in real time.
+
+  So the view now measures how long the last playback render actually took on
+  this device, and how fast the playhead is actually crossing the recording
+  (from the follow position, smoothed), and starts the replacement when the
+  runway left is down to about 2.5× the render it has to cover. Where renders
+  are slow relative to the runway this chains back-to-back — which is exactly
+  what Niall asked for, "once the line goes green we should start buffering
+  the next chunk" — and where they are fast, or playback is slowed 8×, it
+  stays idle instead of re-rendering for nothing. The static fractions remain
+  as a floor for the first render, before there is anything to measure.
+- **Playback puts 90% of its margin ahead**, not the 75% a pan gets. A
+  recording never plays backwards and the view cannot be dragged while it
+  does, so the trailing margin a reversal needs is wasted here.
+
+Resolution went from 1536 to 2048 columns across the viewport. Two things
+bound this, and neither is speed:
+
+- **Memory.** The raw grid keeps all 1024 frequency bins so a frequency-only
+  pan can recolor without re-rendering, so a tile is `columns × 1024 × 4`
+  bytes — 33 MB at the 4× cap, briefly double while a replacement renders.
+  That, not time, is what caps `maxTileColumns`.
+- **The analysis window.** 512 samples is ~1.3 ms at 384 kHz, so a 0.2 s
+  viewport holds only ~150 genuinely independent columns and anything past
+  that is interpolation. More columns help at MEDIUM and WIDE zoom, where the
+  native frame grid is pooled hardest (a 2 s viewport holds 24 000 native
+  frames). Sharpening deep zoom means a shorter window, which costs frequency
+  resolution — a different decision, not a column count.
 
 ### The 96 kHz capture artifact is real and does not matter (2026-08-18)
 
@@ -2006,6 +2262,93 @@ under VoiceOver and in UI tests.
   install that has never written the key, so none of it changes an existing
   device; and simplified view — the default mode — applies its own 15–90 kHz
   band once on entry, so the new band defaults are what ADVANCED view starts at.
+- **The amplitude half of that session was measured through an inert slider, and
+  has been rolled back (2026-09-01).** In `.ultrasonic` mode — the default — the
+  detector tests level *and* peak frequency, and the frequency it was handed came
+  from `SpectrogramProcessor.frequency(forBin:level:)`, which returns 0 Hz below
+  `peakThreshold`. That constant is 0.5 and nothing has ever set it, so any
+  column between 0.3 and 0.5 reported no pitch, failed the 15 kHz test, and was
+  dropped. The threshold actually in force was 0.5 for the whole tuning session
+  and the slider did nothing beneath it, so 0.3 records a preference nobody ever
+  heard. Splitting out a level-free `frequency(forBin:)` removed the hidden gate
+  and made 0.3 real for the first time — which is a 14 dB sensitivity increase on
+  the fixed −90…−20 dB trigger scale, and it showed up immediately in the field
+  as clothing rustle and footfall on stone triggering the detector. The pitch
+  gate cannot help here: both are broadband and carry well past 15 kHz, so
+  amplitude is the only thing that ever rejected them. The default is back to
+  **0.5**, with a one-time `pulse.amplitudeGateRepaired` stamp that raises a
+  saved sub-0.5 value on first launch — a stamp rather than a clamp, so a 0.3
+  chosen deliberately *now* survives. The rest of the 2026-08-17 dump stands:
+  nothing else in it was routed through the frequency gate.
+- **0.5 is the measured knee, not a restored guess** (Squamish session
+  `2026-09-01 21:06`, 35 recordings, 47 passes, 39 of them NoID). Re-running each
+  recording's 15–90 kHz peak onto the trigger's own 0–1 scale puts every pass the
+  classifier could name at 0.52 and above, and the great bulk of the junk below
+  it. Sweeping the threshold over that night: 0.30 keeps 30 of 35 recordings,
+  0.40 keeps 20, **0.50 keeps 14 and still keeps 4 of 4 named-species passes**,
+  and 0.55 is where a real *Lasiurus cinereus* pass (peak 0.52) starts being cut.
+  So 0.5 is the highest setting that loses no confirmed bat on this corpus — the
+  knee, with the next step up already costing a real pass. Note what the junk was
+  *not*: its energy sits genuinely above 15 kHz, at −63 to −78 dB, against −29 to
+  −57 dB for the real calls. Rustle and footfall are not rejected here by being
+  low-pitched. They are rejected by being quiet, which is why amplitude is the
+  only gate that was ever doing the work.
+- **The pitch half of the default trigger is a tautology in simplified view.**
+  `applyBand` feeds the display band straight into `SpectrogramProcessor`'s
+  `peakMinFraction`, so the peak search starts at the bottom of what is on
+  screen. Simplified view — the default — sets that to 15 kHz
+  (`SimplifiedView.bandLowHz`), which is exactly `minFrequencyHz`. The reported
+  peak frequency therefore *cannot* come back below the gate, and
+  `peakFrequency >= minFrequencyHz` is true for every column ever fed. The
+  Squamish pulses show the fingerprint directly: the single most common peak
+  frequency in the session is 15000.0 Hz on the nose — bin 80, the first bin the
+  search is allowed to look at — where energy below the band piles up.
+  So "Loudness + pitch" has been plain "Loudness" for every default install,
+  and the setting's own help text ("15–20 kHz rejects wind and handling noise")
+  describes something that cannot happen. Advanced view escapes it only by
+  accident: the 2026-08-17 band starts at ~3.8 kHz, leaving the gate real room.
+  This is the same shape of defect as the hidden `peakThreshold` above — one
+  number quietly serving two consumers with opposite needs. Here the display
+  band is a *viewing* preference and the detector's search floor is a *detection*
+  parameter, and they must not be the same variable: as it stands, scrolling the
+  spectrogram changes what the detector is able to reject.
+  Left unfixed deliberately (2026-09-01). Widening the detector's search floor
+  below the gate is not free — a call arriving over low-frequency rumble would
+  have its peak bin land on the rumble and be rejected, trading tonight's false
+  positives for false negatives on exactly the nights that matter. The honest
+  fix is a concentration test (in-band peak versus sub-gate peak) rather than a
+  wider search, and that wants measuring before it is built.
+  The general lesson is that two independent-looking thresholds on the same
+  scale, one of them a private constant, compose into a gate neither name
+  describes — and a tuning session cannot see it, because the slider it is
+  moving still displays the value it is not applying.
+- **A one-pulse pass is discarded, not filed as NoID** (2026-09-01). Bats call in
+  trains, so a lone trigger with silence either side is a knock, a footfall or a
+  fabric snap — and it is unnameable anyway, there being nothing to aggregate
+  over. In the Squamish session twenty of the thirty-nine NoID passes were
+  single-pulse, while every pass the classifier could name carried two or more
+  (2, 4, 4, 4, 8, 10, 30), so the rule drops half the clutter and none of the
+  identifications. `PulseDetector.minRecordedPassPulseCount` (2).
+  Three things about it that are easy to get wrong:
+  **It is not `AutoIDSettings.minPassPulseCount`,** which looks like the same
+  idea and isn't: that one gates whether a pass gets NAMED, so falling below it
+  produces a NoID record — still written, still in the list. Raising that stepper
+  would have removed none of those twenty entries. This gate decides whether the
+  pass is written at all.
+  **It has to be applied twice.** `AudioRecorder` aggregates over its own segment
+  span, independently of the detector's pass, so dropping the pass from the
+  history alone leaves the WAV on disk — the half the user actually sees. Hence
+  `AudioRecorder.rejectsSegment`, sharing the detector's constant rather than
+  copying it.
+  **Zero classified pulses is KEPT.** In the recorder, `noID(pulseCount: 0)`
+  means nothing was classified during the segment — no model active, or
+  classification not keeping up — which is exactly what a feeding buzz does.
+  Only an explicit count of 1 is evidence of a lone trigger. Simplifying the
+  guard to `pulseCount < min` would silently delete real recordings on the
+  busiest passes of the night, and nothing on screen would say so.
+  The counters are deliberately untouched: `registerDetection()` runs on the
+  detection path, so pulse count and rate still report that something fired. The
+  detector did trigger; it just has nothing worth filing.
 - **`maxGapMs` (6 ms) bridges nulls inside one call.** FM sweeps have amplitude
   nulls; without bridging, one call yielded three fragmented captures.
 - **`minFrequencyHz` 15 kHz** rejects wind and handling noise without cutting off

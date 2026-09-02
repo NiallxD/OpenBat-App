@@ -79,7 +79,9 @@ final class BackgroundDetectionPump {
             // of the batch and would scramble pulse position. Same reasoning as `draw`.
             detector.feed(
                 peakLevel: column.peakLevel,
-                peakFrequency: processor.frequency(forBin: column.peakBin, level: column.peakLevel),
+                // Level-free, matching `draw` — see
+                // `SpectrogramProcessor.frequency(forBin:)`.
+                peakFrequency: processor.frequency(forBin: column.peakBin),
                 columnEndSample: column.endSample,
                 columnsPerSecond: columnsPerSecond,
                 sampleRate: sampleRate

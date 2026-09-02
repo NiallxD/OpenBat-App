@@ -32,9 +32,27 @@
   interrupts everybody, before they reach the detector.
 -->
 
-## v0.9.5 (Build 130)
+## v0.9.5 (Build 135)
+
+### Fixed
+- **The detector stops triggering on your own footsteps** — Rustling clothing, stones underfoot and handling noise were setting it off, filling a night with recordings of nothing. The loudness needed to trigger had been set to a value that never actually took effect, and correcting that made the detector far more sensitive than it had ever been in the field. It is back where it was, which on a test night kept every bat and removed two thirds of the noise.
+- **A single click no longer counts as a bat** — Bats call in trains, so one lone trigger with silence either side is almost always a knock or a footfall. Those are no longer saved or listed. What triggered still counts toward the pulse total, so the readouts stay honest.
 
 ### Changed
+- **Field Guide Image** — The photograph on a species entry now flows to the top of the screen to offer a more immersive view.
+
+## v0.9.5 (Build 134)
+
+### New
+- **Bat group common name** — Added a line with the common group name for that species. This is akin to calling birds 'hawks' or 'hummingbirds'. The name appears at the top of the species profile and can be updates and added to in the Openbat.app field guide editor.
+
+## v0.9.5 (Build 133)
+
+### New
+- **Try OpenBat without a microphone** — Info & Tour now has a demo. It plays a real night's recording through the detector, so the spectrogram, the pulse detection and the species IDs all run exactly as they do live and you can see what the app does before you have any hardware. It will play your own recordings the same way. While one is running the detector shows a Demo badge, and tapping that badge is how you end it and hand the app back to the microphone.
+
+### Changed
+- **You choose where recordings are kept when you set up** — Setting up now asks whether to keep recordings in your own iCloud, alongside the microphone and location questions, and says what it costs: bat audio is large, and a busy night can use several gigabytes. It was on from the start before, and only mentioned in Settings. It is still in Settings whenever you want to change it.
 - **The play button is its own button on iPad** — It used to be the last item inside the tab pill, where it looked like a fourth place to go rather than the control that starts listening. It now sits beside the pill as its own circle, the way it already did on iPhone.
 
 ### Fixed

@@ -130,8 +130,35 @@ nonisolated final class SpectrogramProcessor: @unchecked Sendable {
 
     /// Converts a column's dominant bin to Hz, returning 0 when the level is
     /// below the detection threshold or the sample rate is unknown.
+    ///
+    /// **Only for the auto-tuner.** The zero is a sentinel meaning "no
+    /// confident peak this column", which is what a tuner chasing a frequency
+    /// to lock onto needs. Anything that is going to apply its own amplitude
+    /// test wants `frequency(forBin:)` below instead — see the note there.
     func frequency(forBin bin: Int, level: Float) -> Double {
-        guard sampleRate > 0, level >= peakThreshold else { return 0 }
+        guard level >= peakThreshold else { return 0 }
+        return frequency(forBin: bin)
+    }
+
+    /// Bin → Hz, with no opinion about whether the column was loud enough.
+    ///
+    /// **This split fixes a hidden second amplitude gate.** `peakThreshold` is
+    /// 0.5 and nothing has ever set it, while the pulse detector's own
+    /// `amplitudeThreshold` had been field-tuned down to 0.3 (2026-08-17). In
+    /// "Loudness + pitch" mode — the default — the detector tests level AND
+    /// `peakFrequency >= minFrequencyHz`, and it was being handed a frequency
+    /// computed by the function above: any column between 0.3 and 0.5 reported
+    /// 0 Hz, failed the pitch test, and was dropped. So the amplitude slider
+    /// did nothing at all below 0.5 in the mode almost everyone runs, and the
+    /// tuning session that lowered it changed nothing (found 2026-09-01).
+    ///
+    /// Note what that implies about the 0.3 itself: it was never audible, so it
+    /// is not a preference to preserve. `PulseDetector.amplitudeThreshold` is
+    /// back to the 0.5 that was really in force — removing this gate without
+    /// that rollback is a silent 14 dB sensitivity increase, and it triggers on
+    /// clothing and footsteps.
+    func frequency(forBin bin: Int) -> Double {
+        guard sampleRate > 0 else { return 0 }
         return Double(bin) * sampleRate / Double(fftSize)
     }
 

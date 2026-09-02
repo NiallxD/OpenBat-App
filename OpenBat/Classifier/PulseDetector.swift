@@ -53,12 +53,29 @@ final class PulseDetector {
     var triggerMode: TriggerMode = .ultrasonic {
         didSet { defaults.set(triggerMode.rawValue, forKey: Key.triggerMode) }
     }
-    /// Normalised peak magnitude (0–1). Matches spectrogram brightness — 0.5 =
-    /// medium-bright. Lowered from 0.5 to 0.3 after a field tuning session
-    /// (2026-08-17 dump): 0.5 only triggered on close, loud passes, and the
-    /// frequency half of the default `.ultrasonic` trigger is what keeps the
-    /// lower threshold from firing on wind and handling noise.
-    var amplitudeThreshold: Float = 0.3 {
+    /// Normalised peak magnitude (0–1) on the fixed −90…−20 dB trigger scale, so
+    /// 0.05 here is 3.5 dB. Matches spectrogram brightness — 0.5 = medium-bright.
+    ///
+    /// **0.5, and the 2026-08-17 field tuning that said 0.3 does not apply.**
+    /// That session moved this slider in `.ultrasonic` mode, where the detector
+    /// also tested peak frequency — and the frequency it was handed was itself
+    /// gated at level 0.5 (`SpectrogramProcessor.peakThreshold`), so every column
+    /// between 0.3 and 0.5 reported 0 Hz and was dropped on the pitch test. The
+    /// threshold actually in force was 0.5 the whole time and the slider was
+    /// inert below it, so the session never heard what 0.3 sounds like.
+    ///
+    /// Removing that hidden gate (2026-09-01) made 0.3 real for the first time
+    /// and took the trigger 14 dB more sensitive, which is not a tuning choice
+    /// anyone made: clothing rustle and footfall on stone are broadband and carry
+    /// well past the 15 kHz pitch gate, so amplitude is the only thing rejecting
+    /// them. 0.5 is what the field-tested build ran at, and re-measuring the
+    /// Squamish session of 2026-09-01 says it is also the right number rather
+    /// than merely the old one: every pass the classifier could name peaks at
+    /// 0.52 or above, so 0.5 is the highest threshold that loses none of them,
+    /// and 0.55 already cuts a real *Lasiurus cinereus* pass. See `Context.md`
+    /// §8. Re-tune downward from here deliberately, now that moving the slider
+    /// does something.
+    var amplitudeThreshold: Float = 0.5 {
         didSet { defaults.set(amplitudeThreshold, forKey: Key.amplitudeThreshold) }
     }
     /// Minimum peak frequency (Hz) required in .ultrasonic mode. Default 15 kHz
@@ -134,7 +151,10 @@ final class PulseDetector {
 
     // MARK: Persistence
 
-    private let defaults = UserDefaults.standard
+    /// `UserDefaults.standard` in the app — the initialiser takes a suite only so
+    /// tests can exercise the one-time amplitude repair below without writing to
+    /// the real domain, where a stamp set once would make the test unrepeatable.
+    private let defaults: UserDefaults
     private enum Key {
         static let triggerMode          = "pulse.triggerMode"
         static let amplitudeThreshold   = "pulse.amplitudeThreshold"
@@ -148,14 +168,30 @@ final class PulseDetector {
         static let spectrogramNoiseFloor             = "pulse.spectrogramNoiseFloor"
         static let displayPalette                    = "pulse.displayPalette"
         static let displayRefreshIntervalSeconds     = "pulse.displayRefreshIntervalSeconds"
+        /// Stamp for the one-time amplitude repair below. A stamp rather than a
+        /// clamp because the point is to undo a value the user never chose —
+        /// once it has run, a deliberate 0.3 must survive every later launch.
+        static let amplitudeGateRepaired             = "pulse.amplitudeGateRepaired"
     }
 
-    init() {
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
         // Restore saved settings; absent keys leave the property defaults above.
         if let raw = defaults.string(forKey: Key.triggerMode),
            let mode = TriggerMode(rawValue: raw) { triggerMode = mode }
         if defaults.object(forKey: Key.amplitudeThreshold) != nil {
             amplitudeThreshold = defaults.float(forKey: Key.amplitudeThreshold)
+        }
+        // One-time repair, once per install. A saved threshold below 0.5 was set
+        // while the hidden frequency gate made it unreachable (see the property's
+        // note), so it records a preference that was never audible — restoring it
+        // now would hand the user 14 dB of extra sensitivity they never asked for.
+        // Written straight to `defaults` as well as to the property so the repair
+        // sticks whether or not `didSet` fires for this assignment.
+        if !defaults.bool(forKey: Key.amplitudeGateRepaired) {
+            if amplitudeThreshold < 0.5 { amplitudeThreshold = 0.5 }
+            defaults.set(amplitudeThreshold, forKey: Key.amplitudeThreshold)
+            defaults.set(true, forKey: Key.amplitudeGateRepaired)
         }
         if defaults.object(forKey: Key.minFrequencyHz) != nil {
             minFrequencyHz = defaults.double(forKey: Key.minFrequencyHz)
@@ -236,6 +272,20 @@ final class PulseDetector {
 
     /// Silence gap (seconds) after the last pulse that closes a pass and fires the aggregated ID.
     var passTimeoutSeconds: Double = 2.0
+
+    /// Pulses a pass needs before it is written to the history at all — see the
+    /// discard in `finalizePass()` for the measurement behind the 2.
+    ///
+    /// A constant rather than a setting on purpose. The alternative is a second
+    /// "minimum pulses" control sitting next to `minPassPulseCount`, which means
+    /// something different, and no user could be expected to tell the two apart
+    /// from their names. If this ever needs to move it should move for everyone,
+    /// with a measurement attached.
+    ///
+    /// Static because `AudioRecorder` applies the same rule to its own segments
+    /// from its own queue — see the rejection in `closeSegment`. The two must
+    /// agree, or a pass dropped from the history leaves its WAV behind.
+    nonisolated static let minRecordedPassPulseCount = 2
 
     /// Detection timestamps within the rate window, used to compute `pulseRateHz`.
     private var recentDetections: [Date] = []
@@ -355,10 +405,34 @@ final class PulseDetector {
         }
         guard passPulseCount > 0 else { return }
 
-        // Fires on every exit below — the NoID early return as well as the normal end.
-        // Both are real passes: even when the classifier declines to name one, the pulse
-        // count and last-pulse stats have moved, and the Live Activity should say so.
+        // Fires on every exit below — the NoID early return and the single-pulse
+        // discard as well as the normal end. All three are real triggers: even when
+        // the classifier declines to name one, the pulse count and last-pulse stats
+        // have moved, and the Live Activity should say so.
         defer { onPassFinalized?() }
+
+        // One pulse is not a pass. Bats call in trains, so a lone trigger with
+        // silence either side is a knock, a footfall or a fabric snap — and it is
+        // unnameable in any case, since there is nothing to aggregate over.
+        //
+        // Measured against the Squamish session of 2026-09-01: twenty of its
+        // thirty-nine NoID passes were single-pulse, while every pass the
+        // classifier could name carried two or more (2, 4, 4, 4, 8, 10, 30). So
+        // this drops half the clutter and none of the identifications.
+        //
+        // Deliberately NOT `autoIDSettings.minPassPulseCount`, which looks like
+        // the same idea and is not: that one gates whether a pass gets NAMED, so
+        // falling below it produces a NoID record — still written, still in the
+        // list. This gate decides whether the pass is written at all, which is
+        // the thing that was actually wanted. Raising the other one would have
+        // removed none of those twenty entries.
+        //
+        // The discard is silent in the history but not in the counters: the pulse
+        // count and rate come from `registerDetection()` on the detection path and
+        // are untouched here, so the readouts still say something triggered. That
+        // is the honest split — the detector did fire, it just has nothing worth
+        // filing.
+        guard passPulseCount >= Self.minRecordedPassPulseCount else { return }
 
         let descriptor = activeClassifier()?.descriptor
         guard let outcome = PassAggregation.aggregate(

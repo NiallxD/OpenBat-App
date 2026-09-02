@@ -220,7 +220,10 @@ final class SpectrogramRenderer: NSObject, MTKViewDelegate {
             // column of the batch and would scramble pulse position.
             pulseDetector?.feed(
                 peakLevel: column.peakLevel,
-                peakFrequency: processor.frequency(forBin: column.peakBin, level: column.peakLevel),
+                // Level-free: the detector applies its own amplitude threshold,
+                // and the level-gated spelling made that threshold inert below
+                // 0.5 — see `SpectrogramProcessor.frequency(forBin:)`.
+                peakFrequency: processor.frequency(forBin: column.peakBin),
                 columnEndSample: column.endSample,
                 columnsPerSecond: columnsPerSecond,
                 sampleRate: processor.sampleRate

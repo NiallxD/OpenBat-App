@@ -581,9 +581,24 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
         let outcome = speciesAutoID(segmentStart: segmentStartDate ?? Date(), segmentEnd: Date())
 
         // NOISE is the model's own confident "not a bat" call — reject it outright
-        // rather than saving a WAV nobody will want. Every other outcome (a real
-        // species OR "couldn't be classified") is kept: only NOISE is discarded.
-        guard case .noise = outcome else {
+        // rather than saving a WAV nobody will want.
+        //
+        // A single-pulse NoID segment is rejected too, for the reason given at the
+        // discard in `PulseDetector.finalizePass`: bats call in trains, so one
+        // trigger with silence either side is a knock or a footfall, and it is
+        // unnameable regardless. This has to be decided here as well as there
+        // because the two aggregate independently — the detector over its pass,
+        // the recorder over its own segment span — so dropping the pass from the
+        // history would otherwise still leave the WAV on disk, which is the half
+        // the user actually sees.
+        //
+        // **`pulseCount == 0` is kept, and the difference matters.** Zero does not
+        // mean "nothing happened": it means no pulse was classified inside this
+        // segment — no AutoID model active, or classification simply not keeping
+        // up, which is exactly what a busy feeding buzz does. Discarding those
+        // would delete real recordings whenever the device fell behind. Only an
+        // explicit count of 1 is evidence of a lone trigger.
+        guard Self.rejectsSegment(outcome) else {
             try? closeAndKeep(handle: h, url: url, outcome: outcome)
             return
         }
@@ -777,6 +792,26 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
         /// classification just didn't keep up) — never assume it's 0.
         case noID(pulseCount: Int)
         case noise
+    }
+
+    /// Whether a closed segment is thrown away instead of saved. Split out of
+    /// `closeSegment` so the rule can be tested without a file handle: the
+    /// zero-versus-one distinction below is easy to get wrong and expensive to
+    /// notice, since getting it wrong deletes real recordings silently.
+    nonisolated static func rejectsSegment(_ outcome: AutoIDOutcome) -> Bool {
+        switch outcome {
+        case .noise:
+            // The model's own confident "not a bat".
+            return true
+        case .noID(let pulseCount):
+            // A lone trigger — see `PulseDetector.finalizePass`. `pulseCount == 0`
+            // is NOT a lone trigger: it means nothing was classified in this
+            // segment (no model active, or classification not keeping up, which
+            // is what a feeding buzz does), so it is kept.
+            return pulseCount > 0 && pulseCount < PulseDetector.minRecordedPassPulseCount
+        case .species:
+            return false
+        }
     }
 
     /// Winning outcome across the pulses classified during this segment's time span.
