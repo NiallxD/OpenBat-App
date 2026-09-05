@@ -74,10 +74,6 @@ struct RecordingRow: View {
     /// `runnerUpLine(in:)`. `nil` until then, and drawn as a blank line rather
     /// than as a claim, so the row's height never changes under the reader.
     @State private var runnerUp: String?
-    /// How well this recording would serve as an iNaturalist observation, or
-    /// nil while it is still being worked out. See `iNatBadge`.
-    @State private var iNatRating: INatUploadAssessment.Rating?
-    @State private var iNatPosted = false
     @State private var postSignal = INatPostSignal.shared
 
     /// Wide enough that the picture reads as the square end of the row — the
@@ -145,7 +141,6 @@ struct RecordingRow: View {
                     .foregroundStyle(.secondary)
             }
             Spacer(minLength: 4)
-            iNatBadge
             uploadBadge
             if let confidence = recording.confidence {
                 ConfidenceBadge(confidence: confidence)
@@ -153,56 +148,25 @@ struct RecordingRow: View {
         }
     }
 
-    /// A leaf on the rows worth posting to iNaturalist, and nothing on the rest.
-    ///
-    /// **Only the good news is drawn.** The question this answers is "which of
-    /// tonight's recordings should I do something with", and a list where every
-    /// row carries a grade answers it much worse than one where four rows out of
-    /// sixty have a leaf on them. Poor and blocked recordings say nothing at all
-    /// rather than wearing a red mark — the full reasoning is one tap away on
-    /// the observation sheet, which is where somebody has actually asked.
-    @ViewBuilder private var iNatBadge: some View {
-        if iNatPosted {
-            Image(systemName: "checkmark.seal.fill")
-                .font(.caption)
-                .foregroundStyle(.green)
-                .accessibilityLabel("Posted to iNaturalist")
-        } else if let iNatRating {
-            switch iNatRating {
-            case .excellent, .good:
-                Image(systemName: "leaf.fill")
-                    .font(.caption)
-                    .foregroundStyle(.green)
-                    .accessibilityLabel("Worth posting to iNaturalist: \(iNatRating.rawValue.lowercased())")
-            case .fair:
-                Image(systemName: "leaf")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-                    .accessibilityLabel("Could be posted to iNaturalist: fair")
-            case .poor, .blocked:
-                EmptyView()
-            }
-        }
-    }
-
-    /// Scores the recording for the badge above.
+    /// Scores the recording for the list, and publishes the result to
+    /// `INatRowRatings` for the tile to draw — see that type for why the row
+    /// works it out but doesn't draw it.
     ///
     /// Uses `estimatedUploadBytes` rather than actually trimming the file: the
     /// trim copies tens of megabytes, which is fine on a confirmation screen and
     /// impossible for a scrolling list. The estimate is the same arithmetic the
-    /// trim performs, so the badge and the sheet agree.
+    /// trim performs, so the list and the sheet agree.
     private func assessForINaturalist(_ passes: [PassRecord]) {
-        iNatPosted = INatPostLedger.hasPosted(recordingID: recording.id)
-        guard !iNatPosted else { return }
         let fileBytes = (try? FileManager.default
             .attributesOfItem(atPath: store.wavURL(for: recording).path)[.size] as? Int)
             .flatMap { $0 } ?? 0
         let bytes = INatUploadAssessment.estimatedUploadBytes(recording: recording,
                                                               passes: passes,
                                                               fileBytes: fileBytes)
-        iNatRating = INatUploadAssessment.assess(recording: recording,
-                                                 passes: passes,
-                                                 uploadBytes: bytes).rating
+        let assessment = INatUploadAssessment.assess(recording: recording,
+                                                     passes: passes,
+                                                     uploadBytes: bytes)
+        INatRowRatings.shared.set(assessment.rating, for: recording.id)
     }
 
     /// "Runner-up: Soprano Pipistrelle 22%", from the passes inside this

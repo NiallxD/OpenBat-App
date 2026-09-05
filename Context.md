@@ -3165,7 +3165,23 @@ A recording that is still over 20 MB after trimming scores 0 and cannot be
 posted, because an acoustic observation with no audio cannot be verified by
 anyone.
 
-**The badge on a recording row** (`RecordingRow.iNatBadge`) is the same score,
+**How a row shows it** (revised 2026-09-04): a slow orange breath around the
+whole tile, and nothing else. It was a leaf badge, which sat next to the
+confidence percentage — two small trailing marks, both apparently about how good
+the identification was, saying different things, and Niall read them as one
+thing. An outline says it about the row rather than adding a second trailing
+symbol, so there is nothing for the confidence to be confused with. It stops on
+its own once a recording is posted, with no rule for it: "already posted" is a
+blocker, a blocker makes the rating `.blocked`, and `.blocked` is not worth
+posting. Reduce Motion holds the outline steady rather than dropping it — the
+outline is the information, the breathing only draws the eye.
+
+The row works the rating out and `INatRowRatings` carries it to the tile, which
+is a level further out (`SelectableRow.tile`) — the row has the passes, the tile
+has the glass shape, and scanning the pass library twice to avoid the hand-off
+would be the expensive way round.
+
+**That rating** is the same score,
 but it must never trim to get it: the trim copies tens of megabytes and a list is
 sixty rows deep. `INatUploadAssessment.estimatedUploadBytes` does the same
 arithmetic the trim does — call span over total duration, times the bytes on disk
