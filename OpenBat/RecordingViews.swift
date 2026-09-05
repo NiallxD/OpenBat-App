@@ -189,7 +189,8 @@ struct RecordingRow: View {
                     .font(.caption)
                     .foregroundStyle(.orange)
                     .accessibilityLabel("Could be posted to iNaturalist: fair")
-            case .poor, .blocked:
+            case .poor, .blocked, .alreadyPosted:
+                // `alreadyPosted` is drawn by the branch above, off the ledger.
                 EmptyView()
             }
         }

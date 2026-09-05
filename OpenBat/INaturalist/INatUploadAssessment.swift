@@ -53,6 +53,10 @@ nonisolated struct INatUploadAssessment {
     /// Why this cannot be posted. Empty means it can.
     let blockers: [String]
 
+    /// Set when the only thing stopping this is that it has been posted
+    /// already — which is a completed job, not a fault with the recording.
+    var alreadyPosted = false
+
     /// True when the debug override is on and `blockers` is being ignored.
     /// Only ever set from the Debug menu — see `INatUploadAssessment.overrideLimits`.
     var overridden = false
@@ -63,6 +67,10 @@ nonisolated struct INatUploadAssessment {
     var canPost: Bool { blockers.isEmpty || overridden }
 
     enum Rating: String {
+        /// Its own rating rather than a kind of `blocked`: "Not suitable" is a
+        /// judgement about the recording, and saying it about one the user has
+        /// already successfully posted is both wrong and insulting.
+        case alreadyPosted = "Already uploaded"
         case blocked = "Not suitable"
         case poor = "Poor"
         case fair = "Fair"
@@ -71,6 +79,7 @@ nonisolated struct INatUploadAssessment {
     }
 
     var rating: Rating {
+        if alreadyPosted { return .alreadyPosted }
         // An overridden recording still shows its real rating, blockers and
         // all: the override is there to let a post through, not to pretend the
         // recording is better than it is.
@@ -86,6 +95,7 @@ nonisolated struct INatUploadAssessment {
     /// One line for the confirmation screen.
     var summary: String {
         switch rating {
+        case .alreadyPosted: return "This is already on iNaturalist."
         case .blocked: return "This one shouldn't go to iNaturalist."
         case .poor: return "Weak evidence. Consider keeping this one for yourself."
         case .fair: return "Usable, but an identifier will have to work for it."
@@ -142,7 +152,9 @@ nonisolated struct INatUploadAssessment {
             blockers.append("No calls were detected in this recording.")
         }
 
+        var alreadyPosted = false
         if INatPostLedger.hasPosted(recordingID: recording.id) {
+            alreadyPosted = true
             blockers.append("You've already posted this recording.")
         } else if let coordinate = recording.coordinate {
             let already = INatPostLedger.count(species: recording.species,
@@ -158,7 +170,8 @@ nonisolated struct INatUploadAssessment {
         // out honestly, so a test post looks exactly like the real thing.
         let overridden = !blockers.isEmpty && MainActor.assumeIsolated { overrideLimits }
         if !blockers.isEmpty && !overridden {
-            return INatUploadAssessment(score: 0, blockers: blockers, notes: notes)
+            return INatUploadAssessment(score: 0, blockers: blockers,
+                                        alreadyPosted: alreadyPosted, notes: notes)
         }
 
         // ---- Score ----
@@ -241,6 +254,7 @@ nonisolated struct INatUploadAssessment {
 
         return INatUploadAssessment(score: Int(score.rounded()),
                                     blockers: blockers,
+                                    alreadyPosted: alreadyPosted,
                                     overridden: overridden,
                                     notes: notes)
     }

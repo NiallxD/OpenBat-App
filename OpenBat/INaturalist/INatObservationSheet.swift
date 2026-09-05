@@ -210,9 +210,10 @@ struct INatObservationSheet: View {
                     // No "post anyway". Every blocker is a case where the
                     // record would be useless or unwelcome, and the manual
                     // uploader below is the deliberate way past it.
-                    Label(assessment.rating.rawValue, systemImage: "hand.raised.fill")
+                    Label(assessment.rating.rawValue,
+                          systemImage: assessment.alreadyPosted ? "checkmark.seal.fill" : "hand.raised.fill")
                         .font(.callout.weight(.medium))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(assessment.alreadyPosted ? Color.green : Color.secondary)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 6)
                 } else if auth.isSignedIn {
@@ -433,6 +434,7 @@ struct INatObservationSheet: View {
 
     private func colour(for rating: INatUploadAssessment.Rating) -> Color {
         switch rating {
+        case .alreadyPosted: return .green
         case .blocked: return .red
         case .poor: return .orange
         case .fair: return .yellow
