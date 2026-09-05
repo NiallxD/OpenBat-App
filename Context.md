@@ -3463,6 +3463,16 @@ of the binomial, which is always a real iNaturalist taxon — unlike a complex's
 display name ("Myotis species", "Low-frequency bats"), which resolved to nothing
 and left the observation as Unknown.
 
+**One annotation: Alive** (attribute 17, value 18 — looked up from
+`/v1/controlled_terms`, not remembered). Safe to set without asking, which
+almost no annotation is: the observation is a recording of an echolocation call,
+and a bat that is echolocating is alive. It is not an inference about the
+animal, it is a restatement of what the evidence is. Deliberately the only one —
+Life Stage and Sex are unknowable from a call, and Evidence of Presence is for
+records showing something OTHER than the organism (a track, scat, a feather), so
+annotating a call "Organism" adds nothing a reader couldn't see. Non-fatal like
+the fields.
+
 **Still not done:** the rest of the fields — "Number of calls" and the source
 filename have no established community field, so they stay copyable-only.
 

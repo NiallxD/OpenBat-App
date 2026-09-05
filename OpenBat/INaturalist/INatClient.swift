@@ -10,6 +10,7 @@
 //    POST /observation_photos   attach the spectrogram
 //    POST /observation_sounds   attach the audible copy and the original
 //    POST /observation_field_values  the bat-recording community's own fields
+//    POST /annotations          marks it Alive, which a calling bat is
 //
 //  No background posting, no bulk upload of a night in one action, no writes to
 //  anyone else's records, no crawling. Every call here is downstream of a tap
@@ -73,6 +74,7 @@ nonisolated enum INatClient {
         let webURL: URL
         var attachedPhotos = 0
         var attachedFields = 0
+        var annotated = false
         var attachedSounds = 0
         /// Human-readable, already user-facing. Empty on a clean post.
         var skipped: [String] = []
@@ -119,6 +121,15 @@ nonisolated enum INatClient {
             }
         }
 
+        do {
+            try await annotate(uuid: uuid,
+                               attribute: INatObservationFields.aliveOrDeadAttribute,
+                               value: INatObservationFields.aliveValue)
+            result.annotated = true
+        } catch {
+            result.skipped.append("The \u{201C}Alive\u{201D} annotation didn't save (\(error.localizedDescription))")
+        }
+
         // After the observation exists and before the media, because these are
         // small and quick: a user who backgrounds the app mid-upload is more
         // likely to have kept the searchable metadata this way.
@@ -153,6 +164,22 @@ nonisolated enum INatClient {
         }
 
         return result
+    }
+
+    /// Marks the observation with a controlled annotation — only ever
+    /// "Alive", and see `INatObservationFields.aliveOrDeadAttribute` for why
+    /// that is the only one OpenBat is entitled to set.
+    private static func annotate(uuid: UUID, attribute: Int, value: Int) async throws {
+        var request = try await authorized(endpoint("annotations"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "resource_type": "Observation",
+            "resource_id": uuid.uuidString.lowercased(),
+            "controlled_attribute_id": attribute,
+            "controlled_value_id": value
+        ])
+        _ = try await send(request)
     }
 
     /// Adds one observation field value — the things that make an acoustic

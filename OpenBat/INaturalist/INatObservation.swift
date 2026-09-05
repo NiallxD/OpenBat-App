@@ -163,6 +163,22 @@ nonisolated struct INatObservation: Identifiable {
 /// there from Wildlife Acoustics and Pettersson kit, and makes it turn up in
 /// the searches people use to find acoustic records.
 nonisolated enum INatObservationFields {
+    /// iNaturalist's "Alive or Dead" annotation, and its "Alive" value.
+    ///
+    /// Safe to set without asking, which almost no annotation is: the
+    /// observation is a recording of an echolocation call, and a bat that is
+    /// echolocating is alive. It is not an inference about the animal, it is a
+    /// restatement of what the evidence is.
+    ///
+    /// Only this one. "Life Stage" and "Sex" are unknowable from a call, and
+    /// "Evidence of Presence" is for records that show something OTHER than the
+    /// organism — a track, scat, a feather — so annotating a call with
+    /// "Organism" adds nothing a reader couldn't see.
+    ///
+    /// Looked up from `/v1/controlled_terms` rather than remembered.
+    static let aliveOrDeadAttribute = 17
+    static let aliveValue = 18
+
     static let detectorModel = 567
     static let recordingMethod = 578
     static let callFrequency = 308
