@@ -3245,6 +3245,24 @@ The band comes from each pulse's stored thumbnail bounds where it has them
 (they include the sweep and harmonics) and falls back to peak frequency, which
 underestimates the band — hence 20 kHz of padding rather than 5.
 
+**Every exported spectrogram is log-frequency, always** (Niall, 2026-09-04) —
+the one setting in the export that does NOT follow the player. The player's log
+toggle is a display post-process (`LogFrequencyWarp.warp` on the finished image,
+default off), so until now everything posted was linear whatever the user was
+looking at. A call's shape is what an identifier reads, and on a linear axis a
+45 kHz pipistrelle and a 25 kHz noctule are drawn at completely different sizes
+for the same gesture; the picture exists to be compared with other people's, so
+the axis that makes them comparable wins over the one the user happens to prefer.
+
+Two things the warp drags in. It floors at `LogFrequencyWarp.floorHz` (10 kHz),
+so the band actually drawn is not always the band asked for — `logWarped`
+returns the drawn one and every label comes from that. And the axis labels can
+no longer be arithmetic: all three now come from `LogFrequencyWarp.vFracToHz`,
+the same function the warp itself uses, in both the tiles and `PulseImagePlot`
+(which gained a `logFrequency` flag, off for the pulse detail screen that still
+shows a linear thumbnail). Labelling a log picture with a linear midpoint is the
+kind of error nobody would catch by looking.
+
 **Both pictures use the user's own noise floor.** The context view gets it for
 free by re-colorizing. The close-up does not: the pulse thumbnail on disk was
 colorized at whatever floor was in force the night it was detected, which is

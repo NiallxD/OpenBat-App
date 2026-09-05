@@ -30,7 +30,16 @@ nonisolated enum LogFrequencyWarp {
     /// compressing room for. Still respects a MORE conservative (higher)
     /// linear low bound if the user has already trimmed the Y-axis there
     /// themselves — this is a floor, not an override.
-    private static func clampedLo(_ lo: Double) -> Double { max(lo, 10_000) }
+    static let floorHz = 10_000.0
+
+    /// The low bound a log axis will actually use, which is not always the one
+    /// asked for — see `floorHz`. Exposed because anything DRAWING an axis
+    /// beside a warped image has to label the range that was drawn: labelling
+    /// the requested range puts a number on the bottom row of the picture that
+    /// isn't the frequency shown there.
+    static func lowerBound(_ lo: Double) -> Double { clampedLo(lo) }
+
+    private static func clampedLo(_ lo: Double) -> Double { max(lo, floorHz) }
 
     /// Remaps `image`'s rows (row 0 = top = `hiHz`, last row = bottom =
     /// `loHz`, evenly spaced in Hz — every renderer in this codebase's native

@@ -99,6 +99,30 @@ enum INatImages {
         let data: Data
     }
 
+    /// Every exported spectrogram is log-frequency, whatever the player is set
+    /// to (Niall, 2026-09-04).
+    ///
+    /// Not a preference here, unlike the noise floor and the palette. A bat
+    /// call's shape — the sweep, how steeply it drops, where it flattens into a
+    /// tail — is what an identifier reads, and on a linear axis a 45 kHz
+    /// pipistrelle and a 25 kHz noctule are drawn at completely different sizes
+    /// for what is the same gesture. A log axis makes them comparable, and the
+    /// picture is being posted for people who will compare it with others.
+    ///
+    /// The axis floors at `LogFrequencyWarp.floorHz`, so the returned band is
+    /// what was actually drawn rather than what was asked for — the labels have
+    /// to come from this, not from the requested range.
+    /// `nonisolated` so the row remap runs wherever it is called from — the
+    /// context view warps a full-width overview, and that is not main-actor work.
+    private nonisolated static func logWarped(_ image: UIImage,
+                                              band: ClosedRange<Double>) -> (image: UIImage, band: ClosedRange<Double>) {
+        let lo = LogFrequencyWarp.lowerBound(band.lowerBound)
+        guard band.upperBound > lo,
+              let warped = LogFrequencyWarp.warp(image, loHz: band.lowerBound, hiHz: band.upperBound)
+        else { return (image, band) }
+        return (warped, lo...band.upperBound)
+    }
+
     /// The images to attach, in the order iNaturalist shows them — which is the
     /// order they are uploaded in.
     ///
@@ -129,8 +153,9 @@ enum INatImages {
         }
 
         if let pulse = sources.pulse,
-           let image = await closeUp(pulse: pulse, sources: sources) ?? sources.pulseImage,
-           let plot = pulsePlot(pulse: pulse, image: image, band: closeUpBand(for: pulse)),
+           let linear = await closeUp(pulse: pulse, sources: sources) ?? sources.pulseImage,
+           case let warped = logWarped(linear, band: closeUpBand(for: pulse)),
+           let plot = pulsePlot(pulse: pulse, image: warped.image, band: warped.band),
            let data = plot.pngData() {
             images.append(("call-close-up.png", data))
         }
@@ -186,10 +211,12 @@ enum INatImages {
             let packed = map.keptFraction < 0.9
                 ? WavSpectrogramEngine.compressedOverviewRawTile(from: raw, map: map)
                 : raw
-            return WavSpectrogramEngine.colorize(packed, sampleRate: sampleRate,
-                                                 minFreqHz: band.lowerBound,
-                                                 maxFreqHz: band.upperBound,
-                                                 palette: palette, noiseFloor: floor)?.image
+            guard let linear = WavSpectrogramEngine.colorize(packed, sampleRate: sampleRate,
+                                                            minFreqHz: band.lowerBound,
+                                                            maxFreqHz: band.upperBound,
+                                                            palette: palette, noiseFloor: floor)?.image
+            else { return nil }
+            return logWarped(linear, band: band).image
         }.value
     }
 
@@ -254,8 +281,9 @@ enum INatImages {
             let from = Double(index) * tileSeconds
             let to = min(totalSeconds, from + tileSeconds)
             guard to > from else { break }
-            guard let image = await tile(from: from, to: to, band: band, sources: sources),
-                  let plot = tilePlot(image: image, band: band, from: from, to: to,
+            guard let linear = await tile(from: from, to: to, band: band, sources: sources) else { continue }
+            let warped = logWarped(linear, band: band)
+            guard let plot = tilePlot(image: warped.image, band: warped.band, from: from, to: to,
                                       index: index, of: count),
                   let data = plot.pngData()
             else { continue }
@@ -303,11 +331,13 @@ enum INatImages {
         let view = VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 4) {
                 VStack(alignment: .trailing) {
-                    axisText(String(format: "%.0f", band.upperBound / 1000))
+                    // From the warp's own mapping, so the numbers can't
+                    // describe a linear axis over a log picture.
+                    axisText(kHz(at: 0, in: band))
                     Spacer()
-                    axisText(String(format: "%.0f", (band.lowerBound + band.upperBound) / 2000))
+                    axisText(kHz(at: 0.5, in: band))
                     Spacer()
-                    axisText(String(format: "%.0f", band.lowerBound / 1000))
+                    axisText(kHz(at: 1, in: band))
                 }
                 .frame(width: 34, height: 360 * 9 / 16, alignment: .trailing)
                 Image(uiImage: image)
@@ -336,6 +366,12 @@ enum INatImages {
         renderer.scale = 3
         renderer.isOpaque = true
         return renderer.uiImage
+    }
+
+    private static func kHz(at fraction: Double, in band: ClosedRange<Double>) -> String {
+        let hz = LogFrequencyWarp.vFracToHz(fraction, lo: band.lowerBound,
+                                            hi: band.upperBound, log: true)
+        return String(format: "%.0f", hz / 1000)
     }
 
     private static func axisText(_ string: String) -> some View {
@@ -492,7 +528,8 @@ enum INatImages {
             PulseImagePlot(image: image,
                            freqMinHz: band.lowerBound,
                            freqMaxHz: band.upperBound,
-                           spanMs: closeUpSpan(for: pulse) * 1000)
+                           spanMs: closeUpSpan(for: pulse) * 1000,
+                           logFrequency: true)
             Text(caption(for: pulse))
                 .font(.system(size: 10).monospacedDigit())
                 .foregroundStyle(.secondary)

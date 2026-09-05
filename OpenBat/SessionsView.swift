@@ -1377,6 +1377,11 @@ struct PulseImagePlot: View {
     let freqMinHz: Double?
     let freqMaxHz: Double?
     let spanMs: Double?
+    /// Whether `image` has already been log-warped, so the frequency labels can
+    /// be put where a log axis actually puts them. Off for the pulse detail
+    /// screen, which shows the stored linear thumbnail; on for the iNaturalist
+    /// export, which warps everything (see `INatImages`).
+    var logFrequency = false
 
     private let axisWidth: CGFloat = 30
     private let plotHeight: CGFloat = 130
@@ -1387,11 +1392,14 @@ struct PulseImagePlot: View {
             VStack(spacing: 3) {
                 HStack(spacing: 4) {
                     VStack(alignment: .trailing, spacing: 0) {
-                        axisLabel(String(format: "%.0f", fMax / 1000))
+                        // All three from the same function as the warp itself,
+                        // so a linear and a log plot cannot end up labelled by
+                        // two different ideas of where a frequency sits.
+                        axisLabel(kHz(at: 0, fMin, fMax))
                         Spacer()
-                        axisLabel(String(format: "%.0f", (fMin + fMax) / 2000))
+                        axisLabel(kHz(at: 0.5, fMin, fMax))
                         Spacer()
-                        axisLabel(String(format: "%.0f", fMin / 1000))
+                        axisLabel(kHz(at: 1, fMin, fMax))
                     }
                     .frame(width: axisWidth, height: plotHeight, alignment: .trailing)
                     plotImage
@@ -1421,6 +1429,12 @@ struct PulseImagePlot: View {
             .frame(height: plotHeight)
             .clipShape(RoundedRectangle(cornerRadius: 6))
             .background(RoundedRectangle(cornerRadius: 6).fill(Color(uiColor: .systemBackground)))
+    }
+
+    /// The frequency a given fraction down the plot represents. `0` is the top.
+    private func kHz(at fraction: Double, _ fMin: Double, _ fMax: Double) -> String {
+        let hz = LogFrequencyWarp.vFracToHz(fraction, lo: fMin, hi: fMax, log: logFrequency)
+        return String(format: "%.0f", hz / 1000)
     }
 
     private func axisLabel(_ s: String) -> some View {
