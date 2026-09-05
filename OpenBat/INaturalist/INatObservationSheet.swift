@@ -437,7 +437,7 @@ struct INatObservationSheet: View {
             // The single most important sentence on this screen. An observation
             // posted from here carries the user's name, not OpenBat's, and iNat
             // records are permanent and public.
-            Text("You're making this claim, not OpenBat. If you're not sure, log it as Chiroptera and let iNaturalist's community narrow it down — that's what the site is for.")
+            Text("OpenBat posts at genus and puts its species suggestion in the notes, because an acoustic identification isn't strong enough to claim a species on a permanent public record. If you're confident of the species, add that identification yourself on iNaturalist — then a person has made the claim, which is the point.")
         }
     }
 

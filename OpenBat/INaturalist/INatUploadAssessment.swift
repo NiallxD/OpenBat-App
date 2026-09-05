@@ -174,12 +174,13 @@ nonisolated struct INatUploadAssessment {
             ? (recording.confidence ?? 0)
             : raws.reduce(0, +) / Float(raws.count)
         score += 35 * ramp(Double(confidence), from: 0.4, to: 0.95)
-        if confidence < INatExport.speciesConfidenceThreshold {
-            // Says the same thing the taxon rule does, and gets it from the
-            // same constant — these two disagreeing would be a screen that
-            // tells the user one rank and posts another.
-            notes.append(String(format: "The model is %.0f%% sure, under the %.0f%% needed to claim a species — this will be posted at genus level.",
-                                confidence * 100, INatExport.speciesConfidenceThreshold * 100))
+        if confidence < 0.6 {
+            // A note about the EVIDENCE, not about the rank: everything is
+            // posted at genus regardless (see `INatExport.taxon`), so this says
+            // how much weight to put on the suggestion in the notes rather than
+            // predicting what will be claimed.
+            notes.append(String(format: "The model is only %.0f%% sure of the species, so the suggestion in the notes is a weak one.",
+                                confidence * 100))
         }
 
         // One species (25). bat2inat's "works best if one species is present",
@@ -200,8 +201,8 @@ nonisolated struct INatUploadAssessment {
             margin = 1  // Nothing ran second at all, which is as clean as it gets.
         }
         score += 10 * ramp(margin, from: 0.05, to: 0.5)
-        if let best, best.isComplexAmbiguous, confidence < INatExport.speciesConfidenceThreshold {
-            notes.append("Another species in the same group scored close behind, and they can't be told apart acoustically — this will be posted only as a bat.")
+        if let best, best.isComplexAmbiguous {
+            notes.append("Another species in the same group scored close behind, and the two can't be told apart acoustically.")
         }
 
         // How much there is to look at (20). One call is a guess; a sequence is

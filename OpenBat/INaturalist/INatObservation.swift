@@ -387,46 +387,44 @@ nonisolated enum INatExport {
         return url
     }
 
-    /// The confidence a species-level claim needs, measured on the model's RAW
-    /// score.
+    /// What to claim, and it is never the species.
     ///
-    /// Raw, not the location-weighted figure the app displays: the weighted one
-    /// has the observer's own settings and whereabouts baked into it, so the
-    /// same call would be claimed as a species in one place and not in another.
-    /// The rank OpenBat claims on a public record should depend on the
-    /// evidence, not on where somebody was standing.
-    static let speciesConfidenceThreshold: Float = 0.85
-
-    /// What to claim, and it is often not the species.
+    /// **OpenBat posts at genus, and offers the species in the description.**
+    /// (Niall, 2026-09-04, replacing a rule that claimed the species above 85%
+    /// raw confidence.) The reasoning is two things:
     ///
-    /// OpenBat's ID is a model's opinion, and iNat is a permanent public record
-    /// that other people's research draws on. So the rule is to claim the most
-    /// specific rank the evidence actually supports, and to go up a rank rather
-    /// than guess. Someone who knows better can always refine it in iNat —
-    /// which is what iNat is for — but an over-claimed ID that nobody revisits
-    /// quietly becomes data.
+    /// A model's confidence is a softmax output, not a probability of being
+    /// right. Both bundled models were trained on recordings from dedicated
+    /// detectors, and a phone with a plug-in mic has a different noise profile
+    /// — which inflates confidence rather than deflating it. So there is no
+    /// honest threshold to draw: 85% did not mean what a threshold needs it to
+    /// mean, and any other number would have been equally invented.
     ///
-    /// The ladder, first match wins (Niall, 2026-09-04 — this replaced a
-    /// version that posted complexes at complex level and dropped to Chiroptera
-    /// below 0.60 weighted):
+    /// And the costs are asymmetric. iNaturalist moves an observation's
+    /// community taxon by agreement, so a wrong species ID needs two people to
+    /// disagree with it before it shifts, while a correct genus ID needs one
+    /// person to refine it. Under-claiming costs a refinement somebody was
+    /// going to make anyway; over-claiming leaves bad species records that
+    /// nobody revisits, and those quietly become data.
     ///
-    ///   1. No ID, or noise            → Chiroptera
-    ///   2. No scientific name to use  → Chiroptera
-    ///   3. Raw confidence ≥ 0.85      → SPECIES
-    ///   4. An ambiguous complex       → Chiroptera
-    ///   5. Anything else              → GENUS
+    /// Nothing is lost by it: the species, its confidence, the runner-up and
+    /// every measurement behind them are in the description, which is where a
+    /// suggestion belongs. A human reading it can add the species ID — and then
+    /// a person has made the species claim, which is the whole point.
     ///
-    /// **Why complexes go all the way to Chiroptera rather than to their own
-    /// name.** The complexes are named for humans — "Myotis species",
-    /// "Low-frequency bats" — and iNaturalist has no taxon by either name, so a
-    /// complex-level post resolved to nothing and landed as Unknown, which is
-    /// worse than any honest rank. Some map to a genus and one (`lowfreq`:
-    /// Big Brown, Silver-haired, Hoary) spans three, so there is no single rank
-    /// that fits them all. Chiroptera always resolves and is always true.
+    /// The ladder, first match wins:
+    ///
+    ///   1. No ID, or noise                       → Chiroptera
+    ///   2. No scientific name to use             → Chiroptera
+    ///   3. Ambiguous across more than one genus  → Chiroptera
+    ///   4. Anything else                         → GENUS
     ///
     /// **Genus comes from the scientific name, not from a table.** The first
-    /// word of a binomial is the genus, and unlike a complex name it is always
-    /// a real iNaturalist taxon, so `INatClient.taxonID` can resolve it.
+    /// word of a binomial is the genus, and unlike a complex's name it is
+    /// always a real iNaturalist taxon that `INatClient.taxonID` can resolve.
+    /// The complexes are named for humans — "Myotis species", "Low-frequency
+    /// bats" — and posting one of those resolved to nothing at all, leaving the
+    /// observation as Unknown.
     private static func taxon(for recording: Recording,
                               passes: [PassRecord],
                               descriptor: ModelDescriptor?) -> (name: String, note: String) {
@@ -437,32 +435,40 @@ nonisolated enum INatExport {
         guard let scientific = descriptor?.scientificNames[recording.species] else {
             return (order, "No scientific name for \(recording.species) in this model, so it's logged as a bat.")
         }
+        let genus = Self.genus(of: scientific)
 
-        // The mean of each pass's own raw score — the same figure the notes
-        // publish, so a reader can check this decision against the number.
-        let raws = passes.compactMap(\.rawConfidence)
-        let raw = raws.isEmpty ? nil : raws.reduce(0, +) / Float(raws.count)
-
-        if let raw, raw >= speciesConfidenceThreshold {
-            return (scientific, "OpenBat's identification. Check it before you post — you're the one making the claim.")
-        }
-
+        // Most complexes are genus-level ambiguity and land on the same answer
+        // anyway — Myotis, Pipistrellus, Nyctalus, Plecotus are each one genus,
+        // so "we can't separate these" and "genus" agree. Only a complex whose
+        // members span genera has to go higher.
         let best = passes.max { $0.confidence < $1.confidence }
-        if let best, best.isComplexAmbiguous {
+        if let best, best.isComplexAmbiguous, let complex = best.complex,
+           spansMultipleGenera(complex, descriptor: descriptor) {
             return (order,
-                    "Another species in the same group scored close behind, and they can't be separated by ear or by eye on a spectrogram — so this is logged only as a bat.")
+                    "The species this most resembles can't be separated acoustically from others in a different genus, so it's logged only as a bat. The suggestion is in the notes.")
         }
 
-        // Genus. A binomial's first word; anything without a space is already
-        // at genus rank or higher, so it stands as it is.
-        let genus = scientific.split(separator: " ").first.map(String.init) ?? scientific
-        guard let raw else {
-            return (genus,
-                    "This recording predates OpenBat storing the model's raw score, so the species can't be confirmed — logged at genus level.")
-        }
         return (genus,
-                String(format: "OpenBat suggests %@, but at %.0f%% the model isn't sure enough to claim the species — logged as %@. Narrow it yourself if you're confident.",
-                       scientific, raw * 100, genus))
+                "\(scientific) is what OpenBat's model suggests, but an acoustic identification isn't strong enough to claim a species on a public record — so this is logged as \(genus), with the suggestion and the measurements in the notes. Narrow it yourself if you're confident.")
+    }
+
+    /// The first word of a binomial. A name with no space is already at genus
+    /// rank or above and stands as it is.
+    private static func genus(of scientificName: String) -> String {
+        scientificName.split(separator: " ").first.map(String.init) ?? scientificName
+    }
+
+    /// Whether a complex's members sit in more than one genus.
+    ///
+    /// Worked out from the members' own scientific names rather than recorded
+    /// on the complex, so adding a species to a complex cannot leave a stale
+    /// answer here. Unknown names are ignored: a complex we can only half
+    /// resolve is treated as spanning genera, which is the cautious direction.
+    private static func spansMultipleGenera(_ complex: SpeciesComplex,
+                                            descriptor: ModelDescriptor?) -> Bool {
+        guard let descriptor else { return true }
+        let genera = Set(complex.codes.compactMap { descriptor.scientificNames[$0] }.map(genus))
+        return genera.count != 1
     }
 
     /// The notes body. Mirrors the quantities bat2inat writes into its
@@ -480,7 +486,16 @@ nonisolated enum INatExport {
         if let model = descriptor {
             lines.append("Classifier: \(model.displayName)")
         }
-        lines.append("Automated ID: \(recording.commonName) (\(recording.species))")
+        // Spelled out as a SUGGESTION, and with the binomial, because the
+        // observation itself is posted at genus — this line is the species
+        // claim, and it needs to be findable and unambiguous for whoever
+        // decides whether to refine the ID.
+        if let scientific = descriptor?.scientificNames[recording.species] {
+            lines.append("Suggested species: \(scientific) (\(recording.commonName))")
+        } else {
+            lines.append("Suggested species: \(recording.commonName) (\(recording.species))")
+        }
+        lines.append("This observation is deliberately logged at a coarser rank than the suggestion — an acoustic identification isn't strong enough to claim a species. If you can confirm it, please add the identification.")
         if let confidence = recording.confidence {
             lines.append(String(format: "Confidence: %.0f%% (location-weighted)", confidence * 100))
         }

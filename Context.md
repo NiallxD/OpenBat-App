@@ -3301,29 +3301,33 @@ trusted. Read straight from `UserDefaults` at chunk-build time rather
 than pushed onto the recording queue like `setInputName`, so changing it
 mid-session takes effect on the next file.
 
-**What rank gets claimed** (rewritten 2026-09-04, Niall's rule). First match
-wins: no ID or noise → Chiroptera; no scientific name for the code → Chiroptera;
-**raw confidence ≥ 0.85 → species**; an ambiguous complex → Chiroptera;
-otherwise → **genus**.
+**What rank gets claimed: genus, never species** (2026-09-04, Niall's call —
+this replaced a same-day rule that claimed the species above 85% raw
+confidence). First match wins: no ID or noise → Chiroptera; no scientific name
+for the code → Chiroptera; ambiguous across more than one genus → Chiroptera;
+otherwise → **genus**. The species, its confidence, the runner-up and every
+measurement go in the description as a *suggestion*, with a line asking anyone
+who can confirm it to add the identification.
 
-Three things this fixed. It thresholds on the RAW score, where the old rule used
-the location-weighted one — so the same call was claimed as a species in one
-place and not in another, which makes the rank a statement about where somebody
-was standing rather than about the evidence. It posts genus rather than dropping
-straight to Chiroptera, which is a real rank and costs nothing, because a
-binomial's first word is always a genus iNaturalist actually has. And it stops
-posting complexes at complex level: the complexes are named for humans ("Myotis
-species", "Low-frequency bats"), iNaturalist has no taxon by either name, so
-`INatClient.taxonID` — which requires an exact match on purpose — resolved
-nothing and the observation landed as **Unknown**. Some complexes map to a genus
-and `lowfreq` (Big Brown / Silver-haired / Hoary) spans three, so no single rank
-fits them all; Chiroptera always resolves and is always true.
+**Why no threshold at all.** A model's confidence is a softmax output, not a
+probability of being right, and both bundled models were trained on recordings
+from dedicated detectors — a phone with a plug-in mic has a different noise
+profile, which inflates confidence rather than deflating it. 85% did not mean
+what a threshold needs it to mean, and any other number would have been equally
+invented. The costs are also asymmetric: iNaturalist moves the community taxon
+by agreement, so a wrong species ID needs two people to disagree before it
+shifts, while a correct genus ID needs one person to refine it. Under-claiming
+costs a refinement somebody was going to make anyway.
 
-A recording from before `rawConfidence` was stored has no raw score to test, and
-is posted at genus with the reason stated rather than being promoted on the
-weighted figure. `INatUploadAssessment` reads the same
-`INatExport.speciesConfidenceThreshold`, so the screen cannot promise one rank
-and post another.
+Most complexes turn out not to need special handling — Myotis, Pipistrellus,
+Nyctalus and Plecotus are each a single genus, so "can't separate these" and
+"genus" are the same answer. Only a complex spanning genera (`lowfreq`: Big
+Brown / Silver-haired / Hoary) goes to Chiroptera, and that is computed from the
+members' own scientific names rather than recorded on the complex, so adding a
+species to a complex can't leave a stale answer. Genus itself is the first word
+of the binomial, which is always a real iNaturalist taxon — unlike a complex's
+display name ("Myotis species", "Low-frequency bats"), which resolved to nothing
+and left the observation as Unknown.
 
 **Still not done:** the rest of the fields — "Number of calls" and the source
 filename have no established community field, so they stay copyable-only.
