@@ -350,8 +350,7 @@ struct SessionsView: View {
                     ForEach(looseRecordings) { recording in
                             SelectableRow(isSelecting: isSelecting,
                                           isSelected: selection.contains(.recording(recording.id)),
-                                          toggle: { toggle(.recording(recording.id)) },
-                                          recordingID: recording.id) {
+                                          toggle: { toggle(.recording(recording.id)) }) {
                                 recordingDestination(recording)
                             } label: {
                                 RecordingRow(recording: recording, store: store, consent: consent)
@@ -707,8 +706,7 @@ struct SessionDetailView: View {
                 ForEach(sessionRecordings) { recording in
                     SelectableRow(isSelecting: isSelecting,
                                   isSelected: selection.contains(recording.id),
-                                  toggle: { toggle(recording.id) },
-                                  recordingID: recording.id) {
+                                  toggle: { toggle(recording.id) }) {
                         // Lazy: WavPlayerView's `@State` engine is expensive
                         // to construct — see LazyDestination.
                         LazyDestination {
@@ -1108,16 +1106,9 @@ private struct SelectableRow<Destination: View, Label: View>: View {
     let isSelecting: Bool
     let isSelected: Bool
     let toggle: () -> Void
-    /// The recording this row is for, when there is one, so the tile can mark
-    /// itself as worth posting — see `iNaturalistHighlight`. nil for a session
-    /// row, which has nothing to post.
-    var recordingID: UUID? = nil
     @ViewBuilder var destination: () -> Destination
     @ViewBuilder var label: () -> Label
 
-    @State private var ratings = INatRowRatings.shared
-    @State private var pulsing = false
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         if isSelecting {
@@ -1154,50 +1145,6 @@ private struct SelectableRow<Destination: View, Label: View>: View {
         .padding(.trailing, 12)
         .contentShape(Rectangle())
         .glassTile()
-        .iNaturalistHighlight(isOn: isWorthPosting, pulsing: $pulsing, reduceMotion: reduceMotion)
-    }
-
-    private var isWorthPosting: Bool {
-        guard let recordingID else { return false }
-        return ratings.isWorthPosting(recordingID)
-    }
-}
-
-private extension View {
-    /// A slow orange breath around a row worth sending to iNaturalist.
-    ///
-    /// **Replaced a leaf badge** (Niall, 2026-09-04). The badge sat next to the
-    /// confidence percentage and the two read as one thing — two small trailing
-    /// marks, both apparently about how good the identification was, saying
-    /// different things. The outline says it about the whole row instead, so
-    /// there is nothing for the confidence to be confused with.
-    ///
-    /// Only the rows worth posting are marked, and few of them are, so a
-    /// scrolling list has at most a handful of these animating. It stops on its
-    /// own once a recording is posted: "already posted" is a blocker, which
-    /// makes the rating `.blocked`, which is not worth posting.
-    ///
-    /// Honours Reduce Motion by holding the outline steady rather than dropping
-    /// it — the information is the outline; the breathing is only what draws the
-    /// eye to it.
-    func iNaturalistHighlight(isOn: Bool, pulsing: Binding<Bool>, reduceMotion: Bool) -> some View {
-        overlay {
-            if isOn {
-                RoundedRectangle(cornerRadius: TileList.cornerRadius, style: .continuous)
-                    .strokeBorder(Color.orange.opacity(pulsing.wrappedValue ? 0.85 : 0.25),
-                                  lineWidth: 1.5)
-                    .allowsHitTesting(false)
-                    .onAppear {
-                        guard !reduceMotion else { pulsing.wrappedValue = true; return }
-                        withAnimation(.easeInOut(duration: 1.6).repeatForever(autoreverses: true)) {
-                            pulsing.wrappedValue = true
-                        }
-                    }
-                    .onDisappear { pulsing.wrappedValue = false }
-            }
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityHint(isOn ? "Worth posting to iNaturalist" : "")
     }
 }
 

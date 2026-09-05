@@ -338,41 +338,6 @@ nonisolated struct Cell: Hashable, Codable {
 /// It is also NOT the authority on whether an observation exists — iNaturalist
 /// is, and `INatClient.post` asks it. This is the local shortcut that stops the
 /// user reaching that point.
-/// Which recordings in a list are worth posting to iNaturalist.
-///
-/// A shared cache, because the row that can WORK THIS OUT and the view that has
-/// to DRAW it are not the same view: the assessment needs the recording's
-/// passes, which `RecordingRow` already fetches, but the outline belongs on the
-/// glass tile that wraps the row a level further out. Rather than scan the pass
-/// library twice, the row writes what it found here and the tile reads it.
-///
-/// Also a genuine cache: an assessment costs a scan of every pass in the
-/// library, and a list re-runs its rows constantly while scrolling.
-@Observable
-final class INatRowRatings {
-    static let shared = INatRowRatings()
-    private var ratings: [UUID: INatUploadAssessment.Rating] = [:]
-    private init() {}
-
-    func set(_ rating: INatUploadAssessment.Rating, for id: UUID) {
-        ratings[id] = rating
-    }
-
-    /// True only for the recordings actually worth somebody's attention.
-    ///
-    /// Good and Excellent, nothing else — the whole point of marking a row is
-    /// that few of them are marked. A recording that has already been posted
-    /// answers false because "already posted" is a blocker, so its rating is
-    /// `.blocked`: the highlight stops on its own once the job is done, with no
-    /// separate rule for it.
-    func isWorthPosting(_ id: UUID) -> Bool {
-        switch ratings[id] {
-        case .good, .excellent: return true
-        default: return false
-        }
-    }
-}
-
 /// Tells the recording list that the ledger changed.
 ///
 /// The rows work out their iNaturalist badge once, when they appear, off a
