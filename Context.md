@@ -3385,6 +3385,17 @@ Phil Atkin, and a "Generic Ultrasonic Mic" entry standing in for anything
 unlisted). It feeds GUANO `Make` and iNaturalist field 567, and unset falls back
 to the port name — a vague name in an archive beats a wrong one.
 
+**iNaturalist reads the detector back out of the recording, not out of the
+setting** (Niall, 2026-09-04). The setting says which detector is in use *now*,
+and plenty of people own two — reading it at post time stamped tonight's
+microphone onto a recording made last month with the other one. GUANO `Make` was
+written when the file was recorded and is the only per-recording answer there
+is. Only a name from `DetectorModel.known` is used: a file recorded before the
+setting existed has the USB port name in `Make`, and publishing `bat_detector_usb`
+would be worse than publishing nothing, because it looks like a model name and
+isn't one. The read is off the main actor — a bounded seek for a resident file,
+an unbounded wait for an iCloud-evicted one.
+
 **No free-text option, and that is the point** (Niall, same day, erring towards
 privacy). An "Other" text field was built and removed within the hour: this
 string goes into the metadata of every recording and onto a public iNaturalist

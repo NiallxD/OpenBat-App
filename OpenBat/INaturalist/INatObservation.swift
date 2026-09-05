@@ -177,18 +177,27 @@ nonisolated enum INatObservationFields {
     /// that records in bursts and goes deaf between them.
     static let method = "direct recording"
 
-    /// What goes in `567`: the microphone the user told us about, and the app.
+    /// What goes in `567`: the microphone this RECORDING was made with, and
+    /// the app.
     ///
     /// Both, because the field is read by people comparing kit and the answer
     /// is genuinely two things — the mic decides what was captured, the app
-    /// decides what was made of it. Falls back to the app alone when the user
-    /// hasn't named a detector: OpenBat works with any USB ultrasonic mic and
-    /// does not record which one made a given recording, so guessing from the
-    /// mic plugged in now would be wrong for an old or imported one.
-    @MainActor
-    static var detector: String {
-        guard let model = DetectorModel.current else { return "OpenBat for iOS" }
-        return "\(model) + OpenBat for iOS"
+    /// decides what was made of it.
+    ///
+    /// **From the recording's own GUANO metadata, not from the setting** (Niall,
+    /// 2026-09-04). Plenty of people own more than one detector, and the setting
+    /// says which one is in use *now*; reading it at post time would stamp
+    /// tonight's microphone onto a recording made last month with the other one.
+    /// The GUANO `Make` field was written when the file was recorded and is the
+    /// only per-recording answer there is.
+    ///
+    /// Only a name OpenBat itself offers is used. A file recorded before the
+    /// setting existed has the USB port name in `Make` — `bat_detector_usb` and
+    /// the like — and publishing that would be worse than publishing nothing:
+    /// it looks like a model name and isn't one.
+    static func detector(recordedWith make: String?) -> String {
+        guard let make, DetectorModel.known.contains(make) else { return "OpenBat for iOS" }
+        return "\(make) + OpenBat for iOS"
     }
 }
 
@@ -211,7 +220,8 @@ nonisolated enum INatExport {
     @MainActor
     static func draft(recording: Recording,
                       passes: [PassRecord],
-                      priors: PriorSnapshot? = nil) -> INatObservation {
+                      priors: PriorSnapshot? = nil,
+                      detectorMake: String? = nil) -> INatObservation {
         // Resolved from the species code rather than from the user's currently
         // active model: the recording was classified by whichever model knew
         // this code, and that may not be the one selected now.
@@ -225,7 +235,7 @@ nonisolated enum INatExport {
             latitude: recording.latitude,
             longitude: recording.longitude,
             notes: notes(recording: recording, passes: passes, descriptor: descriptor, priors: priors),
-            fields: fields(recording: recording, passes: passes))
+            fields: fields(recording: recording, passes: passes, detectorMake: detectorMake))
     }
 
     /// The attachments, kept apart rather than lumped into one array: the share
@@ -584,7 +594,8 @@ nonisolated enum INatExport {
     /// The individually-copyable rows. Labels match iNaturalist's own field
     /// names where it has one, so there is no translation step for the user.
     @MainActor
-    private static func fields(recording: Recording, passes: [PassRecord]) -> [INatObservation.Field] {
+    private static func fields(recording: Recording, passes: [PassRecord],
+                               detectorMake: String?) -> [INatObservation.Field] {
         var fields: [INatObservation.Field] = []
         let pulses = passes.flatMap(\.pulses)
         if !pulses.isEmpty {
@@ -599,7 +610,7 @@ nonisolated enum INatExport {
                             note: "Full spectrum at 384 kHz — see the note in INatObservationFields.",
                             iNatFieldID: INatObservationFields.recordingMethod))
         fields.append(.init(label: "Bat detector model",
-                            value: INatObservationFields.detector,
+                            value: INatObservationFields.detector(recordedWith: detectorMake),
                             iNatFieldID: INatObservationFields.detectorModel))
         // No established community field for either of these, so they are on
         // the sheet to be copied and nothing more.

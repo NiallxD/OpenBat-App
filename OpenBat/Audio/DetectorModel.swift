@@ -32,6 +32,11 @@
 //    • iNaturalist observation field 567, "Bat detector model", which is the
 //      most-used field on acoustic bat records by a wide margin.
 //
+//  Note the direction of the second one: iNaturalist reads it back out of the
+//  RECORDING'S GUANO, not out of this setting. The setting says which detector
+//  is in use now, and plenty of people own two — posting an old recording would
+//  otherwise stamp tonight's microphone onto it. The file knows; ask the file.
+//
 //  Both are read by other people's tools, which is the whole reason this is
 //  worth a setting. Unset means unset: the recorder falls back to the port name
 //  rather than guessing, because a wrong detector name in an archived recording

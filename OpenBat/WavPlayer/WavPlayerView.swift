@@ -314,9 +314,21 @@ struct WavPlayerView: View {
     /// and built here; the files are prepared by the sheet itself, off the main
     /// actor — see `INatExport.prepareFiles`.
     private func addToINaturalist() {
-        inatObservation = INatExport.draft(recording: recording,
-                                           passes: store.passes(forRecording: recording),
-                                           priors: store.priorSnapshot(for: recording))
+        let url = store.wavURL(for: recording)
+        Task {
+            // The detector comes from the file's own GUANO rather than from
+            // Settings, so a two-microphone owner doesn't stamp tonight's mic
+            // onto last month's recording — see `INatObservationFields.detector`.
+            // Off the main actor because it can touch iCloud: a bounded seek and
+            // read for a resident file, an unbounded wait for an evicted one.
+            let make = await Task.detached(priority: .userInitiated) {
+                GuanoMetadata.read(from: url)?["Make"]
+            }.value
+            inatObservation = INatExport.draft(recording: recording,
+                                               passes: store.passes(forRecording: recording),
+                                               priors: store.priorSnapshot(for: recording),
+                                               detectorMake: make)
+        }
     }
 
     /// What `INatImages` needs to build the observation's pictures: the
