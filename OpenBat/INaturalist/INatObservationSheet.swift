@@ -395,9 +395,6 @@ struct INatObservationSheet: View {
     @ViewBuilder
     private var assessmentSection: some View {
         Section {
-            if let files, files.upload != files.original {
-                ControlNote("Silence trimmed — \(byteCount(files.uploadBytes)) of audio.")
-            }
             if let assessment {
                 HStack(alignment: .firstTextBaseline) {
                     Text(assessment.rating.rawValue)
@@ -442,10 +439,6 @@ struct INatObservationSheet: View {
         }
     }
 
-    private func byteCount(_ bytes: Int) -> String {
-        ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
-    }
-
     /// The two routes, named for what they do rather than for how they work.
     ///
     /// "By hand" is not a fallback here, it is a choice — it needs no account,
@@ -461,7 +454,13 @@ struct INatObservationSheet: View {
             }
             .pickerStyle(.segmented)
         }
+        // A row of its own insets and padding is a lot of air around a control
+        // that is only two words wide. It isn't a card — it chooses which cards
+        // follow — so it drops the card's spacing and sits close to them.
         .listRowBackground(Color.clear)
+        .listRowInsets(EdgeInsets(top: 0, leading: TileList.contentInset,
+                                  bottom: 2, trailing: TileList.contentInset))
+        .listRowSeparator(.hidden)
     }
 
     /// Exactly what is about to be uploaded, in the order it will appear.
@@ -500,14 +499,16 @@ struct INatObservationSheet: View {
             }
 
             if let files {
-                ForEach(Array(files.sounds.enumerated()), id: \.offset) { index, sound in
-                    LabeledContent(index == 0
-                                   ? "Slowed \(INatExport.expansionFactor)× so it's audible"
-                                   : "Same audio at its own rate") {
-                        Text(byteCount(soundBytes(sound)))
-                            .foregroundStyle(.secondary)
-                    }
-                    .font(.callout)
+                // The two sounds by what they are, and nothing about bytes:
+                // trimming and file sizes are how the feature works, not
+                // something a person deciding whether to post needs to weigh.
+                ForEach(Array(files.sounds.enumerated()), id: \.offset) { index, _ in
+                    Label(index == 0
+                          ? "Slowed \(INatExport.expansionFactor)× so you can hear it"
+                          : "The original, at full speed",
+                          systemImage: "waveform")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
                 }
             }
         } header: {
@@ -515,11 +516,6 @@ struct INatObservationSheet: View {
                        ? "Checking."
                        : "\(previews.count) pictures, then the sound, in this order.")
         }
-    }
-
-    private func soundBytes(_ url: URL) -> Int {
-        (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int)
-            .flatMap { $0 } ?? 0
     }
 
     /// The numbered headers exist so the manual route can be worked down the
