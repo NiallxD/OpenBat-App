@@ -54,6 +54,10 @@ struct INatObservationSheet: View {
     @State private var postState = PostState.idle
     @State private var signingIn = false
     @State private var authError: String?
+    @State private var showFirstPostBriefing = false
+    /// Shown before somebody's FIRST post and never again — see
+    /// `firstPostBriefing`.
+    @AppStorage("openbat.inat.briefed") private var hasBeenBriefed = false
 
     private enum PhotoState { case idle, saving, saved, denied }
 
@@ -102,6 +106,15 @@ struct INatObservationSheet: View {
             .safeAreaInset(edge: .bottom) { postBar }
             .sheet(item: $shareFiles) { share in
                 ShareSheet(items: share.urls)
+            }
+            .alert("Before your first post", isPresented: $showFirstPostBriefing) {
+                Button("Back", role: .cancel) { }
+                Button("Post") {
+                    hasBeenBriefed = true
+                    post()
+                }
+            } message: {
+                Text(Self.briefing)
             }
             .task {
                 let url = wavURL
@@ -228,8 +241,39 @@ struct INatObservationSheet: View {
         }
     }
 
+    /// The etiquette briefing, shown once, immediately before the first
+    /// observation this install ever posts.
+    ///
+    /// **Once, not every time.** It is advice, and advice that appears on every
+    /// post stops being read by the third one — at which point it has trained
+    /// the user to tap straight through the only screen that ever explains the
+    /// rules. The moment it does appear is the right one: somebody who has just
+    /// decided to post is paying far more attention than they were during
+    /// onboarding.
+    ///
+    /// None of the rules depend on it being read. The cap and the blockers are
+    /// enforced in `INatUploadAssessment` either way; this is the courtesy of
+    /// saying why before somebody runs into one.
+    static let briefing = """
+        Every record on iNaturalist is checked by volunteers, so a few good ones \
+        are worth much more than a lot of rough ones. Post the recordings where \
+        the calls are clear and there's only one bat, and leave the rest on your \
+        phone.
+
+        OpenBat won't post more than two of the same species from the same place \
+        in one night. Past that you're asking somebody to verify the same bat \
+        twice, which costs them time and puts nothing new on the map.
+
+        Your location goes up obscured unless you change it, because a precise \
+        bat record can give away a roost.
+        """
+
     private func post() {
         guard let files else { return }
+        guard hasBeenBriefed else {
+            showFirstPostBriefing = true
+            return
+        }
         postState = .posting
         Task {
             // Resolved here rather than in the draft: it is a network call, and
