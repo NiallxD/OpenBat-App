@@ -113,6 +113,7 @@ enum INatImages {
             photos.append(Photo(name: "call-detail.png", data: data))
         }
 
+        photos.append(contentsOf: await tiles(sources: sources, pulses: pulses))
         return photos
     }
 
@@ -156,6 +157,138 @@ enum INatImages {
         return max(0, low - bandPaddingHz)...min(nyquist, high + bandPaddingHz)
     }
 
+    // MARK: The tiled walk-through
+
+    /// How long a slice of recording each tile covers.
+    ///
+    /// The whole point of tiling is horizontal resolution: one picture of a ten-
+    /// second pass gives an identifier a few pixels per call, and the shape of a
+    /// call — whether it sweeps, how steeply, where it flattens out — is the
+    /// thing they are trying to read. Two seconds across a 16:9 frame is enough
+    /// to see individual calls with their structure intact.
+    static let tileSeconds: Double = 2
+
+    /// Hard ceiling on how many go up.
+    ///
+    /// Twelve tiles is a 24-second pass, already far more than an observation
+    /// needs, and every one is another upload from a phone in a field and
+    /// another image on a page somebody has to scroll. A recording longer than
+    /// this gets its first 24 seconds tiled and the context view carries the
+    /// rest.
+    static let maxTiles = 12
+
+    /// The recording walked through in order, each tile a 16:9 frame.
+    ///
+    /// Skipped entirely for a recording short enough that the context view
+    /// already shows it at full resolution — a single tile that duplicates the
+    /// picture above it is just noise on the page.
+    private static func tiles(sources: INatImageSources,
+                              pulses: [PulseRecord]) async -> [Photo] {
+        guard sources.sampleRate > 0, let raw = sources.overviewRaw else { return [] }
+        let totalSeconds = Double(raw.endSample - raw.startSample) / sources.sampleRate
+        guard totalSeconds > tileSeconds * 1.5 else { return [] }
+
+        let band = callBand(pulses: pulses, nyquist: sources.sampleRate / 2)
+        let count = min(maxTiles, Int((totalSeconds / tileSeconds).rounded(.up)))
+
+        var photos: [Photo] = []
+        for index in 0..<count {
+            let from = Double(index) * tileSeconds
+            let to = min(totalSeconds, from + tileSeconds)
+            guard to > from else { break }
+            guard let image = await tile(from: from, to: to, band: band, sources: sources),
+                  let plot = tilePlot(image: image, band: band, from: from, to: to,
+                                      index: index, of: count),
+                  let data = plot.pngData()
+            else { continue }
+            // Numbered so they stay in order on the page — iNaturalist shows
+            // observation photos in upload order, but the filename is what
+            // anyone downloading them sorts by.
+            photos.append(Photo(name: String(format: "pass-%02d.png", index + 1), data: data))
+        }
+        return photos
+    }
+
+    /// One slice, rendered from the file at the user's own noise floor and
+    /// stretched to 16:9.
+    ///
+    /// Rendered wide (1600 columns for two seconds) and then let the frame do
+    /// the aspect: the tile's natural height is however many frequency bins the
+    /// band covers, which is nothing like 9/16 of its width, so the picture is
+    /// scaled into the frame rather than cropped to it. Stretching a
+    /// spectrogram is normal — both axes are already arbitrary scales — and
+    /// cropping would throw away the frequencies this is meant to show.
+    private static func tile(from: Double, to: Double,
+                             band: ClosedRange<Double>,
+                             sources: INatImageSources) async -> UIImage? {
+        let url = sources.wavURL, rate = sources.sampleRate
+        let palette = sources.palette, floor = sources.noiseFloor
+        let curve = sources.calibrationCurve
+        let start = Int(from * rate), end = Int(to * rate)
+        guard end > start else { return nil }
+        return await Task.detached(priority: .userInitiated) {
+            WavSpectrogramEngine.renderDetailTile(wavURL: url, sampleRate: rate,
+                                                  startSample: start, endSample: end,
+                                                  minFreqHz: band.lowerBound,
+                                                  maxFreqHz: band.upperBound,
+                                                  targetColumns: 1600,
+                                                  palette: palette, noiseFloor: floor,
+                                                  calibrationCurve: curve)?.image
+        }.value
+    }
+
+    /// A tile with its axes and its place in the sequence.
+    ///
+    /// The position line matters more than it looks: without it a reader has no
+    /// way to tell tile 4 from tile 5, and the seconds are absolute within the
+    /// recording so a claim about one call can be pointed at.
+    private static func tilePlot(image: UIImage, band: ClosedRange<Double>,
+                                 from: Double, to: Double,
+                                 index: Int, of count: Int) -> UIImage? {
+        let view = VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 4) {
+                VStack(alignment: .trailing) {
+                    axisText(String(format: "%.0f", band.upperBound / 1000))
+                    Spacer()
+                    axisText(String(format: "%.0f", (band.lowerBound + band.upperBound) / 2000))
+                    Spacer()
+                    axisText(String(format: "%.0f", band.lowerBound / 1000))
+                }
+                .frame(width: 34, height: 360 * 9 / 16, alignment: .trailing)
+                Image(uiImage: image)
+                    .resizable()
+                    .interpolation(.high)
+                    .aspectRatio(16.0 / 9.0, contentMode: .fill)
+                    .frame(height: 360 * 9 / 16)
+                    .clipped()
+            }
+            HStack {
+                axisText("kHz")
+                    .frame(width: 34, alignment: .trailing)
+                axisText(String(format: "%.1f s", from))
+                Spacer()
+                axisText("part \(index + 1) of \(count)")
+                Spacer()
+                axisText(String(format: "%.1f s", to))
+            }
+        }
+        .padding(12)
+        .frame(width: 640)
+        .background(Color.black)
+        .environment(\.colorScheme, .dark)
+
+        let renderer = ImageRenderer(content: view)
+        renderer.scale = 3
+        renderer.isOpaque = true
+        return renderer.uiImage
+    }
+
+    private static func axisText(_ string: String) -> some View {
+        Text(string)
+            .font(.system(size: 9, weight: .medium).monospacedDigit())
+            .foregroundStyle(.secondary)
+    }
+
     // MARK: The detail view
 
     /// Re-renders the call from the WAV at the noise floor the user currently
@@ -165,27 +298,99 @@ enum INatImages {
     /// which is often not what the user settled on while reviewing — and the
     /// picture they decided was worth posting is the one they were looking at.
     /// Falls back to the stored thumbnail when the file can't be re-read.
+    ///
+    /// **A pulse's timestamp is not a position in the file.** `CapturedPulse`
+    /// stamps `Date()` at the moment the classifier finished, so it carries
+    /// whatever latency the capture and classification pipeline had — tens of
+    /// milliseconds, unpredictably. Cropping straight to that offset lands next
+    /// to the call rather than on it, and at these spans "next to the call" is
+    /// usually its echo off the ground or a wall: a few milliseconds later,
+    /// same frequency, and completely convincing as a call in a picture with no
+    /// context. That is what this looked like before (Niall, 2026-09-04).
+    ///
+    /// So the timestamp is treated as a hint, and the picture is centred on
+    /// what is actually there: the loudest moment in the call band within a
+    /// quarter-second of the estimate. That fixes the latency and the echo in
+    /// one go, because a direct call is louder than its own echo.
     private static func closeUp(pulse: PulseRecord, sources: INatImageSources) async -> UIImage? {
         guard sources.sampleRate > 0 else { return nil }
         let band = closeUpBand(for: pulse)
         let span = (pulse.imageSpanMs ?? max(pulse.durationMs * 3, 8)) / 1000
-        let centre = pulse.date.timeIntervalSince(sources.recordingStart) + (pulse.durationMs / 2000)
-        let start = max(0, Int((centre - span / 2) * sources.sampleRate))
-        let end = Int((centre + span / 2) * sources.sampleRate)
-        guard end > start else { return nil }
+        let estimate = pulse.date.timeIntervalSince(sources.recordingStart) + (pulse.durationMs / 2000)
 
         let url = sources.wavURL, rate = sources.sampleRate
         let palette = sources.palette, floor = sources.noiseFloor
         let curve = sources.calibrationCurve
         return await Task.detached(priority: .userInitiated) {
-            WavSpectrogramEngine.renderDetailTile(wavURL: url, sampleRate: rate,
-                                                  startSample: start, endSample: end,
-                                                  minFreqHz: band.lowerBound,
-                                                  maxFreqHz: band.upperBound,
-                                                  targetColumns: 600,
-                                                  palette: palette, noiseFloor: floor,
-                                                  calibrationCurve: curve)?.image
+            let centre = loudestMoment(near: estimate, band: band, wavURL: url,
+                                       sampleRate: rate, calibrationCurve: curve) ?? estimate
+            let start = max(0, Int((centre - span / 2) * rate))
+            let end = Int((centre + span / 2) * rate)
+            guard end > start else { return nil }
+            return WavSpectrogramEngine.renderDetailTile(wavURL: url, sampleRate: rate,
+                                                         startSample: start, endSample: end,
+                                                         minFreqHz: band.lowerBound,
+                                                         maxFreqHz: band.upperBound,
+                                                         targetColumns: 600,
+                                                         palette: palette, noiseFloor: floor,
+                                                         calibrationCurve: curve)?.image
         }.value
+    }
+
+    /// How far either side of a pulse's timestamp to look for the call itself.
+    ///
+    /// Has to cover the pipeline latency described in `closeUp` with room to
+    /// spare, and stay narrow enough that it can't wander onto the NEXT call —
+    /// bats call several times a second, so a quarter-second each way is close
+    /// to the most that is safe.
+    private static let searchWindowSeconds = 0.25
+
+    /// The moment of most energy in the call band, near `estimate`.
+    ///
+    /// Measured off the raw dB grid rather than the colorized picture: the
+    /// colouring has a noise gate and an adaptive per-column ceiling in it, so
+    /// the brightest pixel and the loudest sound are not the same question.
+    ///
+    /// nil when the window can't be read, and the caller falls back to the
+    /// estimate — a slightly mis-centred picture beats no picture.
+    private nonisolated static func loudestMoment(near estimate: TimeInterval,
+                                                  band: ClosedRange<Double>,
+                                                  wavURL: URL,
+                                                  sampleRate: Double,
+                                                  calibrationCurve: MicCalibrationCurve?) -> TimeInterval? {
+        let from = max(0, estimate - searchWindowSeconds)
+        let to = estimate + searchWindowSeconds
+        let startSample = Int(from * sampleRate)
+        let endSample = Int(to * sampleRate)
+        guard endSample > startSample,
+              let raw = WavSpectrogramEngine.renderRawTile(wavURL: wavURL,
+                                                           startSample: startSample,
+                                                           endSample: endSample,
+                                                           targetColumns: 512,
+                                                           calibrationCurve: calibrationCurve),
+              raw.nCols > 0
+        else { return nil }
+
+        let bins = STFTGrid.binCount
+        let hzPerBin = (sampleRate / 2) / Double(bins)
+        let lowBin = min(max(Int(band.lowerBound / hzPerBin), 0), bins - 1)
+        let highBin = min(max(Int(band.upperBound / hzPerBin), lowBin), bins - 1)
+
+        var bestColumn = 0
+        var bestEnergy = -Double.greatestFiniteMagnitude
+        for col in 0..<raw.nCols {
+            var peak = -Double.greatestFiniteMagnitude
+            for bin in lowBin...highBin {
+                peak = max(peak, Double(raw.grid[bin * raw.nCols + col]))
+            }
+            if peak > bestEnergy { bestEnergy = peak; bestColumn = col }
+        }
+
+        // `renderRawTile` pools to at most `targetColumns`, so a column is a
+        // fraction of the window rather than a fixed hop — the position has to
+        // come from the ratio, not from a column count times a hop size.
+        let progress = (Double(bestColumn) + 0.5) / Double(raw.nCols)
+        return from + progress * (to - from)
     }
 
     /// The frequency window for the close-up: the call, and just enough either

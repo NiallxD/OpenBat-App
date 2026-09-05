@@ -337,7 +337,7 @@ struct INatObservationSheet: View {
             if result.alreadyExisted {
                 ControlNote("This recording had already been posted, so nothing was created. Opening it will show you the existing observation.")
             } else {
-                ControlNote("Attached: \(result.attachedSounds) sound file\(result.attachedSounds == 1 ? "" : "s") and \(result.attachedPhotos) spectrogram\(result.attachedPhotos == 1 ? "" : "s"). Location is \(geoprivacy.label.lowercased()).")
+                ControlNote("Attached: \(result.attachedSounds) sound file\(result.attachedSounds == 1 ? "" : "s") and \(result.attachedPhotos) spectrogram\(result.attachedPhotos == 1 ? "" : "s"), plus \(result.attachedFields) observation field\(result.attachedFields == 1 ? "" : "s"). Location is \(geoprivacy.label.lowercased()).")
             }
             Button {
                 openURL(result.webURL)
@@ -501,7 +501,7 @@ struct INatObservationSheet: View {
                 // resolving each field by name first. The numbers are in the
                 // description regardless, so nothing is lost, only harder to
                 // search on.
-                Text("iNaturalist lets you add named fields to an observation, which is how acoustic records from other tools can be found together. OpenBat doesn't fill these in for you yet — copy them onto the observation afterwards if you want it in the search.")
+                Text("iNaturalist lets you add named fields to an observation, which is how acoustic records from other tools are found together. The first three are posted for you; the rest are here to copy if you want them.")
             }
         }
     }

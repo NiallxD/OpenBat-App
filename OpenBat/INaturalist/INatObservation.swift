@@ -119,7 +119,14 @@ nonisolated struct INatObservation: Identifiable {
         let value: String
         /// Shown in smaller type under the value.
         var note: String?
+        /// The iNaturalist observation field this row is posted as, where one
+        /// exists. nil rows are shown on the sheet for the manual route but
+        /// have nowhere to go through the API — see `INatObservationFields`.
+        var iNatFieldID: Int?
     }
+
+    /// The rows that can actually be posted as observation fields.
+    var postableFields: [Field] { fields.filter { $0.iNatFieldID != nil } }
 
     var coordinateText: String? {
         guard let latitude, let longitude else { return nil }
@@ -134,6 +141,51 @@ nonisolated struct INatObservation: Identifiable {
         lines.append(notes)
         return lines.joined(separator: "\n")
     }
+}
+
+/// The iNaturalist observation fields OpenBat fills in.
+///
+/// **These are existing community fields, not new ones.** Observation fields on
+/// iNaturalist are global and anyone can create one, which means the useful
+/// thing is to use whatever the bat-recording community already searches on
+/// rather than to invent a tidier set. Looked up on iNaturalist directly rather
+/// than taken from the API application draft, which named none of them:
+///
+///   567  Bat detector model          19,385 uses — far and away the
+///                                    established one for acoustic bat records
+///   578  Recording method            478 uses, and it has a FIXED value list:
+///                                    time expansion | heterodyne |
+///                                    frequency division | direct recording
+///   308  Echolocation call frequency  1,252 uses. Free text, "dominant
+///                                    frequency of call (kHz)"
+///
+/// Filling these is what puts an OpenBat record alongside the ones already
+/// there from Wildlife Acoustics and Pettersson kit, and makes it turn up in
+/// the searches people use to find acoustic records.
+nonisolated enum INatObservationFields {
+    static let detectorModel = 567
+    static let recordingMethod = 578
+    static let callFrequency = 308
+
+    /// One of `578`'s four permitted values, and the one that is true.
+    ///
+    /// OpenBat records full-spectrum at 384 kHz — every sample, unmodified —
+    /// which is "direct recording". It is tempting to answer "time expansion"
+    /// because the audio ATTACHED to the observation is time-expanded, and that
+    /// would be wrong: this field describes how the call was captured, not what
+    /// was uploaded, and a time-expansion detector is a different instrument
+    /// that records in bursts and goes deaf between them.
+    static let method = "direct recording"
+
+    /// What went in the field, for `567`.
+    ///
+    /// The app, not the microphone. OpenBat works with any USB ultrasonic mic
+    /// and does not record which one was attached to a given recording — the
+    /// live input name is the mic plugged in NOW, which for an old or imported
+    /// recording is simply a different piece of kit. Naming the app is the part
+    /// that is true for every record; if the mic is ever stamped into a
+    /// recording's own metadata, this should carry both.
+    static let detector = "OpenBat for iOS"
 }
 
 nonisolated enum INatExport {
@@ -458,10 +510,20 @@ nonisolated enum INatExport {
         let pulses = passes.flatMap(\.pulses)
         if !pulses.isEmpty {
             let peaks = pulses.map(\.peakFreqHz).sorted()
-            fields.append(.init(label: "Frequency (kHz)",
+            fields.append(.init(label: "Echolocation call frequency",
                                 value: String(format: "%.0f", median(peaks) / 1000),
-                                note: "Median peak frequency across \(pulses.count) calls."))
+                                note: "kHz. Median peak frequency across \(pulses.count) calls.",
+                                iNatFieldID: INatObservationFields.callFrequency))
         }
+        fields.append(.init(label: "Recording method",
+                            value: INatObservationFields.method,
+                            note: "Full spectrum at 384 kHz — see the note in INatObservationFields.",
+                            iNatFieldID: INatObservationFields.recordingMethod))
+        fields.append(.init(label: "Bat detector model",
+                            value: INatObservationFields.detector,
+                            iNatFieldID: INatObservationFields.detectorModel))
+        // No established community field for either of these, so they are on
+        // the sheet to be copied and nothing more.
         fields.append(.init(label: "Number of calls", value: String(recording.pulseCount)))
         fields.append(.init(label: "Source file", value: recording.relativeWavPath.components(separatedBy: "/").last ?? ""))
         return fields

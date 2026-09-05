@@ -3234,10 +3234,51 @@ when there isn't one, since silence would read as "no weighting was applied".
 And a closing line saying every measurement is automatic, unchecked by a person,
 and to be treated as a starting point.
 
-**Still not done:** observation *fields* (the bat2inat convention the application
-promises) are not posted — they are addressed by numeric field id and need a
-name→id lookup first. The numbers are all in the description, so nothing is lost
-but searchability, and the sheet says so.
+**Observation fields (2026-09-04).** Three, and they are existing community
+fields rather than tidier ones of our own — fields on iNaturalist are global and
+the useful thing is to use whatever the bat-recording community already searches
+on. Looked up on iNaturalist directly, since the API application named none of
+them: **567 Bat detector model** (19,385 uses — far and away the established one
+for acoustic bat records), **578 Recording method** (478 uses, and it has a FIXED
+value list: time expansion | heterodyne | frequency division | direct recording),
+and **308 Echolocation call frequency** (1,252 uses, free text, "dominant
+frequency of call (kHz)"). Posted via `POST /observation_field_values`, never
+fatal — an observation without its fields is still a good record, just harder to
+find.
+
+Two traps in those. 578 must say **direct recording**: OpenBat captures full
+spectrum at 384 kHz, and answering "time expansion" because the ATTACHED audio is
+time-expanded would describe a different instrument — one that records in bursts
+and goes deaf between them. And 567 names the app, not the microphone: OpenBat
+works with any USB ultrasonic mic and does not record which one made a given
+recording, so the live input name would be whatever is plugged in now. If a mic
+model is ever stamped into a recording's metadata, that field should carry both.
+
+**A pulse's timestamp is not a position in the file, and this bit.**
+`CapturedPulse` stamps `Date()` when the classifier finishes, so it carries the
+pipeline's latency — tens of milliseconds, unpredictably. The close-up cropped
+straight to that offset and landed next to the call rather than on it, which at
+those spans means its ECHO: a few milliseconds later, same frequency, and
+completely convincing in a picture with no context (Niall spotted it in
+testing). The timestamp is now a hint only — `loudestMoment` searches ±0.25 s of
+raw grid for the strongest column in the call band and centres there, which
+fixes the latency and the echo together, since a direct call is louder than its
+own echo. Measured off the raw dB grid, not the colorized picture: the colouring
+has a noise gate and a per-column adaptive ceiling in it, so brightest pixel and
+loudest sound are different questions. The window can't go much past a quarter
+second either way without wandering onto the next call.
+
+**Tiled 16:9 walk-through.** One picture of a ten-second pass gives an identifier
+a few pixels per call, and call SHAPE is what they read. So the pass is also
+uploaded as consecutive 2-second 16:9 tiles (max 12, skipped entirely for a
+recording short enough that the context view already shows it), each with a kHz
+axis, absolute start/end seconds and a "part n of m" line so a claim can be
+pointed at one call. The tiles are scaled into 16:9 rather than cropped to it —
+a tile's natural height is however many frequency bins the band covers, and
+cropping would throw away the frequencies the picture exists to show.
+
+**Still not done:** the rest of the fields — "Number of calls" and the source
+filename have no established community field, so they stay copyable-only.
 
 ### GPS tracking removed, every run is a session (2026-08-16)
 

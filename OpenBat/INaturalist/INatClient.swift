@@ -9,6 +9,7 @@
 //    POST /observations         create one, on the user's own account
 //    POST /observation_photos   attach the spectrogram
 //    POST /observation_sounds   attach the audible copy and the original
+//    POST /observation_field_values  the bat-recording community's own fields
 //
 //  No background posting, no bulk upload of a night in one action, no writes to
 //  anyone else's records, no crawling. Every call here is downstream of a tap
@@ -71,6 +72,7 @@ nonisolated enum INatClient {
         let uuid: UUID
         let webURL: URL
         var attachedPhotos = 0
+        var attachedFields = 0
         var attachedSounds = 0
         /// Human-readable, already user-facing. Empty on a clean post.
         var skipped: [String] = []
@@ -117,6 +119,21 @@ nonisolated enum INatClient {
             }
         }
 
+        // After the observation exists and before the media, because these are
+        // small and quick: a user who backgrounds the app mid-upload is more
+        // likely to have kept the searchable metadata this way.
+        for field in observation.postableFields {
+            guard let fieldID = field.iNatFieldID else { continue }
+            do {
+                try await attachField(fieldID, value: field.value, to: uuid)
+                result.attachedFields += 1
+            } catch {
+                // Never fatal. An observation without its fields is still a
+                // good record; it is just harder to find in a search.
+                result.skipped.append("The \(field.label) field didn't save (\(error.localizedDescription))")
+            }
+        }
+
         for sound in sounds {
             let bytes = (try? FileManager.default.attributesOfItem(atPath: sound.path)[.size] as? Int) ?? nil
             if let bytes, bytes > INatCredentials.maxSoundBytes {
@@ -136,6 +153,24 @@ nonisolated enum INatClient {
         }
 
         return result
+    }
+
+    /// Adds one observation field value — the things that make an acoustic
+    /// record findable by the searches people actually run. See
+    /// `INatObservationFields` for which fields and why those.
+    private static func attachField(_ fieldID: Int, value: String, to uuid: UUID) async throws {
+        var request = try await authorized(endpoint("observation_field_values"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "observation_field_value": [
+                "observation_id": uuid.uuidString.lowercased(),
+                "observation_field_id": fieldID,
+                "value": value
+            ],
+            "fields": ["id": true]
+        ])
+        _ = try await send(request)
     }
 
     /// Where the user goes to look at what they just posted. UUIDs work in
