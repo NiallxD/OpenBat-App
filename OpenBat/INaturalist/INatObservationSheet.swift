@@ -50,10 +50,10 @@ struct INatObservationSheet: View {
     @Environment(\.webAuthenticationSession) private var webAuthentication
 
     @State private var auth = INatAuth.shared
+    @State private var uploads = INatUploadManager.shared
     @State private var shareFiles: ShareFiles?
     @State private var copied: String?
     @State private var geoprivacy = INatGeoprivacy.obscured
-    @State private var postState = PostState.idle
     @State private var signingIn = false
     @State private var authError: String?
     @State private var showPostBriefing = false
@@ -63,13 +63,6 @@ struct INatObservationSheet: View {
     @AppStorage("openbat.inat.sheetMode") private var mode = Mode.auto
 
     private enum Mode: String { case auto, manual }
-
-    private enum PostState {
-        case idle
-        case posting
-        case posted(INatClient.PostResult)
-        case failed(String)
-    }
 
     /// Built in `.task` — see `INatExport.prepareFiles`, which copies and
     /// rewrites tens of megabytes and must not run on the main actor.
@@ -102,21 +95,17 @@ struct INatObservationSheet: View {
     var body: some View {
         NavigationStack {
             List {
-                if case .posted(let result) = postState {
-                    postedSection(result)
+                modeSection
+                if mode == .auto {
+                    assessmentSection.tileRow()
+                    previewSection.tileRow()
                 } else {
-                    modeSection
-                    if mode == .auto {
-                        assessmentSection.tileRow()
-                        previewSection.tileRow()
-                    } else {
-                        manualSection.tileRow()
-                    }
-                    taxonSection.tileRow()
-                    whenAndWhereSection.tileRow()
-                    notesSection.tileRow()
-                    fieldsSection.tileRow()
+                    manualSection.tileRow()
                 }
+                taxonSection.tileRow()
+                whenAndWhereSection.tileRow()
+                notesSection.tileRow()
+                fieldsSection.tileRow()
             }
             // The app's own list material rather than a grouped list's: see
             // `TileCard`. A grouped list would draw a second container around
@@ -180,9 +169,7 @@ struct INatObservationSheet: View {
     /// on the way somewhere else.
     @ViewBuilder
     private var postBar: some View {
-        if case .posted = postState {
-            EmptyView()
-        } else if mode == .manual {
+        if mode == .manual {
             // The manual route posts nothing; its actions are its own section.
             EmptyView()
         } else {
@@ -192,24 +179,6 @@ struct INatObservationSheet: View {
                         .font(.caption)
                         .foregroundStyle(.red)
                 }
-                if case .failed(let message) = postState {
-                    Text(message)
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                    // A status code on its own is not a diagnosis — the first
-                    // live failure was a 404 whose actual cause was a malformed
-                    // URL, invisible from here. This puts the request and the
-                    // reply where they can be pasted into a bug report.
-                    Button {
-                        UIPasteboard.general.string = INatLog.shared.text
-                        flash("log")
-                    } label: {
-                        Label(copied == "log" ? "Copied" : "Copy the request log",
-                              systemImage: copied == "log" ? "checkmark" : "doc.on.doc")
-                            .font(.caption)
-                    }
-                }
-
                 if let assessment, assessment.overridden {
                     // Loud on purpose: this state only exists behind the Debug
                     // menu, and posting from it puts a record iNaturalist's
@@ -234,14 +203,8 @@ struct INatObservationSheet: View {
                     Button {
                         post()
                     } label: {
-                        Group {
-                            if case .posting = postState {
-                                HStack(spacing: 8) { ProgressView(); Text("Posting…") }
-                            } else {
-                                Label("Post to iNaturalist", systemImage: "arrow.up.circle.fill")
-                            }
-                        }
-                        .frame(maxWidth: .infinity)
+                        Label("Post to iNaturalist", systemImage: "arrow.up.circle.fill")
+                            .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.borderedProminent)
                     // Orange, which is the colour the recording list already
@@ -251,7 +214,7 @@ struct INatObservationSheet: View {
                     // button in the app, and not red, which would read as a
                     // warning about an action the user has chosen.
                     .tint(.orange)
-                    .disabled(isPosting || files == nil)
+                    .disabled(files == nil)
                     Text("Posts to your own iNaturalist account, as \(observation.taxonName), \(geoprivacy.label.lowercased()) location.")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
@@ -284,11 +247,6 @@ struct INatObservationSheet: View {
             .padding(.vertical, 10)
             .background(.bar)
         }
-    }
-
-    private var isPosting: Bool {
-        if case .posting = postState { return true }
-        return false
     }
 
     private func signIn() {
@@ -342,64 +300,19 @@ struct INatObservationSheet: View {
             showPostBriefing = true
             return
         }
-        postState = .posting
-        Task {
-            // Resolved here rather than in the draft: it is a network call, and
-            // it must not happen until the user has actually asked to post.
-            let taxonID = await INatClient.taxonID(for: observation.taxonName)
-            do {
-                let result = try await INatClient.post(observation,
-                                                       geoprivacy: geoprivacy,
-                                                       taxonID: taxonID,
-                                                       photos: includedPhotos,
-                                                       sounds: files.sounds)
-                // Recorded only on a real success, and only for a record this
-                // phone actually created — that is what the nightly cap counts.
-                INatPostLedger.record(recording: recording)
-                postState = .posted(result)
-            } catch {
-                postState = .failed(error.localizedDescription)
-            }
-        }
+        // Handed to `INatUploadManager` and forgotten. The work outlives this
+        // sheet on purpose — a post is tens of megabytes over a field's signal,
+        // and it used to die the moment somebody dismissed the screen they had
+        // already finished with.
+        uploads.post(INatUploadManager.Input(recording: recording,
+                                             observation: observation,
+                                             geoprivacy: geoprivacy,
+                                             photos: includedPhotos,
+                                             sounds: files.sounds))
+        dismiss()
     }
 
     // MARK: Sections
-
-    @ViewBuilder
-    private func postedSection(_ result: INatClient.PostResult) -> some View {
-        TileCard("Done", "It's on your iNaturalist account.") {
-            Label(result.alreadyExisted ? "Already on iNaturalist" : "Posted to iNaturalist",
-                  systemImage: "checkmark.circle.fill")
-                .foregroundStyle(.green)
-            if result.alreadyExisted {
-                ControlNote("Already posted — nothing new was created.")
-            } else {
-                ControlNote("\(result.attachedPhotos) pictures, \(result.attachedSounds) sounds, \(result.attachedFields) fields. Location \(geoprivacy.label.lowercased()).")
-            }
-            Button {
-                openURL(result.webURL)
-            } label: {
-                Label("Open the observation", systemImage: "safari")
-            }
-        }
-        .tileRow()
-
-        if !result.skipped.isEmpty {
-            TileCard("Some didn't attach", "Add them on iNaturalist yourself.") {
-                ForEach(result.skipped, id: \.self) { note in
-                    Label(note, systemImage: "exclamationmark.triangle")
-                        .font(.callout)
-                }
-                Button {
-                    shareFiles = ShareFiles(urls: files?.all ?? [])
-                } label: {
-                    Label("Save the files", systemImage: "square.and.arrow.up")
-                }
-                .disabled(files == nil)
-            }
-            .tileRow()
-        }
-    }
 
     /// The first thing on the screen, before the taxon or the map, because the
     /// question it answers — should this be posted at all? — comes before every

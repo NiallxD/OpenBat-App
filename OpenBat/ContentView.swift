@@ -155,6 +155,7 @@ struct ContentView: View {
     /// App-lifetime, so an export survives leaving the session it was started
     /// from — see `SessionExportManager`.
     @State private var exportManager = SessionExportManager.shared
+    @State private var inatUploads = INatUploadManager.shared
     /// The vertical transport menu hanging off the session button — record,
     /// listen mode, end session. Only openable while a session is running; see
     /// `handleSessionButtonTap`. Deliberately absent from `menuIsOpen`: it is
@@ -278,6 +279,10 @@ struct ContentView: View {
             // progress card and the share sheet at the end are hosted here —
             // see SessionExportManager.
             .overlay(alignment: exportPillAlignment) { sessionExportOverlay }
+            // An iNaturalist post outlives its sheet for the same reason an
+            // export outlives the session screen — see INatUploadManager.
+            .overlay(alignment: exportPillAlignment) { inatUploadOverlay }
+            .inatUploadAlerts(manager: inatUploads)
             .sheet(item: $exportManager.ready) { ready in
                 ShareSheet(items: [ready.url])
             }
@@ -1609,6 +1614,20 @@ struct ContentView: View {
 
     /// Cleared from the bar with the same inset as `notRecordingNudgeOverlay` —
     /// the bar it has to clear is the same bar.
+    /// Sits with the export pill and under the same rules — see
+    /// `sessionExportOverlay`.
+    @ViewBuilder private var inatUploadOverlay: some View {
+        INatUploadBanner(manager: inatUploads)
+            .opacity(inatUploads.inlineHosts == 0 ? 1 : 0)
+            .allowsHitTesting(inatUploads.inlineHosts == 0)
+            .padding(.horizontal, SessionButtonMetrics.horizontalPadding)
+            .padding(transportMenuIsBelowBar ? .top : .bottom, transportMenuInset)
+            // Keyed on the job's identity, not the job: the fraction updates
+            // several times a second and animating those would leave the pill
+            // permanently mid-transition.
+            .animation(.easeInOut(duration: 0.25), value: inatUploads.job?.id)
+    }
+
     @ViewBuilder private var sessionExportOverlay: some View {
         // Nothing here while a screen is showing the pill in its own layout —
         // see SessionExportManager.inlineHosts.

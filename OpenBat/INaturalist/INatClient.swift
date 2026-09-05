@@ -93,9 +93,24 @@ nonisolated enum INatClient {
                      geoprivacy: INatGeoprivacy,
                      taxonID: Int?,
                      photos: [INatImages.Photo],
-                     sounds: [URL]) async throws -> PostResult {
+                     sounds: [URL],
+                     progress: @escaping @Sendable (Double) -> Void = { _ in }) async throws -> PostResult {
         let uuid = observation.observationUUID
         var result = PostResult(uuid: uuid, webURL: webURL(for: uuid))
+
+        // Weighted by bytes, because that is what the wait actually is: the
+        // observation, its fields and its annotation are four small JSON
+        // requests, and one sound file is tens of megabytes. Counting steps
+        // instead would put the bar at 60% before anything slow had started.
+        let soundBytes = sounds.reduce(0) { $0 + fileSize($1) }
+        let photoBytes = photos.reduce(0) { $0 + $1.data.count }
+        let metadataWeight = 64 * 1024
+        let total = Double(max(1, soundBytes + photoBytes + metadataWeight))
+        var done = 0
+        func advance(_ bytes: Int) {
+            done += bytes
+            progress(min(1, Double(done) / total))
+        }
 
         if try await observationExists(uuid: uuid) {
             // A retry after a timeout, or the same recording posted twice. The
@@ -106,6 +121,7 @@ nonisolated enum INatClient {
         }
 
         try await create(observation, uuid: uuid, geoprivacy: geoprivacy, taxonID: taxonID)
+        advance(metadataWeight)
 
         for photo in photos {
             do {
@@ -116,7 +132,9 @@ nonisolated enum INatClient {
                                  path: "observation_photos",
                                  field: "observation_photo")
                 result.attachedPhotos += 1
+                advance(photo.data.count)
             } catch {
+                advance(photo.data.count)
                 result.skipped.append("\(photo.name) didn't upload (\(error.localizedDescription))")
             }
         }
@@ -146,8 +164,9 @@ nonisolated enum INatClient {
         }
 
         for sound in sounds {
-            let bytes = (try? FileManager.default.attributesOfItem(atPath: sound.path)[.size] as? Int) ?? nil
-            if let bytes, bytes > INatCredentials.maxSoundBytes {
+            let bytes = fileSize(sound)
+            if bytes > INatCredentials.maxSoundBytes {
+                advance(bytes)
                 result.skipped.append("\(sound.lastPathComponent) is \(bytes / 1_048_576) MB, over iNaturalist's \(INatCredentials.maxSoundBytes / 1_048_576) MB limit for sound")
                 continue
             }
@@ -158,7 +177,9 @@ nonisolated enum INatClient {
                                  path: "observation_sounds",
                                  field: "observation_sound")
                 result.attachedSounds += 1
+                advance(fileSize(sound))
             } catch {
+                advance(fileSize(sound))
                 result.skipped.append("\(sound.lastPathComponent) didn't upload (\(error.localizedDescription))")
             }
         }
@@ -198,6 +219,11 @@ nonisolated enum INatClient {
             "fields": ["id": true]
         ])
         _ = try await send(request)
+    }
+
+    private static func fileSize(_ url: URL) -> Int {
+        (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int)
+            .flatMap { $0 } ?? 0
     }
 
     /// Where the user goes to look at what they just posted. UUIDs work in

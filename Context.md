@@ -3353,6 +3353,35 @@ has a noise gate and a per-column adaptive ceiling in it, so brightest pixel and
 loudest sound are different questions. The window can't go much past a quarter
 second either way without wandering onto the next call.
 
+**Posting runs in the background, like a session export** (Niall, 2026-09-04).
+`INatUploadManager` is `SessionExportManager`'s shape down to the inline-host
+count, so the two pills behave identically and neither knows about the other: an
+app-lifetime object owns the task, takes a `beginBackgroundTask` so a locked
+screen doesn't suspend a 15 MB upload half way through, and draws a pill over
+the tab bar. The sheet now hands the work over and dismisses; it used to own the
+task, so dismissing the screen killed a post the user had already decided about.
+
+Unlike the exporter there is no dispatch queue and no cancel flag — `INatClient`
+is `async` all the way down and `URLSession` does its own IO, so there is no long
+synchronous block to keep off the main thread and task cancellation reaches the
+session by itself. That whole apparatus in `SessionExportManager` exists for file
+work; copying it here would have been cargo.
+
+Progress is **weighted by bytes**, not by steps: the observation, its fields and
+its annotation are four small JSON requests and one sound file is tens of
+megabytes, so counting steps would put the bar at 60% before anything slow had
+started.
+
+Two things this does NOT change. Nothing starts without a tap — backgrounding the
+work is not posting in the background — and only one post runs at a time, since
+two would compete for the same field signal and the cap means there is never a
+queue worth having.
+
+The finished/failed alerts live in their own `ViewModifier` rather than inline on
+the root view: `ContentView`'s body is at the edge of what the type-checker will
+do, and adding two `.alert`s with their own bindings pushed it straight over
+("unable to type-check this expression in reasonable time").
+
 **The sheet is drawn on the app's own tiles, not a grouped list** (Niall,
 2026-09-04). `TileCard` in `TileList.swift` is the Settings card SHAPE — a
 name, a one-line description, then the controls — drawn on glass, and this sheet
