@@ -3214,7 +3214,12 @@ iNaturalist shows an observation photo at, the evidence is a sliver in a mostly
 black rectangle. It also has no axes, and measuring the call is precisely what
 an identifier does. So an observation carries a CONTEXT view (the whole pass,
 cropped to the call band with 20 kHz of headroom either side) and a DETAIL view
-(the strongest single call, tightly clipped, with kHz and millisecond axes).
+(the strongest single call, with kHz and millisecond axes). The close-up is
+deliberately NOT as tight as the stored thumbnail: that crop was cut to feed a
+classifier, where a pixel that isn't the call is wasted input, and a picture for
+a person is the opposite — a call filling its frame gives a reader no way to see
+that nothing was cut off and no quiet to judge it against. Widened to three
+times the call's own window and ±8 kHz.
 
 The context view is re-colorized from `Overview.rawTile` at a new band rather
 than cropped out of the finished image — `colorize` already does the band crop,
@@ -3285,6 +3290,16 @@ own echo. Measured off the raw dB grid, not the colorized picture: the colouring
 has a noise gate and a per-column adaptive ceiling in it, so brightest pixel and
 loudest sound are different questions. The window can't go much past a quarter
 second either way without wandering onto the next call.
+
+**Upload order** (Niall, 2026-09-04), and it is deliberate because
+iNaturalist shows media in the order it was uploaded: the slices in sequence,
+then the whole pass, then the one call in close-up, then the time-expanded audio,
+then the recording at its own rate. Detail first and summary after, which is how
+somebody actually works through an acoustic record — walk the sequence, see where
+it sits, then look hard at one call. Filenames are numbered to match so a reader
+who downloads them all gets them back in that order rather than alphabetically.
+The audio order matters most: iNaturalist plays the first sound, and a 384 kHz
+file plays in no browser, so leading with it would hand every visitor silence.
 
 **Tiled 16:9 walk-through.** One picture of a ten-second pass gives an identifier
 a few pixels per call, and call SHAPE is what they read. So the pass is also

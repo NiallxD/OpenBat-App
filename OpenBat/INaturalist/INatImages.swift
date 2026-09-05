@@ -90,31 +90,45 @@ enum INatImages {
         let data: Data
     }
 
-    /// The images to attach, in the order iNaturalist should show them: context
-    /// first, because it is what a page thumbnail will be cropped from.
+    /// The images to attach, in the order iNaturalist shows them — which is the
+    /// order they are uploaded in.
+    ///
+    /// **Detail first, summary after** (Niall, 2026-09-04): the pass in
+    /// consecutive slices, then the whole pass, then the one call in close-up.
+    /// It reads the way somebody actually works through an acoustic record —
+    /// walk the sequence, see where it sits as a whole, then look hard at one
+    /// call — rather than the way a page thumbnail would prefer.
+    ///
+    /// Filenames are numbered to match, so a reader who downloads all of them
+    /// gets them back in this order rather than alphabetically.
     static func render(sources: INatImageSources,
                        pulses: [PulseRecord],
                        fallbackPNG: Data?) async -> [Photo] {
-        var photos: [Photo] = []
+        var images: [(name: String, data: Data)] = []
+
+        for tile in await tiles(sources: sources, pulses: pulses) {
+            images.append((tile.name, tile.data))
+        }
 
         if let cropped = await croppedOverview(sources: sources, pulses: pulses),
            let data = cropped.pngData() {
-            photos.append(Photo(name: "spectrogram.png", data: data))
+            images.append(("whole-pass.png", data))
         } else if let fallbackPNG {
             // The uncropped overview is still worth sending. A picture that is
             // mostly black beats no picture at all.
-            photos.append(Photo(name: "spectrogram.png", data: fallbackPNG))
+            images.append(("whole-pass.png", fallbackPNG))
         }
 
         if let pulse = sources.pulse,
            let image = await closeUp(pulse: pulse, sources: sources) ?? sources.pulseImage,
            let plot = pulsePlot(pulse: pulse, image: image, band: closeUpBand(for: pulse)),
            let data = plot.pngData() {
-            photos.append(Photo(name: "call-detail.png", data: data))
+            images.append(("call-close-up.png", data))
         }
 
-        photos.append(contentsOf: await tiles(sources: sources, pulses: pulses))
-        return photos
+        return images.enumerated().map { index, image in
+            Photo(name: String(format: "%02d-%@", index + 1, image.name), data: image.data)
+        }
     }
 
     // MARK: The context view
@@ -201,10 +215,7 @@ enum INatImages {
                                       index: index, of: count),
                   let data = plot.pngData()
             else { continue }
-            // Numbered so they stay in order on the page — iNaturalist shows
-            // observation photos in upload order, but the filename is what
-            // anyone downloading them sorts by.
-            photos.append(Photo(name: String(format: "pass-%02d.png", index + 1), data: data))
+            photos.append(Photo(name: String(format: "part-%02d.png", index + 1), data: data))
         }
         return photos
     }
@@ -315,7 +326,7 @@ enum INatImages {
     private static func closeUp(pulse: PulseRecord, sources: INatImageSources) async -> UIImage? {
         guard sources.sampleRate > 0 else { return nil }
         let band = closeUpBand(for: pulse)
-        let span = (pulse.imageSpanMs ?? max(pulse.durationMs * 3, 8)) / 1000
+        let span = closeUpSpan(for: pulse)
         let estimate = pulse.date.timeIntervalSince(sources.recordingStart) + (pulse.durationMs / 2000)
 
         let url = sources.wavURL, rate = sources.sampleRate
@@ -393,14 +404,34 @@ enum INatImages {
         return from + progress * (to - from)
     }
 
-    /// The frequency window for the close-up: the call, and just enough either
-    /// side to show it is complete. Much tighter than the context view's
-    /// 20 kHz, because this picture exists to be measured.
+    /// Room around the call in the close-up.
+    ///
+    /// The stored crop is as tight as it can be — it was cut to feed a
+    /// classifier, where every pixel that isn't the call is wasted input. A
+    /// picture for a person is the opposite: a call filling its frame edge to
+    /// edge gives a reader no way to see that nothing was cut off, and no quiet
+    /// to judge the call against. Widened on both axes (Niall, 2026-09-04).
+    ///
+    /// Still far tighter than the context view's 20 kHz, because this picture
+    /// exists to be measured.
+    static let closeUpPaddingHz: Double = 8_000
+    static let closeUpTimeFactor: Double = 3
+
     private static func closeUpBand(for pulse: PulseRecord) -> ClosedRange<Double> {
         if let low = pulse.imageFreqMinHz, let high = pulse.imageFreqMaxHz, high > low {
-            return low...high
+            return max(0, low - closeUpPaddingHz)...(high + closeUpPaddingHz)
         }
-        return max(0, pulse.peakFreqHz - 15_000)...(pulse.peakFreqHz + 15_000)
+        return max(0, pulse.peakFreqHz - 20_000)...(pulse.peakFreqHz + 20_000)
+    }
+
+    /// How much recording the close-up covers, in seconds.
+    ///
+    /// Three times the call's own window. Bats call several times a second, so
+    /// at these lengths that is still comfortably inside the gap to the next
+    /// call — it buys silence either side, not a second bat.
+    private static func closeUpSpan(for pulse: PulseRecord) -> TimeInterval {
+        let base = pulse.imageSpanMs ?? max(pulse.durationMs * 3, 8)
+        return base * closeUpTimeFactor / 1000
     }
 
     /// One call, tightly clipped, with axes — `PulseImagePlot` rendered to a
@@ -417,7 +448,7 @@ enum INatImages {
             PulseImagePlot(image: image,
                            freqMinHz: band.lowerBound,
                            freqMaxHz: band.upperBound,
-                           spanMs: pulse.imageSpanMs ?? max(pulse.durationMs * 3, 8))
+                           spanMs: closeUpSpan(for: pulse) * 1000)
             Text(caption(for: pulse))
                 .font(.system(size: 10).monospacedDigit())
                 .foregroundStyle(.secondary)

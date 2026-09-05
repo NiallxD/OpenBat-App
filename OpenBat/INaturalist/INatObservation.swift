@@ -250,8 +250,14 @@ nonisolated enum INatExport {
         /// Everything there is, in the order the hand-off sheet offers them.
         var all: [URL] { [audible].compactMap { $0 } + photos + [original] }
 
-        /// What goes to `/observation_sounds`. The audible copy leads because
-        /// it is the one a reviewer can actually play in a browser.
+        /// What goes to `/observation_sounds`, in upload order: the audible
+        /// time-expanded copy first, then the recording at its own rate.
+        ///
+        /// That order is the point. iNaturalist plays the first sound on an
+        /// observation, and a 384 kHz file plays in no browser at all — leading
+        /// with it would give every visitor silence and leave them assuming the
+        /// record has no audio, which is what has happened to a lot of the
+        /// acoustic observations already on the site.
         var sounds: [URL] { [audible, upload].compactMap { $0 } }
 
         /// What the size limit and the upload score are judged against — both
