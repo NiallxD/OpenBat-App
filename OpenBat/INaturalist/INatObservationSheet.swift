@@ -177,13 +177,11 @@ struct INatObservationSheet: View {
                     Text(authError)
                         .font(.caption)
                         .foregroundStyle(.red)
-                        .multilineTextAlignment(.center)
                 }
                 if case .failed(let message) = postState {
                     Text(message)
                         .font(.caption)
                         .foregroundStyle(.red)
-                        .multilineTextAlignment(.center)
                     // A status code on its own is not a diagnosis — the first
                     // live failure was a 404 whose actual cause was a malformed
                     // URL, invisible from here. This puts the request and the
@@ -205,6 +203,7 @@ struct INatObservationSheet: View {
                     Label("Posting limits overridden in Debug", systemImage: "exclamationmark.triangle.fill")
                         .font(.caption)
                         .foregroundStyle(.orange)
+                        .frame(maxWidth: .infinity)
                 }
 
                 if let assessment, !assessment.canPost {
@@ -230,11 +229,17 @@ struct INatObservationSheet: View {
                         .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.borderedProminent)
+                    // Orange, which is the colour the recording list already
+                    // uses to mean "this one is worth sending" — so the mark on
+                    // the row and the button that acts on it are the same idea
+                    // in the same colour. Not the accent, which is every other
+                    // button in the app, and not red, which would read as a
+                    // warning about an action the user has chosen.
+                    .tint(.orange)
                     .disabled(isPosting || files == nil)
                     Text("Posts to your own iNaturalist account, as \(observation.taxonName), \(geoprivacy.label.lowercased()) location.")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
                 } else {
                     Button {
                         signIn()
@@ -253,9 +258,13 @@ struct INatObservationSheet: View {
                     Text("On iNaturalist's own page. OpenBat never sees your password.")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
                 }
             }
+            // Centred once here rather than per line: the bar is a single
+            // column of statements about one action, and a mix of centred and
+            // leading text in a stack that narrow reads as a mistake.
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: .infinity)
             .padding(.horizontal)
             .padding(.vertical, 10)
             .background(.bar)
