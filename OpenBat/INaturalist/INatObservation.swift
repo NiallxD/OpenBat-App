@@ -3,19 +3,25 @@
 //  OpenBat
 //
 //  Prepares everything needed to log one recording as an iNaturalist
-//  observation, WITHOUT posting it. OpenBat builds the files and the text; the
-//  user completes the observation in iNaturalist's own app.
+//  observation: the taxon to claim, the notes, and the files to attach.
 //
-//  WHY NOT POST IT DIRECTLY
-//  ------------------------
-//  Creating observations through iNaturalist's API needs a registered OAuth
-//  application, and registering one is gated on the developer's own iNat
-//  account activity. Handing the pieces to the share sheet needs nothing, works
-//  today, and has a genuine advantage besides: a human completes every
-//  observation in iNat's own UI, so OpenBat's automated ID is a suggestion a
-//  person has looked at rather than an unreviewed record posted at scale. That
-//  is the failure mode the bat2inat project's README warns about, and this
-//  route avoids it by construction.
+//  Building the observation and POSTING it are deliberately separate. This file
+//  only builds. `INatClient` posts, and only ever in response to a tap on
+//  `INatObservationSheet` — nothing here reaches the network.
+//
+//  ONE OBSERVATION PER RECORDING, FOREVER
+//  --------------------------------------
+//  `observationUUID` is the recording's own id, and iNaturalist v2 lets the
+//  client choose an observation's UUID. So a recording maps to exactly one
+//  observation for good: a retry after a dropped connection re-sends the same
+//  UUID and cannot create a second record. See `INatClient.post`.
+//
+//  THE HAND-OFF ROUTE IS STILL HERE
+//  --------------------------------
+//  Posting through the API needs a signed-in user; the copy-and-paste route
+//  through iNaturalist's web uploader needs nothing, and remains the fallback
+//  for anyone signed out or offline. Both routes claim the same taxon under the
+//  same rules — see `taxon(for:)`, which is the part that matters.
 //
 //  Shaped to line up with bat2inat (github.com/AugustT/bat2inat, MIT): the same
 //  quantities in the notes, in the same units, so OpenBat records read like the
@@ -52,8 +58,43 @@ import UIKit
 import CoreLocation
 import Photos
 
+/// How precisely the observation's location is published.
+///
+/// A bat record at full precision can disclose a roost, and roosts are exactly
+/// the thing not to put on a public map — so OpenBat defaults to `obscured`
+/// (iNaturalist blurs the point to a ~0.2° cell and shows only that) and makes
+/// publishing the exact spot a choice the user has to make on purpose.
+nonisolated enum INatGeoprivacy: String, CaseIterable, Identifiable {
+    case obscured
+    case open
+    /// The location is kept private entirely: iNaturalist stores it but shows
+    /// nobody, which also means the record can't contribute to range data.
+    case `private`
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .obscured: return "Obscured"
+        case .open: return "Exact"
+        case .private: return "Hidden"
+        }
+    }
+
+    var note: String {
+        switch self {
+        case .obscured: return "The map shows a rough area, not the spot. The safe default for bats."
+        case .open: return "The exact coordinates are public. Only if you're sure there's no roost here."
+        case .private: return "Nobody sees the location, including researchers using the record."
+        }
+    }
+}
+
 nonisolated struct INatObservation: Identifiable {
     let id = UUID()
+    /// The UUID this observation will have on iNaturalist — the recording's own
+    /// id, which is what makes posting idempotent. See this file's header.
+    let observationUUID: UUID
     /// What to put in iNat's species box. Deliberately not always the species —
     /// see `taxon(for:)`.
     let taxonName: String
@@ -113,6 +154,7 @@ nonisolated enum INatExport {
         let descriptor = ModelRegistry.all.first { $0.scientificNames[recording.species] != nil }
         let taxon = taxon(for: recording, passes: passes, descriptor: descriptor)
         return INatObservation(
+            observationUUID: recording.id,
             taxonName: taxon.name,
             taxonNote: taxon.note,
             observedOn: Self.dateTime.string(from: recording.date),
@@ -122,20 +164,36 @@ nonisolated enum INatExport {
             fields: fields(recording: recording, passes: passes))
     }
 
-    /// The files to attach, built off the main actor: an audible copy of the
-    /// call, the spectrogram, and the original. Slow enough to matter — a long
-    /// recording at 384 kHz is tens of megabytes — so this never runs inline.
-    static func prepareFiles(wavURL: URL, overviewPNG: Data?) -> [URL] {
+    /// The attachments, kept apart rather than lumped into one array: the share
+    /// sheet wants all of them together, but the API needs to know which is a
+    /// photo and which is a sound, and telling them apart by file extension
+    /// afterwards is the kind of thing that quietly breaks.
+    struct Files {
+        var audible: URL?
+        var spectrogram: URL?
+        var original: URL
+
+        /// Everything there is, in the order the hand-off sheet offers them.
+        var all: [URL] { [audible, spectrogram, original].compactMap { $0 } }
+
+        /// What goes to `/observation_sounds`. The audible copy leads because
+        /// it is the one a reviewer can actually play in a browser.
+        var sounds: [URL] { [audible, original].compactMap { $0 } }
+    }
+
+    /// Built off the main actor: an audible copy of the call, the spectrogram,
+    /// and the original. Slow enough to matter — a long recording at 384 kHz is
+    /// tens of megabytes — so this never runs inline.
+    static func prepareFiles(wavURL: URL, overviewPNG: Data?) -> Files {
         let baseName = wavURL.deletingPathExtension().lastPathComponent
-        var files: [URL] = []
-        if let audible = audibleCopy(of: wavURL, baseName: baseName) { files.append(audible) }
+        var files = Files(original: wavURL)
+        files.audible = audibleCopy(of: wavURL, baseName: baseName)
         if let overviewPNG {
             let url = FileManager.default.temporaryDirectory
                 .appendingPathComponent("\(baseName)-spectrogram.png")
             try? overviewPNG.write(to: url)
-            files.append(url)
+            files.spectrogram = url
         }
-        files.append(wavURL)
         return files
     }
 

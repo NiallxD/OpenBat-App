@@ -2,19 +2,32 @@
 //  INatObservationSheet.swift
 //  OpenBat
 //
-//  The hand-off screen: everything iNaturalist will ask for, laid out in the
-//  order it asks for it, each row copyable, with the files ready to share.
+//  The confirmation screen: what OpenBat is about to claim, where, and with
+//  what evidence — then one button that posts it.
 //
-//  Deliberately NOT a form that posts. OpenBat prepares; the user decides. See
-//  `INatObservation` for why the app doesn't create the observation itself, and
-//  for the rule about which taxon it suggests.
+//  NOTHING IS EVER POSTED WITHOUT A TAP HERE
+//  -----------------------------------------
+//  There is no background posting, no "upload the night", no queue that drains
+//  on its own. An observation exists because somebody read this screen and
+//  pressed the button, which is the only honest way to put a machine
+//  identification into a public record other people's research draws on.
+//
+//  THE MANUAL ROUTE IS STILL AT THE BOTTOM
+//  ---------------------------------------
+//  Signed out, offline, or simply preferring to do it themselves, the user can
+//  still take the files and paste the text into iNaturalist's web uploader —
+//  the route that worked before there was an API key, kept because it needs no
+//  account and nothing can break it. The website, not the iPhone app: iNat's
+//  app can record a sound but cannot import one, so it is structurally unable
+//  to carry an acoustic record.
 //
 //  The order of the sections is the order of iNaturalist's own new-observation
-//  screen — media, then what, then when, then where, then notes — so this can be
-//  worked down the page with the two apps side by side.
+//  screen — what, then when, then where, then notes — so the manual route can
+//  still be worked down the page with the two apps side by side.
 //
 
 import SwiftUI
+import AuthenticationServices
 
 struct INatObservationSheet: View {
     let observation: INatObservation
@@ -23,15 +36,32 @@ struct INatObservationSheet: View {
     /// actor. nil when the overview hasn't rendered yet.
     let overviewPNG: Data?
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.openURL) private var openURL
+    /// SwiftUI's own wrapper around ASWebAuthenticationSession — see the note
+    /// in `INatAuth` about why the view presents the browser and not the model.
+    @Environment(\.webAuthenticationSession) private var webAuthentication
+
+    @State private var auth = INatAuth.shared
     @State private var shareFiles: ShareFiles?
     @State private var copied: String?
     @State private var photoState = PhotoState.idle
+    @State private var geoprivacy = INatGeoprivacy.obscured
+    @State private var postState = PostState.idle
+    @State private var signingIn = false
+    @State private var authError: String?
 
     private enum PhotoState { case idle, saving, saved, denied }
 
+    private enum PostState {
+        case idle
+        case posting
+        case posted(INatClient.PostResult)
+        case failed(String)
+    }
+
     /// Built in `.task` — see `INatExport.prepareFiles`, which copies and
     /// rewrites tens of megabytes and must not run on the main actor.
-    @State private var files: [URL] = []
+    @State private var files: INatExport.Files?
 
     private struct ShareFiles: Identifiable { let id = UUID(); let urls: [URL] }
 
@@ -42,111 +72,14 @@ struct INatObservationSheet: View {
     var body: some View {
         NavigationStack {
             List {
-                Section {
-                    Link(destination: INatObservationSheet.uploaderURL) {
-                        Label("Open the iNaturalist Uploader", systemImage: "safari")
-                    }
-                    ControlNote("The website takes the sound and the spectrogram together, which the iPhone app can't — it records sound but won't import a file. Save the files below first, then pick them in the uploader.")
-                } header: {
-                    CardHeader("1 · Where to add it", "The web uploader, not the app.")
-                }
-
-                Section {
-                    Button {
-                        shareFiles = ShareFiles(urls: files)
-                    } label: {
-                        if files.isEmpty {
-                            HStack(spacing: 8) { ProgressView(); Text("Preparing files…") }
-                        } else {
-                            Label("Save or Share \(files.count) Files", systemImage: "square.and.arrow.up")
-                        }
-                    }
-                    .disabled(files.isEmpty)
-                    ControlNote("A \(INatExport.expansionFactor)× slowed-down copy you can actually hear, the spectrogram, and the original ultrasonic recording. Save them to Files, then choose them in the uploader.")
-
-                    Button {
-                        saveSpectrogram()
-                    } label: {
-                        switch photoState {
-                        case .idle:
-                            Label("Save Spectrogram to Photos", systemImage: "photo.badge.plus")
-                        case .saving:
-                            HStack(spacing: 8) { ProgressView(); Text("Saving…") }
-                        case .saved:
-                            Label("Saved to Photos", systemImage: "checkmark.circle.fill")
-                        case .denied:
-                            Label("Photos access declined", systemImage: "exclamationmark.triangle")
-                        }
-                    }
-                    .disabled(overviewPNG == nil || photoState == .saving || photoState == .saved)
-                    if photoState == .denied {
-                        ControlNote("Turn on Photos access for OpenBat in Settings — or skip it, since the uploader can take the spectrogram straight from Files.")
-                    } else {
-                        ControlNote("Only needed if you'd rather build the observation in the iNaturalist app. It can take a photo from your library, but you'd be posting the call without its sound.")
-                    }
-                } header: {
-                    CardHeader("2 · The files", "")
-                }
-
-                Section {
-                    copyRow("Species", observation.taxonName)
-                    Text(observation.taxonNote)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } header: {
-                    CardHeader("3 · What it was", "Paste into iNaturalist's species box.")
-                } footer: {
-                    // The single most important sentence on this screen. An
-                    // observation posted from here carries the user's name, not
-                    // OpenBat's, and iNat records are permanent and public.
-                    Text("You're making this claim, not OpenBat. If you're not sure, log it as Chiroptera and let iNaturalist's community narrow it down — that's what the site is for.")
-                }
-
-                Section {
-                    copyRow("Date and time", observation.observedOn)
-                    if let coordinates = observation.coordinateText {
-                        copyRow("Coordinates", coordinates)
-                    } else {
-                        Text("No location was recorded with this file. You'll need to place it on iNaturalist's map yourself.")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                    }
-                } header: {
-                    CardHeader("4 · When and where", "")
-                } footer: {
-                    // Roosts are the reason this is here and not left to the
-                    // default. iNat obscures some taxa automatically; that is not
-                    // something to rely on for a species list this app doesn't
-                    // control.
-                    Text("Set the observation's geoprivacy to Obscured before you post, unless you're certain the exact spot is safe to publish. A precise bat record can identify a roost, and roost locations are not something to put on a public map.")
-                }
-
-                Section {
-                    Button {
-                        UIPasteboard.general.string = observation.pasteboardText
-                        flash("notes")
-                    } label: {
-                        Label(copied == "notes" ? "Copied" : "Copy Notes",
-                              systemImage: copied == "notes" ? "checkmark" : "doc.on.doc")
-                    }
-                    Text(observation.notes)
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                } header: {
-                    CardHeader("5 · Notes", "Paste into the description field.")
-                }
-
-                if !observation.fields.isEmpty {
-                    Section {
-                        ForEach(observation.fields) { field in
-                            copyRow(field.label, field.value, note: field.note)
-                        }
-                    } header: {
-                        CardHeader("6 · Observation fields", "Optional, and worth it.")
-                    } footer: {
-                        Text("iNaturalist lets you add named fields to an observation. Filling these in puts your record alongside the bat recordings uploaded by other tools, where a search can find them all together.")
-                    }
+                if case .posted(let result) = postState {
+                    postedSection(result)
+                } else {
+                    taxonSection
+                    whenAndWhereSection
+                    notesSection
+                    fieldsSection
+                    manualSection
                 }
             }
             .pageBackground()
@@ -157,6 +90,7 @@ struct INatObservationSheet: View {
                     Button("Done") { dismiss() }
                 }
             }
+            .safeAreaInset(edge: .bottom) { postBar }
             .sheet(item: $shareFiles) { share in
                 ShareSheet(items: share.urls)
             }
@@ -169,6 +103,289 @@ struct INatObservationSheet: View {
             }
         }
     }
+
+    // MARK: Posting
+
+    /// Pinned rather than placed in the list, so the thing that actually
+    /// creates a public record can't be scrolled past and pressed by accident
+    /// on the way somewhere else.
+    @ViewBuilder
+    private var postBar: some View {
+        if case .posted = postState {
+            EmptyView()
+        } else {
+            VStack(spacing: 8) {
+                if let authError {
+                    Text(authError)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .multilineTextAlignment(.center)
+                }
+                if case .failed(let message) = postState {
+                    Text(message)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .multilineTextAlignment(.center)
+                }
+
+                if auth.isSignedIn {
+                    Button {
+                        post()
+                    } label: {
+                        Group {
+                            if case .posting = postState {
+                                HStack(spacing: 8) { ProgressView(); Text("Posting…") }
+                            } else {
+                                Label("Post to iNaturalist", systemImage: "arrow.up.circle.fill")
+                            }
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(isPosting)
+                    Text("Posts to your own iNaturalist account, as \(observation.taxonName), \(geoprivacy.label.lowercased()) location.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                } else {
+                    Button {
+                        signIn()
+                    } label: {
+                        Group {
+                            if signingIn {
+                                HStack(spacing: 8) { ProgressView(); Text("Signing in…") }
+                            } else {
+                                Label("Sign in to iNaturalist", systemImage: "person.crop.circle")
+                            }
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(signingIn)
+                    Text("You'll sign in on iNaturalist's own page. OpenBat never sees your password, and you can post by hand instead — see the bottom of this screen.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 10)
+            .background(.bar)
+        }
+    }
+
+    private var isPosting: Bool {
+        if case .posting = postState { return true }
+        return false
+    }
+
+    private func signIn() {
+        signingIn = true
+        authError = nil
+        Task {
+            defer { signingIn = false }
+            let request = auth.beginSignIn()
+            do {
+                let callback = try await webAuthentication.authenticate(
+                    using: request.url,
+                    callbackURLScheme: INatCredentials.callbackScheme)
+                try await auth.finishSignIn(callback: callback, request: request)
+            } catch is ASWebAuthenticationSessionError {
+                // Dismissing the browser is a decision, not a failure: saying
+                // "sign-in failed" to somebody who just changed their mind is
+                // noise.
+                return
+            } catch {
+                authError = error.localizedDescription
+            }
+        }
+    }
+
+    private func post() {
+        guard let files else { return }
+        postState = .posting
+        Task {
+            // Resolved here rather than in the draft: it is a network call, and
+            // it must not happen until the user has actually asked to post.
+            let taxonID = await INatClient.taxonID(for: observation.taxonName)
+            do {
+                let result = try await INatClient.post(observation,
+                                                       geoprivacy: geoprivacy,
+                                                       taxonID: taxonID,
+                                                       spectrogramPNG: overviewPNG,
+                                                       sounds: files.sounds)
+                postState = .posted(result)
+            } catch {
+                postState = .failed(error.localizedDescription)
+            }
+        }
+    }
+
+    // MARK: Sections
+
+    @ViewBuilder
+    private func postedSection(_ result: INatClient.PostResult) -> some View {
+        Section {
+            Label(result.alreadyExisted ? "Already on iNaturalist" : "Posted to iNaturalist",
+                  systemImage: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+            if result.alreadyExisted {
+                ControlNote("This recording had already been posted, so nothing was created. Opening it will show you the existing observation.")
+            } else {
+                ControlNote("Attached: \(result.attachedSounds) sound file\(result.attachedSounds == 1 ? "" : "s")\(result.attachedPhoto ? " and the spectrogram" : ""). Location is \(geoprivacy.label.lowercased()).")
+            }
+            Button {
+                openURL(result.webURL)
+            } label: {
+                Label("Open the observation", systemImage: "safari")
+            }
+        } header: {
+            CardHeader("Done", "")
+        }
+
+        if !result.skipped.isEmpty {
+            Section {
+                ForEach(result.skipped, id: \.self) { note in
+                    Label(note, systemImage: "exclamationmark.triangle")
+                        .font(.callout)
+                }
+                Button {
+                    shareFiles = ShareFiles(urls: files?.all ?? [])
+                } label: {
+                    Label("Save the files", systemImage: "square.and.arrow.up")
+                }
+                .disabled(files == nil)
+            } header: {
+                CardHeader("Not everything went up", "The observation is posted; these didn't attach.")
+            } footer: {
+                Text("You can add them to the observation yourself on iNaturalist's website.")
+            }
+        }
+    }
+
+    private var taxonSection: some View {
+        Section {
+            copyRow("Species", observation.taxonName)
+            Text(observation.taxonNote)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        } header: {
+            CardHeader("1 · What it was", "What OpenBat will claim.")
+        } footer: {
+            // The single most important sentence on this screen. An observation
+            // posted from here carries the user's name, not OpenBat's, and iNat
+            // records are permanent and public.
+            Text("You're making this claim, not OpenBat. If you're not sure, log it as Chiroptera and let iNaturalist's community narrow it down — that's what the site is for.")
+        }
+    }
+
+    private var whenAndWhereSection: some View {
+        Section {
+            copyRow("Date and time", observation.observedOn)
+            if let coordinates = observation.coordinateText {
+                copyRow("Coordinates", coordinates)
+                Picker("Location precision", selection: $geoprivacy) {
+                    ForEach(INatGeoprivacy.allCases) { option in
+                        Text(option.label).tag(option)
+                    }
+                }
+                .pickerStyle(.segmented)
+                ControlNote(geoprivacy.note)
+            } else {
+                Text("No location was recorded with this file. iNaturalist will take the observation without one, but it won't count towards range data — you can place it on the map yourself afterwards.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+        } header: {
+            CardHeader("2 · When and where", "")
+        } footer: {
+            // Roosts are the reason the default is Obscured and not iNat's own
+            // default. iNat obscures some taxa automatically; that is not
+            // something to rely on for a species list this app doesn't control.
+            Text("A precise bat record can identify a roost, and roost locations are not something to put on a public map. Obscured is the default for that reason.")
+        }
+    }
+
+    private var notesSection: some View {
+        Section {
+            Button {
+                UIPasteboard.general.string = observation.pasteboardText
+                flash("notes")
+            } label: {
+                Label(copied == "notes" ? "Copied" : "Copy Notes",
+                      systemImage: copied == "notes" ? "checkmark" : "doc.on.doc")
+            }
+            Text(observation.notes)
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+        } header: {
+            CardHeader("3 · Notes", "Posted as the description.")
+        }
+    }
+
+    @ViewBuilder
+    private var fieldsSection: some View {
+        if !observation.fields.isEmpty {
+            Section {
+                ForEach(observation.fields) { field in
+                    copyRow(field.label, field.value, note: field.note)
+                }
+            } header: {
+                CardHeader("4 · Observation fields", "Optional, and worth it.")
+            } footer: {
+                // Not posted by the API path yet: iNaturalist's observation
+                // fields are addressed by numeric id, so adding them means
+                // resolving each field by name first. The numbers are in the
+                // description regardless, so nothing is lost, only harder to
+                // search on.
+                Text("iNaturalist lets you add named fields to an observation, which is how acoustic records from other tools can be found together. OpenBat doesn't fill these in for you yet — copy them onto the observation afterwards if you want it in the search.")
+            }
+        }
+    }
+
+    private var manualSection: some View {
+        Section {
+            Link(destination: INatObservationSheet.uploaderURL) {
+                Label("Open the iNaturalist Uploader", systemImage: "safari")
+            }
+            Button {
+                shareFiles = ShareFiles(urls: files?.all ?? [])
+            } label: {
+                if let files {
+                    Label("Save or Share \(files.all.count) Files", systemImage: "square.and.arrow.up")
+                } else {
+                    HStack(spacing: 8) { ProgressView(); Text("Preparing files…") }
+                }
+            }
+            .disabled(files == nil)
+
+            Button {
+                saveSpectrogram()
+            } label: {
+                switch photoState {
+                case .idle:
+                    Label("Save Spectrogram to Photos", systemImage: "photo.badge.plus")
+                case .saving:
+                    HStack(spacing: 8) { ProgressView(); Text("Saving…") }
+                case .saved:
+                    Label("Saved to Photos", systemImage: "checkmark.circle.fill")
+                case .denied:
+                    Label("Photos access declined", systemImage: "exclamationmark.triangle")
+                }
+            }
+            .disabled(overviewPNG == nil || photoState == .saving || photoState == .saved)
+            if photoState == .denied {
+                ControlNote("Turn on Photos access for OpenBat in Settings — or skip it, since the uploader can take the spectrogram straight from Files.")
+            }
+        } header: {
+            CardHeader("Or do it by hand", "No account needed.")
+        } footer: {
+            Text("The website takes the sound and the spectrogram together, which the iPhone app can't — it records sound but won't import a file. Save the files, then choose them in the uploader and paste the text above.")
+        }
+    }
+
+    // MARK: Rows
 
     private func copyRow(_ label: String, _ value: String, note: String? = nil) -> some View {
         Button {

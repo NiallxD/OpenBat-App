@@ -282,6 +282,8 @@ struct SettingsView: View {
     @ViewBuilder
     private var privacySections: some View {
         Group {
+            iNaturalistSection
+
             Section {
                 Toggle("Contribute my recordings", isOn: .constant(false))
                     .disabled(true)
@@ -291,6 +293,11 @@ struct SettingsView: View {
                 CardHeader("Community science", "No project is running yet.")
             }
 
+            // The iNaturalist account lives in the privacy tab rather than
+            // next to the export settings because the question it answers is
+            // "what does OpenBat have of mine, and how do I take it back" —
+            // which is a privacy question, not a sharing one.
+
             // Device ID / consent erasure are hidden while contribution is
             // disabled (ConsentStore.uploadContributionEnabled == false):
             // consent can never be granted, so no record ever exists to erase,
@@ -298,6 +305,28 @@ struct SettingsView: View {
             // baseURL == "") the Erase call would always fail with a
             // connection-style error that misrepresents a deliberate,
             // permanent severance as a network hiccup.
+        }
+    }
+
+    // MARK: iNaturalist
+
+    @State private var inatAuth = INatAuth.shared
+
+    /// Sign-out only. Signing IN happens on the observation sheet, where there
+    /// is a reason to do it; an account row in Settings that asks for a login
+    /// before the user has anything to post is a wall in front of a feature
+    /// they haven't met yet.
+    @ViewBuilder
+    private var iNaturalistSection: some View {
+        if inatAuth.isSignedIn {
+            Section {
+                Button("Sign out of iNaturalist", role: .destructive) {
+                    inatAuth.signOut()
+                }
+                ControlNote("Observations you've already posted stay on iNaturalist — this only forgets the credential on this phone. You can also revoke OpenBat from your iNaturalist account settings, which stops it working even if the phone is lost.")
+            } header: {
+                CardHeader("iNaturalist", "Signed in. OpenBat only ever posts when you tap Post.")
+            }
         }
     }
 
