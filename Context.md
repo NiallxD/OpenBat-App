@@ -3291,6 +3291,17 @@ has a noise gate and a per-column adaptive ceiling in it, so brightest pixel and
 loudest sound are different questions. The window can't go much past a quarter
 second either way without wandering onto the next call.
 
+**The sheet follows the Settings card shape** (Niall, 2026-09-04): a short
+name, one line of description under it, then the controls, and *nothing*
+underneath — every section footer on this screen is gone. What a footer was
+carrying either compressed into the description, moved above its control as a
+`ControlNote`, or went into the pre-post alert, which is the exception the rule
+already allows because an alert is read before a decision rather than beside
+one. The claim sentence — that OpenBat posts at genus and the species
+identification is the user's to make — is the one that moved to the alert; it is
+the most important sentence on the screen and would not survive being cut to ten
+words.
+
 **The sheet has two routes, chosen by a segmented control at the top** (Niall,
 2026-09-04): post from OpenBat, or do it by hand in iNaturalist's uploader. By
 hand is not a fallback — it needs no account, nothing about it can break, and

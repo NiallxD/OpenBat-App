@@ -250,7 +250,7 @@ struct INatObservationSheet: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(signingIn)
-                    Text("You'll sign in on iNaturalist's own page. OpenBat never sees your password, and you can post by hand instead — see the bottom of this screen.")
+                    Text("On iNaturalist's own page. OpenBat never sees your password.")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
@@ -312,6 +312,11 @@ struct INatObservationSheet: View {
 
         Your location goes up obscured unless you change it, because a precise \
         bat record can give away a roost.
+
+        OpenBat posts at genus and puts its species suggestion in the notes — an \
+        acoustic identification isn't strong enough to claim a species on a \
+        permanent public record. If you're sure of the species, add that \
+        identification yourself afterwards, and then a person has made the claim.
         """
 
     /// `briefed` is set only by the alert's own Post button, which is the one
@@ -353,9 +358,9 @@ struct INatObservationSheet: View {
                   systemImage: "checkmark.circle.fill")
                 .foregroundStyle(.green)
             if result.alreadyExisted {
-                ControlNote("This recording had already been posted, so nothing was created. Opening it will show you the existing observation.")
+                ControlNote("Already posted — nothing new was created.")
             } else {
-                ControlNote("Attached: \(result.attachedSounds) sound file\(result.attachedSounds == 1 ? "" : "s") and \(result.attachedPhotos) spectrogram\(result.attachedPhotos == 1 ? "" : "s"), plus \(result.attachedFields) observation field\(result.attachedFields == 1 ? "" : "s"). Location is \(geoprivacy.label.lowercased()).")
+                ControlNote("\(result.attachedPhotos) pictures, \(result.attachedSounds) sounds, \(result.attachedFields) fields. Location \(geoprivacy.label.lowercased()).")
             }
             Button {
                 openURL(result.webURL)
@@ -363,7 +368,7 @@ struct INatObservationSheet: View {
                 Label("Open the observation", systemImage: "safari")
             }
         } header: {
-            CardHeader("Done", "")
+            CardHeader("Done", "It's on your iNaturalist account.")
         }
 
         if !result.skipped.isEmpty {
@@ -379,9 +384,7 @@ struct INatObservationSheet: View {
                 }
                 .disabled(files == nil)
             } header: {
-                CardHeader("Not everything went up", "The observation is posted; these didn't attach.")
-            } footer: {
-                Text("You can add them to the observation yourself on iNaturalist's website.")
+                CardHeader("Some didn't attach", "Add them on iNaturalist yourself.")
             }
         }
     }
@@ -392,6 +395,9 @@ struct INatObservationSheet: View {
     @ViewBuilder
     private var assessmentSection: some View {
         Section {
+            if let files, files.upload != files.original {
+                ControlNote("Silence trimmed — \(byteCount(files.uploadBytes)) of audio.")
+            }
             if let assessment {
                 HStack(alignment: .firstTextBaseline) {
                     Text(assessment.rating.rawValue)
@@ -422,11 +428,7 @@ struct INatObservationSheet: View {
                 HStack(spacing: 8) { ProgressView(); Text("Checking the recording…") }
             }
         } header: {
-            CardHeader("Worth posting?", "iNaturalist is checked by volunteers.")
-        } footer: {
-            if let files, files.upload != files.original {
-                Text("The silence either side of the calls has been cut off, so what goes up is \(byteCount(files.uploadBytes)) instead of the whole recording.")
-            }
+            CardHeader("Worth posting?", "Volunteers check every record.")
         }
     }
 
@@ -530,17 +532,13 @@ struct INatObservationSheet: View {
 
     private var taxonSection: some View {
         Section {
+            ControlNote("Genus only — the species goes in the notes.")
             copyRow("Species", observation.taxonName)
             Text(observation.taxonNote)
                 .font(.caption)
                 .foregroundStyle(.secondary)
         } header: {
             CardHeader(step(1, "What it was"), "What OpenBat will claim.")
-        } footer: {
-            // The single most important sentence on this screen. An observation
-            // posted from here carries the user's name, not OpenBat's, and iNat
-            // records are permanent and public.
-            Text("OpenBat posts at genus and puts its species suggestion in the notes, because an acoustic identification isn't strong enough to claim a species on a permanent public record. If you're confident of the species, add that identification yourself on iNaturalist — then a person has made the claim, which is the point.")
         }
     }
 
@@ -557,17 +555,12 @@ struct INatObservationSheet: View {
                 .pickerStyle(.segmented)
                 ControlNote(geoprivacy.note)
             } else {
-                Text("No location was recorded with this file. iNaturalist will take the observation without one, but it won't count towards range data — you can place it on the map yourself afterwards.")
+                Text("No location on this recording — place it on the map yourself.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
         } header: {
-            CardHeader(step(2, "When and where"), "")
-        } footer: {
-            // Roosts are the reason the default is Obscured and not iNat's own
-            // default. iNat obscures some taxa automatically; that is not
-            // something to rely on for a species list this app doesn't control.
-            Text("A precise bat record can identify a roost, and roost locations are not something to put on a public map. Obscured is the default for that reason.")
+            CardHeader(step(2, "When and where"), "Obscured unless you change it.")
         }
     }
 
@@ -607,22 +600,14 @@ struct INatObservationSheet: View {
                 }
             } header: {
                 CardHeader(step(4, "Observation fields"),
-                       mode == .auto ? "Posted with the observation." : "Optional, and worth it.")
-            } footer: {
-                // Not posted by the API path yet: iNaturalist's observation
-                // fields are addressed by numeric id, so adding them means
-                // resolving each field by name first. The numbers are in the
-                // description regardless, so nothing is lost, only harder to
-                // search on.
-                Text(mode == .auto
-                     ? "These are the fields other acoustic bat records use, so this one turns up in the same searches."
-                     : "iNaturalist lets you add named fields to an observation, which is how acoustic records from other tools are found together. Add these on the observation once you've made it.")
+                           mode == .auto ? "Found with other bat records." : "Optional, and worth it.")
             }
         }
     }
 
     private var manualSection: some View {
         Section {
+            ControlNote("The website takes sound; the iPhone app can't.")
             Link(destination: INatObservationSheet.uploaderURL) {
                 Label("Open the iNaturalist Uploader", systemImage: "safari")
             }
@@ -653,12 +638,10 @@ struct INatObservationSheet: View {
             }
             .disabled((photos.isEmpty && overviewPNG == nil) || photoState == .saving || photoState == .saved)
             if photoState == .denied {
-                ControlNote("Turn on Photos access for OpenBat in Settings — or skip it, since the uploader can take the spectrogram straight from Files.")
+                ControlNote("Turn on Photos access in Settings, or skip it.")
             }
         } header: {
             CardHeader("Or do it by hand", "No account needed.")
-        } footer: {
-            Text("The website takes the sound and the spectrogram together, which the iPhone app can't — it records sound but won't import a file. Save the files, then choose them in the uploader and paste the text above.")
         }
     }
 
