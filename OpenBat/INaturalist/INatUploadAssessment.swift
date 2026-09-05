@@ -174,8 +174,12 @@ nonisolated struct INatUploadAssessment {
             ? (recording.confidence ?? 0)
             : raws.reduce(0, +) / Float(raws.count)
         score += 35 * ramp(Double(confidence), from: 0.4, to: 0.95)
-        if confidence < 0.6 {
-            notes.append("The model isn't confident about the species — this will be posted as Chiroptera.")
+        if confidence < INatExport.speciesConfidenceThreshold {
+            // Says the same thing the taxon rule does, and gets it from the
+            // same constant — these two disagreeing would be a screen that
+            // tells the user one rank and posts another.
+            notes.append(String(format: "The model is %.0f%% sure, under the %.0f%% needed to claim a species — this will be posted at genus level.",
+                                confidence * 100, INatExport.speciesConfidenceThreshold * 100))
         }
 
         // One species (25). bat2inat's "works best if one species is present",
@@ -196,8 +200,8 @@ nonisolated struct INatUploadAssessment {
             margin = 1  // Nothing ran second at all, which is as clean as it gets.
         }
         score += 10 * ramp(margin, from: 0.05, to: 0.5)
-        if let best, best.isComplexAmbiguous {
-            notes.append("Two species in the same group scored close together, so this will be posted at group level.")
+        if let best, best.isComplexAmbiguous, confidence < INatExport.speciesConfidenceThreshold {
+            notes.append("Another species in the same group scored close behind, and they can't be told apart acoustically — this will be posted only as a bat.")
         }
 
         // How much there is to look at (20). One call is a guess; a sequence is

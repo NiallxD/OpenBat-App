@@ -387,16 +387,46 @@ nonisolated enum INatExport {
         return url
     }
 
+    /// The confidence a species-level claim needs, measured on the model's RAW
+    /// score.
+    ///
+    /// Raw, not the location-weighted figure the app displays: the weighted one
+    /// has the observer's own settings and whereabouts baked into it, so the
+    /// same call would be claimed as a species in one place and not in another.
+    /// The rank OpenBat claims on a public record should depend on the
+    /// evidence, not on where somebody was standing.
+    static let speciesConfidenceThreshold: Float = 0.85
+
     /// What to claim, and it is often not the species.
     ///
-    /// OpenBat's ID is a model's opinion weighted by where the phone is, and iNat
-    /// is a permanent public record that other people's research draws on. So the
-    /// rule is to claim the most specific rank the evidence actually supports:
-    /// an ambiguous complex goes up to the complex, a weak or absent ID goes all
-    /// the way up to Chiroptera. Someone who knows better can always refine it in
-    /// iNat — which is what iNat is for — but an over-claimed ID that nobody
-    /// revisits quietly becomes data.
-    @MainActor
+    /// OpenBat's ID is a model's opinion, and iNat is a permanent public record
+    /// that other people's research draws on. So the rule is to claim the most
+    /// specific rank the evidence actually supports, and to go up a rank rather
+    /// than guess. Someone who knows better can always refine it in iNat —
+    /// which is what iNat is for — but an over-claimed ID that nobody revisits
+    /// quietly becomes data.
+    ///
+    /// The ladder, first match wins (Niall, 2026-09-04 — this replaced a
+    /// version that posted complexes at complex level and dropped to Chiroptera
+    /// below 0.60 weighted):
+    ///
+    ///   1. No ID, or noise            → Chiroptera
+    ///   2. No scientific name to use  → Chiroptera
+    ///   3. Raw confidence ≥ 0.85      → SPECIES
+    ///   4. An ambiguous complex       → Chiroptera
+    ///   5. Anything else              → GENUS
+    ///
+    /// **Why complexes go all the way to Chiroptera rather than to their own
+    /// name.** The complexes are named for humans — "Myotis species",
+    /// "Low-frequency bats" — and iNaturalist has no taxon by either name, so a
+    /// complex-level post resolved to nothing and landed as Unknown, which is
+    /// worse than any honest rank. Some map to a genus and one (`lowfreq`:
+    /// Big Brown, Silver-haired, Hoary) spans three, so there is no single rank
+    /// that fits them all. Chiroptera always resolves and is always true.
+    ///
+    /// **Genus comes from the scientific name, not from a table.** The first
+    /// word of a binomial is the genus, and unlike a complex name it is always
+    /// a real iNaturalist taxon, so `INatClient.taxonID` can resolve it.
     private static func taxon(for recording: Recording,
                               passes: [PassRecord],
                               descriptor: ModelDescriptor?) -> (name: String, note: String) {
@@ -404,20 +434,35 @@ nonisolated enum INatExport {
         guard !recording.isNoID, recording.species != "NOISE" else {
             return (order, "OpenBat couldn't identify this one, so it's logged only as a bat.")
         }
-        let best = passes.max { ($0.confidence) < ($1.confidence) }
-        if let best, best.isComplexAmbiguous, let complex = best.complex {
-            return (complex.name,
-                    "Two species in this group scored close together, so this is logged at group level rather than picking one.")
-        }
         guard let scientific = descriptor?.scientificNames[recording.species] else {
             return (order, "No scientific name for \(recording.species) in this model, so it's logged as a bat.")
         }
-        if let confidence = recording.confidence, confidence < 0.6 {
-            return (order,
-                    String(format: "OpenBat suggests %@ but only at %.0f%%, which is too weak to claim. Change this if you're confident.",
-                           scientific, confidence * 100))
+
+        // The mean of each pass's own raw score — the same figure the notes
+        // publish, so a reader can check this decision against the number.
+        let raws = passes.compactMap(\.rawConfidence)
+        let raw = raws.isEmpty ? nil : raws.reduce(0, +) / Float(raws.count)
+
+        if let raw, raw >= speciesConfidenceThreshold {
+            return (scientific, "OpenBat's identification. Check it before you post — you're the one making the claim.")
         }
-        return (scientific, "OpenBat's identification. Check it before you post — you're the one making the claim.")
+
+        let best = passes.max { $0.confidence < $1.confidence }
+        if let best, best.isComplexAmbiguous {
+            return (order,
+                    "Another species in the same group scored close behind, and they can't be separated by ear or by eye on a spectrogram — so this is logged only as a bat.")
+        }
+
+        // Genus. A binomial's first word; anything without a space is already
+        // at genus rank or higher, so it stands as it is.
+        let genus = scientific.split(separator: " ").first.map(String.init) ?? scientific
+        guard let raw else {
+            return (genus,
+                    "This recording predates OpenBat storing the model's raw score, so the species can't be confirmed — logged at genus level.")
+        }
+        return (genus,
+                String(format: "OpenBat suggests %@, but at %.0f%% the model isn't sure enough to claim the species — logged as %@. Narrow it yourself if you're confident.",
+                       scientific, raw * 100, genus))
     }
 
     /// The notes body. Mirrors the quantities bat2inat writes into its
