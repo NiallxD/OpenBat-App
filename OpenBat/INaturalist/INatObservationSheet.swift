@@ -83,7 +83,18 @@ struct INatObservationSheet: View {
     @State private var photos: [INatImages.Photo] = []
     /// Decoded once for the preview. `UIImage(data:)` on every body pass would
     /// re-decode a dozen PNGs each time the list scrolled.
-    @State private var previews: [UIImage] = []
+    ///
+    /// Index-aligned with `photos`, which is why it holds optionals rather than
+    /// being compacted: a single picture that failed to decode would otherwise
+    /// shift every index after it, and each thumbnail would be captioned and
+    /// removed as if it were the next one along.
+    @State private var previews: [UIImage?] = []
+    /// Pictures the user has taken out of the upload, by filename.
+    ///
+    /// Kept out rather than deleted, so the decision is reversible: a tile
+    /// removed by mistake would otherwise mean closing the sheet and waiting
+    /// for every picture to be rendered again.
+    @State private var excluded: Set<String> = []
 
     private struct ShareFiles: Identifiable { let id = UUID(); let urls: [URL] }
 
@@ -150,7 +161,7 @@ struct INatObservationSheet: View {
                 photos = await INatImages.render(sources: imageSources,
                                                  pulses: pulses,
                                                  fallbackPNG: png)
-                previews = photos.compactMap { UIImage(data: $0.data) }
+                previews = photos.map { UIImage(data: $0.data) }
                 prepared.photos = photos.compactMap { photo in
                     let url = FileManager.default.temporaryDirectory
                         .appendingPathComponent("\(recording.id.uuidString)-\(photo.name)")
@@ -343,7 +354,7 @@ struct INatObservationSheet: View {
                 let result = try await INatClient.post(observation,
                                                        geoprivacy: geoprivacy,
                                                        taxonID: taxonID,
-                                                       photos: photos,
+                                                       photos: includedPhotos,
                                                        sounds: files.sounds)
                 // Recorded only on a real success, and only for a record this
                 // phone actually created — that is what the nightly cap counts.
@@ -474,29 +485,21 @@ struct INatObservationSheet: View {
     private var previewSection: some View {
         TileCard("What gets posted", previews.isEmpty
                  ? "Checking."
-                 : "\(previews.count) pictures, then the sound, in this order.") {
+                 : "\(includedPhotos.count) pictures, then the sound, in this order.") {
             if previews.isEmpty {
                 HStack(spacing: 8) { ProgressView(); Text("Preparing the pictures…") }
             } else {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(alignment: .top, spacing: 10) {
                         ForEach(Array(previews.enumerated()), id: \.offset) { index, image in
-                            VStack(spacing: 4) {
-                                Image(uiImage: image)
-                                    .resizable()
-                                    .interpolation(.high)
-                                    .aspectRatio(contentMode: .fit)
-                                    .frame(height: 96)
-                                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                                Text("\(index + 1)")
-                                    .font(.caption2.monospacedDigit())
-                                    .foregroundStyle(.secondary)
+                            if let image {
+                                previewThumbnail(image, name: photos[index].name)
                             }
                         }
                     }
                     .padding(.vertical, 4)
                 }
-                .accessibilityLabel("\(previews.count) pictures will be posted")
+                .accessibilityLabel("\(includedPhotos.count) pictures will be posted")
             }
 
             if let files {
@@ -522,6 +525,66 @@ struct INatObservationSheet: View {
     /// they don't.
     private func step(_ number: Int, _ title: String) -> String {
         mode == .manual ? "\(number) · \(title)" : title
+    }
+
+    /// One picture in the strip, with the control that takes it out.
+    ///
+    /// **Excluded rather than deleted, and still on screen.** A tile that
+    /// vanished on a mistaken tap would leave no way back except closing the
+    /// sheet and waiting for everything to render again — so it stays, faded,
+    /// with the same button now offering to put it back. The number under it
+    /// disappears while it is out, because the numbers are upload positions and
+    /// an excluded picture does not have one.
+    private func previewThumbnail(_ image: UIImage, name: String) -> some View {
+        let isOut = excluded.contains(name)
+        return VStack(spacing: 4) {
+            Image(uiImage: image)
+                .resizable()
+                .interpolation(.high)
+                .aspectRatio(contentMode: .fit)
+                .frame(height: 96)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .opacity(isOut ? 0.3 : 1)
+                .overlay(alignment: .topLeading) {
+                    Button {
+                        withAnimation(.snappy(duration: 0.2)) {
+                            if isOut { excluded.remove(name) } else { excluded.insert(name) }
+                        }
+                    } label: {
+                        Image(systemName: isOut ? "plus.circle.fill" : "xmark.circle.fill")
+                            .font(.body)
+                            .symbolRenderingMode(.palette)
+                            // White glyph on a dark disc: these sit on
+                            // spectrograms, which are black in some corners and
+                            // bright yellow in others, and a single-colour
+                            // symbol disappears into one or the other.
+                            .foregroundStyle(.white, .black.opacity(0.6))
+                            .padding(4)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(isOut ? "Add \(name) back to the upload"
+                                              : "Leave \(name) out of the upload")
+                }
+            Text(isOut ? "—" : "\(uploadPosition(of: name))")
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    /// What goes up, in order, renumbered so the filenames have no gaps in them
+    /// where an excluded picture used to be.
+    private var includedPhotos: [INatImages.Photo] {
+        photos.filter { !excluded.contains($0.name) }
+            .enumerated()
+            .map { index, photo in
+                let base = photo.name.drop { $0.isNumber }.drop { $0 == "-" }
+                return INatImages.Photo(name: String(format: "%02d-%@", index + 1, String(base)),
+                                        data: photo.data)
+            }
+    }
+
+    private func uploadPosition(of name: String) -> Int {
+        (photos.filter { !excluded.contains($0.name) }.firstIndex { $0.name == name } ?? 0) + 1
     }
 
     private var taxonSection: some View {
