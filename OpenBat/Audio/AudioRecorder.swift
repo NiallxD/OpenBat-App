@@ -739,12 +739,19 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
         let sr = sampleRate
         let durationS = sr > 0 ? Double(dataBytes / 2) / sr : 0
         // GUANO Make/Model describe the recording HARDWARE, not the app: `Make`
-        // is the ultrasonic input device (the Griff's detected port name, or
-        // the host model if none was named), `Model` is the host iPhone. The
-        // app goes in `Firmware Version` (GUANO's conventional slot for
-        // recording software) so downstream tools read "OpenBat …" as the app,
-        // not the device.
-        let hardwareName = inputNameQ == "—" ? Self.deviceModel : inputNameQ
+        // is the ultrasonic input device, `Model` is the host iPhone. The app
+        // goes in `Firmware Version` (GUANO's conventional slot for recording
+        // software) so downstream tools read "OpenBat …" as the app, not the
+        // device.
+        //
+        // `Make` prefers the detector the USER named (`DetectorModel`) over the
+        // port name iOS reports, because the port name is firmware's own
+        // identifier rather than a product name — the Griff calls itself
+        // `bat_detector_usb`, which tells a later reader nothing they couldn't
+        // already see. Falls back to the port name, then to the phone, when
+        // nobody has said: a vague name in an archive beats a wrong one.
+        let hardwareName = DetectorModel.current
+            ?? (inputNameQ == "—" ? Self.deviceModel : inputNameQ)
         var fields: [GuanoMetadata.Field] = [
             .init("GUANO|Version", "1.0"),
             .init("Make", hardwareName),

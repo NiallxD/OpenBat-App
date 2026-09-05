@@ -177,15 +177,19 @@ nonisolated enum INatObservationFields {
     /// that records in bursts and goes deaf between them.
     static let method = "direct recording"
 
-    /// What went in the field, for `567`.
+    /// What goes in `567`: the microphone the user told us about, and the app.
     ///
-    /// The app, not the microphone. OpenBat works with any USB ultrasonic mic
-    /// and does not record which one was attached to a given recording — the
-    /// live input name is the mic plugged in NOW, which for an old or imported
-    /// recording is simply a different piece of kit. Naming the app is the part
-    /// that is true for every record; if the mic is ever stamped into a
-    /// recording's own metadata, this should carry both.
-    static let detector = "OpenBat for iOS"
+    /// Both, because the field is read by people comparing kit and the answer
+    /// is genuinely two things — the mic decides what was captured, the app
+    /// decides what was made of it. Falls back to the app alone when the user
+    /// hasn't named a detector: OpenBat works with any USB ultrasonic mic and
+    /// does not record which one made a given recording, so guessing from the
+    /// mic plugged in now would be wrong for an old or imported one.
+    @MainActor
+    static var detector: String {
+        guard let model = DetectorModel.current else { return "OpenBat for iOS" }
+        return "\(model) + OpenBat for iOS"
+    }
 }
 
 nonisolated enum INatExport {

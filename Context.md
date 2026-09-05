@@ -3277,6 +3277,25 @@ pointed at one call. The tiles are scaled into 16:9 rather than cropped to it �
 a tile's natural height is however many frequency bins the band covers, and
 cropping would throw away the frequencies the picture exists to show.
 
+**The detector is named by the user, not detected** (`DetectorModel`,
+2026-09-04). iOS reports a USB audio device's port name, and that is firmware's
+own identifier rather than a product name — the Griff announces itself as
+`bat_detector_usb`, which was going into every recording's GUANO `Make` field
+and telling a later reader nothing they could not already see. There is no
+registry to look a real name up in, and the set of mics that work as
+class-compliant USB audio at 384 kHz is small, so Settings → Detecting asks
+once and remembers: a short hand-maintained list (one entry today, Griff Mini by
+Phil Atkin) plus Other with a text field. It feeds GUANO `Make` and iNaturalist
+field 567, and unset falls back to the port name — a vague name in an archive
+beats a wrong one. Read straight from `UserDefaults` at chunk-build time rather
+than pushed onto the recording queue like `setInputName`, so changing it
+mid-session takes effect on the next file.
+
+One consequence to watch: `AnonymizedUploadBuilder` sanitises `Make` for
+vendor serials, and Other now means it can carry free-typed text — people put
+their own names on their kit. Contribution is severed today, but that needs
+deciding before it is revived; noted at `sanitizedHardwareName`.
+
 **Still not done:** the rest of the fields — "Number of calls" and the source
 filename have no established community field, so they stay copyable-only.
 
