@@ -3308,6 +3308,13 @@ centred on the wrong call, a tile of empty noise, a spectrogram cropped to the
 wrong band. The previews are decoded once into `@State`; `UIImage(data:)` per
 body pass would re-decode a dozen PNGs on every scroll.
 
+Nothing manual survives on the automatic route: the per-row copy buttons, the
+Copy Notes button and the fields that can only be added by hand are all gone
+there. A copy button on every line implies work the user is supposed to do,
+which is the exact thing that route removes. The description text stays on both,
+because on the automatic route it is not something to copy — it is a preview of
+the longest piece of text going onto a public record.
+
 The numbered section headers ("1 · What it was") only appear on the manual
 route. They exist so the page can be worked down beside iNaturalist's uploader;
 on the automatic route they would read as a checklist of things the user has to

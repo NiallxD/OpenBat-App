@@ -573,13 +573,18 @@ struct INatObservationSheet: View {
 
     private var notesSection: some View {
         Section {
-            Button {
-                UIPasteboard.general.string = observation.pasteboardText
-                flash("notes")
-            } label: {
-                Label(copied == "notes" ? "Copied" : "Copy Notes",
-                      systemImage: copied == "notes" ? "checkmark" : "doc.on.doc")
+            if mode == .manual {
+                Button {
+                    UIPasteboard.general.string = observation.pasteboardText
+                    flash("notes")
+                } label: {
+                    Label(copied == "notes" ? "Copied" : "Copy Notes",
+                          systemImage: copied == "notes" ? "checkmark" : "doc.on.doc")
+                }
             }
+            // Kept on both routes: on the automatic one this is not something
+            // to copy, it is a preview of the description that will be posted,
+            // and it is the longest piece of text going onto a public record.
             Text(observation.notes)
                 .font(.caption.monospaced())
                 .foregroundStyle(.secondary)
@@ -591,20 +596,27 @@ struct INatObservationSheet: View {
 
     @ViewBuilder
     private var fieldsSection: some View {
-        if !observation.fields.isEmpty {
+        // Automatic: only the three that are actually posted. The others exist
+        // to be copied by hand, and listing them on a route that copies nothing
+        // would be listing work nobody has to do.
+        let shown = mode == .auto ? observation.postableFields : observation.fields
+        if !shown.isEmpty {
             Section {
-                ForEach(observation.fields) { field in
+                ForEach(shown) { field in
                     copyRow(field.label, field.value, note: field.note)
                 }
             } header: {
-                CardHeader(step(4, "Observation fields"), "Optional, and worth it.")
+                CardHeader(step(4, "Observation fields"),
+                       mode == .auto ? "Posted with the observation." : "Optional, and worth it.")
             } footer: {
                 // Not posted by the API path yet: iNaturalist's observation
                 // fields are addressed by numeric id, so adding them means
                 // resolving each field by name first. The numbers are in the
                 // description regardless, so nothing is lost, only harder to
                 // search on.
-                Text("iNaturalist lets you add named fields to an observation, which is how acoustic records from other tools are found together. The first three are posted for you; the rest are here to copy if you want them.")
+                Text(mode == .auto
+                     ? "These are the fields other acoustic bat records use, so this one turns up in the same searches."
+                     : "iNaturalist lets you add named fields to an observation, which is how acoustic records from other tools are found together. Add these on the observation once you've made it.")
             }
         }
     }
@@ -652,7 +664,33 @@ struct INatObservationSheet: View {
 
     // MARK: Rows
 
+    /// A row that can be copied, or just read.
+    ///
+    /// The copy buttons exist for the manual route, where every one of these is
+    /// something to paste into a field on iNaturalist's uploader. On the
+    /// automatic route there is nothing to paste anywhere — a copy button on
+    /// each line implies work the user is supposed to do, which is exactly what
+    /// that route removes.
+    @ViewBuilder
     private func copyRow(_ label: String, _ value: String, note: String? = nil) -> some View {
+        if mode == .auto {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(label)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(value)
+                    .font(.body)
+                    .textSelection(.enabled)
+                if let note {
+                    Text(note).font(.caption2).foregroundStyle(.tertiary)
+                }
+            }
+        } else {
+            copyableRow(label, value, note: note)
+        }
+    }
+
+    private func copyableRow(_ label: String, _ value: String, note: String? = nil) -> some View {
         Button {
             UIPasteboard.general.string = value
             flash(label)
