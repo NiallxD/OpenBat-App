@@ -511,6 +511,24 @@ final class ClassificationStore {
         persistSessions()
     }
 
+    /// The priors that were in force when this recording was made — the last
+    /// snapshot taken at or before it, in its own session.
+    ///
+    /// "The last one before it" rather than "the session's": priors are
+    /// re-derived when the user moves more than 10 km, so a transect can carry
+    /// several, and the one that matters is whichever was current when the bat
+    /// called. nil for a recording made outside a session, or from before
+    /// snapshots existed.
+    func priorSnapshot(for recording: Recording) -> PriorSnapshot? {
+        guard let sessionID = recording.sessionID,
+              let session = sessions.first(where: { $0.id == sessionID })
+        else { return nil }
+        return session.priorSnapshots?
+            .filter { $0.takenAt <= recording.date }
+            .max { $0.takenAt < $1.takenAt }
+            ?? session.priorSnapshots?.first
+    }
+
     func addPass(species: String,
                  confidence: Float,
                  pulses: [CapturedPulse],

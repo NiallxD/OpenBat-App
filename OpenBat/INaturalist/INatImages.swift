@@ -39,6 +39,16 @@
 //  labels are environment-coloured, so it is rendered forced to dark on black
 //  to match the spectrogram it sits next to.
 //
+//  BOTH RESPECT THE USER'S NOISE FLOOR
+//  -----------------------------------
+//  The context view gets it for free, since it re-colorizes. The detail view
+//  does NOT: the pulse thumbnail on disk was colorized at whatever floor was in
+//  force the night it was detected, which is frequently not the one the user
+//  settled on while reviewing the recording. So the close-up is re-rendered
+//  from the WAV at the current floor, and the stored thumbnail is only the
+//  fallback. The picture somebody decided was worth posting should be the
+//  picture that gets posted.
+//
 
 import SwiftUI
 
@@ -46,13 +56,21 @@ import SwiftUI
 /// values live and rendered later by the sheet. Cheap to construct — no
 /// rendering happens until `INatImages.render`.
 struct INatImageSources {
+    let wavURL: URL
     let overviewRaw: WavSpectrogramEngine.RawTile?
     let sampleRate: Double
     let palette: Palette
+    /// The user's own noise-floor setting, so both pictures look like what they
+    /// were looking at when they decided the call was worth posting.
     let noiseFloor: Float
-    /// The call to draw in detail, with its stored thumbnail, if there is one.
+    let calibrationCurve: MicCalibrationCurve?
+    /// Which call to draw in detail. Its stored thumbnail is the fallback only
+    /// — see `pulsePlot`.
     let pulse: PulseRecord?
     let pulseImage: UIImage?
+    /// Where the recording starts, to turn a pulse's timestamp into a sample
+    /// offset.
+    let recordingStart: Date
 }
 
 @MainActor
@@ -88,8 +106,9 @@ enum INatImages {
             photos.append(Photo(name: "spectrogram.png", data: fallbackPNG))
         }
 
-        if let pulse = sources.pulse, let image = sources.pulseImage,
-           let plot = pulsePlot(pulse: pulse, image: image),
+        if let pulse = sources.pulse,
+           let image = await closeUp(pulse: pulse, sources: sources) ?? sources.pulseImage,
+           let plot = pulsePlot(pulse: pulse, image: image, band: closeUpBand(for: pulse)),
            let data = plot.pngData() {
             photos.append(Photo(name: "call-detail.png", data: data))
         }
@@ -139,17 +158,61 @@ enum INatImages {
 
     // MARK: The detail view
 
+    /// Re-renders the call from the WAV at the noise floor the user currently
+    /// has set, rather than reusing the thumbnail stored when it was detected.
+    ///
+    /// The thumbnail was colorized at whatever floor was in force that night,
+    /// which is often not what the user settled on while reviewing — and the
+    /// picture they decided was worth posting is the one they were looking at.
+    /// Falls back to the stored thumbnail when the file can't be re-read.
+    private static func closeUp(pulse: PulseRecord, sources: INatImageSources) async -> UIImage? {
+        guard sources.sampleRate > 0 else { return nil }
+        let band = closeUpBand(for: pulse)
+        let span = (pulse.imageSpanMs ?? max(pulse.durationMs * 3, 8)) / 1000
+        let centre = pulse.date.timeIntervalSince(sources.recordingStart) + (pulse.durationMs / 2000)
+        let start = max(0, Int((centre - span / 2) * sources.sampleRate))
+        let end = Int((centre + span / 2) * sources.sampleRate)
+        guard end > start else { return nil }
+
+        let url = sources.wavURL, rate = sources.sampleRate
+        let palette = sources.palette, floor = sources.noiseFloor
+        let curve = sources.calibrationCurve
+        return await Task.detached(priority: .userInitiated) {
+            WavSpectrogramEngine.renderDetailTile(wavURL: url, sampleRate: rate,
+                                                  startSample: start, endSample: end,
+                                                  minFreqHz: band.lowerBound,
+                                                  maxFreqHz: band.upperBound,
+                                                  targetColumns: 600,
+                                                  palette: palette, noiseFloor: floor,
+                                                  calibrationCurve: curve)?.image
+        }.value
+    }
+
+    /// The frequency window for the close-up: the call, and just enough either
+    /// side to show it is complete. Much tighter than the context view's
+    /// 20 kHz, because this picture exists to be measured.
+    private static func closeUpBand(for pulse: PulseRecord) -> ClosedRange<Double> {
+        if let low = pulse.imageFreqMinHz, let high = pulse.imageFreqMaxHz, high > low {
+            return low...high
+        }
+        return max(0, pulse.peakFreqHz - 15_000)...(pulse.peakFreqHz + 15_000)
+    }
+
     /// One call, tightly clipped, with axes — `PulseImagePlot` rendered to a
     /// picture, plus a caption saying what is being measured.
     ///
     /// Rendered at 3× so the axis numbers survive iNaturalist's own
     /// downscaling; at 1× they turn to mush at the size the page shows.
-    private static func pulsePlot(pulse: PulseRecord, image: UIImage) -> UIImage? {
+    private static func pulsePlot(pulse: PulseRecord, image: UIImage,
+                                  band: ClosedRange<Double>) -> UIImage? {
         let view = VStack(alignment: .leading, spacing: 6) {
+            // The axes describe the picture, so they come from the band that
+            // was actually rendered, not from the stored thumbnail's bounds —
+            // those two are the same only when the re-render succeeded.
             PulseImagePlot(image: image,
-                           freqMinHz: pulse.imageFreqMinHz,
-                           freqMaxHz: pulse.imageFreqMaxHz,
-                           spanMs: pulse.imageSpanMs)
+                           freqMinHz: band.lowerBound,
+                           freqMaxHz: band.upperBound,
+                           spanMs: pulse.imageSpanMs ?? max(pulse.durationMs * 3, 8))
             Text(caption(for: pulse))
                 .font(.system(size: 10).monospacedDigit())
                 .foregroundStyle(.secondary)

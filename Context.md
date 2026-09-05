@@ -3210,6 +3210,30 @@ The band comes from each pulse's stored thumbnail bounds where it has them
 (they include the sweep and harmonics) and falls back to peak frequency, which
 underestimates the band — hence 20 kHz of padding rather than 5.
 
+**Both pictures use the user's own noise floor.** The context view gets it for
+free by re-colorizing. The close-up does not: the pulse thumbnail on disk was
+colorized at whatever floor was in force the night it was detected, which is
+frequently not the one the user settled on while reviewing — so the close-up is
+re-rendered from the WAV via `renderDetailTile` at the current floor, palette
+and calibration curve, and the stored thumbnail is only the fallback. Its axes
+come from the band actually rendered rather than the thumbnail's stored bounds,
+since those agree only when the re-render succeeded.
+
+**What the description carries, and why each line is there.** The audible copy
+is 16× (was 10×): it matches the slowest speed OpenBat's own player offers, so a
+call sounds on iNaturalist the way it did in the app, and it divides 384 kHz
+exactly to 24 kHz. Both audio attachments are the TRIMMED audio and the note
+says so. Alongside the raw confidence, the description now states what the
+location weighting actually did — the weight applied to the claimed species, and
+how many of the model's species were pushed below 0.20 — because the headline
+confidence is not comparable between observers and an identifier otherwise has
+no way to tell how much of it was the model and how much was the place. It comes
+from the session's `PriorSnapshot` in force at the recording's timestamp (a
+transect can carry several), and says "not recorded" rather than staying silent
+when there isn't one, since silence would read as "no weighting was applied".
+And a closing line saying every measurement is automatic, unchecked by a person,
+and to be treated as a starting point.
+
 **Still not done:** observation *fields* (the bat2inat convention the application
 promises) are not posted — they are addressed by numeric field id and need a
 name→id lookup first. The numbers are all in the description, so nothing is lost

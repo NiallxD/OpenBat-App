@@ -315,7 +315,8 @@ struct WavPlayerView: View {
     /// actor — see `INatExport.prepareFiles`.
     private func addToINaturalist() {
         inatObservation = INatExport.draft(recording: recording,
-                                           passes: store.passes(forRecording: recording))
+                                           passes: store.passes(forRecording: recording),
+                                           priors: store.priorSnapshot(for: recording))
     }
 
     /// What `INatImages` needs to build the observation's pictures: the
@@ -329,12 +330,15 @@ struct WavPlayerView: View {
         let best = passes.flatMap(\.pulses)
             .filter { $0.imageFile != nil }
             .max { $0.confidence < $1.confidence }
-        return INatImageSources(overviewRaw: overview?.rawTile,
+        return INatImageSources(wavURL: store.wavURL(for: recording),
+                                overviewRaw: overview?.rawTile,
                                 sampleRate: overview?.sampleRate ?? 0,
                                 palette: palette,
                                 noiseFloor: effectiveNoiseFloor,
+                                calibrationCurve: calibrationCurve,
                                 pulse: best,
-                                pulseImage: best.flatMap { store.image(for: $0) })
+                                pulseImage: best.flatMap { store.image(for: $0) },
+                                recordingStart: recording.date)
     }
 
     var body: some View {

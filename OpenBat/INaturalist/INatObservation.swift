@@ -138,11 +138,14 @@ nonisolated struct INatObservation: Identifiable {
 
 nonisolated enum INatExport {
 
-    /// How far the audible copy slows the recording down. 10× is the convention
-    /// bat detectors have used for decades — a 45 kHz pipistrelle lands at
-    /// 4.5 kHz, comfortably inside what a phone speaker and a browser can play,
-    /// and anyone used to time-expansion hears it at the speed they expect.
-    static let expansionFactor = 10
+    /// How far the audible copy slows the recording down.
+    ///
+    /// 16×, matching the slowest speed OpenBat's own player offers, so a call
+    /// sounds the same on iNaturalist as it did in the app. It also divides
+    /// 384 kHz exactly, to 24 kHz — a rate every browser plays without
+    /// resampling. A 45 kHz pipistrelle lands at 2.8 kHz, low enough to hear
+    /// the structure of the call rather than a chirp.
+    static let expansionFactor = 16
 
     // MARK: Building the draft
 
@@ -150,7 +153,9 @@ nonisolated enum INatExport {
     /// `ModelRegistry` is main-actor isolated, which is the reason this is too;
     /// the file work is `prepareFiles`, which deliberately isn't.
     @MainActor
-    static func draft(recording: Recording, passes: [PassRecord]) -> INatObservation {
+    static func draft(recording: Recording,
+                      passes: [PassRecord],
+                      priors: PriorSnapshot? = nil) -> INatObservation {
         // Resolved from the species code rather than from the user's currently
         // active model: the recording was classified by whichever model knew
         // this code, and that may not be the one selected now.
@@ -163,7 +168,7 @@ nonisolated enum INatExport {
             observedOn: Self.dateTime.string(from: recording.date),
             latitude: recording.latitude,
             longitude: recording.longitude,
-            notes: notes(recording: recording, passes: passes, descriptor: descriptor),
+            notes: notes(recording: recording, passes: passes, descriptor: descriptor, priors: priors),
             fields: fields(recording: recording, passes: passes))
     }
 
@@ -366,7 +371,8 @@ nonisolated enum INatExport {
     @MainActor
     private static func notes(recording: Recording,
                               passes: [PassRecord],
-                              descriptor: ModelDescriptor?) -> String {
+                              descriptor: ModelDescriptor?,
+                              priors: PriorSnapshot?) -> String {
         var lines: [String] = []
         lines.append("Recorded with OpenBat on iOS.")
 
@@ -393,6 +399,7 @@ nonisolated enum INatExport {
         if let complex = passes.compactMap(\.complex).first {
             lines.append("Note: \(complex.name) — species in this group are hard to separate acoustically.")
         }
+        lines.append(contentsOf: priorLines(recording: recording, snapshot: priors))
 
         let pulses = passes.flatMap(\.pulses)
         lines.append("")
@@ -406,8 +413,41 @@ nonisolated enum INatExport {
         }
         lines.append(String(format: "Recording length (s): %.1f", recording.durationSeconds))
         lines.append("")
-        lines.append("Audio attached is a \(expansionFactor)× time-expanded copy so it's audible; the original ultrasonic WAV is attached too.")
+        lines.append("Audio attached is slowed \(expansionFactor)× so it is audible — a \(expansionFactor)× time-expanded copy, with the silence either side of the calls removed. The same trimmed audio is attached at its original ultrasonic sample rate for re-analysis.")
+        lines.append("")
+        lines.append("These measurements are produced automatically by OpenBat from the recording. Nothing here has been checked by a person, and the identification is a model's opinion — please treat all of it as a starting point rather than a result.")
         return lines.joined(separator: "\n")
+    }
+
+    /// What the location weighting actually did, in the description.
+    ///
+    /// The headline confidence on every OpenBat record is weighted by which
+    /// species are plausible where the phone was standing, which makes it
+    /// **not comparable between observers** — two people can report the same
+    /// call at different confidences. The raw figure above is the comparable
+    /// one; these lines are what turns the difference between them from a
+    /// mystery into something an identifier can reason about.
+    ///
+    /// Deliberately not a dump of every species' weight. That would be forty
+    /// lines nobody reads; what matters is the weight on the species being
+    /// claimed, and how aggressively everything else was pushed down.
+    private static func priorLines(recording: Recording, snapshot: PriorSnapshot?) -> [String] {
+        guard let snapshot, !snapshot.priors.isEmpty else {
+            // Silence would read as "no weighting was applied", which is a
+            // different and much stronger claim than "we didn't record it".
+            return ["Location weighting: not recorded for this session."]
+        }
+        var lines: [String] = []
+        let own = snapshot.priors[recording.species]
+        if let own {
+            lines.append(String(format: "Location weighting: %@ was weighted %.2f (1.00 = fully expected here, 0.01 = effectively ruled out).",
+                                recording.species, own))
+        } else {
+            lines.append("Location weighting: no weight recorded for \(recording.species).")
+        }
+        let downWeighted = snapshot.priors.values.filter { $0 < 0.2 }.count
+        lines.append("\(downWeighted) of \(snapshot.priors.count) species in this model were weighted below 0.20 for this location\(snapshot.disabled.isEmpty ? "" : ", and \(snapshot.disabled.count) switched off by the observer").")
+        return lines
     }
 
     /// The individually-copyable rows. Labels match iNaturalist's own field
