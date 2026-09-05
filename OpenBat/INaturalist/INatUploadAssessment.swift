@@ -1,0 +1,327 @@
+//
+//  INatUploadAssessment.swift
+//  OpenBat
+//
+//  Whether a recording is worth posting to iNaturalist, and how strongly.
+//
+//  WHY THIS EXISTS
+//  ---------------
+//  iNaturalist runs on volunteers who look at other people's records. A tool
+//  that makes posting one-tap easy makes posting a hundred mediocre records
+//  one-tap easy too, and the cost of that lands on identifiers, not on us. The
+//  bat2inat project's guidance is explicit about what is worth uploading — a
+//  clear call, one species, not noisy, not a duplicate, complete metadata, not
+//  a roost — and this file is that guidance turned into arithmetic the app can
+//  apply before the user taps anything.
+//
+//  THE SCORE IS ADVICE. THE BLOCKERS ARE NOT.
+//  ------------------------------------------
+//  `score` colours a button and sorts a list; a user is free to post a 40. A
+//  `blocker` stops the post outright, and there are only five of them — each
+//  one a case where posting would produce a record that is either useless or
+//  actively unwelcome.
+//
+//  THE CAP: TWO PER SPECIES, PER NIGHT, PER PLACE
+//  ----------------------------------------------
+//  Not per calendar day. A day boundary falls at midnight, in the middle of a
+//  survey night, so a "2 per day" cap is really 4 for anyone recording either
+//  side of it — the same bats, twice over. A night here runs NOON TO NOON,
+//  which needs no solar calculation and no coordinate, and cannot split a
+//  night in half wherever the user is standing.
+//
+//  And per place, because bat2inat's wording is "one or two per species from an
+//  AREA". Somebody walking a transect is producing genuinely different presence
+//  records at each stop, which is the most useful surveying there is; a flat
+//  two-a-night would punish it. `cell` rounds to ~1 km.
+//
+//  The cap is hard — there is no "post anyway". It can afford to be, because
+//  the manual route at the bottom of `INatObservationSheet` needs no account
+//  and is not capped: what the cap removes is effortless bulk posting, not the
+//  ability to post. Somebody with a real reason to add a third record can still
+//  do it, deliberately, by hand.
+//
+
+import Foundation
+import CoreLocation
+
+nonisolated struct INatUploadAssessment {
+
+    /// 0–100. Only meaningful when `blockers` is empty; a blocked recording
+    /// reports 0 so it sorts to the bottom of any list of candidates.
+    let score: Int
+
+    /// Why this cannot be posted. Empty means it can.
+    let blockers: [String]
+
+    /// Why the score is not higher. Ordered worst-first.
+    let notes: [String]
+
+    var canPost: Bool { blockers.isEmpty }
+
+    enum Rating: String {
+        case blocked = "Not suitable"
+        case poor = "Poor"
+        case fair = "Fair"
+        case good = "Good"
+        case excellent = "Excellent"
+    }
+
+    var rating: Rating {
+        guard canPost else { return .blocked }
+        switch score {
+        case 80...: return .excellent
+        case 60..<80: return .good
+        case 40..<60: return .fair
+        default: return .poor
+        }
+    }
+
+    /// One line for the confirmation screen.
+    var summary: String {
+        switch rating {
+        case .blocked: return "This one shouldn't go to iNaturalist."
+        case .poor: return "Weak evidence. Consider keeping this one for yourself."
+        case .fair: return "Usable, but an identifier will have to work for it."
+        case .good: return "A solid record."
+        case .excellent: return "A strong record — clear, and clearly one species."
+        }
+    }
+
+    // MARK: Assessing
+
+    /// `uploadBytes` is the size of what would actually be attached — the
+    /// TRIMMED file, not the file on disk. Trimming silence off a bout can be
+    /// the difference between a 30 MB recording and a 2 MB one, so assessing
+    /// the untrimmed size would reject records that are perfectly fine.
+    static func assess(recording: Recording,
+                       passes: [PassRecord],
+                       uploadBytes: Int) -> INatUploadAssessment {
+        var blockers: [String] = []
+        var notes: [String] = []
+
+        // ---- Blockers ----
+
+        if uploadBytes > INatCredentials.maxSoundBytes {
+            // Sound is the entire point of an acoustic record. An observation
+            // with a spectrogram and no audio cannot be verified by anyone, so
+            // this is a refusal rather than a deduction.
+            blockers.append(String(format: "Even trimmed, the audio is %.0f MB — over iNaturalist's %d MB limit, so the call itself couldn't be attached.",
+                                   Double(uploadBytes) / 1_048_576,
+                                   INatCredentials.maxSoundBytes / 1_048_576))
+        }
+
+        if recording.latitude == nil || recording.longitude == nil {
+            // "Complete metadata, including GPS location" — a presence record
+            // with no place records no presence.
+            blockers.append("There's no location on this recording, and a bat record without one can't tell anyone where the species was.")
+        }
+
+        let pulses = passes.flatMap(\.pulses)
+        if recording.pulseCount == 0 || pulses.isEmpty {
+            blockers.append("No calls were detected in this recording.")
+        }
+
+        if INatPostLedger.hasPosted(recordingID: recording.id) {
+            blockers.append("You've already posted this recording.")
+        } else if let coordinate = recording.coordinate {
+            let already = INatPostLedger.count(species: recording.species,
+                                               night: Night(containing: recording.date),
+                                               cell: Cell(coordinate))
+            if already >= INatPostLedger.perSpeciesPerNight {
+                blockers.append("You've already posted \(already) \(recording.commonName) records from around here tonight. iNaturalist is verified by volunteers, and more of the same species from the same place doesn't add anything.")
+            }
+        }
+
+        guard blockers.isEmpty else {
+            return INatUploadAssessment(score: 0, blockers: blockers, notes: notes)
+        }
+
+        // ---- Score ----
+
+        var score = 0.0
+
+        // Confidence (35). The RAW figure, not the location-weighted one: the
+        // weighted score has the observer's own settings baked into it, and
+        // what is being judged here is how good the evidence is, not how
+        // plausible the species is where they happen to be standing.
+        let raws = passes.compactMap(\.rawConfidence)
+        let confidence = raws.isEmpty
+            ? (recording.confidence ?? 0)
+            : raws.reduce(0, +) / Float(raws.count)
+        score += 35 * ramp(Double(confidence), from: 0.4, to: 0.95)
+        if confidence < 0.6 {
+            notes.append("The model isn't confident about the species — this will be posted as Chiroptera.")
+        }
+
+        // One species (25). bat2inat's "works best if one species is present",
+        // measured two ways: how many pulses agree with the verdict, and how
+        // far clear the winner is of whatever ran second.
+        let agreement = pulses.isEmpty ? 0
+            : Double(pulses.filter { $0.species == recording.species }.count) / Double(pulses.count)
+        score += 15 * ramp(agreement, from: 0.5, to: 0.95)
+        if agreement < 0.8 {
+            notes.append(String(format: "Only %.0f%% of the calls matched the reported species — there may be more than one bat here.", agreement * 100))
+        }
+
+        let best = passes.max { $0.confidence < $1.confidence }
+        let margin: Double
+        if let best, let runnerUp = best.runnerUpConfidence, best.confidence > 0 {
+            margin = Double(max(0, best.confidence - runnerUp) / best.confidence)
+        } else {
+            margin = 1  // Nothing ran second at all, which is as clean as it gets.
+        }
+        score += 10 * ramp(margin, from: 0.05, to: 0.5)
+        if let best, best.isComplexAmbiguous {
+            notes.append("Two species in the same group scored close together, so this will be posted at group level.")
+        }
+
+        // How much there is to look at (20). One call is a guess; a sequence is
+        // evidence, and an identifier can only judge what was recorded.
+        score += 20 * ramp(Double(recording.pulseCount), from: 1, to: 8)
+        if recording.pulseCount < 4 {
+            notes.append("Only \(recording.pulseCount) call\(recording.pulseCount == 1 ? "" : "s") — a longer sequence is much easier to verify.")
+        }
+
+        // Consistency (10). Calls from one bat on one pass cluster tightly in
+        // peak frequency. A wide spread means noise, or more than one animal —
+        // it is the cheapest "is this clean?" signal available without going
+        // back to the audio.
+        if pulses.count >= 3 {
+            let peaks = pulses.map(\.peakFreqHz)
+            let mean = peaks.reduce(0, +) / Double(peaks.count)
+            if mean > 0 {
+                let variance = peaks.map { ($0 - mean) * ($0 - mean) }.reduce(0, +) / Double(peaks.count)
+                let spread = variance.squareRoot() / mean
+                score += 10 * (1 - ramp(spread, from: 0.05, to: 0.25))
+                if spread > 0.15 {
+                    notes.append("The calls vary a lot in frequency, which usually means noise or more than one species.")
+                }
+            }
+        } else {
+            // Too few to measure. Not penalised twice — the call count already
+            // took the hit — so this awards the middle.
+            score += 5
+        }
+
+        // Room under the size limit (10). Not a quality signal exactly, but a
+        // file scraping the ceiling is one long recording of mostly nothing,
+        // and it makes the observation slow to load for everyone who opens it.
+        let fill = Double(uploadBytes) / Double(INatCredentials.maxSoundBytes)
+        score += 10 * (1 - ramp(fill, from: 0.4, to: 1.0))
+
+        return INatUploadAssessment(score: Int(score.rounded()),
+                                    blockers: [],
+                                    notes: notes)
+    }
+
+    /// 0 at or below `from`, 1 at or above `to`, linear between. Every
+    /// component above is one of these, so the weights are the only place the
+    /// balance lives.
+    private static func ramp(_ value: Double, from: Double, to: Double) -> Double {
+        guard to > from else { return value >= to ? 1 : 0 }
+        return min(1, max(0, (value - from) / (to - from)))
+    }
+}
+
+// MARK: - Night and place
+
+/// One survey night, running NOON TO NOON local time.
+///
+/// Midnight is the wrong boundary for anything nocturnal: it falls in the
+/// middle of the activity, so a per-day rule counts one night as two. Noon is
+/// the quietest possible moment to cut, and needs no sunrise calculation — see
+/// the header of this file.
+nonisolated struct Night: Hashable, Codable {
+    /// The date the night *began* on, i.e. the calendar day of its first noon.
+    let startOfNight: Date
+
+    init(containing moment: Date, calendar: Calendar = .current) {
+        let noon = calendar.date(bySettingHour: 12, minute: 0, second: 0, of: moment) ?? moment
+        // Before noon is still last night's session.
+        startOfNight = moment < noon ? calendar.date(byAdding: .day, value: -1, to: noon) ?? noon : noon
+    }
+}
+
+/// A location rounded to roughly a kilometre, which is the resolution the
+/// duplicate rule cares about: two records of the same species from the same
+/// field on the same night are a duplicate; from two ends of a transect they
+/// are two presence records.
+///
+/// 0.01° of latitude is about 1.1 km everywhere. The same step in longitude is
+/// narrower the further from the equator, which makes the cells smaller — the
+/// direction that lets MORE records through, and the safe one to be wrong in.
+nonisolated struct Cell: Hashable, Codable {
+    let latitude: Int
+    let longitude: Int
+
+    init(_ coordinate: CLLocationCoordinate2D) {
+        latitude = Int((coordinate.latitude * 100).rounded())
+        longitude = Int((coordinate.longitude * 100).rounded())
+    }
+}
+
+// MARK: - What has already been posted
+
+/// The record of what this phone has put on iNaturalist, which is what makes
+/// the cap and the "already posted" check possible.
+///
+/// Local, in UserDefaults, and deliberately not synced: it holds a species, a
+/// time and a rounded location per post, which is exactly the kind of thing
+/// that should not be shipped anywhere. Erased with the app.
+///
+/// It is also NOT the authority on whether an observation exists — iNaturalist
+/// is, and `INatClient.post` asks it. This is the local shortcut that stops the
+/// user reaching that point.
+nonisolated enum INatPostLedger {
+
+    static let perSpeciesPerNight = 2
+
+    struct Entry: Codable {
+        let recordingID: UUID
+        let species: String
+        let night: Night
+        let cell: Cell?
+        let postedAt: Date
+    }
+
+    private static let key = "openbat.inat.posted"
+
+    static var entries: [Entry] {
+        guard let data = UserDefaults.standard.data(forKey: key),
+              let decoded = try? JSONDecoder().decode([Entry].self, from: data) else { return [] }
+        return decoded
+    }
+
+    static func hasPosted(recordingID: UUID) -> Bool {
+        entries.contains { $0.recordingID == recordingID }
+    }
+
+    static func count(species: String, night: Night, cell: Cell) -> Int {
+        entries.filter { $0.species == species && $0.night == night && $0.cell == cell }.count
+    }
+
+    static func record(recording: Recording) {
+        var all = entries
+        guard !all.contains(where: { $0.recordingID == recording.id }) else { return }
+        all.append(Entry(recordingID: recording.id,
+                         species: recording.species,
+                         night: Night(containing: recording.date),
+                         cell: recording.coordinate.map(Cell.init),
+                         postedAt: .now))
+        // Trimmed to the last year: the cap only ever asks about tonight, and
+        // "already posted" only matters for recordings still on the phone.
+        // Unbounded growth in UserDefaults is the failure this avoids.
+        let cutoff = Date.now.addingTimeInterval(-365 * 24 * 60 * 60)
+        all = all.filter { $0.postedAt > cutoff }
+        if let data = try? JSONEncoder().encode(all) {
+            UserDefaults.standard.set(data, forKey: key)
+        }
+    }
+
+    // There is deliberately no `clear()`, and signing out does NOT reset the
+    // ledger. It would be tidier — the counts belong to an account, and a
+    // second person signing in on the same phone inherits the first one's cap
+    // for the night. But a reset on sign-out is a one-tap way around the cap,
+    // and a cap with a one-tap bypass is decoration. The shared-phone case is
+    // rare, lasts until noon, and has the manual uploader as its way out.
+}

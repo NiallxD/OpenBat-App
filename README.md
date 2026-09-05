@@ -80,6 +80,16 @@ also makes it usable in the simulator.
 - **Recordings stay on your device.** Nothing leaves the phone unless you
   choose to contribute it, and you are asked first, every time. Identification
   runs entirely on device.
+- **Posting to iNaturalist is the one exception, and it is always a tap.**
+  If you sign in to iNaturalist, OpenBat can post a single recording as an
+  observation on your own account: the call audio, a spectrogram, the time, the
+  place, and what the classifier thought it was. It happens only when you press
+  Post on a screen showing exactly what will be sent — never in the background,
+  never in bulk, and never without an account you signed in to yourself.
+  The location defaults to **obscured**, because a precise bat record can give
+  away a roost. Signing in uses iNaturalist's own web page, so OpenBat never
+  sees your password, and you can revoke it from your iNaturalist settings at
+  any time.
 - **Location** is used to tag detections, to suggest the right species model for
   where you are, to name a session after the place it happened, and to work out
   your local sunset and sunrise for the detector's sun clock. These are

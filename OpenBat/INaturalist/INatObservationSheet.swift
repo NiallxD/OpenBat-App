@@ -31,6 +31,11 @@ import AuthenticationServices
 
 struct INatObservationSheet: View {
     let observation: INatObservation
+    /// Needed alongside the built observation because trimming and scoring both
+    /// work off the classifier's own output — where the calls are, how many
+    /// there were, and how well they agreed. See `INatUploadAssessment`.
+    let recording: Recording
+    let passes: [PassRecord]
     let wavURL: URL
     /// Already encoded, so the sheet never touches a `UIImage` off the main
     /// actor. nil when the overview hasn't rendered yet.
@@ -62,6 +67,9 @@ struct INatObservationSheet: View {
     /// Built in `.task` — see `INatExport.prepareFiles`, which copies and
     /// rewrites tens of megabytes and must not run on the main actor.
     @State private var files: INatExport.Files?
+    /// nil until `files` is ready — the score can't be known before the trim
+    /// is, because the size of the trimmed file is one of its inputs.
+    @State private var assessment: INatUploadAssessment?
 
     private struct ShareFiles: Identifiable { let id = UUID(); let urls: [URL] }
 
@@ -75,6 +83,7 @@ struct INatObservationSheet: View {
                 if case .posted(let result) = postState {
                     postedSection(result)
                 } else {
+                    assessmentSection
                     taxonSection
                     whenAndWhereSection
                     notesSection
@@ -97,9 +106,18 @@ struct INatObservationSheet: View {
             .task {
                 let url = wavURL
                 let png = overviewPNG
-                files = await Task.detached(priority: .userInitiated) {
-                    INatExport.prepareFiles(wavURL: url, overviewPNG: png)
+                let start = recording.date
+                let pulses = passes.flatMap(\.pulses)
+                let prepared = await Task.detached(priority: .userInitiated) {
+                    INatExport.prepareFiles(wavURL: url,
+                                            overviewPNG: png,
+                                            recordingStart: start,
+                                            pulses: pulses)
                 }.value
+                files = prepared
+                assessment = INatUploadAssessment.assess(recording: recording,
+                                                         passes: passes,
+                                                         uploadBytes: prepared.uploadBytes)
             }
         }
     }
@@ -128,7 +146,16 @@ struct INatObservationSheet: View {
                         .multilineTextAlignment(.center)
                 }
 
-                if auth.isSignedIn {
+                if let assessment, !assessment.canPost {
+                    // No "post anyway". Every blocker is a case where the
+                    // record would be useless or unwelcome, and the manual
+                    // uploader below is the deliberate way past it.
+                    Label(assessment.rating.rawValue, systemImage: "hand.raised.fill")
+                        .font(.callout.weight(.medium))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 6)
+                } else if auth.isSignedIn {
                     Button {
                         post()
                     } label: {
@@ -142,7 +169,7 @@ struct INatObservationSheet: View {
                         .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(isPosting)
+                    .disabled(isPosting || files == nil)
                     Text("Posts to your own iNaturalist account, as \(observation.taxonName), \(geoprivacy.label.lowercased()) location.")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
@@ -214,6 +241,9 @@ struct INatObservationSheet: View {
                                                        taxonID: taxonID,
                                                        spectrogramPNG: overviewPNG,
                                                        sounds: files.sounds)
+                // Recorded only on a real success, and only for a record this
+                // phone actually created — that is what the nightly cap counts.
+                INatPostLedger.record(recording: recording)
                 postState = .posted(result)
             } catch {
                 postState = .failed(error.localizedDescription)
@@ -261,6 +291,63 @@ struct INatObservationSheet: View {
                 Text("You can add them to the observation yourself on iNaturalist's website.")
             }
         }
+    }
+
+    /// The first thing on the screen, before the taxon or the map, because the
+    /// question it answers — should this be posted at all? — comes before every
+    /// other question on the page.
+    @ViewBuilder
+    private var assessmentSection: some View {
+        Section {
+            if let assessment {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(assessment.rating.rawValue)
+                        .font(.headline)
+                        .foregroundStyle(colour(for: assessment.rating))
+                    Spacer()
+                    if assessment.canPost {
+                        Text("\(assessment.score)/100")
+                            .font(.subheadline.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Text(assessment.summary)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+
+                ForEach(assessment.blockers, id: \.self) { blocker in
+                    Label(blocker, systemImage: "xmark.octagon.fill")
+                        .font(.callout)
+                        .foregroundStyle(.primary)
+                }
+                ForEach(assessment.notes, id: \.self) { note in
+                    Label(note, systemImage: "exclamationmark.circle")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                HStack(spacing: 8) { ProgressView(); Text("Checking the recording…") }
+            }
+        } header: {
+            CardHeader("Worth posting?", "iNaturalist is checked by volunteers.")
+        } footer: {
+            if let files, files.upload != files.original {
+                Text("The silence either side of the calls has been cut off, so what goes up is \(byteCount(files.uploadBytes)) instead of the whole recording.")
+            }
+        }
+    }
+
+    private func colour(for rating: INatUploadAssessment.Rating) -> Color {
+        switch rating {
+        case .blocked: return .red
+        case .poor: return .orange
+        case .fair: return .yellow
+        case .good, .excellent: return .green
+        }
+    }
+
+    private func byteCount(_ bytes: Int) -> String {
+        ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
     }
 
     private var taxonSection: some View {

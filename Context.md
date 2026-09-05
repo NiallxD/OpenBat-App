@@ -3106,7 +3106,69 @@ classifier model suits the region, deciding which species are plausible nearby
 each detection, naming a session after the place it happened, and computing local
 sunset/sunrise for the detector's sun clock (§7). All on-device, all from
 occasional one-shot fixes. Nothing sends a coordinate anywhere except a
-deliberately-tapped contribution, which fuzzes it.
+deliberately-tapped contribution, which fuzzes it, or a deliberately-tapped
+iNaturalist post, which does not — see below.
+
+### Posting to iNaturalist (2026-09-04)
+
+The second thing that can leave the phone, and the first that leaves it
+*identified*: an observation on the user's own iNaturalist account, carrying the
+call audio, a spectrogram, the timestamp, the coordinate and the classifier's
+verdict. It happens only on a tap on `INatObservationSheet`, which shows all of
+it first. There is no queue, no background post and no bulk action, by design —
+see that file's header.
+
+**Be precise about the coordinate, because "obscured" invites the wrong
+summary.** OpenBat sends iNaturalist the *true* coordinate and asks for
+`geoprivacy: obscured`; iNaturalist stores the real position and publishes only a
+~0.2° cell. So the location is hidden from the public, not from iNaturalist. Any
+privacy document that says OpenBat "only sends a fuzzed location" to iNat is
+wrong. Obscured is the default because a precise bat record can disclose a roost,
+and publishing at full precision is a choice the user makes on the sheet.
+
+**What the app stores about it.** An OAuth access token in the Keychain (its own
+service name, unrelated to `DeviceIdentity`'s), and a local ledger of what has
+been posted — recording id, species, night, and a ~1 km rounded cell — which is
+what the nightly cap counts. Neither is synced anywhere. The JWT that the v2 API
+actually authenticates with is held in memory only.
+
+**Three corrections to `iNaturalist-API-Application.txt`**, found by reading the
+current specs rather than the draft: v1 has no `observation_sounds` endpoint at
+all (so the integration is v2 throughout); v2 writes need a JWT from
+`inaturalist.org/users/api_token`, not the OAuth token; and duplicates are
+prevented by posting under a client-chosen UUID — the recording's own id — rather
+than by the "same time and place" search the draft describes, which cannot tell a
+retry from a second bat. Get the spec from `api.inaturalist.org/v2/api-docs`;
+`/v2/swagger.json` 404s and the `/v2/docs/` JSON paths return the swagger-ui HTML
+shell.
+
+**The cap, and why it is shaped the way it is.** Two posts per species, per
+night, per ~1 km cell, hard, with no override. Per *night* (noon to noon) and not
+per day because a midnight boundary cuts a survey night in two and quietly
+doubles the cap for anyone recording either side of it. Per *place* because
+bat2inat's guidance is one or two per species from an *area*, and a flat nightly
+cap would punish a transect, which is the most useful surveying there is. It can
+afford to be hard because the manual web-uploader route needs no account and is
+uncapped: what the cap removes is effortless bulk posting, not the ability to
+post. Signing out deliberately does NOT reset the ledger — that would be a
+one-tap bypass.
+
+**Trimming is not a size optimisation, it is what makes the feature work.**
+iNaturalist rejects sound files over 20 MB, and at 384 kHz that is 27 seconds.
+`INatExport.trimmedToCalls` cuts to the span the pulses occupy plus a third of a
+second either side, using the classifier's own pulse timestamps rather than a
+second energy-detection opinion in the export path. Note the trap this avoids:
+`audibleCopy` rewrites the WAV header rather than resampling, so the audible copy
+is *byte-identical in size* to what it was made from — trimming the original but
+not the copy would have left the file people actually play still over the limit.
+A recording that is still over 20 MB after trimming scores 0 and cannot be
+posted, because an acoustic observation with no audio cannot be verified by
+anyone.
+
+**Still not done:** observation *fields* (the bat2inat convention the application
+promises) are not posted — they are addressed by numeric field id and need a
+name→id lookup first. The numbers are all in the description, so nothing is lost
+but searchability, and the sheet says so.
 
 ### GPS tracking removed, every run is a session (2026-08-16)
 

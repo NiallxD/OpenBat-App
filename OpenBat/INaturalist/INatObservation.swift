@@ -171,23 +171,49 @@ nonisolated enum INatExport {
     struct Files {
         var audible: URL?
         var spectrogram: URL?
+        /// The recording exactly as it sits on disk. Offered to the share
+        /// sheet, where somebody may want the whole thing, and never uploaded.
         var original: URL
+        /// The calls with the silence cut off either side, which is what
+        /// actually goes to iNaturalist. Falls back to `original` when there
+        /// was nothing to trim or the trim failed.
+        var upload: URL
 
         /// Everything there is, in the order the hand-off sheet offers them.
         var all: [URL] { [audible, spectrogram, original].compactMap { $0 } }
 
         /// What goes to `/observation_sounds`. The audible copy leads because
         /// it is the one a reviewer can actually play in a browser.
-        var sounds: [URL] { [audible, original].compactMap { $0 } }
+        var sounds: [URL] { [audible, upload].compactMap { $0 } }
+
+        /// What the size limit and the upload score are judged against — both
+        /// attachments are the same length, so one figure covers them.
+        var uploadBytes: Int {
+            (try? FileManager.default.attributesOfItem(atPath: upload.path)[.size] as? Int)
+                .flatMap { $0 } ?? 0
+        }
     }
 
-    /// Built off the main actor: an audible copy of the call, the spectrogram,
-    /// and the original. Slow enough to matter — a long recording at 384 kHz is
-    /// tens of megabytes — so this never runs inline.
-    static func prepareFiles(wavURL: URL, overviewPNG: Data?) -> Files {
+    /// Built off the main actor: the calls trimmed out of the recording, an
+    /// audible copy of them, and the spectrogram. Slow enough to matter — a
+    /// long recording at 384 kHz is tens of megabytes — so this never runs
+    /// inline.
+    static func prepareFiles(wavURL: URL,
+                             overviewPNG: Data?,
+                             recordingStart: Date,
+                             pulses: [PulseRecord]) -> Files {
         let baseName = wavURL.deletingPathExtension().lastPathComponent
-        var files = Files(original: wavURL)
-        files.audible = audibleCopy(of: wavURL, baseName: baseName)
+        var files = Files(original: wavURL, upload: wavURL)
+        if let trimmed = trimmedToCalls(source: wavURL,
+                                        recordingStart: recordingStart,
+                                        pulses: pulses,
+                                        baseName: baseName) {
+            files.upload = trimmed
+        }
+        // Derived from the trimmed file, not the original: otherwise the small
+        // upload would be paired with a full-length audible copy, and the
+        // 20 MB limit would still bite on the file people actually play.
+        files.audible = audibleCopy(of: files.upload, baseName: baseName)
         if let overviewPNG {
             let url = FileManager.default.temporaryDirectory
                 .appendingPathComponent("\(baseName)-spectrogram.png")
@@ -195,6 +221,109 @@ nonisolated enum INatExport {
             files.spectrogram = url
         }
         return files
+    }
+
+    // MARK: Trimming
+
+    /// How much recording to keep either side of the outermost call.
+    ///
+    /// Not zero: a call clipped hard at the first sample looks truncated on a
+    /// spectrogram and sounds wrong, and an identifier needs to see that
+    /// nothing was cut off mid-pulse. A third of a second is enough context to
+    /// show the call is complete without carrying the bout's dead air.
+    static let trimPaddingSeconds = 0.33
+
+    /// Cuts the recording down to the span the calls actually occupy.
+    ///
+    /// A bout is mostly silence — the detector keeps a pre-roll and runs on
+    /// past the last call — and at 384 kHz, silence costs the same 768 kB a
+    /// second as a bat does. Trimming is what keeps a real recording under
+    /// iNaturalist's 20 MB sound limit, and it makes the observation quicker
+    /// to load for everyone who opens it.
+    ///
+    /// This trims by the PULSE TIMESTAMPS the classifier already produced, not
+    /// by hunting for energy in the samples: the app has already decided where
+    /// the calls are, and a second, differently-tuned opinion about that in the
+    /// export path is a bug waiting to happen. It also means a recording whose
+    /// calls span the whole file is correctly left alone.
+    ///
+    /// Returns nil when there is nothing to gain — no pulses, an unreadable or
+    /// non-canonical file, or a trim that would save almost nothing — and the
+    /// caller falls back to the original.
+    static func trimmedToCalls(source: URL,
+                               recordingStart: Date,
+                               pulses: [PulseRecord],
+                               baseName: String) -> URL? {
+        guard !pulses.isEmpty,
+              let format = WavHeader.describe(url: source), format.isCanonical else { return nil }
+
+        let bytesPerSample = 2  // canonical: 16-bit mono
+        let totalSeconds = Double(format.dataBytes) / Double(format.sampleRate) / Double(bytesPerSample)
+
+        let offsets = pulses.map { $0.date.timeIntervalSince(recordingStart) }
+        let firstCall = offsets.min() ?? 0
+        // Each pulse's timestamp is its start, so the last call ends a pulse
+        // length later. Taking the longest is cheaper than pairing them up and
+        // errs towards keeping more.
+        let longestPulse = (pulses.map(\.durationMs).max() ?? 0) / 1000
+        let lastCall = (offsets.max() ?? totalSeconds) + longestPulse
+
+        let start = max(0, firstCall - trimPaddingSeconds)
+        let end = min(totalSeconds, lastCall + trimPaddingSeconds)
+        guard end > start else { return nil }
+
+        // Pulse timestamps come from a different clock to the file's own
+        // length, and a bad one could ask for a span longer than the file.
+        // Nothing to cut means nothing to do.
+        guard (end - start) < totalSeconds * 0.95 else { return nil }
+
+        let startByte = UInt64(start * Double(format.sampleRate)) * UInt64(bytesPerSample)
+        let endByte = UInt64(end * Double(format.sampleRate)) * UInt64(bytesPerSample)
+        let keep = Int(min(endByte, UInt64(format.dataBytes)) - min(startByte, endByte))
+        guard keep > 0 else { return nil }
+
+        guard let input = try? FileHandle(forReadingFrom: source),
+              (try? input.seek(toOffset: format.dataOffset + startByte)) != nil
+        else { return nil }
+        defer { try? input.close() }
+
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(baseName)-calls.wav")
+        try? FileManager.default.removeItem(at: url)
+        guard FileManager.default.createFile(atPath: url.path, contents: nil),
+              let output = try? FileHandle(forWritingTo: url)
+        else { return nil }
+
+        var written = 0
+        var succeeded = false
+        defer {
+            try? output.close()
+            // Same reasoning as `audibleCopy`: a half-written WAV would be
+            // attached to an observation and play as a truncated call.
+            if !succeeded { try? FileManager.default.removeItem(at: url) }
+        }
+
+        guard (try? output.write(contentsOf: header(sampleRate: format.sampleRate,
+                                                    dataBytes: keep))) != nil
+        else { return nil }
+
+        while written < keep {
+            let want = min(keep - written, 1 << 20)
+            guard let block = try? input.read(upToCount: want), !block.isEmpty else { break }
+            guard (try? output.write(contentsOf: block)) != nil else { return nil }
+            written += block.count
+        }
+        // A short read would leave the header overstating the data.
+        if written != keep {
+            guard written > 0,
+                  (try? output.seek(toOffset: 0)) != nil,
+                  (try? output.write(contentsOf: header(sampleRate: format.sampleRate,
+                                                        dataBytes: written))) != nil
+            else { return nil }
+        }
+
+        succeeded = true
+        return url
     }
 
     /// What to claim, and it is often not the species.

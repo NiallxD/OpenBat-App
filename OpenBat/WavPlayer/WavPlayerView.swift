@@ -329,6 +329,8 @@ struct WavPlayerView: View {
         }
         .sheet(item: $inatObservation) { observation in
             INatObservationSheet(observation: observation,
+                                 recording: recording,
+                                 passes: store.passes(forRecording: recording),
                                  wavURL: store.wavURL(for: recording),
                                  overviewPNG: overview?.image.pngData())
         }
