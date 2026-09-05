@@ -3291,6 +3291,17 @@ has a noise gate and a per-column adaptive ceiling in it, so brightest pixel and
 loudest sound are different questions. The window can't go much past a quarter
 second either way without wandering onto the next call.
 
+**The sheet is drawn on the app's own tiles, not a grouped list** (Niall,
+2026-09-04). `TileCard` in `TileList.swift` is the Settings card SHAPE — a
+name, a one-line description, then the controls — drawn on glass, and this sheet
+is the first user. The two idioms had drifted apart: `Form`/`Section` with a
+`CardHeader` in Settings, glass tiles everywhere else, so a screen wanting the
+Settings shape had to use a grouped list and then looked like a different app
+beside the sessions list it was pushed from. It was also sitting on the trap
+`pageBackground()` documents for forms — a grouped list's card is
+`secondarySystemGroupedBackground`, which in light mode is white on the app's
+own white page.
+
 **The sheet follows the Settings card shape** (Niall, 2026-09-04): a short
 name, one line of description under it, then the controls, and *nothing*
 underneath — every section footer on this screen is gone. What a footer was

@@ -99,17 +99,23 @@ struct INatObservationSheet: View {
                 } else {
                     modeSection
                     if mode == .auto {
-                        assessmentSection
-                        previewSection
+                        assessmentSection.tileRow()
+                        previewSection.tileRow()
                     } else {
-                        manualSection
+                        manualSection.tileRow()
                     }
-                    taxonSection
-                    whenAndWhereSection
-                    notesSection
-                    fieldsSection
+                    taxonSection.tileRow()
+                    whenAndWhereSection.tileRow()
+                    notesSection.tileRow()
+                    fieldsSection.tileRow()
                 }
             }
+            // The app's own list material rather than a grouped list's: see
+            // `TileCard`. A grouped list would draw a second container around
+            // every card and, on `pageBackground()`, draw it in a colour that
+            // disappears in light mode.
+            .listStyle(.plain)
+            .contentMargins(.top, TileList.scrollTopMargin, for: .scrollContent)
             .pageBackground()
             .navigationTitle("Add to iNaturalist")
             .navigationBarTitleDisplayMode(.inline)
@@ -353,7 +359,7 @@ struct INatObservationSheet: View {
 
     @ViewBuilder
     private func postedSection(_ result: INatClient.PostResult) -> some View {
-        Section {
+        TileCard("Done", "It's on your iNaturalist account.") {
             Label(result.alreadyExisted ? "Already on iNaturalist" : "Posted to iNaturalist",
                   systemImage: "checkmark.circle.fill")
                 .foregroundStyle(.green)
@@ -367,12 +373,11 @@ struct INatObservationSheet: View {
             } label: {
                 Label("Open the observation", systemImage: "safari")
             }
-        } header: {
-            CardHeader("Done", "It's on your iNaturalist account.")
         }
+        .tileRow()
 
         if !result.skipped.isEmpty {
-            Section {
+            TileCard("Some didn't attach", "Add them on iNaturalist yourself.") {
                 ForEach(result.skipped, id: \.self) { note in
                     Label(note, systemImage: "exclamationmark.triangle")
                         .font(.callout)
@@ -383,9 +388,8 @@ struct INatObservationSheet: View {
                     Label("Save the files", systemImage: "square.and.arrow.up")
                 }
                 .disabled(files == nil)
-            } header: {
-                CardHeader("Some didn't attach", "Add them on iNaturalist yourself.")
             }
+            .tileRow()
         }
     }
 
@@ -394,7 +398,7 @@ struct INatObservationSheet: View {
     /// other question on the page.
     @ViewBuilder
     private var assessmentSection: some View {
-        Section {
+        TileCard("Worth posting?", "Volunteers check every record.") {
             if let assessment {
                 HStack(alignment: .firstTextBaseline) {
                     Text(assessment.rating.rawValue)
@@ -424,8 +428,6 @@ struct INatObservationSheet: View {
             } else {
                 HStack(spacing: 8) { ProgressView(); Text("Checking the recording…") }
             }
-        } header: {
-            CardHeader("Worth posting?", "Volunteers check every record.")
         }
     }
 
@@ -447,19 +449,16 @@ struct INatObservationSheet: View {
     /// route is the default because it is the one that gets records posted at
     /// the moment somebody is standing in a field looking at the call.
     private var modeSection: some View {
-        Section {
-            Picker("How", selection: $mode) {
-                Text("Post from OpenBat").tag(Mode.auto)
-                Text("Do it by hand").tag(Mode.manual)
-            }
-            .pickerStyle(.segmented)
+        Picker("How", selection: $mode) {
+            Text("Post from OpenBat").tag(Mode.auto)
+            Text("Do it by hand").tag(Mode.manual)
         }
-        // A row of its own insets and padding is a lot of air around a control
-        // that is only two words wide. It isn't a card — it chooses which cards
-        // follow — so it drops the card's spacing and sits close to them.
-        .listRowBackground(Color.clear)
+        .pickerStyle(.segmented)
+        // Not a card, and not drawn as one: it chooses which cards follow, so
+        // it takes the tile gutter for alignment and none of the tile's air.
         .listRowInsets(EdgeInsets(top: 0, leading: TileList.contentInset,
                                   bottom: 2, trailing: TileList.contentInset))
+        .listRowBackground(Color.clear)
         .listRowSeparator(.hidden)
     }
 
@@ -473,7 +472,9 @@ struct INatObservationSheet: View {
     /// of empty noise, a spectrogram cropped to the wrong band.
     @ViewBuilder
     private var previewSection: some View {
-        Section {
+        TileCard("What gets posted", previews.isEmpty
+                 ? "Checking."
+                 : "\(previews.count) pictures, then the sound, in this order.") {
             if previews.isEmpty {
                 HStack(spacing: 8) { ProgressView(); Text("Preparing the pictures…") }
             } else {
@@ -511,10 +512,6 @@ struct INatObservationSheet: View {
                         .foregroundStyle(.secondary)
                 }
             }
-        } header: {
-            CardHeader("What gets posted", previews.isEmpty
-                       ? "Checking."
-                       : "\(previews.count) pictures, then the sound, in this order.")
         }
     }
 
@@ -528,19 +525,17 @@ struct INatObservationSheet: View {
     }
 
     private var taxonSection: some View {
-        Section {
+        TileCard(step(1, "What it was"), "What OpenBat will claim.") {
             ControlNote("Genus only — the species goes in the notes.")
             copyRow("Species", observation.taxonName)
             Text(observation.taxonNote)
                 .font(.caption)
                 .foregroundStyle(.secondary)
-        } header: {
-            CardHeader(step(1, "What it was"), "What OpenBat will claim.")
         }
     }
 
     private var whenAndWhereSection: some View {
-        Section {
+        TileCard(step(2, "When and where"), "Obscured unless you change it.") {
             copyRow("Date and time", observation.observedOn)
             if let coordinates = observation.coordinateText {
                 copyRow("Coordinates", coordinates)
@@ -556,13 +551,11 @@ struct INatObservationSheet: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
-        } header: {
-            CardHeader(step(2, "When and where"), "Obscured unless you change it.")
         }
     }
 
     private var notesSection: some View {
-        Section {
+        TileCard(step(3, "Notes"), mode == .manual ? "Paste into the description field." : "Posted as the description.") {
             if mode == .manual {
                 Button {
                     UIPasteboard.general.string = observation.pasteboardText
@@ -579,8 +572,6 @@ struct INatObservationSheet: View {
                 .font(.caption.monospaced())
                 .foregroundStyle(.secondary)
                 .textSelection(.enabled)
-        } header: {
-            CardHeader(step(3, "Notes"), mode == .manual ? "Paste into the description field." : "Posted as the description.")
         }
     }
 
@@ -591,19 +582,17 @@ struct INatObservationSheet: View {
         // would be listing work nobody has to do.
         let shown = mode == .auto ? observation.postableFields : observation.fields
         if !shown.isEmpty {
-            Section {
+            TileCard(step(4, "Observation fields"),
+                           mode == .auto ? "Found with other bat records." : "Optional, and worth it.") {
                 ForEach(shown) { field in
                     copyRow(field.label, field.value, note: field.note)
                 }
-            } header: {
-                CardHeader(step(4, "Observation fields"),
-                           mode == .auto ? "Found with other bat records." : "Optional, and worth it.")
             }
         }
     }
 
     private var manualSection: some View {
-        Section {
+        TileCard("Or do it by hand", "No account needed.") {
             ControlNote("The website takes sound; the iPhone app can't.")
             Link(destination: INatObservationSheet.uploaderURL) {
                 Label("Open the iNaturalist Uploader", systemImage: "safari")
@@ -637,8 +626,6 @@ struct INatObservationSheet: View {
             if photoState == .denied {
                 ControlNote("Turn on Photos access in Settings, or skip it.")
             }
-        } header: {
-            CardHeader("Or do it by hand", "No account needed.")
         }
     }
 

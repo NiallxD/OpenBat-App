@@ -106,6 +106,43 @@ private struct GlassTile<S: Shape>: ViewModifier {
     }
 }
 
+/// A settings-shaped card drawn on the app's own glass rather than on a list's
+/// section background.
+///
+/// The two card idioms had drifted apart: `Form`/`Section` with a `CardHeader`
+/// in Settings, and glass tiles everywhere else. A screen that wants the
+/// Settings SHAPE — a name, a one-line description, then its controls, and
+/// nothing underneath — could only get it by using a grouped list, which then
+/// looked like a different app beside the sessions list next to it. Worse, a
+/// grouped list's card is `secondarySystemGroupedBackground`, which in light
+/// mode is white: put it on the app's own page colour with `pageBackground()`
+/// and the cards vanish, the exact trap `pageBackground()` warns about for
+/// forms.
+///
+/// So this is the shape on the material: same header, same rules about what
+/// goes in it, drawn as a tile.
+struct TileCard<Content: View>: View {
+    let title: String
+    let subtitle: String
+    @ViewBuilder var content: Content
+
+    init(_ title: String, _ subtitle: String = "", @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.subtitle = subtitle
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            CardHeader(title, subtitle)
+            content
+        }
+        .padding(TileList.contentInset)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .glassTile()
+    }
+}
+
 /// What a row in a tiled list gives back to the list: nothing. No cell
 /// background, no separator, and insets that are pure spacing.
 private struct TileRow: ViewModifier {
