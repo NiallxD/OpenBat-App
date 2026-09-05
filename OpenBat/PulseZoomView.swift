@@ -89,7 +89,7 @@ struct PulseZoomView: View {
             } else {
                 Text("No pulse detected")
                     .font(.caption2)
-                    .foregroundStyle(.white.opacity(0.35))
+                    .foregroundStyle(Color.primary.opacity(0.35))
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
 
@@ -107,7 +107,7 @@ struct PulseZoomView: View {
                          ? String(format: "%.0f ms", pulseDetector.capturedDurationMs)
                          : "–")
                         .font(.caption2.monospacedDigit())
-                        .foregroundStyle(.white.opacity(0.6))
+                        .foregroundStyle(Color.primary.opacity(0.6))
                         .padding(6)
                 }
             }
@@ -300,12 +300,12 @@ struct PulseZoomView: View {
                         p.move(to: CGPoint(x: 0, y: h * f)); p.addLine(to: CGPoint(x: w, y: h * f))
                     }
                 }
-                .stroke(Color.white.opacity(0.12), lineWidth: 0.5)
+                .stroke(Color.primary.opacity(0.12), lineWidth: 0.5)
 
                 Path { p in                                      // onset marker
                     p.move(to: CGPoint(x: onsetX, y: 0)); p.addLine(to: CGPoint(x: onsetX, y: h))
                 }
-                .stroke(Color.white.opacity(0.30), style: StrokeStyle(lineWidth: 0.5, dash: [3, 3]))
+                .stroke(Color.primary.opacity(0.30), style: StrokeStyle(lineWidth: 0.5, dash: [3, 3]))
             }
         }
         .allowsHitTesting(false)
@@ -325,7 +325,7 @@ struct PulseZoomView: View {
         Text(hz >= 1000 ? String(format: "%.0f kHz", hz / 1000)
                         : String(format: "%.0f Hz", hz))
             .font(.caption2.monospacedDigit())
-            .foregroundStyle(.white.opacity(0.7))
+            .foregroundStyle(Color.primary.opacity(0.7))
             .shadow(radius: 1)
     }
 }

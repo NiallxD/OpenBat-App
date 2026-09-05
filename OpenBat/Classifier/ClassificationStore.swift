@@ -64,6 +64,27 @@ struct RecordingSession: Codable, Identifiable {
     /// Optional: sessions recorded before this existed decode as nil, and there
     /// is no way to reconstruct it for them — see `PriorSnapshot`.
     var priorSnapshots: [PriorSnapshot]?
+    /// Where the outing happened, on its own — the reverse-geocoded place name,
+    /// or whatever the user renamed the session to.
+    ///
+    /// Split out of `title` because a row should say WHERE and let the line under
+    /// it say when (Niall, 2026-09-02): the title bakes the start timestamp in
+    /// ("2 Sep 2026 at 13:30 · Sandford"), so a row led with the date twice and
+    /// truncated the only part that identified the outing. `title` stays as it
+    /// was — exports and filenames are built from it.
+    var placeName: String?
+
+    /// What a row calls this outing: the place, falling back to the title.
+    ///
+    /// Sessions saved before `placeName` existed have their place recovered from
+    /// the title's own "date · place" shape at decode, so an existing library
+    /// reads the same way a new one does; a title with no place in it (never
+    /// geocoded, or renamed to something without a separator) falls through to
+    /// the title itself rather than to a blank row.
+    var displayName: String {
+        if let placeName, !placeName.isEmpty { return placeName }
+        return title
+    }
 
     /// Sessions saved before tracks were removed carry one; it is decoded and
     /// discarded rather than rejected, so an existing library still opens.
@@ -75,16 +96,21 @@ struct RecordingSession: Codable, Identifiable {
         startDate = try c.decode(Date.self, forKey: .startDate)
         endDate = try c.decodeIfPresent(Date.self, forKey: .endDate)
         priorSnapshots = try c.decodeIfPresent([PriorSnapshot].self, forKey: .priorSnapshots)
+        // Legacy migration, not a fallback: every session written before
+        // `placeName` existed carries its place in the title after " · ".
+        placeName = try c.decodeIfPresent(String.self, forKey: .placeName)
+            ?? title.range(of: " · ").map { String(title[$0.upperBound...]) }
     }
 
     init(id: UUID, title: String, notes: String, startDate: Date, endDate: Date?,
-         priorSnapshots: [PriorSnapshot]? = nil) {
+         priorSnapshots: [PriorSnapshot]? = nil, placeName: String? = nil) {
         self.id = id
         self.title = title
         self.notes = notes
         self.startDate = startDate
         self.endDate = endDate
         self.priorSnapshots = priorSnapshots
+        self.placeName = placeName
     }
 }
 
@@ -173,6 +199,11 @@ struct PassRecord: Codable, Identifiable, NoIDFilterable {
     /// confident "this wasn't a bat" call from the model, NOID is "not enough
     /// evidence either way".
     var isNoID: Bool { species == "NOID" }
+    /// Logged during a demo run. Demo passes are held in memory only — never
+    /// written to `passes.json` — and dropped when the demo ends, so a demo
+    /// leaves nothing behind. Persisted records never carry it; it is `Codable`
+    /// only because the rest of the type is.
+    var isDemo: Bool?
 }
 
 /// Conformed by `PassRecord` and `Recording` so both can share the "hide NoID
@@ -304,6 +335,41 @@ final class ClassificationStore {
     /// near-empty sessions. A session should be an outing, not a tap.
     private static let sessionResumeWindow: TimeInterval = 15 * 60
 
+    /// True while a demo is playing. Set by ContentView around the demo, and
+    /// read by `addPass` so the synthetic IDs it produces stay out of the file.
+    ///
+    /// A demo opens no session (ContentView.startDemo) and its recorder is
+    /// blocked, so its passes used to land in the Listening bucket as
+    /// session-less orphans — which the launch-time migration below then swept
+    /// into an invented session, giving Sessions a row full of IDs with no
+    /// recordings under it. A demo is meant to leave no trace at all.
+    var demoRun = false
+
+    /// Ends a demo run and removes everything it logged, thumbnails included.
+    /// Idempotent, so it is safe to call on any path that leaves demo mode.
+    func endDemoRun() {
+        demoRun = false
+        let demoPasses = passes.filter { $0.isDemo == true }
+        // Not the bulk `delete`: that forces a persist of a file these passes
+        // were never in. Drop them and clean up their thumbnails directly.
+        guard !demoPasses.isEmpty else { return }
+        passes.removeAll { $0.isDemo == true }
+        let imageFiles = demoPasses.flatMap { $0.pulses.compactMap(\.imageFile) }
+        io.async { [weak self] in
+            guard let self else { return }
+            for file in imageFiles {
+                try? FileManager.default.removeItem(at: self.imagesDir.appendingPathComponent(file))
+            }
+        }
+    }
+
+    /// 2026-08-16 — when every run became a session. Passes older than this
+    /// were saved with no session because there was nothing to attach them to;
+    /// see `adoptOrphanedListeningPasses`.
+    private static let sessionlessPassCutoff = Calendar(identifier: .gregorian)
+        .date(from: DateComponents(timeZone: TimeZone(identifier: "UTC"), year: 2026, month: 8, day: 16))
+        ?? Date.distantPast
+
     /// Begin an outing and mark it active, resuming the previous one if it ended
     /// only moments ago. New passes attach to it until `endSession`.
     @discardableResult
@@ -337,9 +403,12 @@ final class ClassificationStore {
         persistSessions(force: true)
     }
 
+    /// A rename names the OUTING, which is what a row shows — so it lands on
+    /// `placeName` too, and a geocode that arrives afterwards leaves it alone.
     func setTitle(_ title: String, for id: UUID) {
         guard let i = sessions.firstIndex(where: { $0.id == id }) else { return }
         sessions[i].title = title
+        sessions[i].placeName = title
         persistSessions(force: true)
     }
 
@@ -352,6 +421,9 @@ final class ClassificationStore {
     /// Fold a reverse-geocoded place name into the title, keeping the start timestamp.
     func setPlaceName(_ name: String, for id: UUID) {
         guard let i = sessions.firstIndex(where: { $0.id == id }) else { return }
+        // Never over a name the user chose — a reverse geocode can land minutes
+        // into an outing, and it used to overwrite a rename made before it.
+        if sessions[i].placeName == nil { sessions[i].placeName = name }
         sessions[i].title = "\(Self.defaultTitle(sessions[i].startDate)) · \(name)"
         persistSessions(force: true)
     }
@@ -452,6 +524,7 @@ final class ClassificationStore {
                  rawConfidence: Float? = nil) {
         guard !pulses.isEmpty else { return }
         let passID = UUID()
+        let isDemo = demoRun
 
         io.async { [weak self] in
             guard let self else { return }
@@ -479,12 +552,18 @@ final class ClassificationStore {
                                   latitude: coordinate?.latitude, longitude: coordinate?.longitude,
                                   runnerUpSpecies: runnerUpSpecies, runnerUpConfidence: runnerUpConfidence,
                                   complexID: complexID, complexAmbiguous: complexAmbiguous,
-                                  rawConfidence: rawConfidence)
+                                  rawConfidence: rawConfidence, isDemo: isDemo ? true : nil)
 
             DispatchQueue.main.async {
+                // A pass that was still being encoded when the demo ended must
+                // not slip in behind `endDemoRun`'s sweep — this insert is the
+                // far side of a thumbnail write, so it can land well after.
+                if isDemo && !self.demoRun { return }
                 self.passes.insert(pass, at: 0)
                 self.prune()
-                self.persist()
+                // Demo passes are in-memory only, so there is nothing to write —
+                // and persisting would put synthetic IDs in the user's history.
+                if !isDemo { self.persist() }
             }
         }
     }
@@ -1028,7 +1107,12 @@ final class ClassificationStore {
     /// runs past midnight is one outing, and splitting it at midnight would be
     /// wrong for exactly the users who did the most listening.
     private func adoptOrphanedListeningPasses() {
-        let orphans = passes.filter { $0.sessionID == nil }
+        // Strictly a migration, so it only ever looks at data old enough to
+        // need one. A session-less pass dated after every run became a session
+        // is not history — it is a bug somewhere upstream, and inventing an
+        // outing around it produces a Session row of IDs with no recordings
+        // under it (which is exactly what demo runs used to do here).
+        let orphans = passes.filter { $0.sessionID == nil && $0.date < Self.sessionlessPassCutoff }
         guard !orphans.isEmpty else { return }
 
         var calendar = Calendar.current
@@ -1092,17 +1176,31 @@ enum SpeciesInfo {
     /// Populated by `SpeciesGuideStore` whenever it loads or refreshes.
     private(set) static var guideNames: [String: String] = [:]
 
+    /// The guide entry behind each code, for screens that want the species'
+    /// PICTURE rather than its name — a recording row's thumbnail, chiefly.
+    ///
+    /// Kept here for the same reason the names are: this is read from rows deep
+    /// inside the sessions tree, which is handed a `ClassificationStore` and
+    /// nothing else, and threading a guide reference down to a row so it can draw
+    /// a photo is a lot of plumbing for one image.
+    private(set) static var guidePages: [String: GuideSpecies] = [:]
+
+    static func guidePage(forCode code: String) -> GuideSpecies? { guidePages[code] }
+
     /// Adopt the guide's names for every code a model can produce.
     ///
     /// Joined on scientific name, the same way `SpeciesGuide.species(forCode:)`
     /// does — the guide deliberately knows nothing about classifier codes.
     static func adoptNames(from guide: SpeciesGuide) {
         var names: [String: String] = [:]
+        var pages: [String: GuideSpecies] = [:]
         for entry in guide.species {
             guard let code = SpeciesGuide.code(forScientificName: entry.scientificName) else { continue }
             names[code] = entry.commonName
+            pages[code] = entry
         }
         guideNames = names
+        guidePages = pages
     }
 
     /// Fallback for codes the guide has no page for — which is most of them:

@@ -83,7 +83,7 @@ static float3 neonColormap(float t) {
     return mix(c2, c3, (t - 0.60) / 0.40);
 }
 
-static float3 colormap(float t, float paletteIndex) {
+static float3 colormap(float t, float paletteIndex, float invert) {
     t = clamp(t, 0.0, 1.0);
     int p = int(paletteIndex + 0.5);
     float3 c;
@@ -95,7 +95,13 @@ static float3 colormap(float t, float paletteIndex) {
     // Fade the bottom of every palette to black so silence renders dark even for
     // palettes whose t=0 stop is a saturated colour (viridis, jet).
     // Mirrors the identical fade in DisplayColormap.rgb (DisplayPalette.swift).
-    return c * min(t / 0.12, 1.0);
+    c = c * min(t / 0.12, 1.0);
+    // Light mode: a straight negative, so silence is white and calls are ink.
+    // Taken after the fade, which is what puts the background at pure white for
+    // every palette rather than at that palette's own t=0 colour. Mirrors the
+    // identical inversion in DisplayColormap.rgb.
+    if (invert > 0.5) c = 1.0 - c;
+    return c;
 }
 
 fragment float4 spectro_fragment(VertexOut in [[stage_in]],
@@ -108,7 +114,8 @@ fragment float4 spectro_fragment(VertexOut in [[stage_in]],
                                  constant float &noiseFloor [[buffer(5)]],
                                  constant float &isRing [[buffer(6)]],
                                  constant float &paletteIndex [[buffer(7)]],
-                                 constant float &logFreq [[buffer(8)]]) {
+                                 constant float &logFreq [[buffer(8)]],
+                                 constant float &invertColors [[buffer(9)]]) {
     // Ring texture: repeat wrapping gives smooth sub-column scrolling as `rightEdge`
     // advances by fractional columns each frame. Seek texture is linear (not a
     // ring) — repeat-wrapping it would blend in texels from the opposite edge near
@@ -143,5 +150,5 @@ fragment float4 spectro_fragment(VertexOut in [[stage_in]],
     // Noise gate + contrast stretch: drop everything below the floor, rescale the
     // rest to [0, 1] so the colormap's full range covers the signal above it.
     intensity = max(0.0, (intensity - noiseFloor) / max(0.01, 1.0 - noiseFloor));
-    return float4(colormap(intensity, paletteIndex), 1.0);
+    return float4(colormap(intensity, paletteIndex, invertColors), 1.0);
 }

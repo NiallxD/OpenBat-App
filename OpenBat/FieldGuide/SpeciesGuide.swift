@@ -97,6 +97,56 @@ struct GuideRegion: Codable, Identifiable, Hashable {
     }
 }
 
+/// Common names for the bat families the guide groups species under.
+///
+/// The collection pages group by `GuideSpecies.family`, and a heading that says
+/// "Vespertilionidae" tells a beginner nothing — the name they can actually use
+/// is "Vesper bats", with the Latin kept beside it for anyone who wants it
+/// (Niall, 2026-09-02). Held here rather than in the guide JSON because it is a
+/// property of the family, not of any one species: a per-species field would let
+/// two members of the same family disagree about what their family is called.
+///
+/// Every extant chiropteran family, so a new contributor entry lands with a
+/// heading already written. Anything unrecognised — a family added by a future
+/// taxonomy, or the app's "Other" bucket — falls back to the name as given
+/// rather than to a wrong guess.
+enum GuideFamily {
+
+    static func commonName(for family: String) -> String? { names[family] }
+
+    /// Niall's list (2026-09-02), one name each: where he gave two ("Vesper bats
+    /// / evening bats") the first is the heading and the second is here, because
+    /// a heading is not the place to teach synonyms.
+    ///
+    /// Cistugidae and Rhinonycteridae are not on that list — both were split out
+    /// of older families recently enough that plenty of sources still fold them
+    /// in — but a species filed under either would otherwise show bare Latin, so
+    /// they carry the names those splits are usually published under.
+    private static let names: [String: String] = [
+        "Pteropodidae":     "Flying foxes",           // also Old World fruit bats
+        "Rhinolophidae":    "Horseshoe bats",
+        "Hipposideridae":   "Old World leaf-nosed bats", // also roundleaf bats
+        "Rhinopomatidae":   "Mouse-tailed bats",
+        "Megadermatidae":   "False vampire bats",
+        "Craseonycteridae": "Bumblebee bat",          // also Kitti's hog-nosed bat
+        "Vespertilionidae": "Vesper bats",            // also evening bats
+        "Molossidae":       "Free-tailed bats",       // also mastiff bats
+        "Phyllostomidae":   "New World leaf-nosed bats",
+        "Emballonuridae":   "Sheath-tailed bats",     // also sac-winged bats
+        "Nycteridae":       "Slit-faced bats",
+        "Mormoopidae":      "Mustached bats",         // also ghost-faced bats
+        "Noctilionidae":    "Bulldog bats",           // also fishing bats
+        "Miniopteridae":    "Bent-winged bats",       // also long-fingered bats
+        "Natalidae":        "Funnel-eared bats",
+        "Furipteridae":     "Smoky bats",             // also thumbless bats
+        "Thyropteridae":    "Disk-winged bats",
+        "Myzopodidae":      "Sucker-footed bats",
+        "Mystacinidae":     "New Zealand short-tailed bats",
+        "Rhinonycteridae":  "Trident bats",
+        "Cistugidae":       "Wing-gland bats",
+    ]
+}
+
 /// One species entry. Only identity + placement fields are load-bearing today;
 /// the page-content fields are optional so the JSON can grow without breaking
 /// older app builds (unknown keys are ignored by Codable anyway).

@@ -1199,6 +1199,24 @@ Both found by a full-codebase sweep, both fixed the same day.
 - **Recording is blocked and no session is opened in demo mode.** A demo pass
   isn't field data; saving one would put a synthetic `Recording` in Sessions,
   eligible for upload and re-feedable into the demo.
+- **A demo still reached Sessions anyway, by the back door (found 2026-09-02).**
+  Blocking the recorder and opening no session left the demo's IDs as
+  session-less passes in the Listening bucket — and `adoptOrphanedListeningPasses`,
+  the launch-time migration written for pre-2026-08-16 "Just Listening" history,
+  runs on *every* launch over *any* session-less pass. So the next launch
+  invented an outing around an evening's demo runs: a Sessions row full of
+  species IDs with "No recordings in this session" under it, which is what it
+  looks like from the outside. Two fixes, both needed. Demo passes are now
+  in-memory only (`ClassificationStore.demoRun` / `PassRecord.isDemo`) — the
+  live species feed still shows them, `endDemoRun` drops them and their
+  thumbnails when the demo ends, and a pass whose thumbnail write finished after
+  that is discarded rather than inserted. And the migration is now bounded to
+  passes dated before 2026-08-16: a session-less pass after that date is a bug
+  upstream, and inventing an outing around it hides the bug behind a plausible
+  row. Note that nothing links a `PassRecord` to a `Recording`, so "IDs with no
+  recordings" is not diagnosable from the data after the fact — it is equally
+  what you get from a run with recording off, or from Settings ▸ Storage's
+  "Delete NoID Recordings", which deliberately keeps the pass log.
 
 ---
 
@@ -2023,6 +2041,97 @@ it is never more than one world-width — for any range that can exist. Hence
 `mapHeight` now sizes only the "no data" placeholder. `mapSize` survives purely
 as a re-frame guard; there is no longer a size → height → size loop to converge.
 
+**Amended 2026-09-02: square was necessary but not sufficient.** The argument
+above is about the *rect*, and it holds. What it assumed about MapKit does not:
+that `.rect` frames a rect by matching whichever axis needs the wider view and
+adding margin on the other. For a range much wider than it is tall the camera
+came back framed to the view's HEIGHT instead, with the east and west ends of
+the range off the map — common pipistrelle, whose padded rect is 1.5:1 (Niall).
+
+So the card no longer relies on a fitting rule at all. The rect is squared off
+before it reaches the camera — the short side grown around its own centre, slid
+back inside the world where the range sits near a pole — and the card is drawn
+in the shape that rect ends up. The two being the same shape leaves nothing to
+fit. Measured against the presence data all 48 species square with room at both
+poles (widest: greater horseshoe, 2.7:1 before framing), so the non-square
+fallback only exists for data that doesn't exist yet.
+
+### A bar that changes state breaks touches on a page that escaped its inset (2026-09-02)
+
+Every control on the species page answered to a region 20–70pt ABOVE itself, on
+iPad, and only after the page had been scrolled. It was drawn exactly where
+SwiftUI said it was — a screenshot measured against the logged frames agreed to
+the point — so the touches were the thing arriving in the wrong place.
+
+The cause was the navigation bar being told to change while the page underneath
+it had opted out of its safe area. The bar showed the species' name only once
+the hero photo had scrolled out from under it, and that flip changes the top
+safe area (measured swinging 140 ↔ 86). The page discards that inset with
+`.ignoresSafeArea(edges: .top)` so the photo can run to the top of the window —
+and when the inset moves, the content stays put while the touch mapping does
+not. Both halves are needed for the bug: no other screen escapes its inset, and
+before the title flip nothing moved it.
+
+The title is now a principal toolbar item that is always present and always the
+same size, and only its opacity changes — so it still appears when the photo has
+scrolled away, and the bar's layout never moves. **Anything on this page that
+makes the bar change SHAPE mid-scroll will bring this back.** Appearance is
+fine: `toolbarColorScheme` flips on the same signal and always has been
+harmless. It is content coming and going that costs a page its taps.
+
+### The map has to be told twice, and the second time is the one that lands (2026-09-02)
+
+Distribution maps were cropped on iPad, showing about three quarters of the
+range. Nothing to do with the rect: the card is laid out at the full window
+width and then narrowed to the reading column, and the map answers a resize by
+holding its centre and its zoom — so a map framed for a 756pt view keeps that
+zoom in a 592pt one and shows 592/756 of what it was given. iPhone never
+narrows, which is why only iPad was wrong.
+
+Two things had to be fixed to re-frame it, and the first is the trap:
+
+- **Assigning the same camera position twice does nothing.** The re-frame ran on
+  every size change and pushed `.rect(sameRect)`, and SwiftUI only sends a value
+  that has changed. `reframed(_:)` nudges the rect by a ten-thousandth on
+  alternate calls so no two re-frames are ever equal.
+- **The map rescales itself LATER than any re-frame can be scheduled.** Framing
+  in the same layout pass and again on the next tick were both overwritten by it
+  (1116 → 585 landed on 0.082 of the world against 0.157 asked for). So the card
+  answers the result instead of racing it: `onMapCameraChange` compares what the
+  map settled on against the range and frames again if it falls short, capped
+  per size change. Measured over rotations it takes one or two corrections and
+  then reads settled.
+
+### A zero-size drawable is not a frame (2026-09-02)
+
+Rotating an iPad crashed on a Metal validation assertion — a display drawable
+destroyed while a command buffer still needed it. A rotation takes the
+spectrogram view through a zero drawable size on the way to the new one
+(`CAMetalLayer ignoring invalid setDrawableSize width=0.000000`), and encoding
+against the layer at that moment leaves the buffer holding a drawable the layer
+then discards. `draw(in:)` now returns early on a zero drawable size.
+
+Only Debug crashes — `MTLDebugDevice` is the validation layer — so a release
+build would have carried the hazard silently.
+
+### Range outlines must not pinch (2026-09-02)
+
+Toggling Range/Records on the same species redrew the same cells differently
+each time (Niall, spotted bat). The ring tracer closed a loop only on returning
+to its *start*, so where two blocks of range meet corner to corner — one lattice
+point, two ways out — the walk carried on through and traced both blocks as one
+figure-of-eight. That is not a simple polygon and MapKit cannot fill one: it
+abandons the tessellation part way (`Wrapped around the polygon without
+finishing`, with the node count it had left) and not in the same place twice.
+
+Closing a loop the moment the walk revisits *any* vertex splits a corner touch
+into the two rings it always was, and makes the result independent of which exit
+was taken first. Counted over the real data, pinched rings before the fix:
+spotted bat 1 of 19, common pipistrelle 13 of 70, little brown 16 of 111 — and
+zero after. **Records mode only.** Modelled ranges are solid and never pinch,
+which is why this survived since 2026-08-17: the mode showing scattered single
+cells is the one where diagonal touches are everywhere.
+
 ### Distribution maps are drawn as outlines, not cells (2026-08-17)
 
 Every version that drew the presence cells themselves showed seams inside the
@@ -2378,6 +2487,110 @@ real UX trade (continuous audio under the finger versus silence until release),
 so it is Niall's call, not a bug fix. Likewise the log-frequency warp, which
 re-copies the whole displayed bitmap twice per frame during playback and only
 costs anything for people who turn that toggle on.
+
+### The field guide's figures, in the Call Analysis card (2026-09-02)
+
+The player measures eleven call parameters; the field guide publishes the same
+kind of figures for the species the recording is filed under. Until now the two
+lived on different screens, so checking a measured Fc against the book meant
+leaving the recording.
+
+The Call Analysis grid is four columns wide and holds eleven metrics, so its
+last cell was blank. It is now a button naming the species code ("LACI") that
+expands one reference row underneath: the guide's Pf, Cf and Duration, each
+column-aligned with the measured metric it should be read against — Pf under
+Peak, Cf under Char. Freq, Duration under Duration. The guide publishes no
+bandwidth figure, so the third column carries the entry's call type and its
+free-text notes behind the same info-popover gesture every other cell in the
+grid already answers to.
+
+Three things worth knowing:
+
+- **This row is the one thing allowed to change the card's height.** Everything
+  else about that card is fixed-height on purpose (a resizing card squashes the
+  spectrogram it shares a VStack with — see `CallAnalysisPanel`'s header). Here
+  the squash is the feature: it is a toggle the user opened, and it is why the
+  comparison is a row you expand rather than a row that is always there.
+- **The button appears only when there is something behind it.** The guide
+  covers far fewer species than the models can name, so a code with no guide
+  page — or an entry whose echolocation block has no figures filled in — leaves
+  the cell blank rather than expanding four dashes. NoID recordings never show
+  it.
+- **It is gated on a measurement existing.** The grid is faded to zero opacity
+  until a region has been selected, and an opacity-0 button is still tappable.
+
+Reaching the guide from the player meant passing `SpeciesGuideStore` down
+through Sessions; it is not constructed in the player, since it is a ~328 KB
+JSON decode that already happens once at launch.
+
+### Pages became columns on iPad, and compare no longer locks it up (2026-09-02)
+
+Two changes to the guide, one cosmetic and one not.
+
+**Pages read as a column.** A page took the full window width on iPad, which
+put a line of body text across ~1300pt — about twice a comfortable reading
+measure — and pushed a row of tiles out to opposite ends of the glass. Content
+is now 80% of the width in portrait and 55% in landscape, centred, so the
+margins are even. Two fractions rather than one because 80% of a landscape iPad
+is wider than the portrait screen the number was chosen for. The rule lives in
+one place, `PageColumn`, and applies to the species page, the guide's species
+lists in both layouts, the sessions list, a session's page and a pass's page.
+
+Nothing changes on a phone, or anywhere the container is narrower than 700pt (a
+form sheet, a slim Split View pane — both can report a regular width class while
+being no wider than a phone). Three screens are deliberately left full width
+because their content is not reading matter: the globe, the WAV player's
+spectrogram, and a **comparison pane** — those pass their width explicitly and
+have already given up half the window to the pane beside them.
+
+Two mechanics worth keeping straight:
+
+- **Portrait versus landscape is decided on width alone**, not on an aspect
+  ratio, so the rule can be applied to a view whose height is its content's
+  rather than the window's. 1050pt splits them cleanly: the narrowest landscape
+  iPad is 1080, the widest portrait one 1024.
+- **Everything except the species page is inset with `contentMargins`, not by
+  narrowing the view.** A list keeps its full-bleed background and leaves its
+  scroll indicator at the screen edge that way; narrowing the view itself puts
+  bare window down both sides of a page whose background is part of its look.
+  The species page is the exception because it already pins its content width
+  for a second reason — one over-wide card would otherwise let the whole page
+  scroll sideways — and one pin does both jobs.
+
+**`onScrollGeometryChange` was the wrong tool for measuring the viewport, and it
+failed silently.** The first version of this read `containerSize` from it, and
+the column never appeared: that modifier reports when the geometry CHANGES, and
+a page opened, read and left without ever being resized never changes its
+container size. Measuring the scroll view's own frame with `onGeometryChange`
+reports at layout, which is when the answer is needed. Neither direction risks
+the feedback the comparison view had to break with a `GeometryReader`: this is
+the size the scroll view is GIVEN, which does not depend on what is inside it.
+
+**Comparing from inside a species page locked the app up on iPad.** The compare
+button opened a picker sheet *hosted by the species page*, and choosing a
+species swapped that page out of the navigation path 350 ms later — asking
+SwiftUI to finish dismissing a sheet whose host was being removed. On iPhone the
+wait was long enough to get away with; on iPad, where the picker is a form sheet
+over a live page, it was not, and what came out the other side was an invisible
+modal that swallowed every touch. The app looked fine and answered nothing.
+
+The fix is ownership, not another delay: the guide's stack now presents that
+picker itself, and `SpeciesCompareMode.replacesPage` hands it the species being
+read rather than receiving a pair back. **The sheet hangs off the
+`NavigationStack`, not off anything inside it** — the stack's root content is no
+good either, since it leaves the window the moment a page is pushed over it and
+a sheet presented from an off-screen view never appears at all. The stack is the
+one host in the chain a path change cannot disturb. The 350 ms wait stays; it
+should now be belt to the fix's braces rather than the thing holding it up.
+
+Worth remembering the shape of this, because it is the third time the same trap
+has been hit here (see the notes in `SpeciesDetailView`): anything presented
+from a view that a navigation change is about to remove is living on borrowed
+time, and the phone forgives what the iPad does not.
+
+The other route into a comparison — arming compare mode on a collection and
+tapping two species — was never affected: it is a plain `NavigationLink` push
+with no sheet and no path surgery.
 
 ---
 

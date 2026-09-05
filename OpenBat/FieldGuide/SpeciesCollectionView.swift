@@ -64,7 +64,6 @@ struct SpeciesCollectionView: View {
     /// Whether this stack offers comparison at all — see `SpeciesCompareMode`.
     @Environment(\.speciesCompareMode) private var compareMode
     /// Only for orienting the compare glyph — see `compareToggle`.
-    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
     /// Compare mode: armed from the toolbar, then two taps pick the pair.
     /// Deliberately not a long-press on a species — that gesture is invisible,
@@ -73,6 +72,17 @@ struct SpeciesCollectionView: View {
     @State private var isComparing = false
     /// The first of the pair, once picked. Tapping it again puts it back.
     @State private var firstPick: GuideSpecies?
+    // NO `secondPick` here, and no gesture on the tile — REVERTED 2026-09-02,
+    // same day it was added. Marking the second pick as the push began meant a
+    // `simultaneousGesture` on the row, and a tap gesture attached to a row is
+    // enough to stop a `List` activating the `NavigationLink` under it: tapping
+    // any species in the guide stopped opening it at all. Browsing the guide
+    // beats confirming a tap in the one interaction where the confirmation
+    // arrives half a frame before the screen changes anyway.
+    //
+    // The picker sheet's tick (`SpeciesComparePickerSheet.picked`) is a
+    // different case and stands: there the tap starts a dismissal, and the
+    // wait is real.
 
     private static let unclassified = "Other"
 
@@ -95,10 +105,16 @@ struct SpeciesCollectionView: View {
     var body: some View {
         VStack(spacing: 0) {
             if !species.isEmpty {
+                // A count, not a title — small and on the trailing edge, out of
+                // the way of the family headings that start each group. It led
+                // the page in `.headline` at the leading edge, which put the
+                // least useful line on the page in the most prominent slot and
+                // gave the first heading something to compete with (Niall,
+                // 2026-09-02).
                 Text("Species \(countSuffix): \(species.count)")
-                    .font(.headline)
+                    .font(.caption)
                     .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
                     .padding(.horizontal)
                     .padding(.top, 8)
                     .padding(.bottom, 4)
@@ -113,6 +129,7 @@ struct SpeciesCollectionView: View {
                                            systemImage: "book.closed",
                                            description: emptyStateDescription)
                 }
+                .pageBackground()
             } else {
                 switch layout {
                 case .list:  listLayout
@@ -120,6 +137,7 @@ struct SpeciesCollectionView: View {
                 }
             }
         }
+        .background(Color.appBackground)
         // Floats over the collection rather than pushing it down. A banner in
         // the flow shoved every card down the screen the moment compare mode
         // was armed, which is a lot of movement to say one sentence — and the
@@ -132,6 +150,13 @@ struct SpeciesCollectionView: View {
         .animation(.snappy(duration: 0.25), value: firstPick)
         .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
+        // No painted header (Niall, 2026-09-02). The app-wide appearance proxy
+        // gives every bar an opaque background, which on a page whose content
+        // starts right under it reads as a header strip the page doesn't need.
+        // Cleared here, with the scroll-edge scrim dropped alongside it — one
+        // without the other just swaps a painted bar for a glass one.
+        .clearNavigationBarBackground()
+        .flatTopScrollEdge()
         .toolbar {
             // Two species are the minimum for a comparison to mean anything, so
             // the button isn't offered on a page that can't satisfy it — nor on
@@ -156,13 +181,12 @@ struct SpeciesCollectionView: View {
         Button {
             if isComparing { exitCompare() } else { isComparing = true }
         } label: {
-            Image(systemName: "chevron.up.chevron.down.square")
-                .symbolVariant(isComparing ? .fill : .none)
-                // Turned on its side where the comparison itself is: the glyph
-                // shows the two halves you are about to get, so it should be
-                // split the way they will be — stacked on a phone, beside each
-                // other on an iPad.
-                .rotationEffect(.degrees(horizontalSizeClass == .regular ? 90 : 0))
+            // A branching arrow: one thing you are reading, two things you
+            // end up looking at. It replaced a split-square glyph that was
+            // rotated to match the comparison's own layout — the arrow reads
+            // the same way round whichever way the panes are split, so there
+            // is nothing to rotate any more.
+            Image(systemName: "arrow.trianglehead.branch")
         }
         .tint(isComparing ? Color.batAccent : nil)
         .accessibilityLabel(isComparing ? "Cancel comparing" : "Compare two species")
@@ -271,26 +295,111 @@ struct SpeciesCollectionView: View {
         .accessibilityLabel(layout.toggled.actionLabel)
     }
 
+    /// "Vesper bats (Vespertilionidae)" — the name someone can use, with the
+    /// one they will meet in the literature beside it.
+    ///
+    /// The Latin is the smaller half deliberately: it is the label the group is
+    /// filed under, not the thing being read. Falls back to the Latin alone for
+    /// a family with no common name on file, and for the "Other" bucket, where a
+    /// parenthetical repeating the heading would be noise.
+    private func familyHeader(_ family: String) -> some View {
+        let common = GuideFamily.commonName(for: family)
+        return TileSectionHeading(title: common ?? family,
+                                   detail: common == nil ? nil : family)
+    }
+
+
+
     private var listLayout: some View {
         List {
             ForEach(families, id: \.name) { family in
-                Section(family.name) {
-                    ForEach(family.species) { species in
-                        speciesTile(species) {
-                            GuideSpeciesRow(species: species)
-                                .comparePick(isPicked(species), cornerRadius: 10)
+                // A heading ROW, not a `Section` header. A plain list pins its
+                // section headers to the top as you scroll, and these have no
+                // background of their own any more — a pinned heading would ride
+                // over the glass tiles passing under it. The card layout doesn't
+                // pin its headings either, and matching that is the whole point.
+                familyHeader(family.name)
+
+                ForEach(family.species) { species in
+                    speciesTile(species) {
+                        HStack(spacing: 10) {
+                            GuideSpeciesRow(species: species, fullBleedThumbnail: true)
+                            if isComparing { compareTick(species) } else { RowChevron() }
                         }
+                        .padding(.trailing, 12)
+                        // On the row, not on the tick: the tick is decoration
+                        // for VoiceOver, and the thing that is selected is the
+                        // species.
+                        .accessibilityElement(children: .combine)
+                        .accessibilityAddTraits(isPicked(species) ? .isSelected : [])
+                        .glassTile()
                     }
+                    .tileRow()
                 }
             }
         }
+        // `.plain`, because the rows are the cards now. An inset-grouped list
+        // draws a rounded container of its own around each section and insets it
+        // by an amount only it knows — which is why the card grid's 14pt gutter
+        // and the list's rows never quite lined up, and why the headings sat a
+        // couple of points out with them (Niall, 2026-09-02). Plain contributes
+        // no container and no inset, so both layouts measure from the same edge.
+        .listStyle(.plain)
+        .pageBackground()
+        .listRowSpacing(0)
+        .contentMargins(.top, TileList.scrollTopMargin, for: .scrollContent)
+        .pageColumn()
+        // The system's chevron is off for good, not just while comparing. It is
+        // drawn by the list in the row's trailing inset — which is now OUTSIDE
+        // the glass tile, so it floated in the gutter beside the row instead of
+        // sitting in it (Niall, 2026-09-02). The row draws its own, inside the
+        // tile, where the tick also goes. Back-deployed to iOS 17 despite being a
+        // 26-era spelling, so there is no availability fork here.
+        .navigationLinkIndicatorVisibility(.hidden)
+    }
+
+    /// A row's compare state, in the chevron's place — the same tick the
+    /// sessions list swaps in while a selection is running (`SelectableRow`).
+    ///
+    /// **Rows get a tick; cards keep the orange outline** (Niall, 2026-09-02). An
+    /// outline drawn around a full-bleed list row is a rectangle around a
+    /// rectangle in a stack of them, and it reads as a rendering artefact rather
+    /// than as a choice you made; on a card, which is already a discrete object
+    /// with its own corners, the same outline reads exactly right. What both
+    /// layouts share is the meaning, not the drawing.
+    ///
+    /// Sits in the row's trailing slot, where the chevron is the rest of the
+    /// time.
+    ///
+    /// Shown on every row, not just the pickable ones: after a first pick, a tap
+    /// on any other row completes the comparison, so an empty circle is the
+    /// truth everywhere. The filled one marks the species already chosen.
+    private func compareTick(_ species: GuideSpecies) -> some View {
+        Image(systemName: isPicked(species) ? "checkmark.circle.fill" : "circle")
+            .font(.title3)
+            .foregroundStyle(isPicked(species) ? Color.batAccent : Color.secondary)
+            .accessibilityHidden(true)
     }
 
     private var cardLayout: some View {
         ScrollView {
-            LazyVGrid(columns: Self.columns, spacing: 14) {
+            // A `LazyVStack` of heading-then-grid rather than one `LazyVGrid` of
+            // sections. A grid section's header is spaced from its content by the
+            // grid's own `spacing` — the same 14 that separates the cards — so
+            // the heading sat a card-gap above its cards while the list's sat
+            // right on top of its rows, and there was no way to say "less here,
+            // the same there" without changing how far apart the cards are
+            // (Niall, 2026-09-02). One grid per family puts the gap under a
+            // heading in `TileList.headerBottomPadding`, where the list can use the
+            // same number.
+            LazyVStack(alignment: .leading, spacing: 0) {
                 ForEach(families, id: \.name) { family in
-                    Section {
+                    familyHeader(family.name)
+                        .padding(.top, TileList.headerTopPadding)
+                        // No bottom padding here: `TileSectionHeading` carries
+                        // its own now, because it has to be negative.
+
+                    LazyVGrid(columns: Self.columns, spacing: TileList.rowSpacing) {
                         ForEach(family.species) { species in
                             speciesTile(species) {
                                 GuideSpeciesCard(species: species)
@@ -302,17 +411,20 @@ struct SpeciesCollectionView: View {
                             }
                             .buttonStyle(.plain)
                         }
-                    } header: {
-                        Text(family.name)
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.top, 4)
                     }
+                    // The same half-gap a list row carries in its own insets,
+                    // above and below — see `TileList.halfGap`.
+                    .padding(.vertical, TileList.halfGap)
                 }
             }
-            .padding(14)
+            .padding(.top, TileList.scrollTopMargin)
+            .padding(.horizontal, TileList.contentInset)
+
         }
+        // Narrower cards, not more of them: the grid keeps its two/three
+        // columns and the column takes the width off both sides — see
+        // `PageColumn`.
+        .pageColumn()
     }
 }
 
@@ -350,12 +462,7 @@ struct GuideSpeciesCard: View {
             }
             .clipped()
             .overlay(alignment: .bottom) { nameplate }
-            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .liquidGlass(in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .strokeBorder(.white.opacity(0.12), lineWidth: 1)
-            }
+            .glassTile()
             .task(id: species.scientificName) {
                 // Contributor-set URL first — see `GuideSpecies.imageURL`'s
                 // doc comment for why that's preferred over the live
@@ -400,11 +507,15 @@ struct GuideSpeciesCard: View {
 }
 
 
-/// The orange outline on the first of a compared pair. An outline rather than a
-/// checkmark or a dimming of everything else: it marks the one thing that
-/// changed without redrawing the page around it, and the accent is the same
-/// orange the session button glows, which is this app's colour for "this is the
-/// live one".
+/// The orange outline on the first of a compared pair — **the card layout's
+/// marker only**. A card is a discrete object with its own corners, so an
+/// outline around it reads as "this one is chosen" without redrawing the page
+/// around it, in the same orange the session button glows.
+///
+/// List rows use a tick in the chevron's slot instead
+/// (`SpeciesCollectionView.compareTick`): the same outline around a full-bleed
+/// row is a rectangle drawn around a rectangle in a stack of them, and reads as
+/// an artefact rather than a choice.
 private struct ComparePickOutline: ViewModifier {
     let isPicked: Bool
     let cornerRadius: CGFloat

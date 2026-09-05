@@ -132,15 +132,17 @@ struct SunWindowPill: View {
 
     private func pill(_ phase: SunWindow.Phase, now: Date) -> some View {
         HStack(spacing: 4) {
-            // Orange sun, white readout. The glyph carries the colour because it
-            // is the sun; the number stays white so it reads as a value at a
-            // glance in the dark, which is the whole job.
+            // Orange sun, plain readout. The glyph carries the colour because
+            // it is the sun; the number takes the page's own ink so it reads as
+            // a value at a glance, which is the whole job — it was literally
+            // white, which is the same thing in the dark and invisible in a
+            // light-mode toolbar.
             Image(systemName: Self.icon(phase))
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(Color.batAccent)
             Text(Self.label(phase, now: now))
                 .font(.system(size: 12, weight: .semibold).monospacedDigit())
-                .foregroundStyle(.white)
+                .foregroundStyle(.primary)
         }
         // Hold intrinsic width: the number is the whole point of the pill, so it
         // wins the layout rather than being squeezed to just the icon. Same
@@ -238,8 +240,9 @@ struct SunWindowPill: View {
 /// It leads with tonight's real times rather than the general advice, because
 /// that is the part a user acts on tonight.
 ///
-/// Computed once when the popover opens rather than on a timeline: a popover is
-/// read in a few seconds and the times inside it do not move.
+/// Tonight's times are computed once when the popover opens — they do not move
+/// while it is read. The sun riding the arc does, on the minute; that tick lives
+/// in `SunArcView`.
 private struct SunWindowExplainer: View {
     let coordinate: CLLocationCoordinate2D
 
@@ -247,14 +250,26 @@ private struct SunWindowExplainer: View {
         let f = DateFormatter(); f.timeStyle = .short; return f
     }()
 
+    /// Full screen width bar a margin on a phone, within sensible bounds. A
+    /// popover sizes itself to its content, so this has to be stated — there is
+    /// no "fill the screen" for content that is measured before it is placed.
+    ///
+    /// The cap is what keeps this sane on an iPad, where the popover is a small
+    /// panel hanging off the toolbar and full width would be absurd: the screen
+    /// term only ever binds on a phone.
+    private static var width: CGFloat {
+        let screen = UIScreen.main.bounds.width
+        return min(max(screen - 40, 280), 420)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Bat activity tonight")
+            Text("Sun Clock")
                 .font(.subheadline.weight(.semibold))
                 .frame(maxWidth: .infinity, alignment: .center)
 
-            if let night = SunWindow.night(at: Date(), coordinate: coordinate) {
-                SunArcView(sunset: night.sunset, sunrise: night.sunrise, now: Date())
+            if let night = SunWindow.dayAndNight(at: Date(), coordinate: coordinate) {
+                SunArcView(dayStart: night.dayStart, sunset: night.sunset, sunrise: night.sunrise)
                     .padding(.vertical, 2)
 
                 Text("Most bats emerge soon after sunset and are most active for the first couple of hours, with a second, quieter burst before sunrise as they return to the roost.")
@@ -265,7 +280,7 @@ private struct SunWindowExplainer: View {
                 // Names the actual window length rather than "15%" — a fraction is
                 // the implementation, and what the user wants to know is how long
                 // they have got.
-                Text("This timer counts through those two windows, which for tonight is about \(SunWindowPill.compact(minutes: Int(night.window / 60))) after sunset and before sunrise. Night time is about \(SunWindowPill.compact(minutes: Int(night.sunrise.timeIntervalSince(night.sunset) / 60))) long tonight.")
+                Text("This timer counts through those two windows, which for tonight is about \(SunWindowPill.compact(minutes: Int(SunWindow.activityWindowFraction * night.sunrise.timeIntervalSince(night.sunset) / 60))) after sunset and before sunrise. Night time is about \(SunWindowPill.compact(minutes: Int(night.sunrise.timeIntervalSince(night.sunset) / 60))) long tonight.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -285,100 +300,278 @@ private struct SunWindowExplainer: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
         .padding(14)
-        .frame(width: 280, alignment: .leading)
+        // As wide as the screen allows rather than a fixed 280: the arc is the
+        // point of this popover and it is a wide drawing — three markers, two
+        // half-waves and their labels — so every point of width buys legibility.
+        // Capped so it does not sprawl on an iPad.
+        .frame(width: Self.width, alignment: .leading)
     }
 
 }
 
 // MARK: - Sun arc
 
-/// Sunrise on the left, sunset on the right, a dashed arc between them, and a
-/// sun glyph riding the arc at wherever `now` falls in tonight's sunset→sunrise
-/// span. Static once drawn — same "computed when the popover opens" choice as
-/// the rest of `SunWindowExplainer`, not a live clock.
+/// Tonight's shape of the sky, end to end: the day the user is standing in
+/// rising to noon, dipping into sunset, and the night trough running on to the
+/// next sunrise — with the sun (or the moon, once it is dark) riding the curve
+/// at wherever `now` actually falls.
+///
+/// **The span is sunrise → sunset → sunrise, not sunset → sunrise, and that is
+/// the fix.** The first cut of this drew the night only, so every daylight hour
+/// — the hours someone is most likely to open the app and plan an evening —
+/// clamped to the same end point, and the sun sat parked on the sunset marker
+/// from dawn to dusk. Nothing moved until it was already dark. Spanning the day
+/// too means the glyph is somewhere honest at every hour, and "how long until
+/// sunset" is a distance you can see rather than a number to read.
+///
+/// Live, unlike the rest of the explainer: it advances on the minute through the
+/// same `@State` tick the pill uses, never a `TimelineView` — see
+/// `SunWindowPill.tick()` for why that distinction is load-bearing here.
 private struct SunArcView: View {
+    /// The sunrise that opened the current day — the left end of the curve.
+    let dayStart: Date
     let sunset: Date
+    /// The sunrise that ends the night — the right end.
     let sunrise: Date
-    let now: Date
+
+    @State private var now = Date()
 
     private static let clock: DateFormatter = {
         let f = DateFormatter(); f.timeStyle = .short; return f
     }()
 
-    /// 0 at sunset, 1 at sunrise — how far through tonight `now` is. Clamped
-    /// so a popover opened just before sunset or just after sunrise still
-    /// pins the sun glyph to the nearer end rather than running off the arc.
-    private var progress: Double {
-        let total = sunrise.timeIntervalSince(sunset)
-        guard total > 0 else { return 0 }
-        return min(max(now.timeIntervalSince(sunset) / total, 0), 1)
+    // MARK: Geometry
+
+    /// y of the horizon line: the two sunrises, the sunset, and their labels all
+    /// sit on it, the day dome above and the night trough below.
+    private static let baseline: CGFloat = 46
+    /// How far the curve travels either side of the horizon. Day and night share
+    /// it so neither reads as the more important half.
+    private static let amplitude: CGFloat = 32
+    private static let totalHeight: CGFloat = 100
+    /// Inset from each edge so an end label's full width doesn't clip against the
+    /// popover's padding.
+    private static let edgeInset: CGFloat = 20
+    /// Gap between an anchor icon and where a horizon segment resumes.
+    private static let anchorGap: CGFloat = 16
+    /// Distance from the horizon to the centre of an anchor's time label.
+    private static let labelOffset: CGFloat = 20
+    /// How far from a glyph's centre the curve stops — a little wider than the
+    /// glyph itself, so the line ends short of it rather than touching.
+    private static let gapRadius: CGFloat = 13
+    /// The same gap on the night half, which needs a touch more: the trough
+    /// arrives at each anchor from below and shallowly, so it runs alongside the
+    /// icon for longer than the day curve does before it clears it.
+    private static let nightGapRadius: CGFloat = 15
+
+    /// Where `now` sits, as a position on one of the two half-waves.
+    /// Clamped: a popover held open across an event pins the glyph to the marker
+    /// it is passing rather than running off the end of the curve.
+    private var marker: (isDay: Bool, u: Double) {
+        if now < sunset {
+            let day = sunset.timeIntervalSince(dayStart)
+            guard day > 0 else { return (true, 1) }
+            return (true, min(max(now.timeIntervalSince(dayStart) / day, 0), 1))
+        }
+        let night = sunrise.timeIntervalSince(sunset)
+        guard night > 0 else { return (false, 1) }
+        return (false, min(max(now.timeIntervalSince(sunset) / night, 0), 1))
     }
-
-    /// The moving glyph is the sun, not the night — once sunset has actually
-    /// passed there's nothing for it to represent, so it disappears rather
-    /// than riding the arc as a stand-in for "how far through the night".
-    private var isBeforeSunset: Bool { now < sunset }
-
-    /// y of the arc's two ends, and where the end icons sit — everything below
-    /// that line is the icon + time labels.
-    private static let baseline: CGFloat = 44
-    /// y of the arc's highest point, above the baseline. Kept well clear of
-    /// the baseline (was 30pt, now 42) so the curve reads as a rounded dome
-    /// rather than two near-straight sides meeting a flat top — a shallow
-    /// arc over this width looked like it just stopped at the ends instead
-    /// of curving into them.
-    private static let arcTop: CGFloat = 2
-    private static let totalHeight: CGFloat = 86
-    /// Inset from each edge so the end labels' full width (icon or the wider
-    /// time text below it) doesn't clip against the popover's padding.
-    private static let edgeInset: CGFloat = 18
 
     var body: some View {
         GeometryReader { geo in
-            let width = geo.size.width
-            let left = CGPoint(x: Self.edgeInset, y: Self.baseline)
-            let right = CGPoint(x: width - Self.edgeInset, y: Self.baseline)
-            let control = CGPoint(x: width / 2, y: Self.arcTop)
+            let leftX: CGFloat = Self.edgeInset
+            let rightX: CGFloat = geo.size.width - Self.edgeInset
+            // Half the width each, NOT the real day/night proportion. Unequal
+            // halves make two visibly different curves — a squashed dome beside a
+            // stretched trough — and the drawing stops reading as one sine wave,
+            // which is the thing it is a picture of. The hours are on the labels;
+            // what the shape has to carry is "up, over, down, under, up". The
+            // glyph's position inside its own half is still the true fraction of
+            // that half elapsed, so tracking is unaffected.
+            let midX: CGFloat = (leftX + rightX) / 2
+            let place = marker
+            let markerPoint = Self.point(at: place.u,
+                                         from: place.isDay ? leftX : midX,
+                                         to: place.isDay ? midX : rightX,
+                                         below: !place.isDay)
 
+            horizonSegment("Day", from: leftX, to: midX)
+            horizonSegment("Night", from: midX, to: rightX)
+
+            // The curve is drawn with real gaps in it rather than covered or
+            // punched through. A dark disc behind each glyph is a visible dark
+            // disc, and `destinationOut` through a compositing group leaves a
+            // grey one — the popover's material does not survive being cut out of
+            // (Niall, 2026-09-02, twice). Leaving those samples out of the path
+            // has nothing behind it to get wrong on any background.
             Path { path in
-                path.move(to: left)
-                path.addQuadCurve(to: right, control: control)
+                for run in Self.gaps(in: Self.curve(from: leftX, to: midX, below: false)
+                                       + Self.curve(from: midX, to: rightX, below: true),
+                                     around: [CGPoint(x: leftX, y: Self.baseline),
+                                              CGPoint(x: midX, y: Self.baseline),
+                                              CGPoint(x: rightX, y: Self.baseline),
+                                              markerPoint]) {
+                    path.addLines(run)
+                }
             }
-            .stroke(Color.batAccent, style: StrokeStyle(lineWidth: 4, lineCap: .round))
+            .stroke(Color.batAccent, style: StrokeStyle(lineWidth: 4, lineCap: .round, lineJoin: .round))
 
-            // Sunrise sits at the curve's t=0 end, sunset at t=1 — the mirror
-            // of `progress` (0 at sunset, 1 at sunrise), so the glyph moves
-            // right-to-left as the night goes on, ending at sunrise on the left.
-            if isBeforeSunset {
-                Image(systemName: "sun.max.fill")
-                    .font(.system(size: 13))
-                    .foregroundStyle(Color.batAccent)
-                    .position(Self.quadPoint(t: 1 - progress, p0: left, control: control, p1: right))
-            }
+            Image(systemName: place.isDay ? "sun.max.fill" : "moon.fill")
+                .font(.system(size: 14))
+                .foregroundStyle(place.isDay ? Color.batAccent : Color.primary)
+                .position(markerPoint)
 
-            endLabel(icon: "sunrise.fill", time: sunrise)
-                .position(x: left.x, y: Self.baseline + 20)
-            endLabel(icon: "sunset.fill", time: sunset)
-                .position(x: right.x, y: Self.baseline + 20)
+            // Times below the first two, above the last: the curve leaves the
+            // right-hand sunrise from underneath, so a time below it would sit in
+            // the night trough.
+            endLabel(icon: "sunrise.fill", time: dayStart, above: false)
+                .position(x: leftX, y: Self.baseline)
+            endLabel(icon: "sunset.fill", time: sunset, above: false)
+                .position(x: midX, y: Self.baseline)
+            endLabel(icon: "sunrise.fill", time: sunrise, above: true)
+                .position(x: rightX, y: Self.baseline)
         }
         .frame(height: Self.totalHeight)
+        .accessibilityElement()
+        .accessibilityLabel(accessibilityLabel)
+        .task { await tick() }
     }
 
-    private func endLabel(icon: String, time: Date) -> some View {
-        VStack(spacing: 2) {
-            Image(systemName: icon)
-                .font(.system(size: 13))
-                .foregroundStyle(Color.batAccent)
-            Text(Self.clock.string(from: time))
-                .font(.caption2.monospacedDigit())
+    /// The horizon line for one half, split around its own label — no plate
+    /// behind the text, which over the popover's material would read as a patch
+    /// of grey rather than as a break in the line.
+    private func horizonSegment(_ title: String, from x0: CGFloat, to x1: CGFloat) -> some View {
+        HStack(spacing: 6) {
+            rule
+            Text(title)
+                .font(.caption2)
                 .foregroundStyle(.secondary)
+                .fixedSize()
+            rule
+        }
+        .frame(width: max(x1 - x0 - 2 * Self.anchorGap, 1))
+        .position(x: (x0 + x1) / 2, y: Self.baseline)
+    }
+
+    private var rule: some View {
+        Rectangle()
+            .fill(Color.secondary.opacity(0.4))
+            .frame(height: 1)
+    }
+
+    /// Icon on the horizon, its time stacked directly above or below it.
+    ///
+    /// Nothing behind either: the horizon and the curve are already broken around
+    /// the icon by `hole(at:)`, and the times sit clear of both lines, so a plate
+    /// would only be a dark shape on a page that has none.
+    private func endLabel(icon: String, time: Date, above: Bool) -> some View {
+        let time = Text(Self.clock.string(from: time))
+            .font(.caption2.monospacedDigit())
+            .foregroundStyle(.secondary)
+        let glyph = Image(systemName: icon)
+            .font(.system(size: 13))
+            .foregroundStyle(Color.batAccent)
+
+        // The icon holds the baseline whichever way the pair is stacked, so all
+        // three anchors line up on the horizon rather than on their own bounds —
+        // an offset rather than a stack, because an offset doesn't change the
+        // view's own bounds and `position` is placing that.
+        return ZStack {
+            glyph
+            time.offset(y: above ? -Self.labelOffset : Self.labelOffset)
+        }
+        .fixedSize()
+    }
+
+    /// Half a sine wave sampled into points — a quad curve can't hold the
+    /// shoulders of a dome and a trough meeting cleanly at the horizon, and the
+    /// sun has to ride the same geometry the stroke draws, which is far easier to
+    /// evaluate from the closed form than from a Bézier.
+    private static func curve(from x0: CGFloat, to x1: CGFloat, below: Bool) -> [CGPoint] {
+        stride(from: 0.0, through: 1.0, by: 1.0 / 96).map {
+            point(at: $0, from: x0, to: x1, below: below)
         }
     }
 
-    private static func quadPoint(t: Double, p0: CGPoint, control: CGPoint, p1: CGPoint) -> CGPoint {
-        let mt = 1 - t
-        let x = mt * mt * p0.x + 2 * mt * t * control.x + t * t * p1.x
-        let y = mt * mt * p0.y + 2 * mt * t * control.y + t * t * p1.y
-        return CGPoint(x: x, y: y)
+    /// Splits a sampled curve into the runs that stay clear of the glyphs,
+    /// so the stroke breaks around each one instead of running through it.
+    private static func gaps(in points: [CGPoint], around glyphs: [CGPoint]) -> [[CGPoint]] {
+        var runs: [[CGPoint]] = []
+        var run: [CGPoint] = []
+        for p in points {
+            let radius = p.y >= baseline ? nightGapRadius : gapRadius
+            let clear = glyphs.allSatisfy { hypot($0.x - p.x, $0.y - p.y) > radius }
+            if clear {
+                run.append(p)
+            } else if run.count > 1 {
+                runs.append(run); run = []
+            } else {
+                run = []
+            }
+        }
+        if run.count > 1 { runs.append(run) }
+        return runs
+    }
+
+    private static func point(at u: Double, from x0: CGFloat, to x1: CGFloat, below: Bool) -> CGPoint {
+        let offset = amplitude * sin(.pi * u)
+        return CGPoint(x: x0 + CGFloat(u) * (x1 - x0),
+                       y: baseline + (below ? offset : -offset))
+    }
+
+    // MARK: Tick
+
+    /// Advances the sun on the minute for as long as the popover is open. Same
+    /// `@State`-write mechanism as the pill, deliberately — see
+    /// `SunWindowPill.tick()`.
+    private func tick() async {
+        while !Task.isCancelled {
+            let instant = Date()
+            now = instant
+            let intoMinute = instant.timeIntervalSince1970.truncatingRemainder(dividingBy: 60)
+            do { try await Task.sleep(for: .seconds(60 - intoMinute)) } catch { return }
+        }
+    }
+
+    /// One sentence for VoiceOver: the three markers are meaningless read out as
+    /// separate glyphs and times.
+    private var accessibilityLabel: String {
+        let sunsetTime = Self.clock.string(from: sunset)
+        let sunriseTime = Self.clock.string(from: sunrise)
+        if now < sunset {
+            let mins = max(0, Int((sunset.timeIntervalSince(now) / 60).rounded(.up)))
+            return "Daytime. Sunset at \(sunsetTime), in \(SunWindowPill.spoken(minutes: mins)). Sunrise at \(sunriseTime)."
+        }
+        let mins = max(0, Int((sunrise.timeIntervalSince(now) / 60).rounded(.up)))
+        return "Night. Sunset was at \(sunsetTime). Sunrise at \(sunriseTime), in \(SunWindowPill.spoken(minutes: mins))."
+    }
+}
+
+// MARK: - Giving the slot back
+
+/// A screen's request to have the sun clock taken out of its leading toolbar
+/// slot for a while.
+///
+/// The pill is declared once, on every section's stack root (`ContentView`'s
+/// `sectionScreen`), so the screens themselves have no say over it — and one of
+/// them needs one: the sessions list puts Delete in the same leading slot while
+/// a selection is running. A preference travels up from the screen to the stack
+/// that owns the toolbar, which is the direction this information has to go.
+///
+/// `||` rather than last-wins, so a nested view asking for the slot is not
+/// overruled by a sibling that doesn't care.
+struct SunClockHiddenKey: PreferenceKey {
+    static let defaultValue = false
+    static func reduce(value: inout Bool, nextValue: () -> Bool) {
+        value = value || nextValue()
+    }
+}
+
+extension View {
+    /// Ask for the sun clock to be dropped from this screen's toolbar while
+    /// `hidden` is true.
+    func hidesSunClock(_ hidden: Bool) -> some View {
+        preference(key: SunClockHiddenKey.self, value: hidden)
     }
 }

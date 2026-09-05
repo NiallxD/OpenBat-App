@@ -70,10 +70,39 @@ struct RecordingRow: View {
     let store: ClassificationStore
     let consent: ConsentStore
     @State private var image: UIImage?
+    /// The second-place species line, once it has been worked out — see
+    /// `runnerUpLine(in:)`. `nil` until then, and drawn as a blank line rather
+    /// than as a claim, so the row's height never changes under the reader.
+    @State private var runnerUp: String?
+
+    /// Wide enough that the picture reads as the square end of the row — the
+    /// same width `GuideSpeciesRow` uses, because these rows sit in the same app
+    /// and now look like the same object.
+    private static let thumbnailWidth: CGFloat = 72
 
     var body: some View {
-        HStack(spacing: 12) {
-            thumbnail
+        // Full-bleed leading picture with the text laid over the space beside it,
+        // the way the guide's species rows are built: the photo is drawn as a
+        // `.background`, so it is handed the text block's own height and fills
+        // the row whatever the caption does to it.
+        text
+            .padding(.vertical, 10)
+            .padding(.trailing, 4)
+            .padding(.leading, Self.thumbnailWidth + 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(alignment: .leading) { leadingImage }
+            .task(id: recording.id) {
+                // Off the render path: `passes(forRecording:)` scans every pass
+                // in the library, and this row is one of a scrolling listful.
+                if !recording.isNoID { runnerUp = runnerUpLine(in: store.passes(forRecording: recording)) }
+                image = await RecordingThumbnailLoader.load(
+                    recording, store: store,
+                    maxPixelSize: RecordingThumbnailLoader.rowMaxPixelSize)
+            }
+    }
+
+    private var text: some View {
+        HStack(alignment: .center, spacing: 8) {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(recording.species).font(.headline)
@@ -83,26 +112,59 @@ struct RecordingRow: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
-                if recording.isNoID {
-                    Text("Triggered, but couldn't be classified")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                }
+                // Always a third line, whatever the row is. NoID rows carried
+                // one and identified rows did not, so half the list was two
+                // lines tall and half was three — and the taller ones had the
+                // bigger picture (Niall, 2026-09-02). The runner-up is the
+                // honest thing to put there: an ID is a choice between species,
+                // and which one it nearly was is the most useful thing about it.
+                Text(recording.isNoID ? "Triggered, but couldn't be classified" : (runnerUp ?? " "))
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
                 Text("\(Self.durationString(recording.durationSeconds)) · \(recording.pulseCount) pulse\(recording.pulseCount == 1 ? "" : "s") · \(Self.time(recording.date))")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            Spacer()
+            Spacer(minLength: 4)
             uploadBadge
             if let confidence = recording.confidence {
                 ConfidenceBadge(confidence: confidence)
             }
         }
-        .padding(.vertical, 2)
-        .task(id: recording.id) {
-            image = await RecordingThumbnailLoader.load(
-                recording, store: store,
-                maxPixelSize: RecordingThumbnailLoader.rowMaxPixelSize)
+    }
+
+    /// "Runner-up: Soprano Pipistrelle 22%", from the passes inside this
+    /// recording, or a plain statement when there was no second candidate.
+    ///
+    /// Taken from the pass that agrees with the recording's own species where
+    /// there is one — a recording can contain a pass that went the other way,
+    /// and the runner-up worth showing is the runner-up to the ID on the row.
+    /// Falls back to the strongest runner-up in the recording otherwise.
+    private func runnerUpLine(in passes: [PassRecord]) -> String {
+        let candidates = passes.filter { $0.runnerUpSpecies != nil }
+        let best = candidates.first { $0.species == recording.species } ??
+            candidates.max { ($0.runnerUpConfidence ?? 0) < ($1.runnerUpConfidence ?? 0) }
+        guard let best, let code = best.runnerUpSpecies else { return "No close second species" }
+        let name = SpeciesInfo.commonName[code] ?? code
+        guard let confidence = best.runnerUpConfidence else { return "Runner-up: \(name)" }
+        return String(format: "Runner-up: %@ %.0f%%", name, confidence * 100)
+    }
+
+    /// The species' photo where the guide has one for this code, the recording's
+    /// own spectrogram where it does not.
+    ///
+    /// **The photo first, and the spectrogram as the fallback** (Niall,
+    /// 2026-09-02): a row is a species sighting before it is a signal, and the
+    /// picture is what makes a list of them scannable — the same reason the guide
+    /// rows lead with one. NoID and NOISE have no guide page by construction, so
+    /// they keep the spectrogram, which is the only thing there is to show for a
+    /// recording that never resolved to a bat.
+    @ViewBuilder private var leadingImage: some View {
+        if let page = SpeciesInfo.guidePage(forCode: recording.species) {
+            GuideSpeciesThumbnail(species: page, size: Self.thumbnailWidth, fillsHeight: true)
+        } else {
+            spectrogramThumbnail
         }
     }
 
@@ -175,20 +237,23 @@ struct RecordingRow: View {
         .accessibilityLabel("Upload this recording")
     }
 
-    @ViewBuilder private var thumbnail: some View {
-        if let image {
-            Image(uiImage: image)
-                .resizable()
-                .interpolation(.high)
-                .aspectRatio(contentMode: .fill)
-                .frame(width: 56, height: 40)
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-        } else {
-            RoundedRectangle(cornerRadius: 6)
-                .fill(.quaternary)
-                .frame(width: 56, height: 40)
-                .overlay { Image(systemName: "waveform").font(.caption2).foregroundStyle(.secondary) }
+    /// The spectrogram, filling the same leading tile the species photo would.
+    @ViewBuilder private var spectrogramThumbnail: some View {
+        Group {
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .interpolation(.high)
+                    .aspectRatio(contentMode: .fill)
+            } else {
+                Rectangle()
+                    .fill(.quaternary)
+                    .overlay { Image(systemName: "waveform").font(.caption2).foregroundStyle(.secondary) }
+            }
         }
+        .frame(width: Self.thumbnailWidth)
+        .frame(maxHeight: .infinity)
+        .clipped()
     }
 
     static func time(_ d: Date) -> String {
@@ -262,6 +327,7 @@ struct RecordingPulsesSheet: View {
                     }
                 }
             }
+            .pageBackground()
             .navigationTitle("Pulses")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -298,14 +364,20 @@ struct RecordingPulsesSheet: View {
 struct SessionSpeciesSummary: View {
     let passes: [PassRecord]
 
-    private var counts: [(species: String, commonName: String, count: Int)] {
+    /// Detections per species, commonest first. Shared with the session detail
+    /// screen's map-side column, which shows the same tally without the bars.
+    static func counts(for passes: [PassRecord]) -> [(species: String, commonName: String, count: Int)] {
         var byspecies: [String: (commonName: String, count: Int)] = [:]
         for pass in passes where !pass.isNoise && !pass.isNoID {
             byspecies[pass.species, default: (pass.commonName, 0)].count += 1
         }
         return byspecies
             .map { (species: $0.key, commonName: $0.value.commonName, count: $0.value.count) }
-            .sorted { $0.count > $1.count }
+            .sorted { $0.count == $1.count ? $0.species < $1.species : $0.count > $1.count }
+    }
+
+    private var counts: [(species: String, commonName: String, count: Int)] {
+        Self.counts(for: passes)
     }
 
     var body: some View {

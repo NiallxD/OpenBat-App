@@ -79,10 +79,27 @@ struct SpeciesComparisonView: View {
             // The 1pt is the divider's. Without subtracting it the two halves
             // add up to a point more than there is, and the split overflows
             // again — by much less, but visibly.
-            let paneWidth = sideBySide ? (geometry.size.width - 1) / 2 : geometry.size.width
-            let paneHeight = sideBySide ? geometry.size.height : (geometry.size.height - 1) / 2
+            // Floored at zero: on the first layout pass — and during a
+            // navigation transition, which is where this actually showed up — a
+            // reader can be offered a size of 0, and subtracting the divider's
+            // point from that asks for a pane half a point WIDE OF NOTHING.
+            // SwiftUI logs "Invalid frame dimension (negative or non-finite)"
+            // and the pane is laid out at a size nobody chose (Niall,
+            // 2026-09-02).
+            let paneWidth = max(0, sideBySide ? (geometry.size.width - 1) / 2 : geometry.size.width)
+            let paneHeight = max(0, sideBySide ? geometry.size.height : (geometry.size.height - 1) / 2)
 
-            if sideBySide {
+            // **Nothing is built until there is somewhere to build it.**
+            // Flooring the arithmetic at zero (above) stopped SwiftUI
+            // complaining about the frame, but it still went on to construct
+            // two whole species pages at 0x0 — and a range map at that size
+            // hands MapKit a Metal drawable of zero width, which is where this
+            // screen was dying (Niall, 2026-09-02). A reader is offered 0x0
+            // whenever the comparison is presented rather than pushed, so this
+            // is a real state, not a first-frame nicety.
+            if paneWidth <= 0 || paneHeight <= 0 {
+                Color.clear
+            } else if sideBySide {
                 HStack(spacing: 0) {
                     pane(first, side: .first, width: paneWidth, height: paneHeight)
                     Divider()
@@ -186,14 +203,26 @@ enum SpeciesCompareMode {
     case unavailable
 
     /// The host owns its stack's path and will SWAP the species page for the
-    /// comparison rather than stacking one on the other.
+    /// comparison rather than stacking one on the other. Hand it the species
+    /// being read; it runs the whole flow from there — the "compare with…"
+    /// picker included.
     ///
     /// This is what makes Back land on the guide. A comparison started from a
     /// species page is a better view of that same page, not a place you went
     /// afterwards, so leaving the page behind to return to puts a screen in the
     /// way that nobody wants to visit — you have to go back twice to reach the
     /// list you were browsing.
-    case replacesPage(@MainActor (GuideSpecies, GuideSpecies) -> Void)
+    ///
+    /// **The host presents the picker, not the page, and that is load-bearing
+    /// on iPad** (Niall, 2026-09-02). The page used to own that sheet, so
+    /// choosing a species asked SwiftUI to tear the sheet's own host out of the
+    /// navigation stack moments after the sheet started dismissing. On iPhone
+    /// the wait that guards it was long enough; on iPad — where the picker is a
+    /// form sheet over a live page rather than a full-screen one — it was not,
+    /// and the app came out of it with an invisible modal still swallowing
+    /// every touch: a total lock-up. Presented from the stack's root, the
+    /// sheet's host is a view that the swap does not remove.
+    case replacesPage(@MainActor (GuideSpecies) -> Void)
 
     /// No path to swap, so the comparison is presented over the page instead.
     /// The fallback, and what every stack did before the guide grew a path.

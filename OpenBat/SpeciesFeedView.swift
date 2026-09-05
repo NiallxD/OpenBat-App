@@ -131,43 +131,66 @@ private struct SpeciesFeedRow: View {
             // stat cell — a dimmed row reads as "heard earlier", matching the
             // stat panel instead of implying the bat is still overhead.
             let isStale = context.date.timeIntervalSince(pass.date) > staleIDSeconds
-            // The runner-up/noise lines sit below the main row at full width —
-            // sharing the middle column with the name scrunches everything when
-            // this feed is in a narrow panel (e.g. the pulse-view column of the
-            // iPad-landscape layout).
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 10) {
-                    if showsThumbnail {
-                        thumbnail
-                    }
+            VStack(alignment: .leading, spacing: 2) {
+                // Name and score on one line. The two badges sit beside each
+                // other rather than stacked: stacked, a row with both of them
+                // was taller than the photo beside it for no reason, and the
+                // score and the caveat about it belong together.
+                HStack(alignment: .top, spacing: 8) {
                     titleAndTime(now: context.date)
                     Spacer(minLength: 4)
                     trailingBadges
                 }
-                secondaryLines
+                // The runner-up/noise lines and the two destinations share the
+                // bottom line — the text explains the ID, the buttons leave for
+                // the animal (guide) or the evidence (pulses).
+                HStack(alignment: .bottom, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 2) { secondaryLines }
+                    Spacer(minLength: 4)
+                    actionButtons
+                }
             }
             .opacity(isStale ? 0.5 : 1)
             .animation(.easeInOut(duration: 0.6), value: isStale)
+            .padding(.vertical, 10)
+            .padding(.trailing, 10)
+            // Room for the photo, which is drawn behind rather than beside the
+            // text: a `.background` is handed the text block's own height, so
+            // the photo fills the row's full height whatever the runner-up
+            // lines do to it. In an HStack it could only match by being given a
+            // height nothing here knows in advance.
+            .padding(.leading, showsThumbnail ? Self.photoWidth + 10 : 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(alignment: .leading) {
+                if showsThumbnail { thumbnail }
+            }
         }
-        .padding(8)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
-        .contentShape(RoundedRectangle(cornerRadius: 10))
-        .onTapGesture { showDetail = true }
+        .background(.ultraThinMaterial)
+        // Clips the photo as well as the fill, which is what lets the picture
+        // run into the card's leading edge and pick up its corners.
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        // The row goes to the animal, not to the evidence (Niall, 2026-09-02).
+        // A row that has just named a bat is read as that bat, and the guide
+        // page is what nearly every tap on it was after; the pulses behind the
+        // ID are one deliberate tap away on the button. Falls back to the
+        // pulses for a species the guide has no page for — the models name far
+        // more bats than the guide describes, and a dead tap is worse than the
+        // wrong destination.
+        .onTapGesture {
+            if let page = guidePage { profile = page } else { showDetail = true }
+        }
         .task(id: representativePulse?.id) {
             // Nothing to decode when the guide photo is what's on screen — the
             // pulse image is only ever the fallback now.
             guard guidePage == nil, let pulse = representativePulse else { return }
             image = await store.loadImage(for: pulse)
         }
+        // The shared modal wrapper rather than a stack of its own: this row and
+        // the stats strip were presenting the same page two ways, and the bar
+        // treatment only has to be decided once.
         .sheet(item: $profile) { page in
-            NavigationStack {
-                SpeciesDetailView(species: page, store: guide, presenceStore: presenceStore)
-                    .toolbar {
-                        ToolbarItem(placement: .confirmationAction) {
-                            Button("Done") { profile = nil }
-                        }
-                    }
-            }
+            SpeciesProfileSheet(species: page, store: guide, presenceStore: presenceStore)
         }
         .sheet(isPresented: $showDetail) {
             NavigationStack {
@@ -180,6 +203,10 @@ private struct SpeciesFeedRow: View {
             }
         }
     }
+
+    /// The leading photo's width. The row's height comes out close to it, so the
+    /// picture reads as the square end of the card.
+    private static let photoWidth: CGFloat = 78
 
     // Both lines shrink a little rather than wrap or truncate — in the narrow
     // pulse-view column there's ~100 pt for this text and
@@ -211,10 +238,18 @@ private struct SpeciesFeedRow: View {
                 .foregroundStyle(.tertiary)
         }
         if let runnerUp = pass.runnerUpSpecies {
-            Text("Runner-up: \(SpeciesInfo.commonName[runnerUp] ?? runnerUp)"
+            // Two lines rather than one wrapped one: the label is fixed and the
+            // name is not, so wrapping broke the species across lines and put
+            // half of "Runner-up:" on the second one.
+            Text("Runner-up:")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+            Text((SpeciesInfo.commonName[runnerUp] ?? runnerUp)
                  + (pass.runnerUpConfidence.map { String(format: " (%.0f%%)", $0 * 100) } ?? ""))
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
         }
     }
 
@@ -223,14 +258,44 @@ private struct SpeciesFeedRow: View {
         // where the model never settled on anything) — showing "0%" would read as
         // a real score rather than "we don't know".
         if !pass.isNoID {
-            HStack(spacing: 8) {
-                VStack(alignment: .trailing, spacing: 4) {
-                    ConfidenceBadge(confidence: pass.confidence)
-                    ComplexIndicator(pass: pass)
-                }
-                guideButton
+            HStack(spacing: 6) {
+                ConfidenceBadge(confidence: pass.confidence)
+                ComplexIndicator(pass: pass)
             }
         }
+    }
+
+    /// The row's two destinations. The guide button repeats what a tap on the
+    /// row does; the pulses button is the only way to the evidence behind the
+    /// identification, which the row itself used to open.
+    ///
+    /// Absent in the narrow placement (`showsThumbnail == false`, the pulse-view
+    /// column of the iPad-landscape layout) — there is about 100pt of row there
+    /// and the badges already have it.
+    @ViewBuilder private var actionButtons: some View {
+        if showsThumbnail {
+            HStack(spacing: 8) {
+                guideButton
+                actionButton(systemImage: "waveform.badge.magnifyingglass",
+                             label: "Pulses behind this identification") {
+                    showDetail = true
+                }
+            }
+        }
+    }
+
+    private func actionButton(systemImage: String,
+                              label: String,
+                              action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(Color.batAccent)
+                .frame(width: 34, height: 34)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
     }
 
     /// Opens the species' field-guide page from the detector, without leaving
@@ -238,21 +303,14 @@ private struct SpeciesFeedRow: View {
     /// it came back here when that cell was removed (2026-08-16), which is the
     /// better home for it anyway — this row already IS the species.
     ///
-    /// Its own tap target rather than a second gesture on the row: the row goes
-    /// to the pass detail (the evidence behind this identification), and the
-    /// book goes to the profile (the animal itself). Those are different
-    /// questions and a single tap can't serve both.
+    /// Now the same destination as a tap on the row, kept because it is the only
+    /// thing on the row that SAYS a species page is there to be opened.
     @ViewBuilder private var guideButton: some View {
         if let page = guidePage {
-            Button { profile = page } label: {
-                Image(systemName: "book.closed")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(Color.batAccent)
-                    .frame(width: 30, height: 30)
-                    .background(.ultraThinMaterial, in: Circle())
+            actionButton(systemImage: "book.closed",
+                         label: "Field guide page for \(page.commonName)") {
+                profile = page
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Field guide page for \(page.commonName)")
         }
     }
 
@@ -270,18 +328,20 @@ private struct SpeciesFeedRow: View {
     /// tile.
     @ViewBuilder private var thumbnail: some View {
         if let guidePage {
-            GuideSpeciesThumbnail(species: guidePage, size: 44, cornerRadius: 8)
+            GuideSpeciesThumbnail(species: guidePage, size: Self.photoWidth, fillsHeight: true)
         } else if let image {
             Image(uiImage: image)
                 .resizable()
                 .interpolation(.high)
                 .aspectRatio(contentMode: .fill)
-                .frame(width: 44, height: 44)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .frame(width: Self.photoWidth)
+                .frame(maxHeight: .infinity)
+                .clipped()
         } else {
-            RoundedRectangle(cornerRadius: 8)
+            Rectangle()
                 .fill(.quaternary)
-                .frame(width: 44, height: 44)
+                .frame(width: Self.photoWidth)
+                .frame(maxHeight: .infinity)
                 .overlay { Image(systemName: "waveform").font(.caption2).foregroundStyle(.secondary) }
         }
     }

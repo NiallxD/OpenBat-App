@@ -110,7 +110,7 @@ struct OnboardingView: View {
             }
             flowContent
                 .frame(maxWidth: isCenteredCard ? 480 : .infinity)
-                .background(Color(.systemBackground))
+                .background(Color.appBackground)
                 .clipShape(RoundedRectangle(cornerRadius: isCenteredCard ? 28 : 0, style: .continuous))
                 .shadow(color: .black.opacity(isCenteredCard ? 0.15 : 0), radius: 24, y: 8)
                 // Capped, not just centred: on an iPad screen this flow's own
@@ -325,7 +325,7 @@ struct OnboardingView: View {
             // user can finish onboarding, reach a silent detector screen, and
             // conclude the app is broken.
             cautionFooter {
-                PlugInAnimation(tint: .white)
+                PlugInAnimation(tint: .primary)
                     .frame(width: 76, height: 76)
             } text: {
                 "Our app works with USB microphones designed to be able to hear the ultra-high pitch calls which bats produce as they navigate the world. Visit the Help page in the top-right options menu to learn more."
@@ -377,7 +377,9 @@ struct OnboardingView: View {
             leading()
             Text(text())
                 .font(.footnote)
-                .foregroundStyle(.white)
+                // Not white: this sits on a 20%-orange wash, which is a pale
+                // wash on a light page.
+                .foregroundStyle(.primary)
                 .multilineTextAlignment(.leading)
         }
         .padding(12)

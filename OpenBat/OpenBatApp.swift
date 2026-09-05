@@ -43,7 +43,8 @@ struct OpenBatApp: App {
         CloudStorage.lastMigrationResult = migration
     }
 
-    /// Flat black nav bar on every screen, in every scroll state.
+    /// Flat nav bar on every screen, in every scroll state, in the ground colour
+    /// of whichever appearance the phone is in.
     ///
     /// SwiftUI's `.toolbarBackground(Color…)` only supplies a background *colour*
     /// — under iOS 26 Liquid Glass the bar still composites its own translucent
@@ -58,11 +59,18 @@ struct OpenBatApp: App {
     private static func configureNavigationBarAppearance() {
         let appearance = UINavigationBarAppearance()
         appearance.configureWithOpaqueBackground()
-        appearance.backgroundColor = .black
+        // Dynamic UIColors, not `.black`/`.white`. An appearance proxy is
+        // configured once at launch, but these resolve against the trait
+        // collection at draw time, so the bar follows a light/dark switch made
+        // while the app is running rather than needing a relaunch.
+        // The page's colour, not `systemBackground` — see `Color.appBackground`
+        // for why the light-mode page is a few percent of grey. A pure-white bar
+        // over a grey page is a header strip nobody asked for.
+        appearance.backgroundColor = UIColor(Color.appBackground)
         appearance.backgroundEffect = nil          // drop the glass/blur material
         appearance.shadowColor = .clear            // and the hairline separator
-        appearance.titleTextAttributes = [.foregroundColor: UIColor.white]
-        appearance.largeTitleTextAttributes = [.foregroundColor: UIColor.white]
+        appearance.titleTextAttributes = [.foregroundColor: UIColor.label]
+        appearance.largeTitleTextAttributes = [.foregroundColor: UIColor.label]
 
         let bar = UINavigationBar.appearance()
         bar.standardAppearance = appearance
@@ -89,7 +97,6 @@ struct OpenBatApp: App {
 /// initializer is only re-run when this view's is.
 private struct RootView: View {
     private let onboarding = OnboardingState.shared
-
     /// Decided once, here, because one of its outcomes changes which branch
     /// below is taken. `init` rather than `.onAppear`: by the time `onAppear`
     /// runs, `body` has already chosen a screen, and re-running onboarding after
@@ -118,9 +125,69 @@ private struct RootView: View {
                 .transition(.opacity)
             }
         }
-        // The UI (dark spectrogram backgrounds, white/orange/green icon tints)
-        // is designed for dark mode only — force it regardless of the system
-        // appearance setting so light mode never washes it out.
-        .preferredColorScheme(.dark)
+        // The app forced dark mode on everything until 2026-09-02, because its
+        // own chrome was white at a dozen hard-coded call sites and light mode
+        // washed all of it out. Those are semantic now — see `Color.glassEdge` —
+        // so the app follows the phone, or the Light/Dark/Device setting when
+        // one is picked.
+        //
+        // The spectrogram follows too: in light mode every colormap is drawn as
+        // a negative, so silence is white and calls are ink. That is one flag —
+        // `DisplayColormap.inverted` — read by the Metal shader and by every CPU
+        // colouring path. Everything drawn OVER a spectrogram (axis labels, grid
+        // lines, cursors, annotation pills) moved to `.primary` with it: white
+        // ink on a white plot is the obvious failure and the only reason those
+        // were ever literal white.
+        //
+        // Under everything, so any screen that doesn't paint its own ground
+        // gets the page colour rather than the window's flat white.
+        .background(Color.appBackground.ignoresSafeArea())
+        // Light / Dark / Device, applied by a LEAF and never read here — see
+        // `AppearanceApplier` for the launch-time runaway that caused.
+        .background(AppearanceApplier())
+    }
+}
+
+/// Applies the app's appearance setting, and keeps the spectrogram's polarity in
+/// step with whatever the app ends up drawn in.
+///
+/// **A leaf view, and it has to be** (Niall, 2026-09-02: the app stopped
+/// launching, killed by the OS for using too much memory). `RootView` held both
+/// halves of this: it applied `.preferredColorScheme` AND read
+/// `@Environment(\.colorScheme)`. Applying the preference changes the window's
+/// style, which changes that environment value, which re-evaluates the view that
+/// read it — and `RootView`'s body constructs `ContentView`, whose initializer
+/// seeds a dozen stores including the spectrogram's history buffers. Round and
+/// round, allocating on every pass, until the OS stepped in. See `RootView`'s own
+/// doc comment, which is about exactly this cost and predates the loop.
+///
+/// Here the two halves are in a view that draws nothing and builds nothing. The
+/// environment can flip under it as often as it likes.
+private struct AppearanceApplier: View {
+    @AppStorage(AppAppearance.key) private var appearanceRaw = AppAppearance.system.rawValue
+    /// The phone's own setting. Only consulted for "Device".
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var appearance: AppAppearance {
+        AppAppearance(rawValue: appearanceRaw) ?? .system
+    }
+
+    /// What the app is ACTUALLY drawn in, which is not always what this view's
+    /// environment says: the stored choice wins where it has one, and the
+    /// environment answers for "Device".
+    private var effectiveScheme: ColorScheme {
+        appearance.colorScheme ?? colorScheme
+    }
+
+    var body: some View {
+        // Nil for Device, which is what lets the phone through — see
+        // `AppAppearance`. The preference travels up from here to the window
+        // just as it would from anywhere else in the tree.
+        Color.clear
+            .preferredColorScheme(appearance.colorScheme)
+            .onAppear { DisplayColormap.inverted = effectiveScheme == .light }
+            .onChange(of: effectiveScheme) { _, new in
+                DisplayColormap.inverted = new == .light
+            }
     }
 }

@@ -244,6 +244,16 @@ final class SpectrogramRenderer: NSObject, MTKViewDelegate {
 
         advanceDisplayHead()
 
+        // **Nothing is drawn into a layer with no size.** A rotation takes the
+        // view through a zero drawable size on its way to the new one ("CAMetal
+        // Layer ignoring invalid setDrawableSize width=0.000000"), and encoding
+        // a frame against that layer left a command buffer holding a drawable
+        // the layer then threw away — which Metal's validation layer catches as
+        // a fatal "destroyed while still required to be alive by the command
+        // buffer" (Niall, 2026-09-02, rotating an iPad). Skipping the frame
+        // costs one frame at the start of a rotation and nothing else.
+        guard view.drawableSize.width > 0, view.drawableSize.height > 0 else { return }
+
         guard
             let passDescriptor = view.currentRenderPassDescriptor,
             let drawable = view.currentDrawable,
@@ -290,6 +300,10 @@ final class SpectrogramRenderer: NSObject, MTKViewDelegate {
         var floor = pulseDetector?.spectrogramNoiseFloor ?? 0
         var paletteIndex = Float((palette ?? pulseDetector?.displayPalette ?? .inferno).rawValue)
         var logFreq: Float = logFrequency ? 1 : 0
+        // Read per frame from the one global the CPU-side colouring also reads,
+        // so the live view and every rendered picture agree — see
+        // `DisplayColormap.inverted`.
+        var invertColors: Float = DisplayColormap.inverted ? 1 : 0
 
         encoder.setRenderPipelineState(pipeline)
         encoder.setFragmentTexture(renderTexture, index: 0)
@@ -302,6 +316,7 @@ final class SpectrogramRenderer: NSObject, MTKViewDelegate {
         encoder.setFragmentBytes(&isRing,     length: MemoryLayout<Float>.size, index: 6)
         encoder.setFragmentBytes(&paletteIndex, length: MemoryLayout<Float>.size, index: 7)
         encoder.setFragmentBytes(&logFreq,    length: MemoryLayout<Float>.size, index: 8)
+        encoder.setFragmentBytes(&invertColors, length: MemoryLayout<Float>.size, index: 9)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         encoder.endEncoding()
 

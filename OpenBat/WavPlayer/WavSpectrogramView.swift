@@ -502,7 +502,10 @@ struct WavSpectrogramView: View {
                 .frame(width: geoSize.width, height: geoSize.height)
                 .clipped()
         } else {
-            Color.black
+            // The plot's own ground while there is nothing to draw yet: white in
+            // light mode, black in dark, matching what the colormap renders at
+            // silence — see `DisplayColormap.inverted`.
+            Color(uiColor: .systemBackground)
                 .frame(width: geoSize.width, height: geoSize.height)
         }
     }
@@ -1925,8 +1928,8 @@ private struct SelectionOverlay: View {
         let y0 = CGFloat(max(0, min(1, vTop))) * geoSize.height
         let y1 = CGFloat(max(0, min(1, vBot))) * geoSize.height
         Rectangle()
-            .fill(Color.white.opacity(0.15))
-            .overlay(Rectangle().stroke(Color.white.opacity(0.6), lineWidth: 1))
+            .fill(Color.primary.opacity(0.15))
+            .overlay(Rectangle().stroke(Color.primary.opacity(0.6), lineWidth: 1))
             .frame(width: max(2, x1 - x0), height: max(2, y1 - y0))
             .position(x: (x0 + x1) / 2, y: (y0 + y1) / 2)
             .allowsHitTesting(false)

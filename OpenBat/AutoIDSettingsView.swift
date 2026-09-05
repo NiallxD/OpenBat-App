@@ -24,10 +24,12 @@ struct AutoIDSettingsView: View {
                     modelRow(model)
                 }
             } header: {
-                CardHeader("Models", "Which set of species OpenBat tries to recognise.")
-            } footer: {
-                Text("One model identifies at a time. Tap the circle to switch to a model; "
-                   + "tap its name to see the species it knows and how sure it has to be.")
+                // "One model at a time" is the card's whole rule, and it is what
+                // the single-select circles already show. Where each tap goes —
+                // circle to switch, name for the species list — is learned in one
+                // tap and doesn't earn a paragraph. See `SettingsView`'s header
+                // for the three-part shape every settings card now follows.
+                CardHeader("Models", "Which species OpenBat tries to recognise.")
             }
 
             // Moved here from General (2026-08-18). It lived under a "Location"
@@ -36,6 +38,9 @@ struct AutoIDSettingsView: View {
             // are good enough to become a pin, so they belong beside the thing
             // making the identifications.
             Section {
+                // Both notes sit ABOVE their control, which is where a control's
+                // description belongs — they were below, which made them read as
+                // an afterthought about the thing you had already moved.
                 VStack(alignment: .leading) {
                     HStack {
                         Text("Minimum confidence")
@@ -43,17 +48,16 @@ struct AutoIDSettingsView: View {
                         Text("\(Int(settings.mapPinMinConfidence * 100))%").monospacedDigit()
                             .foregroundStyle(.secondary)
                     }
+                    ControlNote("How certain the identification has to be.")
                     Slider(value: Binding(get: { Double(settings.mapPinMinConfidence) },
                                           set: { settings.mapPinMinConfidence = Float($0) }),
                            in: 0.3...0.95, step: 0.05)
                 }
-                ControlNote("How certain the identification has to be.")
+                ControlNote("So one chance detection isn't a pin.")
                 Stepper("Minimum calls: \(settings.mapPinMinPulseCount)",
                         value: $settings.mapPinMinPulseCount, in: 1...20)
-                ControlNote("How many calls it has to be based on, so a single "
-                          + "chance detection doesn't become a pin.")
             } header: {
-                CardHeader("Map pins", "Which of your identifications end up on the map.")
+                CardHeader("Map pins", "Which identifications end up on the map.")
             }
         }
         .onAppear { location.requestRegionFix() }

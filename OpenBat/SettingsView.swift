@@ -6,17 +6,25 @@
 //  segmented control rather than a `TabView`, so only the active tab's `Form`
 //  exists at a time.
 //
-//  **Every card here follows one shape** (2026-08-18, Niall's call — the tabs
-//  had grown into a heap of sections whose footers explained the implementation
-//  rather than the effect):
+//  **Every card here follows one shape, and it has exactly three parts**
+//  (2026-09-02, Niall's call — the cards had grown a description above the
+//  control AND a paragraph below it, so the same idea was explained twice at
+//  two sizes and the sheet read as a wall of text):
 //
 //    1. a short NAME, in ordinary words — what a person would call this thing;
-//    2. one line of DESCRIPTION under it saying what the card is for;
-//    3. each control as label-and-value, then its one-sentence note, then the
-//       control itself. The note sits ABOVE the slider deliberately (Niall,
-//       2026-08-18): read top to bottom you get the name, what it does, then the
-//       thing you drag — so the explanation arrives before you touch anything
-//       rather than after.
+//    2. one line of DESCRIPTION under it — **at most ten words, and it must
+//       still be one line on the narrowest iPhone**, which in practice means
+//       about forty characters;
+//    3. the control. A control that needs saying more than its label says gets
+//       a `ControlNote`, which is that control's own description and therefore
+//       sits ABOVE it, under the same ten-word rule.
+//
+//  **There is no fourth part.** Nothing goes below the control — no section
+//  footer, no trailing paragraph. Whatever a footer was carrying either matters
+//  enough to be compressed into the description, or it doesn't matter. The
+//  exceptions are the status `Label`s (a failed iCloud move, haptics off in Low
+//  Power Mode), which report a condition rather than explain a control, and
+//  alert messages, which are read before a decision rather than alongside one.
 //
 //  Use `CardHeader` for 1 and 2 and `ControlNote` for 3, so a card added later
 //  can't quietly reintroduce the old shape.
@@ -143,17 +151,14 @@ struct SettingsView: View {
                     get: { !simplifiedMode },
                     set: { simplifiedMode = !$0 }
                 ))
+
+                ControlNote("Or follow the phone, which is the default.")
+                AppearancePicker()
             } header: {
-                CardHeader("Interface", "How much of the app you see at once.")
-            } footer: {
-                // Says what the user will SEE, and — the part that matters —
-                // that nothing is being thrown away. Someone who has tuned an
-                // advanced control and then turns this on needs to know their
-                // settings are still there, or the switch reads as destructive
-                // and they won't touch it.
-                Text(simplifiedMode
-                     ? "You're seeing the simple screen: the species name, the level meter and the spectrogram. Turn this on to add the call close-up, the measurements, the timeline and palette controls, and a few finer detection settings. Nothing is deleted either way — whatever you've set is still there when you switch back."
-                     : "You're seeing everything. Turn this off for a plainer screen: just the species name, the level meter and the spectrogram.")
+                // "Nothing is lost" earns its place in ten words: someone who
+                // has tuned an advanced control reads a switch that hides
+                // controls as destructive, and won't touch it.
+                CardHeader("Interface", "How much you see, and how it looks.")
             }
 
             storageSections
@@ -214,15 +219,12 @@ struct SettingsView: View {
             Section {
                 Toggle("Keep recordings in iCloud", isOn: $keepInICloud)
             } header: {
-                CardHeader("Storage", "Where your recordings and session history are kept.")
-            } footer: {
-                // Deliberately explicit about both the benefit and the cost:
-                // audio is ~768 KB/s at 384 kHz, so a busy night can run to
-                // several GB against the user's iCloud quota — and they'd
-                // otherwise have no way to connect that to OpenBat.
-                Text(keepInICloud
-                     ? "They survive deleting the app and follow you to a new device. They stay in your own iCloud and don't appear in the Files app. Bat audio is large — a busy night can use several GB of your iCloud storage."
-                     : "They're on this device only, and are lost for good if you delete OpenBat. Nothing is kept in iCloud.")
+                // Of everything the old footer said, this is the half a person
+                // decides on. The cost it also carried — bat audio is ~768 KB/s,
+                // so a busy night can run to several GB of iCloud quota — has no
+                // home at ten words and is not stated anywhere else in the app.
+                // If it needs saying, it needs a place that can measure it.
+                CardHeader("Storage", "In iCloud they survive deleting the app.")
             }
 
             if case .awaitingDownloads(let count) = CloudStorage.lastMigrationResult {
@@ -263,12 +265,12 @@ struct SettingsView: View {
                 Button("Delete NoID Recordings", role: .destructive) {
                     showDeleteNoIDConfirm = true
                 }
-                ControlNote("Everything that triggered but couldn't be identified — usually noise. Species IDs and sessions are untouched.")
+                ControlNote("Unidentified triggers, usually noise.")
 
                 Button("Delete All Sessions", role: .destructive) {
                     showDeleteAllSessionsConfirmation = true
                 }
-                ControlNote("Every session on this device, with the IDs and recordings inside it. Recordings not in a session are kept — delete those individually in Sessions.")
+                ControlNote("Sessions, with the recordings inside them.")
             } header: {
                 CardHeader("Deleting in bulk", "Neither of these can be undone.")
             }
@@ -284,9 +286,9 @@ struct SettingsView: View {
                 Toggle("Contribute my recordings", isOn: .constant(false))
                     .disabled(true)
             } header: {
-                CardHeader("Community science", "Sharing what you record with researchers.")
-            } footer: {
-                Text("No project is running at the moment, so there's nothing to share with yet. Check back soon.")
+                // The description says why the switch is dead, because that is
+                // the only question this card raises.
+                CardHeader("Community science", "No project is running yet.")
             }
 
             // Device ID / consent erasure are hidden while contribution is
@@ -325,7 +327,7 @@ struct SettingsView: View {
             } label: {
                 Label("Share Log", systemImage: "square.and.arrow.up")
             }
-            ControlNote("Sends a zipped copy. Useful if you're reporting an identification that looks wrong.")
+            ControlNote("Send a copy when an ID looks wrong.")
 
             Button(role: .destructive) {
                 ClassificationLogger.shared.clearLog()
@@ -339,11 +341,9 @@ struct SettingsView: View {
             } label: {
                 Label(logCleared ? "Cleared" : "Clear Log", systemImage: "trash")
             }
-            ControlNote("Deletes the log only. Your recordings, sessions and species IDs are untouched.")
+            ControlNote("The log only. Recordings are untouched.")
         } header: {
-            CardHeader("Classifier log", "A running record of what OpenBat thought it heard.")
-        } footer: {
-            Text("Every detection is written down with its date and time, the species OpenBat picked, and how each species scored. It's kept on this device and never sent anywhere on its own.")
+            CardHeader("Classifier log", "What OpenBat heard, and when.")
         }
     }
 
@@ -399,14 +399,19 @@ struct SettingsView: View {
     /// precedence — "no mic attached" is the more fundamental blocker, and
     /// telling someone to stop detecting when they have nothing to detect with
     /// would send them round in a circle.
-    private var calibrationFooter: String {
+    ///
+    /// A blocked button is the one case where the reason has to be right there,
+    /// so this is the button's `ControlNote` rather than the description: the
+    /// card's description can't change with the mic, and a greyed-out button
+    /// with no reason beside it reads as a bug.
+    private var calibrationNote: String {
         if !audio.diagnostics.canCalibrate {
-            return "Plug in your ultrasonic microphone to calibrate it. There's nothing to measure on the phone's own mic — it can't hear the frequencies bats call at."
+            return "Plug in your ultrasonic mic to calibrate."
         }
         if audio.isRunning {
             return "Stop detecting first, then calibrate."
         }
-        return "Every microphone hears some pitches louder than others, which shows up as faint horizontal stripes on the spectrogram and biases frequency measurements. Calibrating measures yours in a quiet spot — about 15 seconds — and corrects for it. This affects what you see and measure, never what gets recorded."
+        return "Corrects the pitches your mic hears unevenly."
     }
 
     @ViewBuilder
@@ -417,6 +422,7 @@ struct SettingsView: View {
                 LabeledContent("Measured for", value: curve.micName)
                 LabeledContent("Measured on", value: curve.capturedAt.formatted(date: .abbreviated, time: .shortened))
             }
+            ControlNote(calibrationNote)
             Button {
                 showMicCalibration = true
             } label: {
@@ -424,9 +430,7 @@ struct SettingsView: View {
             }
             .disabled(audio.isRunning || !audio.diagnostics.canCalibrate)
         } header: {
-            CardHeader("Microphone", "The ultrasonic mic OpenBat is listening through.")
-        } footer: {
-            Text(calibrationFooter)
+            CardHeader("Microphone", "The mic you're listening through.")
         }
     }
 
@@ -448,7 +452,7 @@ struct SettingsView: View {
                             .monospacedDigit()
                             .foregroundStyle(.secondary)
                     }
-                    ControlNote("Scales every tap. Raise it if you're wearing gloves or carrying the phone in a pocket.")
+                    ControlNote("Raise it for gloves, or a pocket.")
                     Slider(value: $haptics.strength, in: 0.25...1.5, step: 0.05)
                         .accessibilityLabel("Vibration strength")
 
@@ -466,9 +470,11 @@ struct SettingsView: View {
                     }
                 }
             } header: {
-                CardHeader("Vibration", "A tap you feel for each call, instead of one you hear.")
-            } footer: {
-                Text("Stronger for a closer bat, sharper for a higher-pitched one. When calls come too fast to feel apart — a feeding buzz, as a bat closes on an insect — the taps run together into a hum, so that moment feels different rather than just quicker.\n\nWorks with the screen off, and doesn't need a listening mode switched on.")
+                // What the taps encode — stronger for a closer bat, sharper for
+                // a higher-pitched one, running together into a hum through a
+                // feeding buzz — is a paragraph, and it is felt in one press of
+                // "Play a sample". The sample button is the explanation now.
+                CardHeader("Vibration", "A tap you feel for each call.")
             }
         }
     }
@@ -512,7 +518,7 @@ struct SettingsView: View {
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                 }
-                ControlNote("Matches the brightness scale on the spectrogram, so anything that looks brighter than this will trigger. Lower it for faint, distant bats — and more noise with them.")
+                ControlNote("Lower it for faint bats, and more noise.")
                 Slider(value: $pulseDetector.amplitudeThreshold, in: 0.1...0.95, step: 0.05)
 
                 if pulseDetector.triggerMode == .ultrasonic {
@@ -521,12 +527,12 @@ struct SettingsView: View {
                             .monospacedDigit()
                             .foregroundStyle(.secondary)
                     }
-                    ControlNote("Anything below this is ignored however loud it is. 15–20 kHz clears wind and handling noise; raise it to target only the higher-pitched species.")
+                    ControlNote("Ignored below this. 15–20 kHz clears wind.")
                     Slider(value: pulseMinFreqKHz, in: 5...150, step: 5)
                 }
             } header: {
                 CardHeader("What counts as a call",
-                           "How loud, and how high, before OpenBat reacts.")
+                           "How loud, and how high, to trigger.")
             }
 
             Section {
@@ -535,7 +541,7 @@ struct SettingsView: View {
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                 }
-                ControlNote("How long a sound must last to count as a call. Raise it to reject clicks and pops.")
+                ControlNote("Raise it to reject clicks and pops.")
                 // The detector counts whole analysis columns, but nobody thinks
                 // in columns, so the slider moves in columns (step 1, the only
                 // values that exist) while the readout is milliseconds. That
@@ -553,7 +559,7 @@ struct SettingsView: View {
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                 }
-                ControlNote("A call can dip quiet partway through. Quiet patches shorter than this stay part of the same call — raise it if one call is being counted as several.")
+                ControlNote("Shorter quiet patches stay one call.")
                 Slider(value: $pulseDetector.maxGapMs, in: 0...30, step: 1)
 
                 LabeledContent("Wait after a call") {
@@ -561,11 +567,11 @@ struct SettingsView: View {
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                 }
-                ControlNote("The shortest gap accepted between two separate calls. 30 ms keeps up with a feeding buzz; raise it if echoes are being counted as extra calls.")
+                ControlNote("Shortest gap between two separate calls.")
                 Slider(value: $pulseDetector.holdOffSeconds, in: 0.02...1.0, step: 0.01)
             } header: {
                 CardHeader("Telling calls apart",
-                           "Stops one call being counted several times, and clicks being counted at all.")
+                           "Stops one call being counted as several.")
             }
             .advancedOnly(simplifiedMode)
         }
@@ -619,7 +625,7 @@ struct SettingsView: View {
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
             }
-            ControlNote("A bat call is a few thousandths of a second long — too short to hear any detail in. Slowing it down stretches that detail out, and drops the pitch by the same amount.")
+            ControlNote("Stops listening for about \(Int(snippetExpansion.replaySeconds.rounded())) s each time.")
             Slider(value: slowReplayIndex,
                    in: 0...Double(slowReplaySteps.count - 1),
                    step: 1)
@@ -634,7 +640,7 @@ struct SettingsView: View {
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
             }
-            ControlNote("Every replay is already matched to the same level, so a distant bat comes back as loud as a close one. This shifts them all together.")
+            ControlNote("Replays are levelled; this shifts them all.")
             Slider(value: Binding(
                 get: { snippetExpansion.trimDB },
                 set: {
@@ -657,16 +663,15 @@ struct SettingsView: View {
                 ForEach(SnippetDenoiseMode.allCases) { Text($0.label).tag($0) }
             }
             .pickerStyle(.segmented)
-            ControlNote("Slowing a recording down stretches its background hiss along with the bat. Reduce measures that hiss in each frequency band and subtracts it. Scrub goes further and silences everything that isn't plainly a call, so you hear the call and nothing else.")
+            ControlNote("Reduce cuts hiss. Scrub keeps only calls.")
         } header: {
-            CardHeader("Slow replay",
-                       "How far a captured call is slowed down so you can hear its shape.")
-        } footer: {
             // The cost of a higher speed is deafness, and from Settings — with
-            // no live readout beside it — that is invisible. The overlay shows
-            // it as "Replay length"; here it has to be said in the footer, in
-            // the terms it actually costs the listener.
-            Text("While a call is replaying, OpenBat isn't listening for new ones. At this speed each one takes about \(Int(snippetExpansion.replaySeconds.rounded())) seconds to play back.")
+            // no live readout beside it — that is invisible. It used to be a
+            // footer; it now rides on the speed slider's own note, which is the
+            // only control that changes it and the place a person is looking
+            // when they do.
+            CardHeader("Slow replay",
+                       "How far a call is slowed to hear it.")
         }
     }
 
@@ -677,7 +682,7 @@ struct SettingsView: View {
         Group {
             Section {
                 Toggle("Record automatically", isOn: $autoRecordOnSessionStart)
-                ControlNote("Starting detection also arms the recorder, so a bat that passes while you aren't watching is still saved.")
+                ControlNote("Starting detection also arms the recorder.")
             } header: {
                 CardHeader("Recording", "When OpenBat saves audio to a file.")
             }
@@ -688,7 +693,7 @@ struct SettingsView: View {
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                 }
-                ControlNote("The recording reaches back this far before the first call, so the approach isn't lost.")
+                ControlNote("Starts this far before the first call.")
                 // Upper bound from the recorder, which sizes its pre-roll ring for
                 // exactly this — a wider slider here than there would silently cap.
                 Slider(value: $recorder.preRollSeconds,
@@ -699,11 +704,11 @@ struct SettingsView: View {
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                 }
-                ControlNote("Each new call extends the recording, so it closes only once nothing has been heard for this long.")
+                ControlNote("Each new call extends the recording.")
                 Slider(value: $recorder.postRollSeconds, in: 1.0...10.0, step: 0.5)
             } header: {
                 CardHeader("Length of a recording",
-                           "One bat passing several times should be one file, not many.")
+                           "One pass should be one file, not many.")
             }
         }
     }
@@ -714,34 +719,67 @@ struct SettingsView: View {
 /// A settings card's name and its one-line description. See this file's header
 /// for the shape every card follows and why.
 ///
+/// **The description is at most ten words and must not wrap on the narrowest
+/// iPhone** (Niall, 2026-09-02) — about forty characters. It is the whole
+/// explanation the card gets: there is no paragraph under the control any more,
+/// so anything that won't compress to one line is something the card has to do
+/// without.
+///
 /// `.textCase(nil)` on the subtitle is load-bearing: a `Form` section header
 /// uppercases its content, which is right for the short name above and shouting
 /// for a sentence below it.
-struct CardHeader: View {
+struct CardHeader<Accessory: View>: View {
     let title: String
     let subtitle: String
+    /// An optional control on the title's own line — the species list's "Enable
+    /// all", and nothing else so far. It goes here rather than in an `HStack`
+    /// around the whole header so the description keeps the full width: beside a
+    /// button it had about two thirds of it, and a one-line rule that wraps
+    /// anyway is not a rule.
+    let accessory: Accessory
 
-    init(_ title: String, _ subtitle: String) {
+    init(_ title: String, _ subtitle: String,
+         @ViewBuilder accessory: () -> Accessory) {
         self.title = title
         self.subtitle = subtitle
+        self.accessory = accessory()
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text(title)
-            Text(subtitle)
-                .font(.caption)
-                .textCase(nil)
-                .foregroundStyle(.secondary)
+            HStack(alignment: .firstTextBaseline) {
+                Text(title)
+                Spacer(minLength: 8)
+                accessory
+            }
+            // An empty subtitle draws nothing rather than an empty line: a few
+            // cards are a bare name (a species family, a numbered step) and the
+            // stack's spacing would otherwise leave them sitting high.
+            if !subtitle.isEmpty {
+                Text(subtitle)
+                    .font(.caption)
+                    .textCase(nil)
+                    .foregroundStyle(.secondary)
+            }
         }
         .padding(.bottom, 2)
     }
 }
 
-/// One plain sentence under a control, saying what moving it does for the
-/// reader. Sits inside the card rather than in the section footer so it stays
-/// attached to its own control — a card with three sliders can't explain them
-/// all in one footer, which is how the old sections ended up with paragraphs.
+extension CardHeader where Accessory == EmptyView {
+    init(_ title: String, _ subtitle: String) {
+        self.init(title, subtitle) { EmptyView() }
+    }
+}
+
+/// One short line ABOVE a control, saying what moving it does for the reader —
+/// the same thing `CardHeader`'s description is for the card, under the same
+/// ten-word, one-line rule.
+///
+/// Above, not below, and inside the card rather than in a section footer: read
+/// top to bottom you get the name, what it does, then the thing you touch. A
+/// card with three sliders can't explain them all in one footer either, which
+/// is how the old sections ended up as paragraphs.
 struct ControlNote: View {
     let text: String
 

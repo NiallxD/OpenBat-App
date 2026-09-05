@@ -81,7 +81,7 @@ struct AboutAppTour: View {
                     .padding(.top, 8)
                     .padding(.bottom, 16)
             }
-            .background(Color(.systemBackground))
+            .background(Color.appBackground)
             .navigationTitle("About the app")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -169,8 +169,8 @@ struct AboutAppTour: View {
             VStack(spacing: 20) {
                 OnboardingStepView(
                     systemImage: "slider.horizontal.below.rectangle",
-                    title: "How much do you want to see?",
-                    message: "The detector can show a lot at once. Simplified view is the default — change it here or in Settings, whenever you like.")
+                    title: "How should it look?",
+                    message: "Two questions about the app rather than about bats. Both are the first things in Settings, and neither is permanent.")
 
                 // A real toggle rather than two choice cards: this is one
                 // setting with two states, it lives in Settings as a toggle,
@@ -189,7 +189,10 @@ struct AboutAppTour: View {
                         .font(.headline)
                         .padding(.horizontal, 16)
                         .padding(.vertical, 12)
-                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+                        // Same tile as the cards under it — this switch is one of the
+                        // row of things on this page, not a control of a
+                        // different kind.
+                        .glassTile()
 
                     OnboardingCard(
                         systemImage: simplifiedMode ? "eye" : "eye.trianglebadge.exclamationmark",
@@ -197,10 +200,22 @@ struct AboutAppTour: View {
                         detail: simplifiedMode
                             ? "A running list of every species heard, the input level, and the spectrogram. Enough to know which bat flew over."
                             : "Every readout and control: peak frequency, bandwidth, duration and pulse rate, the pulse close-up, and the timeline, palette and frequency-band controls.")
+                    // Asked here because it is the other question about how
+                    // the app looks, and asking both on one page is what makes
+                    // this the page a user remembers going back to (Niall,
+                    // 2026-09-02). Same control as Settings shows, for the same
+                    // reason the toggle above is a real toggle.
+                    AppearancePicker()
+                        .padding(.top, 6)
+                    OnboardingCard(
+                        systemImage: "circle.lefthalf.filled",
+                        title: "Light, dark, or the phone's own",
+                        detail: "Device follows whatever your phone is set to, including its schedule — that's the default. Pick one outright if you'd rather OpenBat stayed dark in daylight, or light at night.")
+
                     OnboardingCard(
                         systemImage: "gearshape.fill",
-                        title: "Change it any time",
-                        detail: "It's the first switch in Settings, under General. Nothing is lost by switching either way — anything you've adjusted is kept and comes back.")
+                        title: "Change them any time",
+                        detail: "Both are in Settings, under Interface, and nothing is lost by switching either way — anything you've adjusted is kept and comes back.")
                 }
                 .padding(.top, 4)
             }

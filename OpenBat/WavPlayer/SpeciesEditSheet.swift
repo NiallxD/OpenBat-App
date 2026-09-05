@@ -149,6 +149,7 @@ struct SpeciesEditSheet: View {
             }
             .buttonStyle(.plain)
         }
+        .pageBackground()
         .listStyle(.plain)
     }
 

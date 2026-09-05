@@ -22,11 +22,28 @@
 //  readout: it said there was no data without saying why, or that the user
 //  has to select a region before there can be any.
 //
+//  The one exception to the fixed height is deliberate and user-driven: the
+//  species button in the last cell of the grid expands a single reference row
+//  of the field guide's published Pf / Cf / Duration for the species this
+//  recording is filed under, so a measured call can be read against the
+//  book's figures without leaving the player. That row DOES squash the
+//  spectrogram while it is open — which is the point of it being a toggle
+//  rather than something always on screen (Niall, 2026-09-02).
+//
 
 import SwiftUI
 
 struct CallAnalysisPanel: View {
     let result: CallAnalysis.Result?
+    /// The classifier code this recording is filed under ("LACI"), or nil for
+    /// a NoID recording. Names the reference row's species on its button.
+    let speciesCode: String?
+    /// The field guide's echolocation figures for that code, when the guide
+    /// has an entry for it — nil hides the button entirely rather than
+    /// offering an expansion with nothing in it.
+    let guideEcholocation: SpeciesEcholocation?
+
+    @State private var showGuideRow = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -92,9 +109,90 @@ struct CallAnalysisPanel: View {
                                  info: "The slope of the call body only, from the knee to the start of any terminal toe — a more diagnostic slope than the whole-call Sweep figure.")
                     InfoStatCell(title: "Toe", value: values.toe, unit: "",
                                  info: "Whether the call curves at its very end: up, down, or stays flat (none) with no distinct terminal hook.")
-                    StatCell(title: "", value: "", unit: "")
+                    // The cell this button fills was empty — eleven metrics in
+                    // a four-column grid leave one gap, and it sat blank.
+                    speciesCell
+                }
+                if showGuideRow, result != nil, let guideEcholocation {
+                    Divider()
+                    guideRow(guideEcholocation)
                 }
             }
+    }
+
+    // MARK: Field-guide reference row
+
+    /// The grid's twelfth cell: a toggle naming the species, or nothing at all
+    /// when there is no guide entry to expand (a NoID recording, a code no
+    /// model resolves to a guide page, or an entry with no echolocation
+    /// figures filled in). Kept as an empty `StatCell` in that case so the
+    /// grid's four columns stay evenly divided.
+    @ViewBuilder private var speciesCell: some View {
+        // `result != nil` as well: the whole grid is faded to zero opacity
+        // until a selection has been measured (an opacity-0 button is still
+        // tappable, and the empty prompt sits over it), and there is nothing
+        // to read the guide's figures against until then anyway.
+        if result != nil, let speciesCode, let guideEcholocation,
+           guideEcholocation.hasDisplayableFigures {
+            Button {
+                withAnimation(.snappy(duration: 0.25)) { showGuideRow.toggle() }
+            } label: {
+                HStack(spacing: 3) {
+                    Text(speciesCode)
+                        .font(.system(size: 13, weight: .semibold))
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 9, weight: .semibold))
+                        .rotationEffect(.degrees(showGuideRow ? 180 : 0))
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(.quaternary, in: Capsule())
+                .frame(maxWidth: .infinity)
+                .minimumScaleFactor(0.6)
+                .lineLimit(1)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(showGuideRow
+                                ? "Hide field guide figures for \(speciesCode)"
+                                : "Show field guide figures for \(speciesCode)")
+        } else {
+            StatCell(title: "", value: "", unit: "")
+        }
+    }
+
+    /// One row of the guide's published ranges, column-aligned with the
+    /// measured grid above it: Pf under Peak, Cf under Char. Freq, Duration
+    /// under Duration. The third column has no guide counterpart (the guide
+    /// publishes Fhigh/Flow, not a bandwidth), so the species' notes hang
+    /// there as a popover instead of leaving a hole.
+    private func guideRow(_ echo: SpeciesEcholocation) -> some View {
+        HStack(spacing: 0) {
+            GuideStatCell(title: "Pf", value: Self.kHzValue(echo.peakFreqHzRange), unit: "kHz")
+            GuideStatCell(title: "Cf", value: Self.kHzValue(echo.characteristicFreqHzRange), unit: "kHz")
+            GuideNotesCell(notes: echo.notes, callType: echo.callType)
+            GuideStatCell(title: "Dur", value: Self.value(echo.durationMsRange), unit: "ms")
+        }
+        .transition(.opacity.combined(with: .move(edge: .top)))
+    }
+
+    /// Range → "38–42", or "40" when the guide gives a single figure. Values
+    /// only: the unit goes in `StatCell`'s own unit slot, as it does for every
+    /// measured cell above.
+    private static func value(_ range: MeasurementRange?) -> String {
+        guard let range else { return "–" }
+        // Defensive about min/max order — the guide is hand-edited JSON.
+        let lo = Swift.min(range.min, range.max), hi = Swift.max(range.min, range.max)
+        return lo == hi ? trimmed(lo) : "\(trimmed(lo))–\(trimmed(hi))"
+    }
+
+    private static func kHzValue(_ range: MeasurementRange?) -> String {
+        guard let range else { return "–" }
+        return value(MeasurementRange(min: range.min / 1000, max: range.max / 1000))
+    }
+
+    private static func trimmed(_ v: Double) -> String {
+        v.truncatingRemainder(dividingBy: 1) == 0
+            ? String(format: "%.0f", v) : String(format: "%.1f", v)
     }
 
     private var values: Values { Values(result) }
@@ -169,3 +267,93 @@ private struct InfoStatCell: View {
     }
 }
 
+
+
+/// A guide figure under its measured counterpart. Deliberately quieter and
+/// shorter than `StatCell`: this row is the reference the measurement is being
+/// read against, not another measurement, and a full-size row of it would
+/// double the visual weight of the card while adding no new reading.
+private struct GuideStatCell: View {
+    let title: String
+    let value: String
+    let unit: String
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 3) {
+            Text(title.uppercased())
+                .font(.system(size: 9, weight: .semibold))
+            Text(value)
+                .font(.footnote.monospacedDigit().weight(.semibold))
+            if !unit.isEmpty {
+                Text(unit).font(.system(size: 9))
+            }
+        }
+        .foregroundStyle(.secondary)
+        .frame(maxWidth: .infinity)
+        .minimumScaleFactor(0.6)
+        .lineLimit(1)
+    }
+}
+
+/// The guide's free-text echolocation notes, behind an info glyph — the same
+/// gesture every metric in the grid above already answers to, so the row needs
+/// no separate affordance explaining itself. Shows the call type ("FM",
+/// "CF-FM") inline when the guide gives one, since that is the single most
+/// useful thing to have on screen beside the numbers.
+private struct GuideNotesCell: View {
+    let notes: String?
+    let callType: String?
+    @State private var showNotes = false
+
+    var body: some View {
+        if notes == nil && callType == nil {
+            Color.clear.frame(maxWidth: .infinity, maxHeight: 1)
+        } else {
+            Button { if notes != nil { showNotes = true } } label: {
+                HStack(spacing: 3) {
+                    if let callType {
+                        Text(callType)
+                            .font(.footnote.weight(.semibold))
+                    }
+                    if notes != nil {
+                        Image(systemName: "info.circle")
+                            .font(.system(size: 11))
+                    }
+                }
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity)
+                .minimumScaleFactor(0.6)
+                .lineLimit(1)
+            }
+            .buttonStyle(.plain)
+            .disabled(notes == nil)
+            .accessibilityLabel("Field guide notes")
+            .popover(isPresented: $showNotes) {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("FIELD GUIDE NOTES")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                        Text(notes ?? "")
+                            .font(.subheadline)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(14)
+                }
+                .frame(width: 280)
+                .presentationCompactAdaptation(.popover)
+            }
+        }
+    }
+}
+
+extension SpeciesEcholocation {
+    /// Whether there is anything for the reference row to show. A guide entry
+    /// can carry an echolocation block with only, say, `exemplarImageName`
+    /// set; expanding a row of four dashes for it would be worse than not
+    /// offering the button.
+    var hasDisplayableFigures: Bool {
+        peakFreqHzRange != nil || characteristicFreqHzRange != nil
+            || durationMsRange != nil || callType != nil || notes != nil
+    }
+}

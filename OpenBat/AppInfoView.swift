@@ -328,118 +328,108 @@ struct AppInfoView: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
+                VStack(alignment: .leading, spacing: 18) {
                     header
 
-                    section("What it does",
-                            "OpenBat turns iOS compatible ultrasonic USB microphones into live bat detectors. It captures audio at up to 384 kHz, shows a real-time spectrogram, detects individual echolocation pulses, and identifies the species with an on-device classifier if classifiers (sometimes called models) are openly available for a region.")
-                    
-                    section("The Origin of OpenBat",
-                            "OpenBat exists to make bat observing accessible to everyone. Most tools for identifying bat calls are expensive, proprietary, and hard to get hold of, which puts the experience out of reach for a lot of people who'd genuinely enjoy it. Free apps that work with ultrasonic microphones already exist, but as far as I know, none of them use the open-source machine learning models that have been trained on bat echolocation calls. By building that identification directly into the app, we can help people put a name to the call they just heard. That small moment of recognition does a lot to build a real connection with bats, and with it, a bit more respect for them too.")
+                    // One paragraph, not three. The long "what it does" /
+                    // "origin" / "getting started" run was the bulk of this
+                    // sheet's length (Niall, 2026-09-02); the origin story is
+                    // now behind the disclosure at the bottom, and getting
+                    // started is what the guided tour is for.
+                    Text("Turns an iOS-compatible ultrasonic USB microphone into a live bat detector: real-time spectrogram, per-pulse detection, and on-device species ID where an open model exists for your region.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+
+                    // The four things you can do from here, as a 2×2 grid of
+                    // square tiles rather than four full-width buttons each
+                    // trailing a caption paragraph. Four equal doors, not one
+                    // offer with three footnotes — which is why they are all one
+                    // material and one shape. That material used to be a flat
+                    // accent fill and is now the guide's own card (Niall,
+                    // 2026-09-02); artwork goes behind each one as it arrives.
+                    LazyVGrid(columns: [GridItem(.flexible(), spacing: 12),
+                                        GridItem(.flexible(), spacing: 12)],
+                              spacing: 12) {
+                        Button {
+                            // Flag the tour, then dismiss; the host starts it from
+                            // the sheet's onDismiss so the spotlight lands on the
+                            // real, unobscured UI — no timing race with the
+                            // dismiss animation.
+                            startTour()
+                            dismiss()
+                        } label: {
+                            infoTile("sparkles", "Guided tour",
+                                     "Points at each control on the detector.",
+                                     art: "infoCardTour")
+                        }
+                        .buttonStyle(.plain)
+
+                        // **Demo lives here because this is the screen someone
+                        // without a microphone reaches.** It used to be reachable
+                        // only through the Debug sheet, behind a hidden
+                        // fifteen-tap unlock — so the one feature that answers
+                        // "what does this app do before I buy hardware?" was
+                        // invisible to everyone who needed it, App Review
+                        // included (an app that can't be evaluated without
+                        // hardware is a Guideline 2.1 rejection).
+                        //
+                        // A NavigationLink rather than a sheet: this view already
+                        // has a NavigationStack, and DemoModeView is written to be
+                        // pushed onto an enclosing one (no stack, no Cancel, no
+                        // title bar of its own).
+                        NavigationLink {
+                            DemoModeView(classStore: classStore) { url, name in
+                                // Same order as the Debug sheet's picker: close the
+                                // whole sheet first, because the demo runs on the
+                                // detector behind it. `dismiss` is this view's, not
+                                // the pushed page's, so it takes the sheet down
+                                // rather than popping back to the About screen.
+                                dismiss()
+                                startDemo(url, name)
+                            }
+                        } label: {
+                            infoTile("play.rectangle", "Try the demo",
+                                     "A real night, played through the detector.",
+                                     art: "infoCardDemo")
+                        }
+                        .buttonStyle(.plain)
+
+                        // A sheet rather than a push, unlike What's New below.
+                        // This is a paged flow with its own bottom bar and Back
+                        // arrow, and pushing it would put a second Back in the
+                        // nav bar pointing somewhere else entirely.
+                        Button { showAboutTour = true } label: {
+                            infoTile("book", "About the app",
+                                     "Echolocation, listening modes, calibration.",
+                                     art: "infoCardAbout")
+                        }
+                        .buttonStyle(.plain)
+
+                        // Where What's New lives once the after-update sheet has
+                        // been dismissed. A push rather than another sheet:
+                        // stacking sheets is how a user loses track of what
+                        // dismissing gets them back to.
+                        NavigationLink {
+                            WhatsNewContent()
+                        } label: {
+                            infoTile("clock.arrow.circlepath", "What's New",
+                                     "What changed in this version.",
+                                     art: "infoCardWhatsNew")
+                        }
+                        .buttonStyle(.plain)
+                    }
 
                     featureList
 
-                    section("Getting started",
-                            "Connect the mic, tap the round button beside the tab bar, and point it at the sky. Every run is a session: detected passes are logged with their species, confidence, and a spectrogram of the pulses, and mapped where they were heard.")
-
-                    // **Demo lives here because this is the screen someone
-                    // without a microphone reaches.** It used to be reachable
-                    // only through the Debug sheet, which is behind a hidden
-                    // fifteen-tap unlock on the version footer — so the one
-                    // feature that answers "what does this app actually do
-                    // before I buy hardware?" was invisible to everyone who
-                    // needed it, App Review included (an app that can't be
-                    // evaluated without hardware is a Guideline 2.1 rejection).
-                    //
-                    // A NavigationLink rather than a sheet: this view already
-                    // has a NavigationStack, and DemoModeView is written to be
-                    // pushed onto an enclosing one (it carries no stack, no
-                    // Cancel, and no title bar of its own).
-                    NavigationLink {
-                        DemoModeView(classStore: classStore) { url, name in
-                            // Same order as the Debug sheet's picker: close the
-                            // whole sheet first, because the demo runs on the
-                            // detector behind it and there is nothing to see
-                            // from in here. `dismiss` is this view's, not the
-                            // pushed page's, so it takes the sheet down rather
-                            // than popping back to the About screen.
-                            dismiss()
-                            startDemo(url, name)
-                        }
-                    } label: {
-                        Label("Try it without a microphone", systemImage: "play.rectangle")
-                            .font(.headline)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 6)
+                    // The origin story is worth keeping and worth not making
+                    // everyone scroll past — collapsed, like the credits below.
+                    DisclosureGroup("Why OpenBat exists") {
+                        Text("Most tools for identifying bat calls are expensive, proprietary, and hard to get hold of, which puts the experience out of reach for a lot of people who'd genuinely enjoy it. Free apps that work with ultrasonic microphones exist, but as far as I know none of them use the open-source machine learning models trained on bat echolocation calls. Building that identification into the app helps people put a name to the call they just heard — and that small moment of recognition does a lot to build a real connection with bats, and with it a bit more respect for them too.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .padding(.top, 6)
                     }
-                    .buttonStyle(.bordered)
-                    .tint(.batAccent)
-
-                    Text("Plays a real night's recording through the detector so you can see it work. End it from the Demo badge on the detector.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .center)
-
-                    // Two tours, and they answer different questions — see
-                    // `AboutAppTour`'s header. The guided one is prominent
-                    // because it is the one someone standing in front of a
-                    // detector they don't understand needs; the other is
-                    // reading material.
-                    Button {
-                        // Flag the tour, then dismiss; the host starts it from the
-                        // sheet's onDismiss so the spotlight lands on the real,
-                        // unobscured UI — no timing race with the dismiss animation.
-                        startTour()
-                        dismiss()
-                    } label: {
-                        Label("Take the guided tour", systemImage: "sparkles")
-                            .font(.headline)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 6)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.batAccent)
-                    .padding(.top, 4)
-
-                    Text("Points at each control on the detector in turn and says what it does.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .center)
-
-                    // A sheet rather than a push, unlike What's New below. This
-                    // is a paged flow with its own bottom bar and its own Back
-                    // arrow, and pushing it would put a second Back in the nav
-                    // bar pointing somewhere else entirely. It stacks over this
-                    // sheet rather than replacing it, which is fine — it has a
-                    // Done of its own and this one is still underneath when it
-                    // goes.
-                    Button { showAboutTour = true } label: {
-                        Label("About the app", systemImage: "book")
-                            .font(.headline)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 6)
-                    }
-                    .buttonStyle(.bordered)
-                    .tint(.batAccent)
-
-                    Text("Echolocation, the two ways of hearing a call, calibration and how much of the detector to show.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .center)
-
-                    // Where What's New lives once the after-update sheet has
-                    // been dismissed. A push rather than another sheet: this one
-                    // is already a sheet, and stacking them is how a user loses
-                    // track of what dismissing gets them back to.
-                    NavigationLink {
-                        WhatsNewContent()
-                    } label: {
-                        Label("What's New", systemImage: "sparkles")
-                            .font(.headline)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 6)
-                    }
-                    .buttonStyle(.bordered)
+                    .font(.headline)
                     .tint(.batAccent)
 
                     attributionSection
@@ -498,31 +488,97 @@ struct AppInfoView: View {
         return UIImage(named: name)
     }()
 
+    /// Five lines, one each. The detail sentences that used to sit under every
+    /// title mostly restated it, and five of them was a screenful.
     private var featureList: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 10) {
             Text("Features").font(.headline)
-            feature("waveform.badge.magnifyingglass", "Real-time spectrogram",
-                    "High-resolution frequency-vs-time display with drag-to-scroll history.")
-            feature("waveform.path.ecg", "Pulse detection & zoom",
-                    "Isolates each call and renders an onset-aligned close-up.")
-            feature("sparkle.magnifyingglass", "Species ID",
-                    "On-device classifier names the species, with runner-up and confidence.")
-            feature("headphones", "Heterodyne & slow replay",
-                    "Hear the ultrasound live — tuned down, replayed 8× slower, or both at once.")
-            feature("square.stack.3d.up", "Sessions & map",
-                    "Every outing is logged automatically — see where each pass was heard.")
+            feature("waveform.badge.magnifyingglass", "Real-time spectrogram with scrollable history")
+            feature("waveform.path.ecg", "Per-pulse detection and onset-aligned zoom")
+            feature("sparkle.magnifyingglass", "On-device species ID, with runner-up and confidence")
+            feature("headphones", "Heterodyne and 8× slow replay — live")
+            feature("square.stack.3d.up", "Sessions logged and mapped automatically")
         }
     }
 
-    private func feature(_ symbol: String, _ title: String, _ detail: String) -> some View {
-        HStack(alignment: .top, spacing: 12) {
+    private func feature(_ symbol: String, _ title: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
             Image(systemName: symbol)
-                .font(.title3)
-                .foregroundStyle(.tint)
-                .frame(width: 28)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.subheadline.weight(.semibold))
-                Text(detail).font(.caption).foregroundStyle(.secondary)
+                .font(.subheadline)
+                // The app's orange, not `.tint` — the accent colour in the
+                // asset catalog is unset, so `.tint` resolved to the system
+                // blue and these were the only blue glyphs in the app.
+                .foregroundStyle(Color.batAccent)
+                .frame(width: 22)
+            Text(title)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// One action tile — **built as a species card is built** (Niall,
+    /// 2026-09-02): a square glass tile, artwork running full bleed inside it,
+    /// and the name legible over a scrim along the bottom. See `GuideSpeciesCard`,
+    /// which is the same object; these four are the guide's cards pointed at the
+    /// app's own features rather than at a bat.
+    ///
+    /// `art` names an image in the asset catalog and is OPTIONAL, so the four
+    /// tiles work now and get their pictures when the pictures exist. With no
+    /// artwork the glass is the card — the icon takes the accent colour and the
+    /// text takes the page's own ink; with artwork it all goes white over the
+    /// scrim, exactly as a species card does.
+    private func infoTile(_ symbol: String, _ title: String, _ subtitle: String,
+                          art: String? = nil) -> some View {
+        // Asked of UIKit rather than handed to `Image(_:)` blind: a missing
+        // asset renders as a blank square with a console warning, and the whole
+        // point of the fallback is that a tile with no art still looks finished.
+        let artwork = art.flatMap { UIImage(named: $0) }
+        return Color.clear
+            .aspectRatio(1, contentMode: .fit)
+            .overlay {
+                if let artwork {
+                    Image(uiImage: artwork)
+                        .resizable()
+                        .scaledToFill()
+                }
+            }
+            .clipped()
+            .overlay(alignment: .topLeading) {
+                Image(systemName: symbol)
+                    .font(.system(size: 26, weight: .semibold))
+                    .foregroundStyle(artwork == nil ? Color.batAccent : .white)
+                    .shadow(color: .black.opacity(artwork == nil ? 0 : 0.5), radius: 4)
+                    .padding(14)
+            }
+            .overlay(alignment: .bottom) { tileNameplate(title, subtitle, over: artwork != nil) }
+            .glassTile()
+    }
+
+    /// The tile's name and line of explanation, in the species card's nameplate
+    /// position. Over artwork it is white on a scrim; over bare glass it takes
+    /// the page's ink and needs no scrim — a black gradient laid over glass
+    /// reads as a smudge rather than as a photo caption.
+    private func tileNameplate(_ title: String, _ subtitle: String,
+                               over artwork: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.headline)
+                .foregroundStyle(artwork ? AnyShapeStyle(.white) : AnyShapeStyle(.primary))
+            Text(subtitle)
+                .font(.caption)
+                .foregroundStyle(artwork ? AnyShapeStyle(.white.opacity(0.85))
+                                         : AnyShapeStyle(.secondary))
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .multilineTextAlignment(.leading)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .background {
+            if artwork {
+                LinearGradient(colors: [.clear, .black.opacity(0.75)],
+                               startPoint: .top, endPoint: .bottom)
             }
         }
     }
@@ -793,7 +849,7 @@ struct TourOverlay: View, Equatable {
                         Image(systemName: "chevron.left")
                             .fontWeight(.semibold)
                             .frame(width: 36, height: 36)
-                            .background(.white.opacity(0.12), in: Circle())
+                            .background(Color.chromeFill(0.12), in: Circle())
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Back")
@@ -816,8 +872,15 @@ struct TourOverlay: View, Equatable {
         // Opaque fill, not a material: a material backdrop-blurs the live
         // spectrogram beneath it every frame, a per-frame GPU cost for the whole
         // tour. Over the 82% black dim an opaque dark grey looks the same.
-        .background(Color(.systemGray6), in: RoundedRectangle(cornerRadius: 16))
-        .overlay(RoundedRectangle(cornerRadius: 16).stroke(.white.opacity(0.12)))
+        // The app's card material, same as everywhere else (Niall, 2026-09-02).
+        //
+        // Worth knowing what this costs, because it was deliberately opaque
+        // before: a material backdrop-blurs whatever is under it every frame,
+        // and what is under this is the live spectrogram — through an 82% black
+        // dim, so the blur buys almost nothing visually. If the tour ever feels
+        // heavy on an older phone, an opaque `Color(.systemGray6)` fill at the
+        // same radius is the swap, and it looked near-identical.
+        .glassTile()
         .shadow(radius: 20, y: 8)
         .padding(.horizontal, 16)
         .frame(maxWidth: .infinity)

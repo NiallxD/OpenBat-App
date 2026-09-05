@@ -103,30 +103,68 @@ struct GBIFDistributionCard: View {
     @State private var camera: MapCameraPosition = .automatic
     /// Last size the camera was framed for, purely so the re-frame runs once per
     /// real size change instead of on every geometry callback. It no longer
-    /// feeds a height calculation — the map is square now and takes its height
-    /// from its width, so there is no size → height → size loop to converge.
+    /// feeds a height calculation — the map takes its height from its width and
+    /// the range's shape, so there is no size → height → size loop to converge.
     @State private var mapSize: CGSize = .zero
+    /// Counts re-frames, and exists only to make each one a value the map can
+    /// tell apart from the last. See `reframed(_:)`.
+    @State private var reframes = 0
+    /// How many times the framing has been corrected since the last size change
+    /// — a stop, so a range the map cannot show doesn't re-frame forever. See
+    /// the `onMapCameraChange` this lives for.
+    @State private var corrections = 0
 
-    /// The map is square, and that is what makes cropping impossible rather
-    /// than merely unlikely.
+    /// The rect to frame, made unmistakably different from the last one framed.
     ///
-    /// Fitting a rect into a view means matching their aspect ratios, so a range
-    /// that is tall relative to the view forces the map to show more longitude
-    /// than the world has — MapKit clamps the zoom there and crops the latitude
-    /// instead. Padding cannot fix that; only a taller frame can.
+    /// **Assigning the same camera position twice does nothing**, and that was
+    /// the whole bug (2026-09-02). A card is laid out at the full window width
+    /// first and narrowed to the reading column a beat later, so the map is
+    /// framed once for a 756pt view and then asked to re-frame for a 592pt one.
+    /// The rect is identical both times, SwiftUI only pushes a value that has
+    /// changed, and the map kept the zoom it had — showing 592/756 of the range
+    /// it was asked for, cropped on all four sides. Only iPad narrows, which is
+    /// why iPhone maps were right.
     ///
-    /// **In Mercator map points the world is square**, so any range's height is
-    /// at most `MKMapRect.world.height`, which equals `MKMapRect.world.width`.
-    /// At aspect 1 the longitude a range needs is exactly its height — therefore
-    /// never more than one world-width, for any range that can exist. A square
-    /// map fits everything.
+    /// The nudge is a ten-thousandth of the rect on alternate re-frames: far too
+    /// small to see, and enough that the value is never equal to the last one.
+    private func reframed(_ rect: MKMapRect) -> MapCameraPosition {
+        reframes += 1
+        let nudge = rect.width * 0.0001 * Double(reframes % 2)
+        return .rect(rect.insetBy(dx: -nudge, dy: -nudge))
+    }
+
+    /// The shape of the map, per species: as close to square as the range
+    /// allows, and never a shape that has to crop the range to be filled.
     ///
-    /// This replaced a grow-the-height-as-needed calculation capped at 340pt
-    /// (2026-08-17). The cap was the bug: measured against the real data, hoary
-    /// bat needs 1.30 world-widths in a wide card, eastern red 1.26, Mexican
-    /// free-tailed 1.12 — and any cap short of square leaves the tallest ranges
-    /// clipped no matter how it is tuned.
-    private static let aspect: CGFloat = 1
+    /// **The card no longer relies on MapKit fitting anything** (2026-09-02).
+    /// It used to be square unconditionally, on the reasoning that a square view
+    /// can contain any range whatsoever — true of the rect, but it assumed
+    /// MapKit answers `.rect` by matching whichever axis needs the wider view
+    /// and adding margin on the other. It does not always: a range much wider
+    /// than it is tall came back framed to the view's HEIGHT, with the east and
+    /// west ends of the range outside the map (common pipistrelle, whose padded
+    /// rect is 1.5 times wider than tall — Niall, 2026-09-02).
+    ///
+    /// So the rect handed to the camera and the frame it is drawn in are now the
+    /// same shape, and there is nothing left for a fitting rule to decide. See
+    /// `framed(_:)` for how the rect gets there; this reads the answer off it.
+    ///
+    /// Square is still what almost always comes out. Squaring a rect means
+    /// growing its short side, and in Mercator map points the world is square —
+    /// so the only range that cannot be squared is one already spanning most of
+    /// the world in its long axis. Measured against the real presence data, the
+    /// widest of the 48 species (greater horseshoe, 2.7:1 before framing) still
+    /// squares with room to spare at both poles.
+    ///
+    /// A grow-the-height-as-needed calculation capped at 340pt came before both
+    /// of these (2026-08-17). The cap was the bug: hoary bat needs 1.30
+    /// world-widths in a wide card, eastern red 1.26, Mexican free-tailed 1.12,
+    /// and any cap short of square leaves the tallest ranges clipped no matter
+    /// how it is tuned.
+    private var aspect: CGFloat {
+        guard let rect = resolvedRange?.rect, rect.height > 0 else { return 1 }
+        return CGFloat(rect.width / rect.height)
+    }
 
     /// One drawn shape: a connected region of the presence grid, outlined —
     /// with its holes, if it has any.
@@ -209,19 +247,47 @@ struct GBIFDistributionCard: View {
                             }
                         }
                     }
-                    // **Square, and that is a correctness fix rather than a
-                    // taste one** — see `Self.aspect`.
-                    .aspectRatio(Self.aspect, contentMode: .fit)
+                    // **The map's shape is the range's shape** — a correctness
+                    // fix rather than a taste one, see `aspect`.
+                    .aspectRatio(aspect, contentMode: .fit)
                     .onGeometryChange(for: CGSize.self) { $0.size } action: { size in
                         // Re-frames on a real size change (first layout,
                         // rotation) — see `camera`, which cannot be set correctly
                         // up front because the layout width isn't known then.
                         guard size.width > 0, size != mapSize else { return }
                         mapSize = size
-                        camera = .rect(range.rect)
+                        corrections = 0
+                        camera = reframed(range.rect)
                     }
                     .onChange(of: species.id) {
-                        if let rect = resolvedRange?.rect { camera = .rect(rect) }
+                        if let rect = resolvedRange?.rect { camera = reframed(rect) }
+                    }
+                    // **The map re-applies its own zoom after a resize, and it
+                    // does so later than any re-frame can be scheduled.** Hold
+                    // the centre, hold the points-per-map-point: so when the
+                    // card is laid out full width and then narrowed to the
+                    // reading column, a map framed correctly for 756pt rescales
+                    // itself to 592/756 of the range it was given, cropped on
+                    // all four sides. Re-framing in the same layout pass, and
+                    // again on the next tick, were both overwritten by it
+                    // (measured 2026-09-02).
+                    //
+                    // So this answers the result instead of racing it: whatever
+                    // the map settles on, if it does not contain the range, ask
+                    // again. Each correction is a distinct camera value (see
+                    // `reframed`) and lands after the resize is done, so the
+                    // second one holds. Capped, and the cap reset per size
+                    // change, so a range the map genuinely cannot show — none
+                    // exist, but the data is community-maintained — settles for
+                    // what it can rather than framing forever.
+                    .onMapCameraChange(frequency: .onEnd) { context in
+                        let want = range.rect, got = context.rect
+                        let slack = want.width * 0.005
+                        let contained = got.minX <= want.minX + slack && got.maxX >= want.maxX - slack
+                            && got.minY <= want.minY + slack && got.maxY >= want.maxY - slack
+                        guard !contained, corrections < 4 else { return }
+                        corrections += 1
+                        camera = reframed(want)
                     }
                 } else {
                     ContentUnavailableView("No distribution data",
@@ -458,20 +524,42 @@ struct GBIFDistributionCard: View {
             }
         }
 
-        // Follow the edges into closed rings, consuming each exactly once. A
-        // vertex where two regions touch corner-to-corner has two ways out;
-        // either choice closes both rings, so take whichever is to hand.
+        // Follow the edges into closed rings, consuming each exactly once.
+        //
+        // **A ring is closed the moment the walk revisits ANY vertex, not just
+        // the one it started from** (2026-09-02). Two blocks of range that meet
+        // corner to corner share a single lattice point with two ways out of it,
+        // and taking either one and carrying on traces both blocks as one ring
+        // pinched through that point. Such a ring is not a simple polygon, and
+        // MapKit's tessellator cannot fill one: it gives up part way ("Wrapped
+        // around the polygon without finishing", with the nodes it had left),
+        // and how much of it got filled before it quit is not stable between
+        // draws — so toggling Range/Records redrew the same cells differently
+        // each time (Niall, 2026-09-02, spotted bat).
+        //
+        // Peeling the loop off at the revisited vertex splits a corner touch
+        // into the two simple rings it should always have been, and leaves the
+        // walk standing on that vertex to take its other exit. Which exit was
+        // taken first stops mattering: both orders yield the same two rings.
         var rings: [[GridVertex]] = []
         while let start = outgoing.first(where: { !$0.value.isEmpty })?.key {
-            var ring: [GridVertex] = [start]
+            var path: [GridVertex] = [start]
+            var visited: [GridVertex: Int] = [start: 0]
             var current = start
             while let next = outgoing[current]?.popLast() {
                 if outgoing[current]?.isEmpty == true { outgoing[current] = nil }
-                if next == start { break }
-                ring.append(next)
+                if let first = visited[next] {
+                    let ring = Array(path[first...])
+                    if ring.count >= 3 { rings.append(ring) }
+                    for vertex in path[(first + 1)...] { visited[vertex] = nil }
+                    path.removeSubrange((first + 1)...)
+                    current = next
+                    continue
+                }
+                path.append(next)
+                visited[next] = path.count - 1
                 current = next
             }
-            if ring.count >= 3 { rings.append(ring) }
         }
 
         // Anticlockwise (positive area) is an outer ring; clockwise is a hole.
@@ -589,7 +677,38 @@ struct GBIFDistributionCard: View {
         // whether the range is tall or wide.
         let padding = max(rect.width, rect.height) * 0.08
         rect = rect.insetBy(dx: -padding, dy: -padding)
-        return rect.intersects(.world) ? rect.intersection(.world) : rect
+        return framed(rect.intersects(.world) ? rect.intersection(.world) : rect)
+    }
+
+    /// Squares the rect off, as far as the world lets it, by growing the short
+    /// side around its own centre. What comes back is what the map is BOTH
+    /// framed to and shaped like — see `aspect` for why those have to be the
+    /// same thing.
+    ///
+    /// Growing rather than shrinking, always: taking the long side down to the
+    /// short one would be cropping the range on purpose. Where the short side
+    /// is latitude and the range already sits near a pole, the grown rect is
+    /// slid back inside the world rather than centred — a range against the top
+    /// of the map takes all of its extra height below itself. Only if it cannot
+    /// grow far enough that way does the result come out non-square, and then
+    /// the card is drawn in that shape instead, which is the nearest to square
+    /// that still shows the whole range.
+    private static func framed(_ rect: MKMapRect) -> MKMapRect {
+        var rect = rect
+        let target = max(rect.width, rect.height)
+        let world = MKMapRect.world
+        if rect.height < target {
+            let height = min(target, world.height)
+            rect.origin.y = min(max(rect.midY - height / 2, world.minY),
+                                world.maxY - height)
+            rect.size.height = height
+        } else if rect.width < target {
+            let width = min(target, world.width)
+            rect.origin.x = min(max(rect.midX - width / 2, world.minX),
+                                world.maxX - width)
+            rect.size.width = width
+        }
+        return rect
     }
 
     // MARK: - Chrome

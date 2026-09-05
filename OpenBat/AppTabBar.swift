@@ -285,7 +285,7 @@ struct SessionButton: View {
                 .frame(width: SessionButtonMetrics.diameter,
                        height: SessionButtonMetrics.diameter)
                 .liquidGlass(tinted: tint, interactive: true, in: .circle)
-                .overlay { Circle().strokeBorder(.white.opacity(0.12), lineWidth: 1) }
+                .overlay { Circle().strokeBorder(Color.glassEdge, lineWidth: 1) }
         }
         .buttonStyle(.plain)
         .accessibilityLabel(accessibilityLabel)
@@ -378,7 +378,7 @@ struct TransportMenu: View {
         .liquidGlass(in: .rect(cornerRadius: width / 2))
         .overlay {
             RoundedRectangle(cornerRadius: width / 2)
-                .strokeBorder(.white.opacity(0.12), lineWidth: 1)
+                .strokeBorder(Color.glassEdge, lineWidth: 1)
         }
         // The whole menu as one target, alongside the per-item ones above. The
         // simplified tour introduces the three controls in a single step rather
@@ -389,7 +389,7 @@ struct TransportMenu: View {
 
     private var divider: some View {
         Rectangle()
-            .fill(.white.opacity(0.10))
+            .fill(Color.chromeFill(0.10))
             .frame(height: 1)
             .padding(.horizontal, 12)
     }
@@ -710,7 +710,7 @@ struct LegacyTabBar: View {
                         Text(tab.rawValue)
                             .font(.system(size: 10, weight: .medium))
                     }
-                    .foregroundStyle(isSelected ? Color.white : Color.secondary)
+                    .foregroundStyle(isSelected ? Color.primary : Color.secondary)
                     // The padding here is the indicator's inset: the highlight
                     // wraps the padded label, so these numbers are the margin
                     // of bare glass left showing around it. The system bar
@@ -722,7 +722,7 @@ struct LegacyTabBar: View {
                     .background {
                         if isSelected {
                             Capsule()
-                                .fill(.white.opacity(0.14))
+                                .fill(Color.chromeFill(0.14))
                                 .matchedGeometryEffect(id: "tabSelection", in: selectionNamespace)
                         }
                     }
@@ -743,6 +743,6 @@ struct LegacyTabBar: View {
         .liquidGlass(in: .capsule)
         // Untinted glass over a dark spectrogram has no edge of its own, and
         // the bar dissolves into the image at its ends without this.
-        .overlay { Capsule().strokeBorder(.white.opacity(0.12), lineWidth: 1) }
+        .overlay { Capsule().strokeBorder(Color.glassEdge, lineWidth: 1) }
     }
 }

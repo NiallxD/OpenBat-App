@@ -21,9 +21,17 @@
 import SwiftUI
 
 struct WavPlayerView: View {
+    /// Only for the spectrogram's polarity — see the `.onChange` on the page.
+    @Environment(\.colorScheme) private var colorScheme
     let recording: Recording
     @Bindable var store: ClassificationStore
     let micCalSettings: MicCalibrationSettings
+    /// Read-only, and only for the Call Analysis card's field-guide reference
+    /// row — the published Pf/Cf/Duration for whatever species this recording
+    /// is filed under, so a measured call can be read against the book without
+    /// leaving the player. Passed in rather than constructed here: the guide is
+    /// a ~328 KB JSON decode that happens once, at launch (SpeciesGuideStore).
+    let speciesGuide: SpeciesGuideStore
     /// Owned locally, unlike the shared listen-mode settings — playback-only
     /// (see ListenMode's doc comment), so there's no live-detector counterpart
     /// to keep in sync with.
@@ -312,6 +320,10 @@ struct WavPlayerView: View {
 
     var body: some View {
         mainLayout
+        // The player is a page like any other on iPad — see `PageColumn`. The
+        // spectrogram narrows with it, which costs some of the time span on
+        // screen at a given zoom; the pinch gesture answers that.
+        .pageColumnFrame()
         .sheet(item: $shareItem) { item in
             ShareSheet(items: [item.url])
         }
@@ -322,6 +334,13 @@ struct WavPlayerView: View {
         }
         .navigationTitle(recording.commonName)
         .navigationBarTitleDisplayMode(.inline)
+        // No painted header (Niall, 2026-09-02). The app-wide appearance proxy
+        // gives every bar an opaque background, which on a page whose content
+        // starts right under it reads as a header strip the page doesn't need.
+        // Cleared here, with the scroll-edge scrim dropped alongside it — one
+        // without the other just swaps a painted bar for a glass one.
+        .clearNavigationBarBackground()
+        .flatTopScrollEdge()
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button {
@@ -468,7 +487,19 @@ struct WavPlayerView: View {
     }
 
     private var statsPanel: some View {
-        CallAnalysisPanel(result: analysisResult)
+        CallAnalysisPanel(result: analysisResult,
+                          speciesCode: recording.isNoID ? nil : recording.species,
+                          guideEcholocation: guideEcholocation)
+    }
+
+    /// The guide's echolocation figures for this recording's species, or nil
+    /// when the guide has no page for it — the guide covers far fewer species
+    /// than the models can name (see SpeciesGuideLookup), and the panel uses
+    /// the nil case to leave its last cell empty rather than offer a reference
+    /// row it can't fill.
+    private var guideEcholocation: SpeciesEcholocation? {
+        guard !recording.isNoID else { return nil }
+        return speciesGuide.guide.species(forCode: recording.species)?.echolocation
     }
 
     /// Minimap scrub bar + elapsed/duration readout. Shared by both layouts;

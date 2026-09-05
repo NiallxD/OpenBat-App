@@ -149,6 +149,7 @@ struct INatObservationSheet: View {
                     }
                 }
             }
+            .pageBackground()
             .navigationTitle("Add to iNaturalist")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

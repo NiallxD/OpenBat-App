@@ -17,6 +17,14 @@
 import SwiftUI
 
 extension View {
+    /// `flatTopScrollEdge()`, unless a caller wants the effect left on — for a
+    /// screen whose bar sits over a photo rather than over black, where the
+    /// blur is what makes the title readable.
+    @ViewBuilder
+    func flatTopScrollEdgeUnless(_ keepEffect: Bool) -> some View {
+        if keepEffect { self } else { flatTopScrollEdge() }
+    }
+
     @ViewBuilder
     func flatTopScrollEdge() -> some View {
         if #available(iOS 26.0, *) {

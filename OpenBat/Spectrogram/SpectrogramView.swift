@@ -141,7 +141,7 @@ struct SpectrogramView: View {
                     returnToLiveButton
                 }
             }
-            .background(.black, in: RoundedRectangle(cornerRadius: 12))
+            .background(Color(uiColor: .systemBackground), in: RoundedRectangle(cornerRadius: 12))
             // `nil` rather than a `.disabled` gesture: an attached-but-disabled
             // DragGesture still claims the touch sequence, which would swallow
             // taps meant for the pills overlaid on top of the spectrogram.
@@ -215,7 +215,7 @@ struct SpectrogramView: View {
                     p.move(to: CGPoint(x: 0, y: h * f)); p.addLine(to: CGPoint(x: w, y: h * f))
                 }
             }
-            .stroke(Color.white.opacity(0.12), lineWidth: 0.5)
+            .stroke(Color.primary.opacity(0.12), lineWidth: 0.5)
         }
         .allowsHitTesting(false)
     }
@@ -255,7 +255,7 @@ struct SpectrogramView: View {
     private func axisLabel(_ hz: Double) -> some View {
         Text(format(hz))
             .font(.caption2.monospacedDigit())
-            .foregroundStyle(.white.opacity(0.7))
+            .foregroundStyle(Color.primary.opacity(0.7))
             .shadow(radius: 1)
     }
 

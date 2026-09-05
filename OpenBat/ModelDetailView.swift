@@ -2,9 +2,19 @@
 //  ModelDetailView.swift
 //  OpenBat
 //
-//  Detail screen for one classifier model: metadata, the "use this model" switch,
-//  and all of the model's settings — pass detection, per-pulse quality gate, and
-//  the species list (grouped) with enable toggles and prior sliders.
+//  Detail screen for one classifier model: what it is, the "use this model"
+//  switch, and all of the model's settings — what it takes to call something an
+//  ID, which calls are good enough to try, and the species list (grouped) with
+//  enable switches and likelihood sliders.
+//
+//  **Follows `SettingsView`'s card shape, and its rules about words** (Niall,
+//  2026-09-02): name, one line of description at ten words or fewer, then the
+//  control — and nothing underneath it. Read that file's header before adding
+//  anything here. This screen was the worst offender: bare one-word headers, no
+//  description anywhere, and footers written in the vocabulary of the code
+//  (timeout, min pulses, SNR, priors, "pass detection") rather than of the
+//  person deciding. The labels below are the plain-English half of that fix;
+//  the stored properties keep their own names.
 //
 //  Every control writes through `settings.perModel[model.id]` so editing a model
 //  that isn't currently active still works.
@@ -32,6 +42,7 @@ struct ModelDetailView: View {
     var body: some View {
         Form {
             metadataSection
+            citationSection
             activeSection
             passSection
             // Hidden for a model that ignores the gate — see
@@ -63,19 +74,30 @@ struct ModelDetailView: View {
         Section {
             LabeledContent("Region", value: model.region)
             LabeledContent("Version", value: model.version)
-            LabeledContent("Classes", value: "\(model.classNames.count)")
+            // "Classes" was ours, not the reader's — it is a count of the
+            // species this model can name.
+            LabeledContent("Species it knows", value: "\(model.classNames.count)")
         } header: {
-            Text("Model")
-        } footer: {
-            VStack(alignment: .leading, spacing: 6) {
-                Text(model.citation)
-                if let url = model.sourceURL {
-                    Link(destination: url) {
-                        Label("Source repository", systemImage: "arrow.up.right.square")
-                    }
-                    .font(.footnote)
+            CardHeader("Model", "Where it works, and what it knows.")
+        }
+    }
+
+    /// The citation is the one thing on this screen that isn't an explanation of
+    /// a control, so it doesn't fall under the no-paragraph rule — it is the
+    /// card's content. It was in a footer under the metadata, where it read as
+    /// small print about the version number.
+    private var citationSection: some View {
+        Section {
+            Text(model.citation)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            if let url = model.sourceURL {
+                Link(destination: url) {
+                    Label("Source repository", systemImage: "arrow.up.right.square")
                 }
             }
+        } header: {
+            CardHeader("Credit", "Who made this model, and where.")
         }
     }
 
@@ -85,66 +107,75 @@ struct ModelDetailView: View {
                 get: { settings.activeModelID == model.id },
                 set: { settings.activeModelID = $0 ? model.id : nil }
             ))
-        } footer: {
-            Text("Only one model runs at a time. Enabling this disables any other.")
+        } header: {
+            CardHeader("Identifying", "Only one model identifies at a time.")
         }
     }
 
-    // MARK: Pass detection
+    // MARK: Making an ID
 
+    /// A value beside its label, then its note, then the full-width slider —
+    /// the row shape the rest of Settings uses. The sliders here were squeezed
+    /// into the trailing half of a `LabeledContent`, which left them about a
+    /// thumb wide and gave the note nowhere to go.
     private var passSection: some View {
-        Section("Pass detection") {
-            LabeledContent("Timeout") {
-                HStack(spacing: 8) {
-                    Slider(value: bind(\.passTimeoutSeconds), in: 0.5...10, step: 0.5)
-                    Text(String(format: "%.1f s", ms.passTimeoutSeconds))
-                        .font(.caption.monospacedDigit())
-                        .frame(width: 42, alignment: .trailing)
-                }
+        Section {
+            LabeledContent("Ends a pass after") {
+                Text(String(format: "%.1f s", ms.passTimeoutSeconds))
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
             }
-            LabeledContent("Min pulses") {
-                Stepper("\(ms.minPassPulseCount)", value: bind(\.minPassPulseCount), in: 1...10)
+            ControlNote("Quiet this long and the bat has gone.")
+            Slider(value: bind(\.passTimeoutSeconds), in: 0.5...10, step: 0.5)
+                .accessibilityLabel("Ends a pass after")
+
+            ControlNote("How many calls an ID is based on.")
+            Stepper("Calls needed: \(ms.minPassPulseCount)",
+                    value: bind(\.minPassPulseCount), in: 1...10)
+
+            LabeledContent("Minimum confidence") {
+                Text(String(format: "%.0f%%", ms.minPassConfidence * 100))
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
             }
-            LabeledContent("Min confidence") {
-                HStack(spacing: 8) {
-                    Slider(value: bind(\.minPassConfidence), in: 0...0.5, step: 0.01)
-                    Text(String(format: "%.0f%%", ms.minPassConfidence * 100))
-                        .font(.caption.monospacedDigit())
-                        .frame(width: 36, alignment: .trailing)
-                }
-            }
+            ControlNote("Below this, no species is named.")
+            Slider(value: bind(\.minPassConfidence), in: 0...0.5, step: 0.01)
+                .accessibilityLabel("Minimum confidence")
+        } header: {
+            CardHeader("Making an ID", "Before OpenBat will name a species.")
         }
     }
 
-    // MARK: Quality gate
+    // MARK: Call quality
 
+    /// The old footer's one fact worth keeping is that skipping is not hiding —
+    /// a skipped call is still drawn in the Pulse View, it just doesn't get a
+    /// vote. That is the description. The NABat defaults it also quoted are on
+    /// the two controls they belong to.
     private var qualityGateSection: some View {
         Section {
-            Toggle("Quality gate", isOn: bind(\.qualityGateEnabled))
+            Toggle("Skip faint calls", isOn: bind(\.qualityGateEnabled))
             if ms.qualityGateEnabled {
-                LabeledContent("Min SNR") {
-                    HStack(spacing: 8) {
-                        Slider(value: bind(\.qualitySNThreshold), in: 1...20, step: 1)
-                        Text(String(format: "%.0f×", ms.qualitySNThreshold))
-                            .font(.caption.monospacedDigit())
-                            .frame(width: 42, alignment: .trailing)
-                    }
+                LabeledContent("Minimum clarity") {
+                    Text(String(format: "%.0f×", ms.qualitySNThreshold))
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
                 }
-                LabeledContent("Min amplitude") {
-                    HStack(spacing: 8) {
-                        Slider(value: bind(\.qualityAmpThreshold), in: 5...40, step: 1)
-                        Text(String(format: "%.0f dB", ms.qualityAmpThreshold))
-                            .font(.caption.monospacedDigit())
-                            .frame(width: 48, alignment: .trailing)
-                    }
+                ControlNote("How far above the noise. NABat uses 7×.")
+                Slider(value: bind(\.qualitySNThreshold), in: 1...20, step: 1)
+                    .accessibilityLabel("Minimum clarity")
+
+                LabeledContent("Minimum loudness") {
+                    Text(String(format: "%.0f dB", ms.qualityAmpThreshold))
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
                 }
+                ControlNote("NABat uses 21 dB.")
+                Slider(value: bind(\.qualityAmpThreshold), in: 5...40, step: 1)
+                    .accessibilityLabel("Minimum loudness")
             }
         } header: {
-            Text("Pulse quality")
-        } footer: {
-            Text("Rejects faint or edge-clipped pulses before classification, matching the "
-               + "NABat detector defaults (SNR ≥ 7, amplitude ≥ 21 dB). Rejected pulses still "
-               + "appear in the Pulse View but don't form an ID.")
+            CardHeader("Call quality", "Skipped calls are shown, not identified.")
         }
     }
 
@@ -163,9 +194,12 @@ struct ModelDetailView: View {
                     )
                 }
             } header: {
-                HStack {
-                    Text(group.name)
-                    Spacer()
+                // Only the first group carries the description: it explains the
+                // slider on every row below, and repeating it over each family
+                // would be the wall of text this screen just lost.
+                CardHeader(group.name,
+                           group.id == model.groups.first?.id
+                           ? "How likely each one is where you are." : "") {
                     let on = allEnabled(group.codes)
                     Button(on ? "Disable all" : "Enable all") {
                         setGroup(group.codes, enabled: !on)
@@ -182,10 +216,11 @@ struct ModelDetailView: View {
             Button("Reset to defaults", role: .destructive) {
                 withAnimation { settings.resetModel(model.id) }
             }
-        } footer: {
-            Text("Restores this model's species, priors, and thresholds to a neutral baseline "
-               + "(every species enabled, no location bias). Priors re-suggest automatically "
-               + "from nearby GBIF occurrence data the next time your location updates.")
+        } header: {
+            // That the likelihoods re-suggest themselves from occurrence data at
+            // the next location fix is true, and is not a thing anyone reads a
+            // settings card to find out. It survives in `AutoIDSettings`.
+            CardHeader("Reset", "Every species back on, no location bias.")
         }
     }
 

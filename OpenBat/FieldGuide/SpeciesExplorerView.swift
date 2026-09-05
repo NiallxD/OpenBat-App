@@ -161,6 +161,9 @@ struct SpeciesExplorerView: View {
                 .padding(.top, 8)
                 .animation(.snappy(duration: 0.22), value: results.count)
             }
+            // No reading column (Niall, 2026-09-02): a globe is not reading
+            // matter, and taking 45% of a landscape iPad off it leaves a small
+            // world in a large empty room. See `PageColumn`.
         .navigationDestination(for: SpeciesGuideDestination.self) { destination in
             switch destination {
             case .region(let region):
@@ -196,6 +199,11 @@ struct SpeciesExplorerView: View {
         // See `clearNavigationBarBackground()`.
         .clearNavigationBarBackground()
         .flatTopScrollEdge()
+        // Told outright rather than left to sample. The globe is satellite
+        // imagery edge to edge in either appearance, so this bar's contents are
+        // white always — and a transparent bar doesn't work that out until the
+        // first scroll, which on a screen that never scrolls is never.
+        .toolbarColorScheme(.dark, for: .navigationBar)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button { showGuideInfo = true } label: {
@@ -374,11 +382,11 @@ struct SpeciesExplorerView: View {
                 .scrollBounceBehavior(.basedOnSize)
             }
         }
-        .liquidGlass(in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .strokeBorder(.white.opacity(0.12), lineWidth: 1)
-        }
+        // The same tile the species rows inside it are cut from — see
+        // `GlassTile`. This is the panel rather than a row, but it is the same
+        // material at the same radius under the same edge, and having one
+        // definition is what keeps it that way.
+        .glassTile()
     }
 
     // MARK: Globe
@@ -721,6 +729,11 @@ struct GuideSpeciesThumbnail: View {
     /// same radius on a 50pt one, and these sit next to each other in neither
     /// place, so matching the host matters more than matching each other.
     var cornerRadius: CGFloat = 10
+    /// Keeps `size` as the tile's WIDTH and lets it stretch to the height of
+    /// whatever it is placed against, clipping nothing itself. For the
+    /// species-ID feed row, whose photo runs full-bleed into the leading edge
+    /// of the card and takes its corners from the card's own clip.
+    var fillsHeight: Bool = false
 
     @State private var imageURL: URL?
 
@@ -738,8 +751,11 @@ struct GuideSpeciesThumbnail: View {
                 placeholder
             }
         }
-        .frame(width: size, height: size)
-        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        .frame(width: size, height: fillsHeight ? nil : size)
+        .frame(maxHeight: fillsHeight ? .infinity : nil)
+        .clipShape(fillsHeight
+                   ? AnyShape(Rectangle())
+                   : AnyShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)))
         .task(id: species.scientificName) {
             // Contributor-set URL first — see its doc comment on `GuideSpecies`
             // for why that's preferred over the live Wikipedia lookup below,
@@ -758,7 +774,8 @@ struct GuideSpeciesThumbnail: View {
             .scaledToFit()
             .foregroundStyle(.white)
             .padding(size / 5)
-            .frame(width: size, height: size)
+            .frame(width: size, height: fillsHeight ? nil : size)
+            .frame(maxHeight: fillsHeight ? .infinity : nil)
             .background(tint.gradient)
     }
 }
@@ -770,6 +787,16 @@ struct GuideSpeciesThumbnail: View {
 /// echolocation stats and an IUCN conservation status).
 struct GuideSpeciesRow: View {
     let species: GuideSpecies
+    /// Draws the photo as a full-height tile hard against the row's leading
+    /// edge, the way the detector's species-ID rows do, instead of as an inset
+    /// rounded chip. Opt-in because only a host that has zeroed its own leading
+    /// inset can show it — anywhere else the picture would float in the middle
+    /// of the margin with square corners. The guide's list layout is the one
+    /// that does (Niall, 2026-09-02).
+    var fullBleedThumbnail: Bool = false
+    /// Wide enough that the picture reads as the square end of the row: three
+    /// lines of text and the padding around them come to about the same.
+    private static let fullBleedWidth: CGFloat = 72
 
     private var peakFreqCaption: String? {
         guard let range = species.echolocation?.peakFreqHzRange else { return nil }
@@ -778,9 +805,31 @@ struct GuideSpeciesRow: View {
     }
 
     var body: some View {
-        HStack(alignment: .center, spacing: 10) {
-            GuideSpeciesThumbnail(species: species)
+        if fullBleedThumbnail {
+            text
+                .padding(.vertical, 10)
+                .padding(.trailing, 4)
+                // The photo is drawn behind the text rather than beside it: a
+                // `.background` is handed the text block's own height, so the
+                // tile fills the row whatever the caption does to it.
+                .padding(.leading, Self.fullBleedWidth + 10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(alignment: .leading) {
+                    GuideSpeciesThumbnail(species: species,
+                                          size: Self.fullBleedWidth,
+                                          fillsHeight: true)
+                }
+        } else {
+            HStack(alignment: .center, spacing: 10) {
+                GuideSpeciesThumbnail(species: species)
+                text
+            }
+            .padding(.vertical, 4)
+        }
+    }
 
+    private var text: some View {
+        HStack(alignment: .center, spacing: 10) {
             VStack(alignment: .leading, spacing: 4) {
                 Text(species.commonName)
                     .font(.headline)
@@ -794,19 +843,14 @@ struct GuideSpeciesRow: View {
                 }
             }
 
-            Spacer()
+            Spacer(minLength: 4)
 
-            if let iucn = species.conservation?.iucnStatus,
-               let badge = IUCNStatusStyle.forStatus(iucn) {
-                Text(badge.text)
-                    .font(.caption2.weight(.bold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 4)
-                    .background(badge.color.gradient, in: Capsule())
-            }
+            // No IUCN badge here. It sat in the row's trailing slot as a
+            // two-letter code most people cannot read without the key, squeezing
+            // the names beside it — and a long common name over a long scientific
+            // one is what wraps first. The status is on the species page, spelled
+            // out, which is where it means something (Niall, 2026-09-02).
         }
-        .padding(.vertical, 4)
     }
 }
 

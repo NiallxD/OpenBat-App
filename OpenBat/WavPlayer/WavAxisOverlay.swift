@@ -59,13 +59,13 @@ struct WavAxisOverlay: View {
         let x = min(max(CGFloat(frac) * geoSize.width, Self.timeAxisLeftInset + Self.timeLabelHalfWidth),
                     geoSize.width - Self.timeLabelHalfWidth)
         return VStack(spacing: 2) {
-            Rectangle().fill(Color.white.opacity(0.6)).frame(width: 1, height: 5)
+            Rectangle().fill(Color.primary.opacity(0.6)).frame(width: 1, height: 5)
             Text(Self.formatTime(seconds))
                 .font(.system(size: 9, weight: .medium))
-                .foregroundStyle(.white)
+                .foregroundStyle(Color.primary)
                 .padding(.horizontal, 3)
                 .padding(.vertical, 1)
-                .background(Color.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 3))
+                .background(Color(uiColor: .systemBackground).opacity(0.55), in: RoundedRectangle(cornerRadius: 3))
         }
         .position(x: x, y: geoSize.height - 10)
     }
@@ -85,11 +85,11 @@ struct WavAxisOverlay: View {
         return HStack(spacing: 2) {
             Text(Self.formatFreq(hz))
                 .font(.system(size: 9, weight: .medium))
-                .foregroundStyle(.white)
+                .foregroundStyle(Color.primary)
                 .padding(.horizontal, 3)
                 .padding(.vertical, 1)
-                .background(Color.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 3))
-            Rectangle().fill(Color.white.opacity(0.6)).frame(width: 5, height: 1)
+                .background(Color(uiColor: .systemBackground).opacity(0.55), in: RoundedRectangle(cornerRadius: 3))
+            Rectangle().fill(Color.primary.opacity(0.6)).frame(width: 5, height: 1)
         }
         .position(x: 26, y: y)
     }

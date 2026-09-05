@@ -108,6 +108,7 @@ struct DemoModeView: View {
                     }
                 }
             }
+            .pageBackground()
             .navigationTitle("Demo Mode")
             .navigationBarTitleDisplayMode(.inline)
     }

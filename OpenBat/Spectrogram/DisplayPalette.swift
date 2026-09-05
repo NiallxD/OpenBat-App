@@ -49,6 +49,24 @@ enum Palette: Int, CaseIterable, Identifiable {
 /// math with no isolation annotation, called from `PulseImageRenderer`'s capture
 /// pipeline and `RecordingSpectrogramRenderer`'s off-main render path.
 nonisolated enum DisplayColormap {
+    /// Whether every colormap is drawn upside down — silence white, calls dark
+    /// — because the phone is in light mode (Niall, 2026-09-02).
+    ///
+    /// **A global, deliberately.** The colouring happens in half a dozen places
+    /// that have no view context to read a colour scheme from: the live Metal
+    /// shader, the pulse-view renderer, session thumbnails, the player's tile
+    /// store and its overview. Threading an environment value through all of
+    /// them would put the same flag in six initialisers and guarantee that one
+    /// of them eventually disagrees with the others — and two spectrograms in
+    /// opposite polarities on one screen is worse than any of the alternatives.
+    /// `RootView` sets it, once, from the scheme.
+    ///
+    /// Written from the main actor and read from render threads. It is a `Bool`
+    /// that flips at most when the user changes appearance, and a torn read is
+    /// not a thing a single-word load can produce — the worst case is one frame
+    /// coloured with the old value.
+    nonisolated(unsafe) static var inverted = false
+
     private typealias RGB = (Float, Float, Float)
     private typealias Stop = (Float, RGB)
 
@@ -90,14 +108,24 @@ nonisolated enum DisplayColormap {
         ],
     ]
 
-    static func rgb(_ t: Float, palette: Palette) -> (UInt8, UInt8, UInt8) {
+    /// `inverted` defaults to the global, so every existing call site follows
+    /// the appearance without being touched; pass it explicitly only to render
+    /// a picture whose polarity must not depend on the phone.
+    static func rgb(_ t: Float, palette: Palette,
+                    inverted: Bool = DisplayColormap.inverted) -> (UInt8, UInt8, UInt8) {
         let t = min(max(t, 0), 1)
         let c = sample(t, palette: palette)
         // Fade the bottom of every palette to black so silence renders dark even
         // for palettes whose t=0 stop is a saturated colour (viridis, jet).
         // Mirrors the identical fade in Spectrogram.metal's colormap().
         let fade = min(t / 0.12, 1)
-        return (UInt8(c.0 * fade * 255), UInt8(c.1 * fade * 255), UInt8(c.2 * fade * 255))
+        var rgb = (c.0 * fade, c.1 * fade, c.2 * fade)
+        // A straight photographic negative, taken AFTER the fade — which is why
+        // it lands on white rather than on some palette's own t=0 colour. Every
+        // map then reads the same way up: silence is the page, energy is ink.
+        // Mirrors the identical inversion in Spectrogram.metal's colormap().
+        if inverted { rgb = (1 - rgb.0, 1 - rgb.1, 1 - rgb.2) }
+        return (UInt8(rgb.0 * 255), UInt8(rgb.1 * 255), UInt8(rgb.2 * 255))
     }
 
     /// Precomputes `rgb(_:palette:)` at `steps` evenly-spaced points — for any
@@ -111,8 +139,10 @@ nonisolated enum DisplayColormap {
     /// resolution/design issue. Build this ONCE per colorize call (256
     /// iterations through the slow path, negligible) and index into it
     /// per-pixel (O(1), no dictionary, no search) instead.
-    static func makeLUT(palette: Palette, steps: Int = 256) -> [(UInt8, UInt8, UInt8)] {
-        (0..<steps).map { i in rgb(Float(i) / Float(steps - 1), palette: palette) }
+    static func makeLUT(palette: Palette, steps: Int = 256,
+                        inverted: Bool = DisplayColormap.inverted) -> [(UInt8, UInt8, UInt8)] {
+        (0..<steps).map { i in rgb(Float(i) / Float(steps - 1), palette: palette,
+                                   inverted: inverted) }
     }
 
     private static func sample(_ t: Float, palette: Palette) -> RGB {

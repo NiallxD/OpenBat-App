@@ -46,6 +46,9 @@ extension Color {
 }
 
 struct ContentView: View {
+    /// Read, not inferred: `sessionSymbolTint` needs a concrete black or white
+    /// because a semantic colour resolves wrong inside the tab bar's glass.
+    @Environment(\.colorScheme) private var colorScheme
     @State private var audio = AudioEngineController()
     @State private var processor = SpectrogramProcessor()
     @State private var pulseDetector = PulseDetector()
@@ -299,10 +302,14 @@ struct ContentView: View {
                 .sheet(isPresented: $showNearbySpecies) {
                     NearbySpeciesSheet(guide: speciesGuide, presenceStore: speciesPresence,
                                        coordinate: location.currentCoordinate)
-                        // The sheet's own card material defaults to a light
-                        // translucent fill — flat black instead, matching the
-                        // guide's push destination of the same grid.
-                        .presentationBackground(Color.black)
+                        // The sheet's own card material defaults to a
+                        // translucent fill — the page's own ground instead,
+                        // matching the guide's push destination of the same
+                        // grid. `Color(uiColor:)`, not `.black`: the guide
+                        // destination is whatever the phone's appearance says,
+                        // and a sheet that stayed black in light mode would be
+                        // the one screen that didn't follow.
+                        .presentationBackground(Color.appBackground)
                 }
                 // Ending stops live listening (and any in-progress recording)
                 // outright — the logged IDs themselves aren't deleted, but the
@@ -848,6 +855,11 @@ struct ContentView: View {
     /// both of them — portrait and iPad landscape — from one place.
     @ViewBuilder private var detectorLayout: some View {
         ZStack {
+            // Painted, not inherited. This screen used to show whatever the
+            // `TabView` put behind it, which is how it ended up the one page in
+            // the app that wasn't drawing `Color.appBackground` — and therefore
+            // the one every other page looked wrong beside.
+            Color.appBackground.ignoresSafeArea()
             detectorLayoutBody
             if showTuningOverlay {
                 LiveTuningOverlay(
@@ -876,6 +888,11 @@ struct ContentView: View {
         if UIDevice.current.userInterfaceIdiom == .pad {
             // iPad landscape gets its own dedicated 2-panel layout (below); iPad
             // portrait falls through to the same stacked layout iPhone uses.
+            //
+            // **No reading column here** (Niall, 2026-09-02). The detector is
+            // not reading matter — it is a spectrogram and a row of live
+            // readouts, and both are worth more the wider they are. See
+            // `PageColumn` for the pages that do take the column.
             GeometryReader { geo in
                 if geo.size.width > geo.size.height {
                     ipadLandscapeLayout
@@ -955,37 +972,125 @@ struct ContentView: View {
     /// because the guide's has to be EDITED and not only appended to: starting
     /// a comparison from a species page replaces that page.
     @State private var sectionPaths: [AppSection: NavigationPath] = [:]
+    /// Which sections have asked for the sun clock to be taken out of their
+    /// leading slot — see the `.toolbar` in `sectionScreen`.
+    @State private var sunClockHiddenBySection: [AppSection: Bool] = [:]
+
+    /// The species a comparison is being started from, while its picker is up.
+    /// Held here because the sheet is presented here — see the note at the
+    /// `.sheet` in `sectionScreen`.
+    @State private var compareBase: GuideSpecies?
+
+    /// Swaps the species page at the top of the guide's stack for the
+    /// comparison it asked for, so Back from the comparison reaches the list
+    /// that page was opened from rather than the page itself.
+    private func replaceSpeciesPage(withComparisonOf first: GuideSpecies,
+                                    and second: GuideSpecies) {
+        var path = sectionPaths[.species] ?? NavigationPath()
+        if !path.isEmpty { path.removeLast() }
+        path.append(SpeciesGuideDestination.compare(first, second))
+        sectionPaths[.species] = path
+    }
 
     private func pathBinding(for section: AppSection) -> Binding<NavigationPath> {
         Binding(get: { sectionPaths[section] ?? NavigationPath() },
                 set: { sectionPaths[section] = $0 })
     }
 
-    /// Each section's screen. Each owns its own `NavigationStack` — the
+    /// Each section's screen, plus — for the guide — the "compare with…"
+    /// picker.
+    ///
+    /// **The picker hangs off the STACK, not off anything inside it.** It is
+    /// opened from a species page and it ends by swapping that page out of the
+    /// path, so a sheet hosted by the page is asked to finish dismissing from a
+    /// host that is being removed; on iPad that left an invisible modal eating
+    /// every touch. The stack's root content is no good either — that view
+    /// leaves the window as soon as a page is pushed over it, and a sheet
+    /// presented from a view that is not on screen never appears. The stack
+    /// itself is the one host in this chain that a path change cannot disturb.
+    @ViewBuilder private func sectionScreen(_ s: AppSection) -> some View {
+        if s == .species {
+            sectionStack(s)
+                // **On the STACK, not on the stack's root content.** This lived
+                // on `SpeciesExplorerView` and never arrived: a species page is
+                // pushed with `navigationDestination`, and that content is
+                // hosted by the NavigationStack rather than by the view the
+                // modifier was declared in — so the page read the default,
+                // `presentsOverPage`, and hosted its own picker and a
+                // `fullScreenCover` over itself. That cover is offered a size
+                // of 0x0 on iPad and takes the range map's Metal layer down
+                // with it (Niall, 2026-09-02). Everything `replacesPage`
+                // documents about owning the path was correct and simply never
+                // ran. Only the guide sets this; the other stacks keep the
+                // default.
+                .environment(\.speciesCompareMode, .replacesPage { base in
+                    compareBase = base
+                })
+                .sheet(item: $compareBase) { base in
+                    SpeciesComparePickerSheet(base: base, store: speciesGuide,
+                                              presenceStore: speciesPresence) { chosen in
+                        compareBase = nil
+                        // The same wait the fallback path takes: a navigation
+                        // change made while a sheet is still dismissing is
+                        // dropped, or worse. It should be harmless now that the
+                        // sheet's host outlives the swap, and it costs nothing.
+                        Task {
+                            try? await Task.sleep(for: .milliseconds(350))
+                            replaceSpeciesPage(withComparisonOf: base, and: chosen)
+                        }
+                    }
+                }
+        } else {
+            sectionStack(s)
+        }
+    }
+
+    /// The section's own stack. Each owns its own `NavigationStack` — the
     /// section views already set their own titles and toolbar items and assume
     /// they are inside one, and a tab bar wants a stack per tab so a push in
     /// Sessions doesn't unwind when you visit Species.
-    @ViewBuilder private func sectionScreen(_ s: AppSection) -> some View {
+    @ViewBuilder private func sectionStack(_ s: AppSection) -> some View {
         NavigationStack(path: pathBinding(for: s)) {
             Group {
                 switch s {
                 case .detector: detectorScreen
                 case .sessions: SessionsView(store: classStore, settings: autoIDSettings, consent: consent,
-                                            micCalSettings: micCalSettings)
+                                            micCalSettings: micCalSettings, speciesGuide: speciesGuide)
                 case .species:
                     SpeciesExplorerView(store: speciesGuide, presenceStore: speciesPresence, userCoordinate: location.currentCoordinate)
-                        // Only the guide can offer this: it is the only stack
-                        // whose path this view owns, and swapping a page for
-                        // its comparison needs the path. See SpeciesCompareMode.
-                        .environment(\.speciesCompareMode, .replacesPage { first, second in
-                            var path = sectionPaths[.species] ?? NavigationPath()
-                            // Drop the species page being compared FROM, so the
-                            // comparison takes its place and Back reaches the
-                            // list underneath rather than the page you left.
-                            if !path.isEmpty { path.removeLast() }
-                            path.append(SpeciesGuideDestination.compare(first, second))
-                            sectionPaths[.species] = path
-                        })
+                }
+            }
+            // The sun clock belongs to the APP, not to the detector (Niall,
+            // 2026-09-02). It says which half of the night you are standing in,
+            // which is as worth knowing while you are reading last night's
+            // sessions or looking a species up as it is while listening — and a
+            // pill that comes and goes with the tab reads as something that
+            // belongs to one screen.
+            //
+            // Applied to the stack's ROOT content, so it is on each tab's own
+            // first screen and not on the pages pushed from it: a pushed page's
+            // leading slot is its Back button's, and the pill would be shoving
+            // it along.
+            // A screen can ask for the pill to be dropped for as long as it
+            // needs the slot — Sessions does, while you are selecting
+            // recordings, where Delete sits leading and a sun clock beside it is
+            // two unrelated things in one corner (Niall, 2026-09-02).
+            //
+            // Kept per section rather than in one flag: all three screens exist
+            // at once (see `sectionScreens`), so a selection left running in
+            // Sessions would otherwise take the pill off the Detector too.
+            .onPreferenceChange(SunClockHiddenKey.self) { hidden in
+                sunClockHiddenBySection[s] = hidden
+            }
+            // The `if` is OUTSIDE the item, not inside its content: a
+            // `ToolbarItem` whose content resolves to nothing is never hosted at
+            // all — see the sun clock's own history in `Context.md`.
+            .toolbar {
+                if sunClockHiddenBySection[s] != true {
+                    ToolbarItem(placement: .topBarLeading) {
+                        SunWindowPill(coordinate: location.currentCoordinate)
+                            .tourTarget(.sunClock)
+                    }
                 }
             }
             // Reserves the height of the hand-built bar, so the last row of a
@@ -999,6 +1104,15 @@ struct ContentView: View {
                 Color.clear.frame(height: SessionButtonMetrics.clearance)
             }
         }
+        // Back to the default accent inside the tab: the orange on the `TabView`
+        // is for the SELECTED TAB, and letting it flow down here would turn every
+        // link, control and toolbar button in the app orange with it — which it
+        // did, on the species profile's trailing buttons among others (Niall,
+        // 2026-09-02). On the stack rather than on its content: a navigation
+        // bar's items are hosted by the stack, so a tint set inside the content
+        // never reaches them. `nil` means "no tint set", which is what these
+        // screens shipped with, rather than a hardcoded blue.
+        .tint(nil)
     }
 
     /// Spotlight rects for the things the tab bar draws — the three tabs and the
@@ -1039,14 +1153,10 @@ struct ContentView: View {
             .navigationTitle("Detector")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                // The slot the logo menu used to fill, before the bottom bar
-                // took its job. A sun clock earns a permanent place there:
-                // bats are busiest in the hours after sunset and before
-                // sunrise, and this says which of those you are standing in.
-                ToolbarItem(placement: .topBarLeading) {
-                    SunWindowPill(coordinate: location.currentCoordinate)
-                        .tourTarget(.sunClock)
-                }
+                // The sun clock used to be declared here — it is on every
+                // section's root now, in `sectionScreen`, because it says
+                // something about the night rather than about this screen.
+                //
                 // Left of the gear, and only until the tour has been seen — see
                 // `OnboardingState.shouldOfferTour`. Declaration order is what
                 // puts it there: trailing items are laid out left to right in the
@@ -1074,7 +1184,7 @@ struct ContentView: View {
             // the glass. An explicit solid Color background (the ShapeStyle
             // overload) blocks that sampling outright. Same root cause the tour
             // dim overlay hit.
-            .toolbarBackground(Color.black, for: .navigationBar)
+            .toolbarBackground(Color(uiColor: .systemBackground), for: .navigationBar)
             // The bar STAYS UP during the tour (2026-08-17, Niall's call: the
             // tour should show the screen as it really is, and hiding the bar
             // took the sun clock with it — a permanent piece of the Detector
@@ -1149,6 +1259,14 @@ struct ContentView: View {
                 }
             }
         }
+        // The bar's selected item takes the app's accent, and the `AccentColor`
+        // asset is deliberately empty so ordinary controls stay system blue (see
+        // `Color.batAccent`) — which left the selected tab blue too, the one
+        // place in the app where blue means "this is the live one" (Niall,
+        // 2026-09-02). Tinting the `TabView` colours the bar; `sectionScreen`
+        // puts the default back for everything inside a tab, so this reaches the
+        // bar and nothing else.
+        .tint(Color.batAccent)
     }
 
     /// Whether the session button is ours to draw rather than the bar's.
@@ -1252,19 +1370,34 @@ struct ContentView: View {
         return audio.isActive ? "waveform" : "play.fill"
     }
 
-    /// Orange while a session runs, white when idle. Idle is deliberately the
-    /// same white as the tab glyphs beside it: nothing is happening, so the
+    /// Orange while a session runs, plain ink when idle. Idle is deliberately
+    /// the same colour as the tab glyphs beside it: nothing is happening, so the
     /// button has nothing to shout about, and orange then means "live" and only
     /// that.
     ///
-    /// This was `.primary` until 2026-08-16 and rendered near-black — a
-    /// semantic colour is resolved in the *bar's* environment, not ours, and
-    /// the bar resolves it as though its glass were light, which the app's
-    /// `.preferredColorScheme(.dark)` does not reach into. It no longer matters
-    /// now the glyph is a baked bitmap, but the rule is worth keeping: concrete
-    /// colours only anywhere near this bar.
+    /// **Still a concrete colour, just not a fixed one.** `.primary` here
+    /// rendered near-black in 2026-08-16: a semantic colour is resolved in the
+    /// *bar's* environment, not ours, and the bar resolved it as though its
+    /// glass were light while the app forced itself dark. So this reads the
+    /// scheme itself and hands the bar black or white — which is what the old
+    /// bare `.white` could not do once the app started following the phone
+    /// (2026-09-02).
     private var sessionSymbolTint: Color {
-        audio.isActive ? .batAccent : .white
+        if audio.isActive { return .batAccent }
+        // White over the globe whatever the phone is set to. The Species tab's
+        // root is satellite imagery running edge to edge, so a light-mode black
+        // glyph sat on a near-black picture — the system's own tab glyphs beside
+        // it flip because the bar samples what is under it, and this glyph is
+        // ours and doesn't (Niall, 2026-09-02). Only at the root: a pushed
+        // species page is an ordinary light page.
+        if isShowingGuideGlobe { return .white }
+        return colorScheme == .dark ? .white : .black
+    }
+
+    /// The Species tab, at its root — which is the globe. A push onto that stack
+    /// (a region, a species, a comparison) is a normal page.
+    private var isShowingGuideGlobe: Bool {
+        section == .species && (sectionPaths[.species]?.isEmpty ?? true)
     }
 
     /// Turns a tap on the session button into either starting a session or
@@ -1516,7 +1649,7 @@ struct ContentView: View {
             .liquidGlass(in: .rect(cornerRadius: 16))
             .overlay {
                 RoundedRectangle(cornerRadius: 16)
-                    .strokeBorder(.white.opacity(0.12), lineWidth: 1)
+                    .strokeBorder(Color.glassEdge, lineWidth: 1)
             }
             .padding(.horizontal, SessionButtonMetrics.horizontalPadding)
             .padding(transportMenuIsBelowBar ? .top : .bottom, transportMenuInset)
@@ -2134,7 +2267,9 @@ struct ContentView: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
         .frame(maxWidth: .infinity)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
+        // The same glass tile the rest of the app is built from, in place of the
+        // bare material this had — see `filledPanelCard`.
+        .filledPanelCard()
     }
 
     /// Mic-connection pill, in the stats header. A standalone View struct because
@@ -2678,6 +2813,11 @@ struct ContentView: View {
     private func startDemo(url: URL, name: String) {
         if audio.isRunning || classStore.activeSessionID != nil { stopDetecting() }
         recorder.setBlocked(true)
+        // Demo IDs are held in memory and dropped at `endDemo` — see
+        // `ClassificationStore.demoRun`. Without this they persisted as
+        // session-less passes and the next launch's migration turned them into
+        // a Session row of IDs with no recordings.
+        classStore.demoRun = true
         pulseDetector.resetStats()
         recorder.setActiveSession(id: nil, startDate: nil, label: "Demo")
         feedSessionStart = Date()
@@ -2713,12 +2853,17 @@ struct ContentView: View {
         liveActivity.end()
         audio.endDemo()
         recorder.setBlocked(false)
+        // After finalizePass, so the pass it just closed is swept up with the
+        // rest of the demo's output rather than outliving it.
+        classStore.endDemoRun()
         feedSessionStart = nil
     }
 
     /// Begin detection inside a new session (logged IDs + map pins). Also the
     /// session button's first-tap action — see `handleSessionButtonTap`.
     private func startDetecting() {
+        // A demo left running when the user hits Start takes its IDs with it.
+        classStore.endDemoRun()
         // Before resetStats(), which discards the accumulator: a pass can still be
         // open here, because an unexpected audio stop (interruption, route error)
         // stops `feed()` being called and so the silence timeout that normally

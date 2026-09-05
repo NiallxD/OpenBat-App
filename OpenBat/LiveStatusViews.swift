@@ -559,9 +559,17 @@ private enum MeterMath {
     /// Samples the user-selected display palette so the meter matches the
     /// spectrogram. Skewed toward the bright end (t = 0.35…1) because most
     /// palettes start near-black, which would make the low segments invisible.
-    static func color(_ frac: Double, palette: Palette) -> Color {
+    ///
+    /// `inverted` is passed IN rather than read from `DisplayColormap.inverted`
+    /// (Niall, 2026-09-02). That global is not observable, so a meter that read
+    /// it directly kept whichever polarity it was first drawn with and sat there
+    /// in last night's colours after a light/dark switch. Handing it in from the
+    /// view's own `@Environment(\.colorScheme)` makes the appearance a real
+    /// dependency of the body, which is what makes the redraw happen at all.
+    static func color(_ frac: Double, palette: Palette, inverted: Bool) -> Color {
         let f = min(max(frac, 0), 1)
-        let (r, g, b) = DisplayColormap.rgb(Float(0.35 + 0.65 * f), palette: palette)
+        let (r, g, b) = DisplayColormap.rgb(Float(0.35 + 0.65 * f), palette: palette,
+                                            inverted: inverted)
         return Color(red: Double(r) / 255, green: Double(g) / 255, blue: Double(b) / 255)
     }
 }
@@ -592,12 +600,16 @@ final class PeakHoldTracker {
 /// View (not a ContentView computed property) so reading `currentLevelDB` at
 /// 15 Hz only invalidates this small view, not the whole screen.
 struct AmplitudeMeterView: View {
+    /// The meter is coloured from the spectrogram's palette, which flips with
+    /// the appearance — see `MeterMath.color`.
+    @Environment(\.colorScheme) private var colorScheme
     let audio: AudioEngineController
     let peakHold: PeakHoldTracker
     let detector: PulseDetector
 
     var body: some View {
         let palette = detector.displayPalette
+        let inverted = colorScheme == .light
         let level = MeterMath.normalized(Double(audio.diagnostics.currentLevelDB))
         let segments = 40
         VStack(alignment: .leading, spacing: 3) {
@@ -618,14 +630,14 @@ struct AmplitudeMeterView: View {
                             let frac = Double(i) / Double(segments - 1)
                             let lit = frac <= level
                             RoundedRectangle(cornerRadius: 1.5)
-                                .fill(MeterMath.color(frac, palette: palette).opacity(lit ? 1 : 0.12))
+                                .fill(MeterMath.color(frac, palette: palette, inverted: inverted).opacity(lit ? 1 : 0.12))
                         }
                     }
                     if peakHold.peakHold > 0 {
                         Circle()
-                            .fill(MeterMath.color(peakHold.peakHold, palette: palette))
+                            .fill(MeterMath.color(peakHold.peakHold, palette: palette, inverted: inverted))
                             .frame(width: 7, height: 7)
-                            .shadow(color: MeterMath.color(peakHold.peakHold, palette: palette).opacity(0.8), radius: 2)
+                            .shadow(color: MeterMath.color(peakHold.peakHold, palette: palette, inverted: inverted).opacity(0.8), radius: 2)
                             .position(x: max(3, min(geo.size.width - 3, geo.size.width * peakHold.peakHold)),
                                       y: geo.size.height / 2)
                     }
@@ -796,11 +808,11 @@ struct RecordingStatusBadge: View {
     var body: some View {
         HStack(spacing: 5) {
             Circle()
-                .fill(isOn ? Color.white : Color.secondary.opacity(0.7))
+                .fill(isOn ? Color.primary : Color.secondary.opacity(0.7))
                 .frame(width: 6, height: 6)
             Text(isOn ? "Recording" : "Not recording")
                 .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(isOn ? .white : Color.secondary)
+                .foregroundStyle(isOn ? Color.primary : Color.secondary)
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)

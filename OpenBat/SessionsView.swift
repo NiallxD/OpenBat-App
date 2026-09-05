@@ -33,6 +33,14 @@ private enum SessionDateFormatters {
     static let dateTimeMedium: DateFormatter = {
         let f = DateFormatter(); f.dateStyle = .medium; f.timeStyle = .medium; return f
     }()
+    /// "2 Sep 2026". A template rather than a literal format so the field order
+    /// follows the user's locale — the ask is dd MMM yyyy, and that is what a
+    /// UK or US locale both resolve this to.
+    static let dayMonthYear: DateFormatter = {
+        let f = DateFormatter()
+        f.setLocalizedDateFormatFromTemplate("d MMM yyyy")
+        return f
+    }()
 }
 
 // MARK: - Sessions list
@@ -44,12 +52,12 @@ struct SessionsView: View {
     /// Only used to hand the player its calibration curve — this screen shows no
     /// spectrogram of its own.
     let micCalSettings: MicCalibrationSettings
+    /// Likewise passed straight through to the player, which shows the guide's
+    /// echolocation figures beside the ones it measures.
+    let speciesGuide: SpeciesGuideStore
     @State private var showImporter = false
     @State private var importError: String?
     @State private var isImporting = false
-    /// Sessions queued by a swipe-delete, pending user confirmation (deleting a
-    /// session irreversibly removes all its IDs and thumbnails).
-    @State private var sessionsPendingDelete: [RecordingSession] = []
 
     // MARK: Multi-select
     //
@@ -63,7 +71,12 @@ struct SessionsView: View {
         case recording(UUID)
     }
     @State private var selection = Set<Selected>()
-    @State private var editMode: EditMode = .inactive
+    /// Selection is the app's own, not the List's. `EditMode` puts a tick in a
+    /// column of its own down the leading edge, which shoves every row's content
+    /// across — and these rows lead with a picture, so the whole list slid
+    /// sideways on entering selection (Niall, 2026-09-02). Ticking in place of
+    /// the row's chevron says the same thing and moves nothing.
+    @State private var isSelecting = false
     /// What a confirmed bulk delete will remove. Held rather than acted on
     /// immediately because it is irreversible in both directions: a session
     /// takes every ID and thumbnail logged in it, a recording takes its WAV.
@@ -83,14 +96,21 @@ struct SessionsView: View {
     }
     var body: some View {
         sessionsContent
-        .navigationTitle("Sessions")
+            .pageBackground()
+            // Delete takes the leading slot while selecting, and the sun clock
+            // lives there the rest of the time — see `hidesSunClock`.
+            .hidesSunClock(isSelecting)
+        // The count lives in the title while selecting. It was a `.bottomBar`
+        // toolbar item, which the floating tab bar sits on top of — the text
+        // was there the whole time, behind the bar.
+        .navigationTitle(isSelecting ? selectionCountTitle : "Sessions")
         .navigationBarTitleDisplayMode(.inline)
-        // Flat black bar, matching every other section. This colour only fills the
-        // bar's background — the glass material that used to composite over it
-        // (reading as a grey header) is removed app-wide in
-        // `OpenBatApp.configureNavigationBarAppearance`, and `flatTopScrollEdge`
-        // drops the scroll-edge scrim this section's list would otherwise add.
-        .toolbarBackground(Color.black, for: .navigationBar)
+        // No painted header (Niall, 2026-09-02). The app-wide appearance proxy
+        // gives every bar an opaque background, which on a page whose content
+        // starts right under it reads as a header strip the page doesn't need.
+        // Cleared here, with the scroll-edge scrim dropped alongside it — one
+        // without the other just swaps a painted bar for a glass one.
+        .clearNavigationBarBackground()
         .flatTopScrollEdge()
         .toolbar { toolbarContent }
         // AIFF and the generic `.audio` type are honest options because everything
@@ -111,26 +131,19 @@ struct SessionsView: View {
         } message: {
             Text(importError ?? "")
         }
-        .confirmationDialog("Delete this session and all its IDs?",
-                            isPresented: Binding(
-                                get: { !sessionsPendingDelete.isEmpty },
-                                set: { if !$0 { sessionsPendingDelete = [] } }
-                            ),
-                            titleVisibility: .visible) {
-            Button("Delete", role: .destructive) {
-                sessionsPendingDelete.forEach(store.deleteSession)
-                sessionsPendingDelete = []
-            }
-            Button("Cancel", role: .cancel) { }
-        } message: {
-            Text("Every ID and recording logged in this session will be removed. This can't be undone.")
-        }
-        .confirmationDialog("Delete the selected items?",
-                            isPresented: Binding(
-                                get: { !(bulkPendingDelete?.isEmpty ?? true) },
-                                set: { if !$0 { bulkPendingDelete = nil } }
-                            ),
-                            titleVisibility: .visible) {
+        // One alert for every way a delete can start — the toolbar's Delete and
+        // a row swipe alike.
+        //
+        // It is an alert rather than a confirmationDialog for two reasons. The
+        // dialog anchors to its source, so with Delete moved to the top-left it
+        // came up as a popover hanging off the toolbar; and a swipe-delete's
+        // dialog left the swiped row half-open behind it, so cancelling gave
+        // back a row still stuck in its delete state.
+        .alert(deleteAlertTitle,
+               isPresented: Binding(
+                   get: { !(bulkPendingDelete?.isEmpty ?? true) },
+                   set: { if !$0 { bulkPendingDelete = nil } }
+               )) {
             Button("Delete", role: .destructive) {
                 guard let pending = bulkPendingDelete else { return }
                 pending.sessions.forEach(store.deleteSession)
@@ -140,7 +153,7 @@ struct SessionsView: View {
                 bulkPendingDelete = nil
                 withAnimation {
                     selection.removeAll()
-                    editMode = .inactive
+                    isSelecting = false
                 }
             }
             Button("Cancel", role: .cancel) { bulkPendingDelete = nil }
@@ -150,62 +163,67 @@ struct SessionsView: View {
     }
 
     @ToolbarContentBuilder private var toolbarContent: some ToolbarContent {
-        // Import an external WAV — the only way to audition a known bat call
+        // Everything that isn't the list itself lives behind one trailing menu:
+        // Add Recording (the WAV importer) and Select. Two bare toolbar icons
+        // used to sit there instead, which meant the import button had to be
+        // hidden mid-selection to stop a new row landing in a list being chosen
+        // from; the menu is simply gone in selection mode.
+        //
+        // Import an external WAV is the only way to audition a known bat call
         // through the listening modes without a live bat, since WavPlayerView
         // drives the real DSP from the file at its native rate. See
         // RecordingImporter. Came here when the Playback tab was folded in.
-        //
-        // Hidden while selecting: importing during a multi-select would land a
-        // new row in a list the user is part-way through choosing from.
-        if editMode == .inactive {
+        if !isSelecting {
             ToolbarItem(placement: .topBarTrailing) {
-                Button {
-                    showImporter = true
+                Menu {
+                    Button {
+                        showImporter = true
+                    } label: {
+                        Label("Add Recording", systemImage: "plus")
+                    }
+                    .disabled(isImporting)
+                    Button {
+                        withAnimation { isSelecting = true }
+                    } label: {
+                        Label("Select", systemImage: "checkmark.circle")
+                    }
+                    .disabled(store.sessions.isEmpty && looseRecordingsSorted.isEmpty)
                 } label: {
                     if isImporting {
                         ProgressView()
                     } else {
-                        Image(systemName: "plus")
+                        Image(systemName: "ellipsis.circle")
                     }
                 }
-                .disabled(isImporting)
-                .accessibilityLabel("Import a recording")
+                .accessibilityLabel("Sessions menu")
             }
-        }
-        // Not `EditButton()`: leaving selection has to drop the selection with
-        // it, or the next Select starts with rows already ticked from last
-        // time and a Delete is one tap from removing them.
-        ToolbarItem(placement: .topBarTrailing) {
-            Button(editMode == .inactive ? "Select" : "Done") {
-                withAnimation {
-                    if editMode == .inactive {
-                        editMode = .active
-                    } else {
-                        editMode = .inactive
-                        selection.removeAll()
-                    }
-                }
-            }
-            .disabled(store.sessions.isEmpty && looseRecordingsSorted.isEmpty)
-        }
-        if editMode == .active {
-            ToolbarItemGroup(placement: .bottomBar) {
-                Button(allSelected ? "Deselect All" : "Select All") {
-                    if allSelected { selection.removeAll() } else { selectAll() }
-                }
-                Spacer()
-                Text(selection.isEmpty
-                     ? "Nothing selected"
-                     : "\(selection.count) selected")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Button(role: .destructive) {
+        } else {
+            // Delete sits leading, opposite Done, so the destructive tap is
+            // nowhere near the one that leaves selection.
+            ToolbarItem(placement: .topBarLeading) {
+                // Tinted rather than `role: .destructive`: the role fills the
+                // toolbar's glass button solid red, which reads as an alert
+                // sitting in the bar. Red lettering on the same glass as every
+                // other item says the same thing at the weight it deserves —
+                // the confirmation alert is where the real red belongs.
+                Button {
                     bulkPendingDelete = resolveSelection()
                 } label: {
                     Text("Delete")
                 }
+                .tint(.red)
                 .disabled(selection.isEmpty)
+            }
+            // Not `EditButton()`: leaving selection has to drop the selection
+            // with it, or the next Select starts with rows already ticked from
+            // last time and a Delete is one tap from removing them.
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("Done") {
+                    withAnimation {
+                        isSelecting = false
+                        selection.removeAll()
+                    }
+                }
             }
         }
         // No unclassified-recordings filter here (Niall, 2026-08-16). This screen
@@ -217,17 +235,8 @@ struct SessionsView: View {
 
     // MARK: Selection
 
-    private var allSelectableCount: Int {
-        store.sessions.count + looseRecordingsSorted.count
-    }
-
-    private var allSelected: Bool {
-        !selection.isEmpty && selection.count == allSelectableCount
-    }
-
-    private func selectAll() {
-        selection = Set(store.sessions.map { Selected.session($0.id) })
-            .union(looseRecordingsSorted.map { Selected.recording($0.id) })
+    private func toggle(_ item: Selected) {
+        if selection.contains(item) { selection.remove(item) } else { selection.insert(item) }
     }
 
     /// Turns the selection back into the objects to delete. Anything that has
@@ -249,6 +258,18 @@ struct SessionsView: View {
     /// Spelled out per kind, because the two costs are different and the
     /// difference matters: a session takes every ID and thumbnail logged in
     /// it, a loose recording takes its audio.
+    private var selectionCountTitle: String {
+        selection.isEmpty ? "Select Items" : "\(selection.count) Selected"
+    }
+
+    /// A swipe on one row shouldn't be asked about as "the selected items".
+    private var deleteAlertTitle: String {
+        guard let pending = bulkPendingDelete else { return "" }
+        if pending.sessions.count == 1 && pending.recordings.isEmpty { return "Delete this session?" }
+        if pending.recordings.count == 1 && pending.sessions.isEmpty { return "Delete this recording?" }
+        return "Delete the selected items?"
+    }
+
     private func bulkDeleteMessage(_ pending: BulkDelete) -> String {
         let s = pending.sessions.count, r = pending.recordings.count
         var parts: [String] = []
@@ -285,44 +306,85 @@ struct SessionsView: View {
                 description: Text("Tap Start to begin detecting. Every outing is logged here automatically.")
             )
         } else {
-            List(selection: $selection) {
+            List {
                 ForEach(groupSessionsByDay(store.sessions), id: \.key) { group in
-                    Section(group.title) {
-                        ForEach(group.sessions) { session in
-                            NavigationLink {
+                    // A heading ROW, not a `Section` header: a plain list pins
+                    // its headers, and these have no background of their own to
+                    // pin with — see `TileList`.
+                    TileSectionHeading(title: group.title)
+
+                    ForEach(group.sessions) { session in
+                            SelectableRow(isSelecting: isSelecting,
+                                          isSelected: selection.contains(.session(session.id)),
+                                          toggle: { toggle(.session(session.id)) }) {
                                 SessionDetailView(session: session, store: store, settings: settings,
-                                                  consent: consent, micCalSettings: micCalSettings)
+                                                  consent: consent, micCalSettings: micCalSettings,
+                                                  speciesGuide: speciesGuide)
                             } label: {
                                 SessionRow(session: session, store: store)
                             }
-                            .tag(Selected.session(session.id))
-                        }
-                        .onDelete { offsets in
-                            sessionsPendingDelete = offsets.map { group.sessions[$0] }
-                        }
+                            .tileRow()
+                            // Red-tinted, NOT `role: .destructive`, and not
+                            // `onDelete`. Both of those own the row's removal
+                            // animation and play it the moment Delete is
+                            // tapped, so the row slid out from under the
+                            // confirmation alert and slid back when it was
+                            // answered — vanishing before the question was
+                            // answered and reappearing after it was. A plain
+                            // tinted button looks identical and only runs the
+                            // closure, leaving the row to the alert.
+                            .swipeActions(edge: .trailing) {
+                                Button {
+                                    bulkPendingDelete = BulkDelete(sessions: [session], recordings: [])
+                                } label: {
+                                    Label("Delete", systemImage: "trash")
+                                }
+                                .tint(.red)
+                            }
                     }
                 }
 
                 if !looseRecordings.isEmpty {
-                    Section {
-                        ForEach(looseRecordings) { recording in
-                            NavigationLink {
+                    TileSectionHeading(title: "Not in a session")
+
+                    ForEach(looseRecordings) { recording in
+                            SelectableRow(isSelecting: isSelecting,
+                                          isSelected: selection.contains(.recording(recording.id)),
+                                          toggle: { toggle(.recording(recording.id)) }) {
                                 recordingDestination(recording)
                             } label: {
                                 RecordingRow(recording: recording, store: store, consent: consent)
                             }
-                            .tag(Selected.recording(recording.id))
-                        }
-                        .onDelete { offsets in offsets.map { looseRecordings[$0] }.forEach(store.delete) }
-                    } header: {
-                        Text("Not in a session")
-                    } footer: {
-                        Text("Imported WAVs, and anything recorded before every outing became a session.")
+                            .tileRow()
+                            // Confirmed like every other delete rather than
+                            // acted on straight away: a swipe took the WAV with
+                            // no way back. See the note above on swipeActions.
+                            .swipeActions(edge: .trailing) {
+                                Button {
+                                    bulkPendingDelete = BulkDelete(sessions: [], recordings: [recording])
+                                } label: {
+                                    Label("Delete", systemImage: "trash")
+                                }
+                                .tint(.red)
+                            }
                     }
+
+                    Text("Imported WAVs, and anything recorded before every outing became a session.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .tileRow()
                 }
             }
-            .listStyle(.insetGrouped)
-            .environment(\.editMode, $editMode)
+            .pageBackground()
+            .pageColumn()
+            // Tiles, like the guide's species lists — see `TileList` for why a
+            // plain list rather than an inset-grouped one.
+            .listStyle(.plain)
+            .listRowSpacing(0)
+            .contentMargins(.top, TileList.scrollTopMargin, for: .scrollContent)
+            // The system draws its chevron in the row's trailing inset, outside
+            // the glass; `SelectableRow` draws its own inside.
+            .navigationLinkIndicatorVisibility(.hidden)
         }
     }
 
@@ -330,7 +392,8 @@ struct SessionsView: View {
     /// LazyDestination.
     @ViewBuilder private func recordingDestination(_ recording: Recording) -> some View {
         LazyDestination {
-            WavPlayerView(recording: recording, store: store, micCalSettings: micCalSettings)
+            WavPlayerView(recording: recording, store: store, micCalSettings: micCalSettings,
+                          speciesGuide: speciesGuide)
         }
     }
 
@@ -439,8 +502,12 @@ private struct SessionRow: View {
         HStack(spacing: 12) {
             SessionMapThumbnail(points: passes.compactMap(\.coordinate))
             VStack(alignment: .leading, spacing: 3) {
-                Text(session.title).font(.headline).lineLimit(1)
-                Text(timeRange).font(.caption).foregroundStyle(.secondary)
+                // The place, alone. The stored title carries the start timestamp
+                // as well, so a row led with the date and then truncated the one
+                // thing that says which outing this was — see
+                // `RecordingSession.displayName` (Niall, 2026-09-02).
+                Text(session.displayName).font(.headline).lineLimit(1)
+                Text(dateAndTime).font(.caption).foregroundStyle(.secondary)
                 HStack(spacing: 8) {
                     Label("\(passes.count) ID\(passes.count == 1 ? "" : "s")",
                           systemImage: "waveform.badge.magnifyingglass")
@@ -449,15 +516,21 @@ private struct SessionRow: View {
                 .font(.caption2)
                 .foregroundStyle(.secondary)
             }
+            // The map sets the row's height; the text only needs enough room of
+            // its own not to touch the edges when it wraps to more lines than
+            // the square is tall.
+            .padding(.vertical, 8)
+            Spacer(minLength: 0)
         }
-        .padding(.vertical, 2)
     }
 
-    private var timeRange: String {
-        let f = SessionDateFormatters.timeShort
-        let start = f.string(from: session.startDate)
-        guard let end = session.endDate else { return "\(start) – now" }
-        return "\(start) – \(f.string(from: end))"
+    /// "2 Sep 2026 | 13:30 – 13:47" — the date the row no longer leads with,
+    /// then the span. Ends "– now" while the outing is still running.
+    private var dateAndTime: String {
+        let time = SessionDateFormatters.timeShort
+        let start = time.string(from: session.startDate)
+        let span = session.endDate.map { "\(start) – \(time.string(from: $0))" } ?? "\(start) – now"
+        return "\(SessionDateFormatters.dayMonthYear.string(from: session.startDate)) | \(span)"
     }
 
     private func dominantSpecies(_ passes: [PassRecord]) -> String? {
@@ -466,9 +539,14 @@ private struct SessionRow: View {
     }
 }
 
-/// Small non-interactive map preview for a session row — same slot/size as
-/// RecordingRow's spectrogram thumbnail. Disabled interaction so a tap still
-/// reaches the enclosing NavigationLink instead of panning the mini-map.
+/// Non-interactive map preview filling the leading square of a session row
+/// (Niall, 2026-09-02) — it used to be a 56×40 chip in the same slot as
+/// RecordingRow's spectrogram thumbnail, which made the one picture on the row
+/// the smallest thing on it. Disabled interaction so a tap still reaches the
+/// enclosing NavigationLink instead of panning the mini-map.
+///
+/// It rounds nothing itself: the row is laid out flush to the leading edge, so
+/// the section card does the clipping and the map picks up the card's corners.
 ///
 /// Shows where the IDs happened. It used to draw the session's GPS track as a
 /// polyline; tracks were removed (see LocationProvider) because detections
@@ -476,27 +554,53 @@ private struct SessionRow: View {
 /// second and much denser recording of the user's movements.
 private struct SessionMapThumbnail: View {
     let points: [CLLocationCoordinate2D]
-    static let size = CGSize(width: 56, height: 40)
+    /// Square, and tall enough to set the row's height on its own — the three
+    /// lines of text beside it come to a little less.
+    static let side: CGFloat = 76
+    /// How much bigger than its slot the map is drawn before being scaled back
+    /// down — see the note on the frame below.
+    private static let renderScale: CGFloat = 2
 
     var body: some View {
         Group {
             if points.isEmpty {
-                RoundedRectangle(cornerRadius: 6)
+                Rectangle()
                     .fill(.quaternary)
                     .overlay { Image(systemName: "location.slash").font(.caption2).foregroundStyle(.secondary) }
             } else {
                 Map(initialPosition: .region(fittedRegion(for: points)), interactionModes: []) {
                     ForEach(Array(points.enumerated()), id: \.offset) { _, point in
-                        MapCircle(center: point, radius: 120)
-                            .foregroundStyle(.blue.opacity(0.7))
+                        // A fixed-size dot, not a `MapCircle`: a circle is drawn
+                        // in metres, so on a session whose IDs sit close together
+                        // the fitted region zooms in and the marker grows into a
+                        // blob covering the map. Orange, matching the species
+                        // pins on the session's own map.
+                        Annotation(coordinate: point) {
+                            Circle()
+                                .fill(.orange)
+                                .frame(width: 6, height: 6)
+                        } label: {
+                            EmptyView()
+                        }
                     }
                 }
                 .mapControlVisibility(.hidden)
                 .allowsHitTesting(false)
+                // Rendered at twice the size and scaled back down, which is the
+                // only handle there is on the "Legal" attribution: MapKit draws
+                // it at a fixed size and it may not be removed — it is Apple's
+                // required credit, not a control — so on a 76pt square it was
+                // most of the bottom edge. Halving it takes the street labels
+                // down with it, which a thumbnail this size is better for.
+                .frame(width: Self.side * Self.renderScale,
+                       height: Self.side * Self.renderScale)
+                .scaleEffect(1 / Self.renderScale)
             }
         }
-        .frame(width: Self.size.width, height: Self.size.height)
-        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .frame(width: Self.side, height: Self.side)
+        // The scaled-up map is drawn larger than its slot before the scale is
+        // applied; without this it paints over the row's text for one pass.
+        .clipped()
     }
 }
 
@@ -529,7 +633,18 @@ struct SessionDetailView: View {
     let settings: AutoIDSettings
     let consent: ConsentStore
     let micCalSettings: MicCalibrationSettings
+    let speciesGuide: SpeciesGuideStore
     @AppStorage("display.showNoID") private var showNoID = false
+    /// Queued by a swipe or by the toolbar's Delete, pending confirmation — a
+    /// delete takes the WAV with no way back, so it is asked about here exactly
+    /// as it is in the sessions list.
+    @State private var pendingDelete: [Recording] = []
+    /// Multi-select over the recordings section only; the map and the charts
+    /// above it aren't selectable rows.
+    @State private var selection = Set<UUID>()
+    /// The app's own, not the List's — see the note on the sessions list's
+    /// `isSelecting` for what `EditMode` does to a row that leads with a picture.
+    @State private var isSelecting = false
     /// Exports don't belong to this screen — see `SessionExportManager`. This
     /// view only starts them and reflects whether one is already running for
     /// this session.
@@ -538,89 +653,207 @@ struct SessionDetailView: View {
     var body: some View {
         List {
             if hasGeo {
-                Section {
-                    SessionMap(pins: mappablePasses)
-                        .frame(height: 240)
-                        .listRowInsets(EdgeInsets())
-                }
-                // The "N pinned of M IDs (≥ 60% · ≥ 3 pulses)" caption that used to
-                // sit under the map is gone (Niall, 2026-08-16). It was explaining
-                // the map's own filtering thresholds in the map's smallest type —
-                // a discrepancy nobody had asked about, stated in the language of
-                // the settings that cause it. The thresholds are still in AutoID
-                // settings, where they can be changed.
+                // The chart headers are rows now, like every other heading in a
+                // tiled list — a plain list pins section headers, and there is no
+                // background under them to pin with. See `TileList`.
+                sectionHeading { SessionChartHeader(title: "Map & species", kind: .map) }
+                // Two cards with a gutter between them, not one panel: a square
+                // map, and the species tally in a card of its own (Niall,
+                // 2026-09-02). They draw their own surfaces, so the row gives
+                // them nothing but the gutter.
+                SessionMapSpeciesRow(pins: mappablePasses, passes: sessionPasses)
+                    .tileRow()
             }
             if !sessionPasses.isEmpty {
                 // Species first, then when they were about. Both used to sit below
                 // the recordings list; the summary of an outing is the reason to
-                // open it, and the file list is what you go to afterwards.
-                Section {
+                // open it, and the file list is what you go to afterwards. With a
+                // map the species live beside it, so the bar chart is redundant.
+                if !hasGeo {
+                    sectionHeading { SessionChartHeader(title: "Species detected", kind: .species) }
                     SessionSpeciesSummary(passes: sessionPasses)
-                } header: {
-                    SessionChartHeader(title: "Species detected", kind: .species)
+                        .padding(14)
+                        .glassTile()
+                        .tileRow()
                 }
-                Section {
-                    SessionActivityChart(passes: sessionPasses,
-                                         start: session.startDate,
-                                         end: session.endDate ?? Date())
-                } header: {
-                    SessionChartHeader(title: "Detections over time", kind: .timeline)
-                }
+                sectionHeading { SessionChartHeader(title: "Detections over time", kind: .timeline) }
+                SessionActivityChart(passes: sessionPasses,
+                                     start: session.startDate,
+                                     end: session.endDate ?? Date())
+                    .padding(14)
+                    .glassTile()
+                    .tileRow()
             }
             if !session.notes.isEmpty {
-                Section("Notes") { Text(session.notes) }
+                TileSectionHeading(title: "Notes")
+                Text(session.notes)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(14)
+                    .glassTile()
+                    .tileRow()
             }
-            Section("Recordings") {
-                if sessionRecordings.isEmpty {
-                    Text(allSessionRecordings.isEmpty
-                         ? "No recordings in this session."
-                         : "Every recording here is unclassified (NoID) — turn on \"Show unclassified\" in the menu above to see them.")
-                        .foregroundStyle(.secondary)
-                } else {
-                    ForEach(sessionRecordings) { recording in
-                        NavigationLink {
-                            // Lazy: WavPlayerView's `@State` engine is expensive
-                            // to construct — see LazyDestination.
-                            LazyDestination {
-                                WavPlayerView(recording: recording, store: store, micCalSettings: micCalSettings)
-                            }
-                        } label: {
-                            RecordingRow(recording: recording, store: store, consent: consent)
+            TileSectionHeading(title: "Recordings")
+            if sessionRecordings.isEmpty {
+                Text(allSessionRecordings.isEmpty
+                     ? "No recordings in this session."
+                     : "Every recording here is unclassified (NoID) — turn on \"Show unclassified\" in the menu above to see them.")
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(14)
+                    .glassTile()
+                    .tileRow()
+            } else {
+                ForEach(sessionRecordings) { recording in
+                    SelectableRow(isSelecting: isSelecting,
+                                  isSelected: selection.contains(recording.id),
+                                  toggle: { toggle(recording.id) }) {
+                        // Lazy: WavPlayerView's `@State` engine is expensive
+                        // to construct — see LazyDestination.
+                        LazyDestination {
+                            WavPlayerView(recording: recording, store: store, micCalSettings: micCalSettings,
+                                          speciesGuide: speciesGuide)
                         }
+                    } label: {
+                        RecordingRow(recording: recording, store: store, consent: consent)
                     }
-                    .onDelete { offsets in offsets.map { sessionRecordings[$0] }.forEach(store.delete) }
-                }
-            }
-        }
-        .navigationTitle(session.title)
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Menu {
-                    // A Toggle rather than a Button: inside a Menu it draws
-                    // its own checkmark, which is what carries the on/off
-                    // state now that the toolbar icon no longer can.
-                    Toggle("Show unclassified", isOn: $showNoID)
-                    Divider()
-                    if isExporting {
-                        // Not a disabled "Export Session…" — that reads as
-                        // "you can't", when what's true is "it's already
-                        // happening, and the banner is showing you where".
-                        Label("Exporting…", systemImage: "clock")
-                    } else {
+                    .tileRow()
+                    // Red-tinted rather than `role: .destructive` (and not
+                    // `onDelete`): both play the row's removal animation as
+                    // soon as Delete is tapped, pulling the row out from
+                    // under the confirmation and putting it back when the
+                    // alert is answered.
+                    .swipeActions(edge: .trailing) {
                         Button {
-                            exportSession()
+                            pendingDelete = [recording]
                         } label: {
-                            Label("Export Session…", systemImage: "square.and.arrow.up")
+                            Label("Delete", systemImage: "trash")
                         }
-                        .disabled(allSessionRecordings.isEmpty)
+                        .tint(.red)
                     }
-                } label: {
-                    Image(systemName: "ellipsis.circle")
                 }
-                .accessibilityLabel("Session options")
             }
         }
+        .pageBackground()
+        .pageColumn()
+        .listStyle(.plain)
+        .listRowSpacing(0)
+        .contentMargins(.top, TileList.scrollTopMargin, for: .scrollContent)
+        // The system's chevron sits in the row's trailing inset, outside the
+        // tile; `SelectableRow` draws its own inside.
+        .navigationLinkIndicatorVisibility(.hidden)
+        // While selecting the title carries the count — see the note in the
+        // sessions list about the floating tab bar covering `.bottomBar`.
+        .navigationTitle(isSelecting
+                         ? (selection.isEmpty ? "Select Recordings" : "\(selection.count) Selected")
+                         : session.displayName)
+        .navigationBarTitleDisplayMode(.inline)
+        // No painted header (Niall, 2026-09-02). The app-wide appearance proxy
+        // gives every bar an opaque background, which on a page whose content
+        // starts right under it reads as a header strip the page doesn't need.
+        // Cleared here, with the scroll-edge scrim dropped alongside it — one
+        // without the other just swaps a painted bar for a glass one.
+        .clearNavigationBarBackground()
+        .flatTopScrollEdge()
+        // The back chevron shares the leading slot with Delete, and a screen
+        // you are part-way through selecting on is one you leave with Done.
+        .navigationBarBackButtonHidden(isSelecting)
+        .alert(pendingDelete.count == 1 ? "Delete this recording?" : "Delete the selected recordings?",
+               isPresented: Binding(
+                   get: { !pendingDelete.isEmpty },
+                   set: { if !$0 { pendingDelete = [] } }
+               )) {
+            Button("Delete", role: .destructive) {
+                // The batch overload, not one call per recording: deleting
+                // singly rewrites the store's index each time.
+                store.delete(pendingDelete)
+                pendingDelete = []
+                withAnimation {
+                    selection.removeAll()
+                    isSelecting = false
+                }
+            }
+            Button("Cancel", role: .cancel) { pendingDelete = [] }
+        } message: {
+            Text(pendingDelete.count == 1
+                 ? "This removes the recording and any IDs made from it. It can't be undone."
+                 : "This removes \(pendingDelete.count) recordings and any IDs made from them. It can't be undone.")
+        }
+        .toolbar {
+            if !isSelecting {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Menu {
+                        // A Toggle rather than a Button: inside a Menu it draws
+                        // its own checkmark, which is what carries the on/off
+                        // state now that the toolbar icon no longer can.
+                        Toggle("Show unclassified", isOn: $showNoID)
+                        Divider()
+                        Button {
+                            withAnimation { isSelecting = true }
+                        } label: {
+                            Label("Select", systemImage: "checkmark.circle")
+                        }
+                        .disabled(sessionRecordings.isEmpty)
+                        if isExporting {
+                            // Not a disabled "Export Session…" — that reads as
+                            // "you can't", when what's true is "it's already
+                            // happening, and the banner is showing you where".
+                            Label("Exporting…", systemImage: "clock")
+                        } else {
+                            Button {
+                                exportSession()
+                            } label: {
+                                Label("Export Session…", systemImage: "square.and.arrow.up")
+                            }
+                            .disabled(allSessionRecordings.isEmpty)
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                    }
+                    .accessibilityLabel("Session options")
+                }
+            } else {
+                // Same shape as the sessions list: Delete leading, Done
+                // trailing, the count between them.
+                ToolbarItem(placement: .topBarLeading) {
+                    // Tinted, not `role: .destructive` — see the sessions list's
+                    // Delete for why.
+                    Button {
+                        pendingDelete = sessionRecordings.filter { selection.contains($0.id) }
+                    } label: {
+                        Text("Delete")
+                    }
+                    .tint(.red)
+                    .disabled(selection.isEmpty)
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") {
+                        withAnimation {
+                            isSelecting = false
+                            selection.removeAll()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func toggle(_ id: UUID) {
+        if selection.contains(id) { selection.remove(id) } else { selection.insert(id) }
+    }
+
+    /// A custom header view — `SessionChartHeader`, with its own info button —
+    /// dressed as a `TileSectionHeading`: same type, same colour, same insets.
+    /// The heading component itself can't be replaced by one, because it carries
+    /// a popover the plain text heading has no room for.
+    private func sectionHeading<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        content()
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(Color(uiColor: .secondaryLabel))
+            .textCase(nil)
+            .listRowInsets(EdgeInsets(top: TileList.headerTopPadding, leading: TileList.contentInset,
+                                      bottom: TileList.headerBottomPadding, trailing: TileList.contentInset))
+            .listRowBackground(Color.clear)
+            .listRowSeparator(.hidden)
     }
 
     private var isExporting: Bool { exportManager.isActive(sessionID: session.id) }
@@ -719,6 +952,119 @@ struct SessionDetailView: View {
     private var hasGeo: Bool { !mappablePasses.isEmpty }
 }
 
+/// The session's map and its species tally as two separate cards side by side,
+/// with a gutter between them: a square map on the left two-thirds, the codes
+/// and counts in a card of its own in the rest.
+///
+/// The row carries no insets of its own, so the pair spans exactly the width the
+/// list's other section cards do and the outer edges line up down the screen.
+///
+/// Both cards use `SessionCardShape`, which on iOS 26 derives its corners from
+/// the list's own card rather than guessing at them — the previous fixed 12pt
+/// radius is what read as the wrong shape beside a system section card.
+///
+/// The width is measured rather than derived from an aspect ratio on the row:
+/// the map is square and the species card matches its height, so the row's
+/// height follows from the width and no ratio on the row expresses that.
+private struct SessionMapSpeciesRow: View {
+    let pins: [PassRecord]
+    let passes: [PassRecord]
+
+    /// Seeded from the screen so the first layout pass is already right — a zero
+    /// default collapses the map for one frame.
+    @State private var width: CGFloat = UIScreen.main.bounds.width - 32
+
+    private static let gutter: CGFloat = 12
+
+    var body: some View {
+        let side = max(0, (width - Self.gutter) * 2 / 3)
+        HStack(alignment: .top, spacing: Self.gutter) {
+            // Both on the app's card material, in the concentric shape this row
+            // has always used (Niall, 2026-09-02). The species tally was a
+            // `secondarySystemGroupedBackground` fill, which is white on a white
+            // light-mode page — the card simply wasn't there any more. The map
+            // was only clipped, with no card under it at all; it missed the pass
+            // that moved everything else onto glass.
+            SessionMap(pins: pins)
+                .frame(width: side, height: side)
+                .glassTile(in: SessionCardShape.shape)
+            SessionSpeciesColumn(passes: passes)
+                .frame(maxWidth: .infinity, alignment: .top)
+                .frame(height: side)
+                .glassTile(in: SessionCardShape.shape)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            GeometryReader { geo in
+                Color.clear.onChange(of: geo.size.width, initial: true) { _, w in
+                    width = w
+                }
+            }
+        )
+    }
+}
+
+/// The corner shape for a card drawn inside a list row — the map and the species
+/// tally beside it.
+///
+/// A card inside a rounded card has to answer to the one around it, and the
+/// list's own radius is not a number the app is told. On iOS 26 the system will
+/// derive it: a concentric rectangle takes its corners from its container, which
+/// is the section card these sit in, and stays right if the OS changes them
+/// again. Before that there is nothing to ask, so it falls back to the 10pt
+/// radius UIKit's inset-grouped sections have used all along — which is also the
+/// minimum the concentric shape is given, for the case where a container shape
+/// isn't resolvable.
+private enum SessionCardShape {
+    static let fallbackRadius: CGFloat = 10
+
+    static var shape: AnyShape {
+        if #available(iOS 26.0, *) {
+            AnyShape(ConcentricRectangle(corners: .concentric(minimum: .fixed(fallbackRadius)),
+                                         isUniform: true))
+        } else {
+            AnyShape(RoundedRectangle(cornerRadius: fallbackRadius, style: .continuous))
+        }
+    }
+}
+
+/// Just the codes and their detection counts — no bars. The map carries the
+/// visual weight; this is the legend beside it.
+///
+/// Draws no background: the card is painted by whatever places it, so the fill
+/// and the corner shape are decided in one place rather than two.
+private struct SessionSpeciesColumn: View {
+    let passes: [PassRecord]
+
+    var body: some View {
+        let rows = SessionSpeciesSummary.counts(for: passes)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 7) {
+                if rows.isEmpty {
+                    Text("No species IDs")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(rows, id: \.species) { row in
+                        HStack(spacing: 6) {
+                            Text(row.species)
+                                .font(.system(size: 12, weight: .medium).monospaced())
+                            Spacer(minLength: 4)
+                            Text("\(row.count)")
+                                .font(.system(size: 12).monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 12)
+        }
+        .scrollBounceBehavior(.basedOnSize)
+    }
+}
+
 /// A species pin per high-quality ID, framed to fit them all.
 private struct SessionMap: View {
     let pins: [PassRecord]
@@ -739,6 +1085,67 @@ private struct SessionMap: View {
     }
 }
 
+
+// MARK: - Selectable row (shared)
+
+/// A list row that navigates normally, and while a selection is running becomes
+/// a tick instead — in the chevron's place, not in a column of its own.
+///
+/// The alternative is `List(selection:)` with `EditMode`, which is what this
+/// screen used to do. It inserts its circles down the leading edge and slides
+/// every row's content across to make room; on rows that lead with a picture
+/// (a session's map, a recording's spectrogram) the whole list lurches
+/// sideways as selection starts, and the thing being ticked ends up furthest
+/// from the tick. Swapping the row's trailing chevron for the tick keeps every
+/// row exactly where it was and puts the state where the eye already is.
+///
+/// The row is a `Button` rather than a `NavigationLink` while selecting, which
+/// is also what removes the chevron — a link would still draw one and still be
+/// pushable underneath the tap that was meant to tick it.
+private struct SelectableRow<Destination: View, Label: View>: View {
+    let isSelecting: Bool
+    let isSelected: Bool
+    let toggle: () -> Void
+    @ViewBuilder var destination: () -> Destination
+    @ViewBuilder var label: () -> Label
+
+    var body: some View {
+        if isSelecting {
+            Button(action: toggle) {
+                tile {
+                    Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                        .font(.title3)
+                        .foregroundStyle(isSelected ? Color.batAccent : Color.secondary)
+                        .accessibilityHidden(true)
+                }
+            }
+            .buttonStyle(.plain)
+            .accessibilityAddTraits(isSelected ? .isSelected : [])
+        } else {
+            NavigationLink { destination() } label: { tile { RowChevron() } }
+        }
+    }
+
+    /// The row as a glass tile, with whichever trailing accessory the mode calls
+    /// for inside it.
+    ///
+    /// Both the tick and the chevron are drawn here rather than left to the
+    /// list: the system's disclosure indicator sits in the row's trailing inset,
+    /// which is OUTSIDE the tile, so it floated in the gutter beside the row —
+    /// the same thing that happened to the guide's species rows (Niall,
+    /// 2026-09-02). Turn the system's off with
+    /// `.navigationLinkIndicatorVisibility(.hidden)` on the list.
+    private func tile<Accessory: View>(@ViewBuilder accessory: () -> Accessory) -> some View {
+        HStack(spacing: 10) {
+            label()
+            Spacer(minLength: 6)
+            accessory()
+        }
+        .padding(.trailing, 12)
+        .contentShape(Rectangle())
+        .glassTile()
+    }
+}
 
 // MARK: - Day grouping (shared)
 
@@ -899,6 +1306,8 @@ struct PassDetailView: View {
                 }
             }
         }
+        .pageBackground()
+        .pageColumn()
         .navigationTitle(pass.species)
         .navigationBarTitleDisplayMode(.inline)
     }
@@ -1010,7 +1419,7 @@ struct PulseImagePlot: View {
             .frame(maxWidth: .infinity)
             .frame(height: plotHeight)
             .clipShape(RoundedRectangle(cornerRadius: 6))
-            .background(RoundedRectangle(cornerRadius: 6).fill(.black))
+            .background(RoundedRectangle(cornerRadius: 6).fill(Color(uiColor: .systemBackground)))
     }
 
     private func axisLabel(_ s: String) -> some View {
@@ -1031,9 +1440,17 @@ struct ConfidenceBadge: View {
             .fixedSize()
             .padding(.horizontal, 8)
             .padding(.vertical, 3)
+            // The wash stays as bright as it ever was; the ink and the edge are
+            // what darken in light mode, where full-strength orange or yellow on
+            // a pale wash is barely there. The border is the other half of the
+            // fix: on white the wash alone doesn't describe a shape.
             .background(color.opacity(0.2), in: Capsule())
-            .foregroundStyle(color)
+            .overlay { Capsule().strokeBorder(ink.opacity(0.45), lineWidth: 1) }
+            .foregroundStyle(ink)
     }
+
+    private var ink: Color { color.darkenedInLightMode() }
+
     private var color: Color {
         switch confidence {
         case 0.6...:  return .green
@@ -1066,8 +1483,10 @@ struct ComplexIndicator: View {
                 .labelStyle(.titleAndIcon)
                 .padding(.horizontal, 7)
                 .padding(.vertical, 3)
+                // Darker orange in light mode — see `darkenedInLightMode`. On
+                // white this pill was an orange glyph on an almost-white wash.
                 .background(Color.orange.opacity(0.18), in: Capsule())
-                .foregroundStyle(.orange)
+                .foregroundStyle(Color.orange.darkenedInLightMode())
                 .accessibilityLabel(accessibility)
         }
     }

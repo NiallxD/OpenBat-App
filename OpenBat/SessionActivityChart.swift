@@ -34,15 +34,16 @@ import SwiftUI
 /// presenting from there — the first shape this took — anchors the popover to the
 /// whole List instead, which points the arrow at the middle of the screen.
 ///
-/// Both charts need one. Neither is self-evident, and the species bars count
-/// *detections* rather than individual bats, which is the most misreadable thing on
-/// the screen: nothing in the chart says so, and the honest answer needs a
-/// paragraph, not a longer axis label.
+/// Both charts need one, and so does the map — none of the three is self-evident,
+/// and all of them count *detections* rather than individual bats, which is the most
+/// misreadable thing on the screen: nothing in a chart says so, and the honest answer
+/// needs a paragraph, not a longer axis label. The map's explainer is also where the
+/// pin thresholds are stated, now that the caption under the map is gone.
 struct SessionChartHeader: View {
     let title: String
     let kind: Kind
 
-    enum Kind { case species, timeline }
+    enum Kind { case map, species, timeline }
 
     @State private var showInfo = false
 
@@ -65,6 +66,16 @@ struct SessionChartHeader: View {
     @ViewBuilder private var explainer: some View {
         VStack(alignment: .leading, spacing: 10) {
             switch kind {
+            case .map:
+                Text("Map & species").font(.subheadline.weight(.semibold))
+                Text("Every detection from this session that had a location fix and cleared the map's quality gates, pinned where it was recorded.")
+                    .font(.caption)
+                Text("Those gates are a minimum confidence and a minimum number of pulses, both set in AutoID settings — the map shows the best of the best, so it will usually hold fewer pins than the session holds IDs. A detection recorded without a location never appears.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text("The list beside the map counts detections per species across the whole session, pinned or not. A detection is one bat pass, **not** one bat. Noise and unclassified triggers are left out.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             case .species:
                 Text("Species detected").font(.subheadline.weight(.semibold))
                 Text("One bar per species, as long as the number of separate detections logged for it during this session.")

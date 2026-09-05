@@ -32,6 +32,27 @@
   interrupts everybody, before they reach the detector.
 -->
 
+## v0.9.5 (Build 193)
+
+### New
+- **User Interface Overhaul** — The user interface has been overhauled with a clean, glass-like, interface. Everything is where it was before, but now with more sleekness.
+- **OpenBat works in light mode** — The app was dark-only for its whole development. It now follows your phone, including its own sunset schedule, and every screen is drawn for both. In light mode the spectrogram turns over with it: silence is white and calls are ink, on the detector and on a recording alike. If you would rather not follow the phone, pick one outright. It is the first thing in Settings under Interface, and setting up asks you alongside how much of the detector you want to see.
+- **The sun clock is on every tab** —  The Sun Clock now persists across Sessions and Species tabs and not just on the Detector tab.
+
+### Changed
+- **Settings say one thing each** — Every card is a name, one line saying what it is for, and the control. The paragraphs that used to sit under each switch are gone: they explained the same idea twice at two sizes, and the sheet read as a wall of text.
+- **The model page is in plain English** — "Pass detection" is "Making an ID", "Pulse quality" is "Call quality", and the controls are named for what they do rather than for what they are called in the code. Its sliders are full width instead of squeezed into half a row.
+- **One card material across the app** — Sessions, the field guide, the tours and the Info sheet were drawn four different ways. They are the same card everywhere now, and Info & Tour's four buttons are cards in their own right.
+- **Species pages give the measurements more room** — Peak frequency, forearm, wingspan, call duration and characteristic frequency were clipping on a normal-sized iPhone. They now take 40% of the row rather than a third.
+- **Group headings sit with what they head** — A family in the guide, and a date in Sessions, now sit close to their first card instead of floating between two groups.
+- **No painted strip behind the title** — On Sessions, on a recording, and on a region's species list, the header no longer paints a bar of its own behind the title and buttons.
+- **Choosing a species to compare confirms your tap** — The row you pick ticks straight away, rather than the screen sitting still while it works.
+
+### Fixed
+- **Blue icons in the field guide** — The characteristic features and the region rows on a species page were drawing in the system blue, which read as something bleeding in from the map above them. They are the app's orange.
+- **Confidence pills are readable in light mode** — The percentage and the "sounds alike" flag were a bright colour on a wash of the same colour, which all but disappeared on white. They have darker text and an edge to sit in.
+- **The map on a session has a card under it** — It was the one thing on that screen drawn straight onto the page, and the species tally beside it had lost its own background.
+
 ## v0.9.5 (Build 135)
 
 ### Fixed

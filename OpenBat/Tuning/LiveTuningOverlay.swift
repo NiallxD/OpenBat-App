@@ -92,7 +92,7 @@ struct LiveTuningOverlay: View {
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
         .overlay(
             RoundedRectangle(cornerRadius: 16)
-                .strokeBorder(.white.opacity(0.12), lineWidth: 0.5)
+                .strokeBorder(Color.glassEdge, lineWidth: 0.5)
         )
         .shadow(color: .black.opacity(0.35), radius: 12, y: 4)
     }
@@ -145,7 +145,7 @@ struct LiveTuningOverlay: View {
                         .background {
                             if tab == t {
                                 RoundedRectangle(cornerRadius: 7)
-                                    .fill(.white.opacity(0.12))
+                                    .fill(Color.chromeFill(0.12))
                             }
                         }
                 }

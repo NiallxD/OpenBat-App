@@ -24,9 +24,13 @@ struct SpeciesProfileSheet: View {
         // can push — the stack is purely to give it a bar to put the title and
         // the Done button in.
         NavigationStack {
-            SpeciesDetailView(species: species, store: store, presenceStore: presenceStore)
+            SpeciesDetailView(species: species, store: store, presenceStore: presenceStore,
+                              blursNavigationBar: true)
                 .toolbar {
-                    ToolbarItem(placement: .confirmationAction) {
+                    // Leading, not trailing: this page puts its own controls in
+                    // the trailing corner, and a sheet's way out belongs on the
+                    // side you are not reaching for them on.
+                    ToolbarItem(placement: .topBarLeading) {
                         Button("Done") { dismiss() }
                     }
                 }

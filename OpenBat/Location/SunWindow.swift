@@ -128,6 +128,25 @@ enum SunWindow {
                 sunrise.timeIntervalSince(sunset) * activityWindowFraction)
     }
 
+    /// The whole arc the explainer draws: the daylight that leads into tonight,
+    /// then tonight itself — the sunrise that opened the current day, the sunset
+    /// that closes it, and the sunrise that ends the night.
+    ///
+    /// `night` alone is not enough to draw a sun that *tracks*: in daylight every
+    /// instant is simply "before sunset", and a curve spanning only sunset→sunrise
+    /// has nowhere to put it but parked on one end. The day is the part of the
+    /// span the user is standing in for most of the hours they might open this.
+    ///
+    /// `nil` on the same terms as `night`, plus when the day's opening sunrise is
+    /// outside the three-day event window (polar edges).
+    static func dayAndNight(at now: Date, coordinate: CLLocationCoordinate2D)
+        -> (dayStart: Date, sunset: Date, sunrise: Date)? {
+        guard let night = night(at: now, coordinate: coordinate) else { return nil }
+        let (sunrises, _) = solarEvents(around: now, coordinate: coordinate)
+        guard let dayStart = sunrises.last(where: { $0 < night.sunset }) else { return nil }
+        return (dayStart, night.sunset, night.sunrise)
+    }
+
     /// Sunrises and sunsets for the solar day around `now` and its two
     /// neighbours, ascending.
     ///

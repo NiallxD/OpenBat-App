@@ -211,6 +211,66 @@ struct SunWindowTests {
         #expect(n.sunrise > n.sunset)
     }
 
+    // MARK: The arc's span
+
+    /// The bug the arc was rebuilt for: drawn across sunset→sunrise only, every
+    /// daylight hour clamped to the same end and the sun sat parked on the sunset
+    /// marker all day. The span has to CONTAIN `now` at every hour, which is what
+    /// lets the glyph move.
+    @Test func theArcSpanContainsTheMomentItIsDrawnFor() {
+        let sun = decemberSun()
+        let hours: [(Double, String)] = [(-7 * 3600, "morning"), (-4 * 3600, "midday"),
+                                         (-30 * 60, "just before sunset"), (60, "just after sunset"),
+                                         (6 * 3600, "middle of the night")]
+        for (offset, label) in hours {
+            let now = sun.sunset.addingTimeInterval(offset)
+            guard let span = SunWindow.dayAndNight(at: now, coordinate: london) else {
+                Issue.record("no span at \(label)")
+                continue
+            }
+            #expect(span.dayStart <= now, "span starts after now at \(label)")
+            #expect(span.sunrise >= now, "span ends before now at \(label)")
+            #expect(span.dayStart < span.sunset && span.sunset < span.sunrise,
+                    "span out of order at \(label)")
+        }
+    }
+
+    /// And it is the SAME night the pill is counting against — the arc and the
+    /// readout above it must not describe different evenings.
+    @Test func theArcSpanAgreesWithTheNight() {
+        let sun = decemberSun()
+        for offset in [-4 * 3600.0, 60.0, 6 * 3600.0] {
+            let now = sun.sunset.addingTimeInterval(offset)
+            let night = SunWindow.night(at: now, coordinate: london)
+            let span = SunWindow.dayAndNight(at: now, coordinate: london)
+            #expect(span?.sunset == night?.sunset)
+            #expect(span?.sunrise == night?.sunrise)
+        }
+    }
+
+    /// The day the arc draws is the one leading into that night, not the one
+    /// before it: a December day in London is ~8 hours, never 32.
+    @Test func theArcDayIsTheOneEndingAtThatSunset() {
+        let sun = decemberSun()
+        guard let span = SunWindow.dayAndNight(at: sun.sunset.addingTimeInterval(-4 * 3600),
+                                               coordinate: london) else {
+            Issue.record("no span in daylight")
+            return
+        }
+        #expect(span.dayStart == sun.sunrise)
+        #expect(span.sunset.timeIntervalSince(span.dayStart) < 24 * 3600)
+    }
+
+    @Test func polarNightHasNoSpanEither() {
+        let svalbard = CLLocationCoordinate2D(latitude: 78.22, longitude: 15.65)
+        var c = DateComponents()
+        c.year = 2026; c.month = 12; c.day = 21; c.hour = 12
+        c.timeZone = TimeZone(identifier: "UTC")
+        var utc = Calendar(identifier: .gregorian)
+        utc.timeZone = TimeZone(identifier: "UTC")!
+        #expect(SunWindow.dayAndNight(at: utc.date(from: c)!, coordinate: svalbard) == nil)
+    }
+
     @Test func polarNightHasNoNightForTheExplainerEither() {
         let svalbard = CLLocationCoordinate2D(latitude: 78.22, longitude: 15.65)
         var c = DateComponents()

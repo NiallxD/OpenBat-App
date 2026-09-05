@@ -12,25 +12,29 @@
 import SwiftUI
 
 extension View {
-    /// Transparent rounded card with a thin hairline border — the
-    /// "structural" panel look (ContentView's pulse/spectrogram/species
-    /// panels; the WAV player's spectrogram panel).
-    func panelCard(cornerRadius: CGFloat = 10) -> some View {
-        clipShape(RoundedRectangle(cornerRadius: cornerRadius))
-            .overlay(
-                RoundedRectangle(cornerRadius: cornerRadius)
-                    .strokeBorder(Color.white.opacity(0.15), lineWidth: 1)
-            )
+    /// Transparent rounded card with a hairline border — the "structural" panel
+    /// look (ContentView's pulse/spectrogram/species panels; the WAV player's
+    /// spectrogram panel).
+    ///
+    /// **Still transparent.** It takes the tile's radius and the tile's edge
+    /// colour so the Detector reads as the same material as the rest of the app
+    /// (Niall, 2026-09-02), but nothing is drawn behind it: what these panels
+    /// contain is a live spectrogram and a species feed, and glass under either
+    /// would be a grey wash over the thing the user is actually looking at. The
+    /// backgrounds stay exactly as they were; only the frame changes.
+    func panelCard(cornerRadius: CGFloat = TileList.cornerRadius) -> some View {
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        return clipShape(shape)
+            .overlay(shape.strokeBorder(Color.glassEdge, lineWidth: 1))
     }
 
-    /// Filled `.ultraThinMaterial` rounded card — the "readout" panel look
-    /// (ContentView's STATS strip; the WAV player's call-analysis panel).
-    /// Distinct from `panelCard()` (transparent, hairline-only): a
-    /// text-heavy numeric readout reads better against a visible surface
-    /// than a purely structural grouping does.
-    func filledPanelCard(cornerRadius: CGFloat = 10) -> some View {
-        background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: cornerRadius))
-            .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
+    /// Filled rounded card — the "readout" panel look (ContentView's STATS
+    /// strip; the WAV player's call-analysis panel). A text-heavy numeric
+    /// readout reads better against a visible surface than a purely structural
+    /// grouping does, and that surface is now the app's glass rather than a bare
+    /// `.ultraThinMaterial`: this is the same tile a session row is drawn on.
+    func filledPanelCard(cornerRadius: CGFloat = TileList.cornerRadius) -> some View {
+        glassTile(cornerRadius: cornerRadius)
     }
 }
 

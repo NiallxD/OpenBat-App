@@ -121,8 +121,31 @@ private struct PageContentWidth: ViewModifier {
         if let explicit {
             content.frame(width: explicit)
         } else {
+            // Full viewport width, and NOT the reading column. This is
+            // attached to the page's zero-height bottom anchor, where its whole
+            // job is to make the scroll content measure exactly one viewport
+            // across. Narrowing it to the column here changed the width of a
+            // spacer and nothing else — the cards stayed full width while the
+            // number was right (Niall, 2026-09-02). The column belongs on the
+            // cards themselves; see `ReadingColumn`.
             content.containerRelativeFrame(.horizontal)
         }
+    }
+}
+
+/// The app's reading column (`PageColumn`), applied to a page's cards.
+///
+/// Off in a comparison pane. A pane already passes its own `contentWidth` and
+/// has given half the window to the page beside it; narrowing each half again
+/// would leave two thin ribbons. It would in fact be a no-op — half an iPad is
+/// under `PageColumn.minimumContainerWidth` — but saying so at the call site
+/// beats relying on that number staying where it is.
+private struct ReadingColumn: ViewModifier {
+    let enabled: Bool
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if enabled { content.pageColumnFrame() } else { content }
     }
 }
 
@@ -137,6 +160,13 @@ struct SpeciesDetailView: View {
     /// corner. So the embedded copy claims no bar chrome; the comparison screen
     /// titles itself and labels each pane with its own strip.
     var isEmbedded = false
+    /// Lets iOS's own scroll-edge blur sit under the navigation bar instead of
+    /// being switched off. Presented modally (`SpeciesProfileSheet`), the page
+    /// is short and the hero photo is right under the bar, so with the effect
+    /// hidden the title floats over bare picture and is often unreadable. A
+    /// pushed page keeps the flat treatment — see `flatTopScrollEdge()` for
+    /// what it buys on this app's black screens.
+    var blursNavigationBar = false
     /// Width to pin the page's content to. Nil when this page owns a screen —
     /// `containerRelativeFrame` measures that case for itself. Non-nil only
     /// from `SpeciesComparisonView`, which has to measure and pass it: see the
@@ -159,6 +189,7 @@ struct SpeciesDetailView: View {
     /// reports nothing at all.
     @State private var reportedSection: GuideSection?
 
+
     @State private var showSources = false
     /// What "compare" should do here, decided by whichever stack this page is
     /// sitting in — see `SpeciesCompareMode`.
@@ -169,7 +200,6 @@ struct SpeciesDetailView: View {
     @State private var compareWith: GuideSpecies?
     @State private var showComparison = false
     /// Only for orienting the compare glyph — see `compareButton`.
-    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var photo: SpeciesPhoto?
     /// A small "i" glyph rather than the credit text itself sitting over the
     /// hero photo — the old always-on capsule covered a large slice of the
@@ -179,6 +209,33 @@ struct SpeciesDetailView: View {
     @State private var showConservationInfoPopover = false
     /// Measured width of the quick-facts row — see `leftQuickFactsColumnWidth`.
     @State private var quickFactsRowWidth: CGFloat = 0
+    /// Whether the navigation bar is currently sitting on the photo rather than
+    /// on the page.
+    ///
+    /// **The bar does work this out for itself, just too late** (Niall,
+    /// 2026-09-02). A transparent bar takes its content colour from what it
+    /// samples underneath, and the sample doesn't land until the scroll view
+    /// first updates — so the page arrived with a black title and black buttons
+    /// on a dark photo, and a millimetre of scrolling flipped them to white.
+    /// Telling it outright removes the wait; it still tracks the scroll, so once
+    /// the photo has gone by the bar goes back to ordinary dark ink on the page.
+    ///
+    /// Written by the hero photo's `onGeometryChange`, which measures this
+    /// question rather than the number behind it — see there.
+    @State private var barContentIsOnPhoto = true
+
+    /// Whether the bar says the species' name.
+    ///
+    /// It should not while the hero photo is still under the bar: the name is
+    /// already on screen twice over — in large type in the header card, and
+    /// over the photo itself — and a third copy pinned under the tab bar just
+    /// sits there looking like chrome nobody asked for (Niall, 2026-09-02).
+    /// Once the photo has scrolled away the header goes with it, and then the
+    /// bar is the only thing left saying which bat this is.
+    ///
+    /// **It is drawn either way, and only its ink changes** — see the principal
+    /// toolbar item, which is what makes hiding it survivable at all.
+    private var showsBarTitle: Bool { photo == nil || !barContentIsOnPhoto }
 
     var body: some View {
         page
@@ -209,6 +266,9 @@ struct SpeciesDetailView: View {
                 // below) bar the way the map on Birding_Data's trip report page
                 // does.
                 .ignoresSafeArea(edges: .top)
+                // Still set, so the system has a name for this page — the
+                // parent's back button reads it. What is DRAWN is the principal
+                // item below.
                 .navigationTitle(species.commonName)
                 .navigationBarTitleDisplayMode(.inline)
                 // The hero photo runs up under this bar (see `cardHeroPhoto`'s
@@ -220,8 +280,30 @@ struct SpeciesDetailView: View {
                 // photo reads as a solid gap between the bar and the image —
                 // the bar background being hidden isn't enough on its own.
                 .clearNavigationBarBackground()
-                .flatTopScrollEdge()
+                .flatTopScrollEdgeUnless(blursNavigationBar)
+                .toolbarColorScheme(barContentIsOnPhoto ? .dark : nil, for: .navigationBar)
                 .toolbar {
+                    // **The title fades; it never appears and disappears.**
+                    // Hiding it by not setting `navigationTitle` cost the whole
+                    // page its taps (2026-09-02): a bar that gains or loses
+                    // content mid-scroll changes shape — on iPadOS 26 the
+                    // floating tab bar collapses to make room for it — and that
+                    // moves the top safe area, which this page has escaped so
+                    // the photo can reach the top of the window. The content
+                    // stayed where it was drawn and the touches did not, so
+                    // every control on the page answered to a region up to 70pt
+                    // above itself. See Context.md.
+                    //
+                    // An item that is always there and always the same size
+                    // leaves the bar's layout alone; only the ink changes.
+                    // Appearance-only changes are safe — `toolbarColorScheme`
+                    // flips on this same signal and always has been fine.
+                    ToolbarItem(placement: .principal) {
+                        Text(species.commonName)
+                            .font(.headline)
+                            .opacity(showsBarTitle ? 1 : 0)
+                            .accessibilityHidden(!showsBarTitle)
+                    }
                     // Gated outside the item for the same reason as the
                     // sources button below: an item whose content resolves to
                     // nothing is never hosted at all.
@@ -238,6 +320,9 @@ struct SpeciesDetailView: View {
                 .sheet(isPresented: $showSources) {
                     SourcesSheet(species: species)
                 }
+                // The fallback path's picker. Where the host owns the stack's
+                // path (the guide) it presents its own — see
+                // `SpeciesCompareMode.replacesPage`.
                 .sheet(isPresented: $showComparePicker) {
                     SpeciesComparePickerSheet(base: species, store: store,
                                               presenceStore: presenceStore) { chosen in
@@ -245,29 +330,32 @@ struct SpeciesDetailView: View {
                         showComparePicker = false
                     }
                 }
-                // **The wait is not a flourish.** Presenting anything while the
+                // **The wait is not a flourish, and `onDismiss` is not a
+                // substitute for it.** Presenting anything while the
                 // presentation it was chosen in is still dismissing gets
-                // silently DROPPED by SwiftUI — the comparison simply never
-                // appears, and the button reads as dead. Same failure, and the
-                // same fix, as the guide's "Sources & licences" button and
+                // silently DROPPED by SwiftUI — the comparison never appears and
+                // the button reads as dead. Same failure, and the same fix, as
+                // the guide's "Sources & licences" button and
                 // `SessionsView.reportImport`.
+                //
+                // Tried and REVERTED, 2026-09-02: hanging this off the sheet's
+                // own `onDismiss` instead, on the reasoning that it fires when
+                // the sheet has actually gone rather than guessing at 350 ms.
+                // Both branches broke — the comparison came up as a black
+                // screen. Whatever `onDismiss` means, the presentation
+                // machinery is still busy inside it: the cover comes up with no
+                // content behind it, and replacing the page tears out the host
+                // the sheet is still dismissing from. The delay stays.
+                //
+                // What was actually wrong is that the tap had no visible
+                // effect for the length of the wait, which read as a hang; the
+                // picker now ticks the row you chose the moment you choose it
+                // (`SpeciesComparePickerSheet.picked`).
                 .onChange(of: showComparePicker) { _, isShowing in
-                    guard !isShowing, let chosen = compareWith else { return }
+                    guard !isShowing, compareWith != nil else { return }
                     Task {
                         try? await Task.sleep(for: .milliseconds(350))
-                        switch compareMode {
-                        case .replacesPage(let replace):
-                            // Waits for the same reason the cover does, though
-                            // not for the same failure: swapping this page out
-                            // from under a sheet that is still dismissing takes
-                            // the sheet's own host with it mid-animation.
-                            compareWith = nil
-                            replace(species, chosen)
-                        case .presentsOverPage:
-                            showComparison = true
-                        case .unavailable:
-                            compareWith = nil
-                        }
+                        openPickedComparison()
                     }
                 }
                 // The fallback path only — where the host owns a path, the
@@ -295,17 +383,37 @@ struct SpeciesDetailView: View {
         }
     }
 
+    /// Opens the comparison for the species picked in the sheet. Called only
+    /// once the picker's dismissal has had time to finish — see the note on the
+    /// sheet. Does nothing if the sheet was cancelled, which is why this is
+    /// keyed on `compareWith` rather than on the sheet closing.
+    private func openPickedComparison() {
+        guard compareWith != nil else { return }
+        // Only the fallback reaches here now: where the host owns the stack's
+        // path it owns the picker too, and none of this page's picker state is
+        // ever written.
+        if case .presentsOverPage = compareMode {
+            showComparison = true
+        } else {
+            compareWith = nil
+        }
+    }
+
     /// Starts a comparison from the bat you are already reading, rather than
     /// from a list. Same glyph as the collection page's compare toggle, so the
     /// two routes into the same screen look like the same thing.
     private var compareButton: some View {
         Button {
-            showComparePicker = true
+            switch compareMode {
+            // The host owns the picker as well as the path — see
+            // `SpeciesCompareMode.replacesPage` for why this page must not
+            // present a sheet it is about to be removed from underneath.
+            case .replacesPage(let startComparison): startComparison(species)
+            case .presentsOverPage: showComparePicker = true
+            case .unavailable: break
+            }
         } label: {
-            Image(systemName: "chevron.up.chevron.down.square")
-                // Split the way the comparison will be — see the same glyph on
-                // a collection's compare toggle.
-                .rotationEffect(.degrees(horizontalSizeClass == .regular ? 90 : 0))
+            Image(systemName: "arrow.trianglehead.branch")
         }
         .accessibilityLabel("Compare with another species")
     }
@@ -320,6 +428,17 @@ struct SpeciesDetailView: View {
     /// Replaced the original List-of-Sections layout outright (2026-07-28) —
     /// it briefly existed behind a toolbar toggle for comparison; see git
     /// history if that layout's code is ever needed again.
+    /// This page is pinned by WIDTH rather than by content margin, unlike every
+    /// other page that takes the reading column, because it already pins its
+    /// width for a second reason — a single over-wide card would otherwise let
+    /// the whole page scroll sideways. One pin does both jobs; see
+    /// `PageContentWidth`.
+    ///
+    /// **A comparison pane is never affected.** Those are embedded and pass
+    /// `contentWidth` explicitly, which wins: they have already given up half
+    /// the window to the pane beside them, and narrowing each half again would
+    /// leave two thin ribbons.
+
     private var cardLayoutBody: some View {
         // The reader is only here to give the follower pane something to scroll
         // with. `scrollPosition(id:)` would be the tidier spelling, but it wants
@@ -352,8 +471,8 @@ struct SpeciesDetailView: View {
                         .guideSection(.overview, offsets: $sectionOffsets, tracking: link != nil)
                     }
                     if hasQuickFactsRow {
-                        // A third-width left column, two-thirds right — unlike
-                        // an even 50/50 split, that ratio isn't something an
+                        // A 40% left column, 60% right — unlike an even
+                        // 50/50 split, that ratio isn't something an
                         // HStack of `maxWidth: .infinity` children falls into
                         // by construction, so the left column's width is
                         // measured off the row itself (`.onGeometryChange`,
@@ -443,6 +562,10 @@ struct SpeciesDetailView: View {
                 // Top inset comes from the first card's own gap instead, or the
                 // header would sit 32 below the hero photo rather than 16.
                 .padding([.horizontal, .bottom], 16)
+                // The cards read as a column on iPad; the hero photo above them
+                // does not, and deliberately — it is the one full-bleed thing on
+                // the page and it runs under the navigation bar.
+                .modifier(ReadingColumn(enabled: contentWidth == nil))
 
                 // The end-of-page anchor. Untracked, deliberately: unlike
                 // `top`, its position is never compared against the scroll
@@ -583,6 +706,22 @@ struct SpeciesDetailView: View {
                 // to bleed under, and sits below its own title strip instead.
                 heroImage(photo, height: Self.pageHeroHeight)
                     .ignoresSafeArea(edges: .top)
+                    // Whether the bar is on the photo — a BOOL, not the photo's
+                    // edge (Niall, 2026-09-02: the page scrolled at about
+                    // 30fps). `onGeometryChange` calls its action only when the
+                    // mapped value changes, so measuring a `CGFloat` here wrote
+                    // new state on every frame of every scroll, and every one of
+                    // those re-evaluated this whole page — the hero image, the
+                    // glass cards, the quick-facts grid and the distribution
+                    // map with it. Mapped to the answer instead, it writes twice
+                    // in a scroll: once when the photo leaves the bar, once when
+                    // it comes back.
+                    //
+                    // 100pt is a status bar plus a navigation bar with a little
+                    // to spare.
+                    .onGeometryChange(for: Bool.self) {
+                        $0.frame(in: .global).maxY > 100
+                    } action: { barContentIsOnPhoto = $0 }
             }
         }
         .overlay(alignment: .bottomTrailing) {
@@ -743,16 +882,27 @@ struct SpeciesDetailView: View {
         peakFreqFact != nil || weightFact != nil || medianWingspanCm != nil || !subQuickFacts.isEmpty
     }
 
-    /// A third of the quick-facts row, minus its share of the inter-column
-    /// spacing — the left column's fixed width; the right column just keeps
-    /// its `maxWidth: .infinity` and fills whatever's left, which comes out
-    /// to two-thirds automatically. Nil until `quickFactsRowWidth` has been
-    /// measured at least once, so the column uses natural sizing rather than
-    /// collapsing to zero width on the first layout pass.
+    /// Share of the quick-facts row the stats column takes; the size card gets
+    /// the rest.
+    ///
+    /// **40/60, up from a third/two-thirds** (Niall, 2026-09-02). A third of a
+    /// 393pt phone is about 117pt, and inside it these tiles carry a 24pt icon,
+    /// 10pt of padding either side and a label like "Call Duration" or "Peak
+    /// Freq" — so on anything narrower than a Pro Max the labels and values were
+    /// clipping. The size card loses width it can spare: `SizeComparisonCard`
+    /// scales its glyphs to whatever space it is given, while a stat tile has a
+    /// floor set by its own text.
+    private static let quickFactsStatsFraction: CGFloat = 0.4
+
+    /// The stats column's fixed width, minus its share of the inter-column
+    /// spacing; the size card keeps its `maxWidth: .infinity` and fills
+    /// whatever's left. Nil until `quickFactsRowWidth` has been measured at
+    /// least once, so the column uses natural sizing rather than collapsing to
+    /// zero width on the first layout pass.
     private var leftQuickFactsColumnWidth: CGFloat? {
         guard quickFactsRowWidth > 0 else { return nil }
         let spacing: CGFloat = 10
-        return (quickFactsRowWidth - spacing) / 3
+        return (quickFactsRowWidth - spacing) * Self.quickFactsStatsFraction
     }
 
     /// Midpoint of the wingspan range — the single number `SizeComparisonCard`
@@ -794,6 +944,7 @@ struct SpeciesDetailView: View {
     @ViewBuilder private var regionsContent: some View {
         ForEach(store.guide.regions.filter { species.regions.contains($0.id) }) { region in
             Label(region.name, systemImage: "globe.europe.africa")
+                .labelStyle(.batAccentIcon)
         }
     }
 
@@ -836,6 +987,14 @@ struct SpeciesDetailView: View {
                 ForEach(features, id: \.self) { feature in
                     Label(feature, systemImage: "sparkle")
                         .font(.subheadline)
+                        // A `Label`'s glyph takes the accent colour, and the
+                        // AccentColor asset in this project has no colour set —
+                        // so it resolved to the system BLUE, which on a page of
+                        // orange read as something bleeding in from the map card
+                        // above (Niall, 2026-09-02). Same trap as the About
+                        // sheet's feature list. Anywhere a `Label` appears in
+                        // this app, say the colour.
+                        .labelStyle(.batAccentIcon)
                 }
             }
             .padding(.vertical, 2)
@@ -979,8 +1138,9 @@ private struct GuideCard<Content: View>: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 16, style: .continuous)
-            .fill(Color(.secondarySystemGroupedBackground)))
+        // The app's tile material, not a grouped-list fill — the same glass the
+        // species cards, rows and sessions are drawn on (Niall, 2026-09-02).
+        .glassTile()
     }
 }
 
@@ -1020,8 +1180,9 @@ private struct CompactQuickFactTile: View {
         // taller of the two — the usual case — there's no slack to take up and
         // the tiles just sit at their natural height.
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
-            .fill(Color(.secondarySystemGroupedBackground)))
+        // Tighter radius than a full-width card: these are small tiles nested
+        // inside one, and 18 on a 90pt tile reads as a lozenge.
+        .glassTile(cornerRadius: 12)
     }
 }
 
@@ -1064,8 +1225,7 @@ private struct HeadlineQuickFactTile<Trailing: View>: View {
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 14, style: .continuous)
-            .fill(Color(.secondarySystemGroupedBackground)))
+        .glassTile(cornerRadius: 14)
     }
 }
 
@@ -1252,8 +1412,7 @@ private struct SizeComparisonCard: View {
         }
         .padding(10)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(RoundedRectangle(cornerRadius: 14, style: .continuous)
-            .fill(Color(.secondarySystemGroupedBackground)))
+        .glassTile(cornerRadius: 14)
     }
 }
 
@@ -1479,6 +1638,7 @@ private struct SourcesSheet: View {
                     }
                 }
             }
+            .pageBackground()
             .navigationTitle("Sources")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

@@ -36,6 +36,25 @@ struct SpeciesComparePickerSheet: View {
 
     @Environment(\.dismiss) private var dismiss
     @State private var query = ""
+    /// The row that was tapped, so it can show as chosen while the sheet is on
+    /// its way out. A tap here starts a dismissal and then a comparison, and
+    /// until this existed the row it started from looked exactly like the rows
+    /// it didn't — a quarter-second of a screen that had apparently ignored you
+    /// (Niall, 2026-09-02). A tick, not an outline, because these are rows: the
+    /// same split the collection page makes.
+    @State private var picked: GuideSpecies?
+    /// Whether the search field is ACTIVE, not merely present — and the reason
+    /// this is bound at all rather than left to `.searchable`'s own default.
+    ///
+    /// This is the only `.searchable` in the app; every other search in the
+    /// guide is a hand-built field with a `FocusState` (see
+    /// `SpeciesExplorerView`). `.searchable` brings a `UISearchController`
+    /// into the window with it, and a search controller that is still active
+    /// when its sheet is torn out from under it leaves its own dimming view
+    /// behind: the app looks completely right and answers no touch at all.
+    /// Standing it down through the binding first is what stops that — see
+    /// `handOff`.
+    @State private var searchActive = false
 
     /// Everything except the bat you are already looking at.
     private var candidates: [GuideSpecies] {
@@ -80,18 +99,26 @@ struct SpeciesComparePickerSheet: View {
                     if matches.isEmpty {
                         ContentUnavailableView.search(text: query)
                     } else {
-                        Section { rows(matches) }
+                        rows(matches)
                     }
                 } else {
                     if !relatives.isEmpty {
-                        Section(base.family ?? "Same family") { rows(relatives) }
+                        TileSectionHeading(title: relativesHeading, detail: relativesDetail)
+                        rows(relatives)
                     }
-                    Section(relatives.isEmpty ? "Species" : "Everything else") {
-                        rows(everythingElse)
-                    }
+                    TileSectionHeading(title: relatives.isEmpty ? "Species" : "Everything else")
+                    rows(everythingElse)
                 }
             }
-            .searchable(text: $query, prompt: "Search species")
+            // The same glass tiles, gutters and headings a region's species list
+            // is built from — see `TileList`. This sheet is the third place the
+            // guide lists species, and it used plain grouped sections while the
+            // other two had been rebuilt around tiles (Niall, 2026-09-02).
+            .listStyle(.plain)
+            .pageBackground()
+            .listRowSpacing(0)
+            .contentMargins(.top, TileList.scrollTopMargin, for: .scrollContent)
+            .searchable(text: $query, isPresented: $searchActive, prompt: "Search species")
             .navigationTitle("Compare with")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -102,24 +129,66 @@ struct SpeciesComparePickerSheet: View {
         }
     }
 
+    /// The family heading, in the same "common name (Latin)" shape the region
+    /// lists use — the picker was showing the bare family name where they show
+    /// "Vesper bats".
+    private var relativesHeading: String {
+        guard let family = base.family else { return "Same family" }
+        return GuideFamily.commonName(for: family) ?? family
+    }
+
+    private var relativesDetail: String? {
+        guard let family = base.family, GuideFamily.commonName(for: family) != nil else { return nil }
+        return family
+    }
+
+    /// Hands the pick back, having first stood the search controller down.
+    ///
+    /// The caller closes this sheet the moment it hears the pick, and on iPad
+    /// closes it out from under a live species page. An ACTIVE `.searchable`
+    /// does not survive that: its search controller is left holding a dimming
+    /// view over the window, and every touch afterwards lands on nothing
+    /// (Niall, 2026-09-02).
+    ///
+    /// Both changes go out in the same update deliberately — the search
+    /// controller stands down before the dismissal it would otherwise be
+    /// interrupted by, and the hand-off still gets the host's own 350 ms wait
+    /// on the other side of it (see `ContentView.sectionScreen`). No second
+    /// delay here.
+    private func handOff(_ chosen: GuideSpecies) {
+        if searchActive {
+            searchActive = false
+            query = ""
+        }
+        onPick(chosen)
+    }
+
     private func rows(_ species: [GuideSpecies]) -> some View {
         ForEach(species) { other in
             Button {
-                onPick(other)
+                // Set before the hand-off, and deliberately not animated away:
+                // the sheet is leaving, and a tick that fades back out on the
+                // way would read as the pick being undone.
+                picked = other
+                handOff(other)
             } label: {
-                HStack {
-                    GuideSpeciesRow(species: other)
-                    Spacer(minLength: 8)
-                    Image(systemName: "chevron.up.chevron.down.square")
+                HStack(spacing: 10) {
+                    GuideSpeciesRow(species: other, fullBleedThumbnail: true)
+                    Image(systemName: picked == other
+                          ? "checkmark.circle.fill" : "arrow.trianglehead.branch")
                         .foregroundStyle(Color.batAccent)
+                        .contentTransition(.symbolEffect(.replace))
                 }
+                .padding(.trailing, 12)
                 .contentShape(Rectangle())
+                .glassTile()
             }
             // A row that opens a comparison rather than a page — the compare
             // glyph on the right says so, and `.plain` keeps the row looking
             // like the species rows everywhere else instead of tinting the
             // whole thing accent-blue.
             .buttonStyle(.plain)
+            .tileRow()
         }
     }
 }
