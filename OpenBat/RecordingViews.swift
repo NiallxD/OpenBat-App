@@ -125,7 +125,12 @@ struct RecordingRow: View {
                 HStack(spacing: 6) {
                     Text(recording.species).font(.headline)
                     Text("·").foregroundStyle(.secondary)
-                    Text(recording.commonName)
+                    // Common name and confidence as one phrase, in the same
+                    // plain type as the runner-up line below: the confidence
+                    // belongs TO the name, and a coloured pill said it a second
+                    // time in a way that competed with the iNaturalist leaf for
+                    // the same corner of the row (Niall, 2026-09-04).
+                    Text(confidenceLine)
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
@@ -210,6 +215,16 @@ struct RecordingRow: View {
         iNatRating = INatUploadAssessment.assess(recording: recording,
                                                  passes: passes,
                                                  uploadBytes: bytes).rating
+    }
+
+    /// "Common Pipistrelle 87%", or just the name where there is no figure to
+    /// give — a NoID recording has no confidence, and a bare "0%" would read as
+    /// a measurement rather than an absence.
+    private var confidenceLine: String {
+        guard let confidence = recording.confidence, !recording.isNoID else {
+            return recording.commonName
+        }
+        return String(format: "%@ %.0f%%", recording.commonName, confidence * 100)
     }
 
     /// "Runner-up: Soprano Pipistrelle 22%", from the passes inside this
