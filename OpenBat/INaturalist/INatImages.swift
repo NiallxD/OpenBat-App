@@ -513,9 +513,17 @@ enum INatImages {
         return renderer.uiImage
     }
 
+    /// The caption under the close-up.
+    ///
+    /// **"(AutoID)" after the name** (Niall, 2026-09-04). The picture travels
+    /// on its own — somebody can open it full screen, save it, or find it
+    /// through an image search with none of the observation around it — and a
+    /// species name burned into a spectrogram reads as a determination. Two
+    /// words make it a machine's suggestion wherever it ends up, which is what
+    /// it is everywhere else on the record.
     private static func caption(for pulse: PulseRecord) -> String {
         let name = SpeciesInfo.commonName[pulse.species] ?? pulse.species
-        return String(format: "%@ · peak %.0f kHz · %.1f ms · OpenBat",
+        return String(format: "%@ (AutoID) · peak %.0f kHz · %.1f ms · OpenBat",
                       name, pulse.peakFreqHz / 1000, pulse.durationMs)
     }
 }
