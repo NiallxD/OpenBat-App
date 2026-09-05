@@ -58,6 +58,12 @@ struct INatObservationSheet: View {
     @State private var signingIn = false
     @State private var authError: String?
     @State private var showPostBriefing = false
+    /// Remembered between recordings: somebody who prefers doing it by hand
+    /// prefers it every time, and being put back on the automatic route on
+    /// every sheet would be a small insult each time.
+    @AppStorage("openbat.inat.sheetMode") private var mode = Mode.auto
+
+    private enum Mode: String { case auto, manual }
 
     private enum PhotoState { case idle, saving, saved, denied }
 
@@ -75,6 +81,9 @@ struct INatObservationSheet: View {
     /// is, because the size of the trimmed file is one of its inputs.
     @State private var assessment: INatUploadAssessment?
     @State private var photos: [INatImages.Photo] = []
+    /// Decoded once for the preview. `UIImage(data:)` on every body pass would
+    /// re-decode a dozen PNGs each time the list scrolled.
+    @State private var previews: [UIImage] = []
 
     private struct ShareFiles: Identifiable { let id = UUID(); let urls: [URL] }
 
@@ -88,12 +97,17 @@ struct INatObservationSheet: View {
                 if case .posted(let result) = postState {
                     postedSection(result)
                 } else {
-                    assessmentSection
+                    modeSection
+                    if mode == .auto {
+                        assessmentSection
+                        previewSection
+                    } else {
+                        manualSection
+                    }
                     taxonSection
                     whenAndWhereSection
                     notesSection
                     fieldsSection
-                    manualSection
                 }
             }
             .pageBackground()
@@ -130,6 +144,7 @@ struct INatObservationSheet: View {
                 photos = await INatImages.render(sources: imageSources,
                                                  pulses: pulses,
                                                  fallbackPNG: png)
+                previews = photos.compactMap { UIImage(data: $0.data) }
                 prepared.photos = photos.compactMap { photo in
                     let url = FileManager.default.temporaryDirectory
                         .appendingPathComponent("\(recording.id.uuidString)-\(photo.name)")
@@ -152,6 +167,9 @@ struct INatObservationSheet: View {
     @ViewBuilder
     private var postBar: some View {
         if case .posted = postState {
+            EmptyView()
+        } else if mode == .manual {
+            // The manual route posts nothing; its actions are its own section.
             EmptyView()
         } else {
             VStack(spacing: 8) {
@@ -425,6 +443,91 @@ struct INatObservationSheet: View {
         ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
     }
 
+    /// The two routes, named for what they do rather than for how they work.
+    ///
+    /// "By hand" is not a fallback here, it is a choice — it needs no account,
+    /// nothing about it can break, and some people would simply rather build
+    /// the observation themselves in iNaturalist's own uploader. The automatic
+    /// route is the default because it is the one that gets records posted at
+    /// the moment somebody is standing in a field looking at the call.
+    private var modeSection: some View {
+        Section {
+            Picker("How", selection: $mode) {
+                Text("Post from OpenBat").tag(Mode.auto)
+                Text("Do it by hand").tag(Mode.manual)
+            }
+            .pickerStyle(.segmented)
+        }
+        .listRowBackground(Color.clear)
+    }
+
+    /// Exactly what is about to be uploaded, in the order it will appear.
+    ///
+    /// **Because an observation is permanent and public.** Every other
+    /// confirmation on this screen is text — a species, a time, a place — and
+    /// the pictures are the part a reader will actually judge, so they are the
+    /// part most worth checking before it goes. It also catches the failures
+    /// that text cannot describe: a close-up centred on the wrong call, a tile
+    /// of empty noise, a spectrogram cropped to the wrong band.
+    @ViewBuilder
+    private var previewSection: some View {
+        Section {
+            if previews.isEmpty {
+                HStack(spacing: 8) { ProgressView(); Text("Preparing the pictures…") }
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(alignment: .top, spacing: 10) {
+                        ForEach(Array(previews.enumerated()), id: \.offset) { index, image in
+                            VStack(spacing: 4) {
+                                Image(uiImage: image)
+                                    .resizable()
+                                    .interpolation(.high)
+                                    .aspectRatio(contentMode: .fit)
+                                    .frame(height: 96)
+                                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                                Text("\(index + 1)")
+                                    .font(.caption2.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+                .accessibilityLabel("\(previews.count) pictures will be posted")
+            }
+
+            if let files {
+                ForEach(Array(files.sounds.enumerated()), id: \.offset) { index, sound in
+                    LabeledContent(index == 0
+                                   ? "Slowed \(INatExport.expansionFactor)× so it's audible"
+                                   : "Same audio at its own rate") {
+                        Text(byteCount(soundBytes(sound)))
+                            .foregroundStyle(.secondary)
+                    }
+                    .font(.callout)
+                }
+            }
+        } header: {
+            CardHeader("What gets posted", previews.isEmpty
+                       ? "Checking."
+                       : "\(previews.count) pictures, then the sound, in this order.")
+        }
+    }
+
+    private func soundBytes(_ url: URL) -> Int {
+        (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int)
+            .flatMap { $0 } ?? 0
+    }
+
+    /// The numbered headers exist so the manual route can be worked down the
+    /// page with iNaturalist's uploader open beside it. On the automatic route
+    /// there is nothing to work through in order — the numbers would read as a
+    /// checklist of things the user has to do, when the whole point is that
+    /// they don't.
+    private func step(_ number: Int, _ title: String) -> String {
+        mode == .manual ? "\(number) · \(title)" : title
+    }
+
     private var taxonSection: some View {
         Section {
             copyRow("Species", observation.taxonName)
@@ -432,7 +535,7 @@ struct INatObservationSheet: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
         } header: {
-            CardHeader("1 · What it was", "What OpenBat will claim.")
+            CardHeader(step(1, "What it was"), "What OpenBat will claim.")
         } footer: {
             // The single most important sentence on this screen. An observation
             // posted from here carries the user's name, not OpenBat's, and iNat
@@ -459,7 +562,7 @@ struct INatObservationSheet: View {
                     .foregroundStyle(.secondary)
             }
         } header: {
-            CardHeader("2 · When and where", "")
+            CardHeader(step(2, "When and where"), "")
         } footer: {
             // Roosts are the reason the default is Obscured and not iNat's own
             // default. iNat obscures some taxa automatically; that is not
@@ -482,7 +585,7 @@ struct INatObservationSheet: View {
                 .foregroundStyle(.secondary)
                 .textSelection(.enabled)
         } header: {
-            CardHeader("3 · Notes", "Posted as the description.")
+            CardHeader(step(3, "Notes"), mode == .manual ? "Paste into the description field." : "Posted as the description.")
         }
     }
 
@@ -494,7 +597,7 @@ struct INatObservationSheet: View {
                     copyRow(field.label, field.value, note: field.note)
                 }
             } header: {
-                CardHeader("4 · Observation fields", "Optional, and worth it.")
+                CardHeader(step(4, "Observation fields"), "Optional, and worth it.")
             } footer: {
                 // Not posted by the API path yet: iNaturalist's observation
                 // fields are addressed by numeric id, so adding them means

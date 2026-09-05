@@ -3291,6 +3291,28 @@ has a noise gate and a per-column adaptive ceiling in it, so brightest pixel and
 loudest sound are different questions. The window can't go much past a quarter
 second either way without wandering onto the next call.
 
+**The sheet has two routes, chosen by a segmented control at the top** (Niall,
+2026-09-04): post from OpenBat, or do it by hand in iNaturalist's uploader. By
+hand is not a fallback — it needs no account, nothing about it can break, and
+some people would rather build the observation themselves — but automatic is the
+default, because it is the one that gets a record posted at the moment somebody
+is standing in a field looking at the call. The choice is remembered: somebody
+who prefers doing it by hand prefers it every time.
+
+The automatic route shows a **preview of exactly what will be uploaded**, in
+order, with the sound files and their sizes underneath. Every other confirmation
+on the screen is text — a species, a time, a place — and the pictures are the
+part a reader actually judges, so they are the part most worth looking at before
+it becomes permanent. It also catches what text cannot describe: a close-up
+centred on the wrong call, a tile of empty noise, a spectrogram cropped to the
+wrong band. The previews are decoded once into `@State`; `UIImage(data:)` per
+body pass would re-decode a dozen PNGs on every scroll.
+
+The numbered section headers ("1 · What it was") only appear on the manual
+route. They exist so the page can be worked down beside iNaturalist's uploader;
+on the automatic route they would read as a checklist of things the user has to
+do, when the point is that they don't.
+
 **Upload order** (Niall, 2026-09-04), and it is deliberate because
 iNaturalist shows media in the order it was uploaded: the slices in sequence,
 then the whole pass, then the one call in close-up, then the time-expanded audio,
