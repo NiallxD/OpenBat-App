@@ -52,6 +52,7 @@ struct DiagnosticsView: View {
                     DiagnosticsLevelMeter(audio: audio)
                     DiagnosticsMicQualityCard(audio: audio)
                     demoSection
+                    iNaturalistSection
                     tuningSection
                     settingsDumpSection
                     sessionButtonSection
@@ -133,6 +134,53 @@ struct DiagnosticsView: View {
     /// Entry point for the live tuning card. Available during a demo and during
     /// live capture — tuning against real bats matters as much as tuning against
     /// the demo clip; the demo is just the repeatable case.
+    @AppStorage("openbat.inat.debugIgnoreLimits") private var inatIgnoreLimits = false
+    @State private var inatLedgerCleared = false
+
+    /// Testing the posting path against the live API means posting the same
+    /// known recording, deleting it on iNaturalist, and posting it again — and
+    /// the "you've already posted this recording" blocker makes the second
+    /// attempt impossible.
+    ///
+    /// **Both of these are here and not in Settings on purpose.** They lift the
+    /// rules that protect iNaturalist's identifiers from a stream of near-
+    /// duplicate records, and that protection is worth nothing if any user can
+    /// switch it off. There is deliberately no user-facing "post anyway"; this
+    /// is behind fifteen taps on the version footer.
+    @ViewBuilder
+    private var iNaturalistSection: some View {
+        VStack(spacing: 12) {
+            HStack {
+                Text("iNaturalist")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+            Toggle("Ignore posting limits", isOn: $inatIgnoreLimits)
+                .font(.callout)
+            Text("Posts anyway when a recording is already posted, over the nightly cap, too big, or has no location. The blockers stay on screen and the score is still worked out honestly, so a test post looks like a real one.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            Button {
+                INatPostLedger.forgetEverythingPosted()
+                inatLedgerCleared = true
+            } label: {
+                Label(inatLedgerCleared ? "Forgotten" : "Forget what's been posted",
+                      systemImage: inatLedgerCleared ? "checkmark" : "arrow.counterclockwise")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            Text("Clears this phone's record of what it has posted, so the nightly cap and the already-posted check start again. Nothing on iNaturalist is touched — delete those there.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding()
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 16))
+    }
+
     private var tuningSection: some View {
         VStack(spacing: 12) {
             HStack {

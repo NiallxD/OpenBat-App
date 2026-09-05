@@ -180,6 +180,15 @@ struct INatObservationSheet: View {
                     }
                 }
 
+                if let assessment, assessment.overridden {
+                    // Loud on purpose: this state only exists behind the Debug
+                    // menu, and posting from it puts a record iNaturalist's
+                    // rules would have stopped onto a real account.
+                    Label("Posting limits overridden in Debug", systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+
                 if let assessment, !assessment.canPost {
                     // No "post anyway". Every blocker is a case where the
                     // record would be useless or unwelcome, and the manual

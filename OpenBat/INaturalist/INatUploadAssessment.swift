@@ -53,10 +53,14 @@ nonisolated struct INatUploadAssessment {
     /// Why this cannot be posted. Empty means it can.
     let blockers: [String]
 
+    /// True when the debug override is on and `blockers` is being ignored.
+    /// Only ever set from the Debug menu — see `INatUploadAssessment.overrideLimits`.
+    var overridden = false
+
     /// Why the score is not higher. Ordered worst-first.
     let notes: [String]
 
-    var canPost: Bool { blockers.isEmpty }
+    var canPost: Bool { blockers.isEmpty || overridden }
 
     enum Rating: String {
         case blocked = "Not suitable"
@@ -67,7 +71,10 @@ nonisolated struct INatUploadAssessment {
     }
 
     var rating: Rating {
-        guard canPost else { return .blocked }
+        // An overridden recording still shows its real rating, blockers and
+        // all: the override is there to let a post through, not to pretend the
+        // recording is better than it is.
+        guard blockers.isEmpty else { return .blocked }
         switch score {
         case 80...: return .excellent
         case 60..<80: return .good
@@ -85,6 +92,20 @@ nonisolated struct INatUploadAssessment {
         case .good: return "A solid record."
         case .excellent: return "A strong record — clear, and clearly one species."
         }
+    }
+
+    /// Debug-only: post regardless of the blockers.
+    ///
+    /// Exists for testing against the live API, where the same known recording
+    /// gets posted and deleted over and over and the "you've already posted
+    /// this" blocker makes the second attempt impossible. Set from the hidden
+    /// Debug menu (fifteen taps on the version footer) and nowhere else, so it
+    /// cannot be reached by an ordinary user — the rules it lifts are the ones
+    /// protecting iNaturalist's identifiers, and there is deliberately no
+    /// user-facing "post anyway".
+    @MainActor
+    static var overrideLimits: Bool {
+        UserDefaults.standard.bool(forKey: "openbat.inat.debugIgnoreLimits")
     }
 
     // MARK: Assessing
@@ -132,7 +153,11 @@ nonisolated struct INatUploadAssessment {
             }
         }
 
-        guard blockers.isEmpty else {
+        // The override does not clear the blockers, it just stops them being
+        // fatal — they stay on the screen, and the score below is still worked
+        // out honestly, so a test post looks exactly like the real thing.
+        let overridden = !blockers.isEmpty && MainActor.assumeIsolated { overrideLimits }
+        if !blockers.isEmpty && !overridden {
             return INatUploadAssessment(score: 0, blockers: blockers, notes: notes)
         }
 
@@ -210,7 +235,8 @@ nonisolated struct INatUploadAssessment {
         score += 10 * (1 - ramp(fill, from: 0.4, to: 1.0))
 
         return INatUploadAssessment(score: Int(score.rounded()),
-                                    blockers: [],
+                                    blockers: blockers,
+                                    overridden: overridden,
                                     notes: notes)
     }
 
@@ -381,7 +407,19 @@ nonisolated enum INatPostLedger {
         }
     }
 
-    // There is deliberately no `clear()`, and signing out does NOT reset the
+    /// Debug-only: forget every post this phone has made.
+    ///
+    /// The companion to `INatUploadAssessment.overrideLimits`, and the tidier
+    /// half of it — testing against the live API means posting the same
+    /// recording repeatedly, and this puts the phone back to never having
+    /// posted anything rather than leaving the override switched on.
+    static func forgetEverythingPosted() {
+        UserDefaults.standard.removeObject(forKey: key)
+        cached = []
+        Task { @MainActor in INatPostSignal.shared.bump() }
+    }
+
+    // Note this is NOT called on sign-out, and signing out does NOT reset the
     // ledger. It would be tidier — the counts belong to an account, and a
     // second person signing in on the same phone inherits the first one's cap
     // for the night. But a reset on sign-out is a one-tap way around the cap,
