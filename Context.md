@@ -3207,6 +3207,38 @@ now exists. It logs every request and reply in a memory ring, redacts tokens
 outright and rounds coordinates to ~1 km so it is safe to hand to somebody, and
 is copyable from the failure state on the sheet and from Settings → Privacy.
 
+**Every exported picture is drawn in `INatExportPlot`** (2026-09-04): a log
+frequency axis with real ticks on a 1-2-5 ladder, a time axis on the same
+ladder, faint gridlines carrying both across the picture, and a line underneath
+saying which timebase it is on. Three labelled frequencies and two labelled
+times were enough to know roughly where you were and nowhere near enough to
+MEASURE anything, which is what an identifier does with a bat call.
+
+That caption is not decoration. Two of the three pictures run on real time and
+the whole-pass one does not: its silence is cut, so its axis measures RETAINED
+audio. The spacing is uniform — packed columns are the same duration as the ones
+they came from, they simply are not adjacent in the recording — so regular ticks
+are meaningful, but the jumps are real and a reader who assumes otherwise reads
+a gap between two calls that never existed. So each plot says "Real time" or
+"Silence removed" on the picture, where it cannot be separated from it.
+
+Geometry is fixed constants rather than a `GeometryReader`: these are rendered
+offscreen by `ImageRenderer` at a size nothing else depends on, so every tick
+position is arithmetic, and a `GeometryReader` would be one more thing to get
+wrong in a view nobody can watch being laid out. The close-up is 3:2 where the
+slices are 16:9 — one shape being read rather than a sequence being counted —
+and its band is deliberately lopsided, 18 kHz above the call and 6 kHz below,
+because harmonics run upwards and a tight top edge cuts through one and leaves
+the call looking truncated whether it was or not.
+
+**Nothing goes to Photos any more** (Niall, 2026-09-04). The manual route had a
+"Save spectrogram to Photos" button for anyone who would rather build the
+observation in iNaturalist's own app, and it cost a photo-library permission
+prompt to enable a route that posts the call WITHOUT its sound — the thing this
+feature exists to fix. The Files app needs no permission and carries everything.
+`NSPhotoLibraryAddUsageDescription` is gone from the build settings with it: an
+unused permission string is a question App Review asks.
+
 **Two pictures, and neither is the player's overview** (`INatImages`,
 2026-09-04). The overview spans 0 to Nyquist — 192 kHz at 384 kHz sampling —
 and a call occupies perhaps 30 kHz of it, so at the few hundred pixels

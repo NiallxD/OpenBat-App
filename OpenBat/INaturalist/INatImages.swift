@@ -74,7 +74,7 @@ struct INatImageSources {
     let silenceThresholdDB: Double
     let silencePadding: Double
     /// Which call to draw in detail. Its stored thumbnail is the fallback only
-    /// — see `pulsePlot`.
+    /// — see `closeUp`.
     let pulse: PulseRecord?
     let pulseImage: UIImage?
     /// Where the recording starts, to turn a pulse's timestamp into a sample
@@ -97,6 +97,17 @@ enum INatImages {
     struct Photo {
         let name: String
         let data: Data
+    }
+
+    /// Turns one of the export plots into a picture.
+    ///
+    /// 3× so the tick numbers survive iNaturalist's own downscaling; at 1×
+    /// they turn to mush at the size the observation page shows.
+    private static func render(_ plot: INatExportPlot) -> UIImage? {
+        let renderer = ImageRenderer(content: plot)
+        renderer.scale = 3
+        renderer.isOpaque = true
+        return renderer.uiImage
     }
 
     /// Every exported spectrogram is log-frequency, whatever the player is set
@@ -143,8 +154,12 @@ enum INatImages {
             images.append((tile.name, tile.data))
         }
 
-        if let cropped = await croppedOverview(sources: sources, pulses: pulses),
-           let data = cropped.pngData() {
+        if let whole = await croppedOverview(sources: sources, pulses: pulses),
+           let plot = render(INatExportPlot(image: whole.image, band: whole.band,
+                                            timeStart: 0, timeEnd: whole.seconds,
+                                            timebase: whole.packed ? .silenceRemoved : .realTime,
+                                            title: "The whole pass")),
+           let data = plot.pngData() {
             images.append(("whole-pass.png", data))
         } else if let fallbackPNG {
             // The uncropped overview is still worth sending. A picture that is
@@ -155,7 +170,11 @@ enum INatImages {
         if let pulse = sources.pulse,
            let linear = await closeUp(pulse: pulse, sources: sources) ?? sources.pulseImage,
            case let warped = logWarped(linear, band: closeUpBand(for: pulse)),
-           let plot = pulsePlot(pulse: pulse, image: warped.image, band: warped.band),
+           let plot = render(INatExportPlot(image: warped.image, band: warped.band,
+                                            timeStart: 0, timeEnd: closeUpSpan(for: pulse),
+                                            timebase: .realTime,
+                                            title: caption(for: pulse),
+                                            aspect: 3.0 / 2.0)),
            let data = plot.pngData() {
             images.append(("call-close-up.png", data))
         }
@@ -188,8 +207,8 @@ enum INatImages {
     ///
     /// Runs off the main actor: bounded array maths over a grid already in
     /// memory, but a full pass over it, while a sheet is animating in.
-    private static func croppedOverview(sources: INatImageSources,
-                                        pulses: [PulseRecord]) async -> UIImage? {
+    private static func croppedOverview(sources: INatImageSources, pulses: [PulseRecord])
+        async -> (image: UIImage, band: ClosedRange<Double>, seconds: Double, packed: Bool)? {
         guard let raw = sources.overviewRaw, sources.sampleRate > 0 else { return nil }
         let band = callBand(pulses: pulses, nyquist: sources.sampleRate / 2)
         let sampleRate = sources.sampleRate
@@ -206,17 +225,22 @@ enum INatImages {
                                          minFreqHz: minAnalysisFrequencyHz,
                                          padSeconds: padding)
             // A recording that is nearly all signal has nothing to gain and
-            // something to lose — packing it would make the axis non-linear for
-            // no benefit — so it is drawn as it is.
+            // something to lose — packing it would make the axis discontinuous
+            // for no benefit — so it is drawn as it is.
             let packed = map.keptFraction < 0.9
+            let tile = packed
                 ? WavSpectrogramEngine.compressedOverviewRawTile(from: raw, map: map)
                 : raw
-            guard let linear = WavSpectrogramEngine.colorize(packed, sampleRate: sampleRate,
+            guard let linear = WavSpectrogramEngine.colorize(tile, sampleRate: sampleRate,
                                                             minFreqHz: band.lowerBound,
                                                             maxFreqHz: band.upperBound,
                                                             palette: palette, noiseFloor: floor)?.image
             else { return nil }
-            return logWarped(linear, band: band).image
+            let warped = logWarped(linear, band: band)
+            // The axis measures what the picture actually contains: the whole
+            // recording when nothing was cut, the retained audio when it was.
+            let seconds = Double(packed ? map.virtualTotal : total) / sampleRate
+            return (warped.image, warped.band, seconds, packed)
         }.value
     }
 
@@ -283,8 +307,10 @@ enum INatImages {
             guard to > from else { break }
             guard let linear = await tile(from: from, to: to, band: band, sources: sources) else { continue }
             let warped = logWarped(linear, band: band)
-            guard let plot = tilePlot(image: warped.image, band: warped.band, from: from, to: to,
-                                      index: index, of: count),
+            guard let plot = render(INatExportPlot(image: warped.image, band: warped.band,
+                                                   timeStart: from, timeEnd: to,
+                                                   timebase: .realTime,
+                                                   title: "Part \(index + 1) of \(count)")),
                   let data = plot.pngData()
             else { continue }
             photos.append(Photo(name: String(format: "part-%02d.png", index + 1), data: data))
@@ -318,66 +344,6 @@ enum INatImages {
                                                   palette: palette, noiseFloor: floor,
                                                   calibrationCurve: curve)?.image
         }.value
-    }
-
-    /// A tile with its axes and its place in the sequence.
-    ///
-    /// The position line matters more than it looks: without it a reader has no
-    /// way to tell tile 4 from tile 5, and the seconds are absolute within the
-    /// recording so a claim about one call can be pointed at.
-    private static func tilePlot(image: UIImage, band: ClosedRange<Double>,
-                                 from: Double, to: Double,
-                                 index: Int, of count: Int) -> UIImage? {
-        let view = VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 4) {
-                VStack(alignment: .trailing) {
-                    // From the warp's own mapping, so the numbers can't
-                    // describe a linear axis over a log picture.
-                    axisText(kHz(at: 0, in: band))
-                    Spacer()
-                    axisText(kHz(at: 0.5, in: band))
-                    Spacer()
-                    axisText(kHz(at: 1, in: band))
-                }
-                .frame(width: 34, height: 360 * 9 / 16, alignment: .trailing)
-                Image(uiImage: image)
-                    .resizable()
-                    .interpolation(.high)
-                    .aspectRatio(16.0 / 9.0, contentMode: .fill)
-                    .frame(height: 360 * 9 / 16)
-                    .clipped()
-            }
-            HStack {
-                axisText("kHz")
-                    .frame(width: 34, alignment: .trailing)
-                axisText(String(format: "%.1f s", from))
-                Spacer()
-                axisText("part \(index + 1) of \(count)")
-                Spacer()
-                axisText(String(format: "%.1f s", to))
-            }
-        }
-        .padding(12)
-        .frame(width: 640)
-        .background(Color.black)
-        .environment(\.colorScheme, .dark)
-
-        let renderer = ImageRenderer(content: view)
-        renderer.scale = 3
-        renderer.isOpaque = true
-        return renderer.uiImage
-    }
-
-    private static func kHz(at fraction: Double, in band: ClosedRange<Double>) -> String {
-        let hz = LogFrequencyWarp.vFracToHz(fraction, lo: band.lowerBound,
-                                            hi: band.upperBound, log: true)
-        return String(format: "%.0f", hz / 1000)
-    }
-
-    private static func axisText(_ string: String) -> some View {
-        Text(string)
-            .font(.system(size: 9, weight: .medium).monospacedDigit())
-            .foregroundStyle(.secondary)
     }
 
     // MARK: The detail view
@@ -494,14 +460,23 @@ enum INatImages {
     ///
     /// Still far tighter than the context view's 20 kHz, because this picture
     /// exists to be measured.
-    static let closeUpPaddingHz: Double = 8_000
+    /// Lopsided on purpose (Niall, 2026-09-04: "this one looks just clipped").
+    ///
+    /// A call's harmonics run UPWARDS, and the stored crop stops at the highest
+    /// energy the classifier cared about — so a tight top edge cuts through a
+    /// harmonic and leaves the call looking truncated whether it was or not.
+    /// The bottom needs far less: below the fundamental there is nothing to cut
+    /// through, only quiet, and the log axis is already giving the low end more
+    /// of the picture than the high end.
+    static let closeUpPaddingAboveHz: Double = 18_000
+    static let closeUpPaddingBelowHz: Double = 6_000
     static let closeUpTimeFactor: Double = 3
 
     private static func closeUpBand(for pulse: PulseRecord) -> ClosedRange<Double> {
         if let low = pulse.imageFreqMinHz, let high = pulse.imageFreqMaxHz, high > low {
-            return max(0, low - closeUpPaddingHz)...(high + closeUpPaddingHz)
+            return max(0, low - closeUpPaddingBelowHz)...(high + closeUpPaddingAboveHz)
         }
-        return max(0, pulse.peakFreqHz - 20_000)...(pulse.peakFreqHz + 20_000)
+        return max(0, pulse.peakFreqHz - closeUpPaddingBelowHz)...(pulse.peakFreqHz + closeUpPaddingAboveHz)
     }
 
     /// How much recording the close-up covers, in seconds.
@@ -514,50 +489,6 @@ enum INatImages {
         return base * closeUpTimeFactor / 1000
     }
 
-    /// One call, tightly clipped, with axes — `PulseImagePlot` rendered to a
-    /// picture, plus a caption saying what is being measured.
-    ///
-    /// Rendered at 3× so the axis numbers survive iNaturalist's own
-    /// downscaling; at 1× they turn to mush at the size the page shows.
-    private static func pulsePlot(pulse: PulseRecord, image: UIImage,
-                                  band: ClosedRange<Double>) -> UIImage? {
-        let view = VStack(alignment: .leading, spacing: 6) {
-            // The axes describe the picture, so they come from the band that
-            // was actually rendered, not from the stored thumbnail's bounds —
-            // those two are the same only when the re-render succeeded.
-            PulseImagePlot(image: image,
-                           freqMinHz: band.lowerBound,
-                           freqMaxHz: band.upperBound,
-                           spanMs: closeUpSpan(for: pulse) * 1000,
-                           logFrequency: true)
-            Text(caption(for: pulse))
-                .font(.system(size: 10).monospacedDigit())
-                .foregroundStyle(.secondary)
-        }
-        .padding(12)
-        .frame(width: 460)
-        .background(Color.black)
-        // `PulseImagePlot` colours its labels with `.secondary` and backs the
-        // image with `systemBackground`; rendered outside a window there is no
-        // trait collection to resolve those against, and they come out for a
-        // light appearance on top of the black. Forcing the scheme is what
-        // makes the axis numbers legible.
-        .environment(\.colorScheme, .dark)
-
-        let renderer = ImageRenderer(content: view)
-        renderer.scale = 3
-        renderer.isOpaque = true
-        return renderer.uiImage
-    }
-
-    /// The caption under the close-up.
-    ///
-    /// **"(AutoID)" after the name** (Niall, 2026-09-04). The picture travels
-    /// on its own — somebody can open it full screen, save it, or find it
-    /// through an image search with none of the observation around it — and a
-    /// species name burned into a spectrogram reads as a determination. Two
-    /// words make it a machine's suggestion wherever it ends up, which is what
-    /// it is everywhere else on the record.
     private static func caption(for pulse: PulseRecord) -> String {
         let name = SpeciesInfo.commonName[pulse.species] ?? pulse.species
         return String(format: "%@ (AutoID) · peak %.0f kHz · %.1f ms · OpenBat",

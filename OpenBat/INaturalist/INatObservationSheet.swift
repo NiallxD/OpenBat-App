@@ -52,7 +52,6 @@ struct INatObservationSheet: View {
     @State private var auth = INatAuth.shared
     @State private var shareFiles: ShareFiles?
     @State private var copied: String?
-    @State private var photoState = PhotoState.idle
     @State private var geoprivacy = INatGeoprivacy.obscured
     @State private var postState = PostState.idle
     @State private var signingIn = false
@@ -64,8 +63,6 @@ struct INatObservationSheet: View {
     @AppStorage("openbat.inat.sheetMode") private var mode = Mode.auto
 
     private enum Mode: String { case auto, manual }
-
-    private enum PhotoState { case idle, saving, saved, denied }
 
     private enum PostState {
         case idle
@@ -671,24 +668,6 @@ struct INatObservationSheet: View {
             }
             .disabled(files == nil)
 
-            Button {
-                saveSpectrogram()
-            } label: {
-                switch photoState {
-                case .idle:
-                    Label("Save Spectrogram to Photos", systemImage: "photo.badge.plus")
-                case .saving:
-                    HStack(spacing: 8) { ProgressView(); Text("Saving…") }
-                case .saved:
-                    Label("Saved to Photos", systemImage: "checkmark.circle.fill")
-                case .denied:
-                    Label("Photos access declined", systemImage: "exclamationmark.triangle")
-                }
-            }
-            .disabled((photos.isEmpty && overviewPNG == nil) || photoState == .saving || photoState == .saved)
-            if photoState == .denied {
-                ControlNote("Turn on Photos access in Settings, or skip it.")
-            }
         }
     }
 
@@ -746,17 +725,6 @@ struct INatObservationSheet: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Copy \(label): \(value)")
-    }
-
-    private func saveSpectrogram() {
-        // The cropped one where it exists: it is the picture worth having, and
-        // the whole point of saving to Photos is to attach it somewhere else.
-        guard let png = photos.first?.data ?? overviewPNG else { return }
-        photoState = .saving
-        Task {
-            let ok = await INatExport.saveSpectrogramToPhotos(png)
-            photoState = ok ? .saved : .denied
-        }
     }
 
     /// Ticks the row for a moment so a tap that only changes the pasteboard —

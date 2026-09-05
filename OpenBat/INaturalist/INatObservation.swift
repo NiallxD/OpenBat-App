@@ -36,13 +36,15 @@
 //  stuck there.
 //
 //  So the sheet points at inaturalist.org's uploader, where the sound and the
-//  spectrogram go in together. Saving the spectrogram to Photos is kept as a
-//  secondary path for anyone who would rather work in the app — it can pick a
-//  photo out of the library — but that posts the call without its sound, which
-//  is why it is not the one offered first.
+//  spectrogram go in together, and the files go to the Files app.
 //
-//  Video is not an escape hatch: iNaturalist accepts images and audio only, so
-//  a spectrogram video would save to Photos and then be refused on upload.
+//  **Not to Photos** (Niall, 2026-09-04). There was a "Save spectrogram to
+//  Photos" button, for anyone who would rather build the observation in
+//  iNaturalist's own app, which can pick a photo out of the library. It cost a
+//  photo-library permission prompt — on a screen whose whole subject is a file
+//  the user already has — to enable a route that posts the call WITHOUT its
+//  sound, which is the thing this feature exists to fix. The Files app needs no
+//  permission and carries everything.
 //
 //  WHAT GOES IN THE BUNDLE
 //  -----------------------
@@ -59,7 +61,6 @@
 import Foundation
 import UIKit
 import CoreLocation
-import Photos
 
 /// How precisely the observation's location is published.
 ///
@@ -646,27 +647,6 @@ nonisolated enum INatExport {
         f.dateFormat = "yyyy-MM-dd HH:mm:ss"
         return f
     }()
-
-    // MARK: Photos
-
-    /// Puts the spectrogram in the photo library, which is the only door the
-    /// iNaturalist iOS app opens to another app's files (see the note at the top
-    /// of this file).
-    ///
-    /// Add-only authorisation: OpenBat never reads the library, and asking for
-    /// read access to write one image would be asking for far more than the
-    /// feature needs.
-    static func saveSpectrogramToPhotos(_ png: Data) async -> Bool {
-        let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
-        guard status == .authorized || status == .limited else { return false }
-        return await withCheckedContinuation { continuation in
-            PHPhotoLibrary.shared().performChanges {
-                PHAssetCreationRequest.forAsset().addResource(with: .photo, data: png, options: nil)
-            } completionHandler: { success, _ in
-                continuation.resume(returning: success)
-            }
-        }
-    }
 
     // MARK: The audible copy
 

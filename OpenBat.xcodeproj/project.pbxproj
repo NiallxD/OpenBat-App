@@ -479,7 +479,6 @@
 				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = NO;
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "OpenBat pins where each species was detected on a map, shows tonight's sunset and sunrise times, and picks the species model for your region. It takes occasional one-shot fixes and never tracks you continuously.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "OpenBat needs microphone access to receive the ultrasonic audio stream from your bat detector microphone.";
-				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "OpenBat saves a call's spectrogram to your photos so you can attach it to an iNaturalist observation. It only ever adds images, and never reads your library.";
 				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
 				INFOPLIST_KEY_NSSupportsLiveActivitiesFrequentUpdates = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -524,7 +523,6 @@
 				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = NO;
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "OpenBat pins where each species was detected on a map, shows tonight's sunset and sunrise times, and picks the species model for your region. It takes occasional one-shot fixes and never tracks you continuously.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "OpenBat needs microphone access to receive the ultrasonic audio stream from your bat detector microphone.";
-				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "OpenBat saves a call's spectrogram to your photos so you can attach it to an iNaturalist observation. It only ever adds images, and never reads your library.";
 				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
 				INFOPLIST_KEY_NSSupportsLiveActivitiesFrequentUpdates = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
