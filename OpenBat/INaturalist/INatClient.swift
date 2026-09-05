@@ -70,7 +70,7 @@ nonisolated enum INatClient {
     struct PostResult {
         let uuid: UUID
         let webURL: URL
-        var attachedPhoto = false
+        var attachedPhotos = 0
         var attachedSounds = 0
         /// Human-readable, already user-facing. Empty on a clean post.
         var skipped: [String] = []
@@ -88,7 +88,7 @@ nonisolated enum INatClient {
     static func post(_ observation: INatObservation,
                      geoprivacy: INatGeoprivacy,
                      taxonID: Int?,
-                     spectrogramPNG: Data?,
+                     photos: [INatImages.Photo],
                      sounds: [URL]) async throws -> PostResult {
         let uuid = observation.observationUUID
         var result = PostResult(uuid: uuid, webURL: webURL(for: uuid))
@@ -103,17 +103,17 @@ nonisolated enum INatClient {
 
         try await create(observation, uuid: uuid, geoprivacy: geoprivacy, taxonID: taxonID)
 
-        if let spectrogramPNG {
+        for photo in photos {
             do {
-                try await attach(data: spectrogramPNG,
-                                 filename: "spectrogram.png",
+                try await attach(data: photo.data,
+                                 filename: photo.name,
                                  mimeType: "image/png",
                                  to: uuid,
                                  path: "observation_photos",
                                  field: "observation_photo")
-                result.attachedPhoto = true
+                result.attachedPhotos += 1
             } catch {
-                result.skipped.append("The spectrogram didn't upload (\(error.localizedDescription))")
+                result.skipped.append("\(photo.name) didn't upload (\(error.localizedDescription))")
             }
         }
 

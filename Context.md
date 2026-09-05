@@ -3189,6 +3189,27 @@ now exists. It logs every request and reply in a memory ring, redacts tokens
 outright and rounds coordinates to ~1 km so it is safe to hand to somebody, and
 is copyable from the failure state on the sheet and from Settings → Privacy.
 
+**Two pictures, and neither is the player's overview** (`INatImages`,
+2026-09-04). The overview spans 0 to Nyquist — 192 kHz at 384 kHz sampling —
+and a call occupies perhaps 30 kHz of it, so at the few hundred pixels
+iNaturalist shows an observation photo at, the evidence is a sliver in a mostly
+black rectangle. It also has no axes, and measuring the call is precisely what
+an identifier does. So an observation carries a CONTEXT view (the whole pass,
+cropped to the call band with 20 kHz of headroom either side) and a DETAIL view
+(the strongest single call, tightly clipped, with kHz and millisecond axes).
+
+The context view is re-colorized from `Overview.rawTile` at a new band rather
+than cropped out of the finished image — `colorize` already does the band crop,
+so this is the same path the noise-floor slider takes and the export cannot
+drift from what the user was looking at. The detail view is `PulseImagePlot`
+— the same axis-drawing view the pulse detail screen uses — through an
+`ImageRenderer` at 3×, forced to `.dark`: its labels are `.secondary` and its
+backing is `systemBackground`, and rendered outside a window there is no trait
+collection to resolve those against, so unforced they come out light-on-black.
+The band comes from each pulse's stored thumbnail bounds where it has them
+(they include the sweep and harmonics) and falls back to peak frequency, which
+underestimates the band — hence 20 kHz of padding rather than 5.
+
 **Still not done:** observation *fields* (the bat2inat convention the application
 promises) are not posted — they are addressed by numeric field id and need a
 name→id lookup first. The numbers are all in the description, so nothing is lost

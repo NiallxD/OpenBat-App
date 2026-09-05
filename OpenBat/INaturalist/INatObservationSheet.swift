@@ -37,8 +37,11 @@ struct INatObservationSheet: View {
     let recording: Recording
     let passes: [PassRecord]
     let wavURL: URL
-    /// Already encoded, so the sheet never touches a `UIImage` off the main
-    /// actor. nil when the overview hasn't rendered yet.
+    /// What the pictures are built from — gathered by the player, rendered
+    /// here. See `INatImages`.
+    let imageSources: INatImageSources
+    /// The player's own full-range overview, kept only as the fallback for when
+    /// the cropped render fails.
     let overviewPNG: Data?
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
@@ -71,6 +74,7 @@ struct INatObservationSheet: View {
     /// nil until `files` is ready — the score can't be known before the trim
     /// is, because the size of the trimmed file is one of its inputs.
     @State private var assessment: INatUploadAssessment?
+    @State private var photos: [INatImages.Photo] = []
 
     private struct ShareFiles: Identifiable { let id = UUID(); let urls: [URL] }
 
@@ -115,12 +119,23 @@ struct INatObservationSheet: View {
                 let png = overviewPNG
                 let start = recording.date
                 let pulses = passes.flatMap(\.pulses)
-                let prepared = await Task.detached(priority: .userInitiated) {
+                var prepared = await Task.detached(priority: .userInitiated) {
                     INatExport.prepareFiles(wavURL: url,
-                                            overviewPNG: png,
                                             recordingStart: start,
                                             pulses: pulses)
                 }.value
+
+                // The pictures, and copies of them on disk so the manual
+                // uploader route offers exactly what the API route would send.
+                photos = await INatImages.render(sources: imageSources,
+                                                 pulses: pulses,
+                                                 fallbackPNG: png)
+                prepared.photos = photos.compactMap { photo in
+                    let url = FileManager.default.temporaryDirectory
+                        .appendingPathComponent("\(recording.id.uuidString)-\(photo.name)")
+                    guard (try? photo.data.write(to: url)) != nil else { return nil }
+                    return url
+                }
                 files = prepared
                 assessment = INatUploadAssessment.assess(recording: recording,
                                                          passes: passes,
@@ -290,7 +305,7 @@ struct INatObservationSheet: View {
                 let result = try await INatClient.post(observation,
                                                        geoprivacy: geoprivacy,
                                                        taxonID: taxonID,
-                                                       spectrogramPNG: overviewPNG,
+                                                       photos: photos,
                                                        sounds: files.sounds)
                 // Recorded only on a real success, and only for a record this
                 // phone actually created — that is what the nightly cap counts.
@@ -313,7 +328,7 @@ struct INatObservationSheet: View {
             if result.alreadyExisted {
                 ControlNote("This recording had already been posted, so nothing was created. Opening it will show you the existing observation.")
             } else {
-                ControlNote("Attached: \(result.attachedSounds) sound file\(result.attachedSounds == 1 ? "" : "s")\(result.attachedPhoto ? " and the spectrogram" : ""). Location is \(geoprivacy.label.lowercased()).")
+                ControlNote("Attached: \(result.attachedSounds) sound file\(result.attachedSounds == 1 ? "" : "s") and \(result.attachedPhotos) spectrogram\(result.attachedPhotos == 1 ? "" : "s"). Location is \(geoprivacy.label.lowercased()).")
             }
             Button {
                 openURL(result.webURL)
@@ -512,7 +527,7 @@ struct INatObservationSheet: View {
                     Label("Photos access declined", systemImage: "exclamationmark.triangle")
                 }
             }
-            .disabled(overviewPNG == nil || photoState == .saving || photoState == .saved)
+            .disabled((photos.isEmpty && overviewPNG == nil) || photoState == .saving || photoState == .saved)
             if photoState == .denied {
                 ControlNote("Turn on Photos access for OpenBat in Settings — or skip it, since the uploader can take the spectrogram straight from Files.")
             }
@@ -554,10 +569,12 @@ struct INatObservationSheet: View {
     }
 
     private func saveSpectrogram() {
-        guard let overviewPNG else { return }
+        // The cropped one where it exists: it is the picture worth having, and
+        // the whole point of saving to Photos is to attach it somewhere else.
+        guard let png = photos.first?.data ?? overviewPNG else { return }
         photoState = .saving
         Task {
-            let ok = await INatExport.saveSpectrogramToPhotos(overviewPNG)
+            let ok = await INatExport.saveSpectrogramToPhotos(png)
             photoState = ok ? .saved : .denied
         }
     }

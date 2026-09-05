@@ -49,7 +49,10 @@
 //    • An AUDIBLE copy of the call — see `audibleCopy`. The original is 384 kHz
 //      and no browser will play it, which makes the sound attachment on a lot of
 //      existing bat observations effectively decorative.
-//    • The spectrogram PNG, which is the evidence a reviewer actually reads.
+//    • Two spectrograms, built by `INatImages`: the pass cropped to the call
+//      band, and one call in detail with kHz/ms axes on it. The full-range
+//      overview the player draws is deliberately NOT what gets sent — see that
+//      file's header.
 //    • The original WAV, for anyone who wants to re-analyse it.
 //
 
@@ -170,7 +173,11 @@ nonisolated enum INatExport {
     /// afterwards is the kind of thing that quietly breaks.
     struct Files {
         var audible: URL?
-        var spectrogram: URL?
+        /// The rendered spectrograms — the cropped context view and the
+        /// axis-labelled call detail. Written by the sheet once `INatImages`
+        /// has produced them, because rendering one of them needs the main
+        /// actor and this type is built off it.
+        var photos: [URL] = []
         /// The recording exactly as it sits on disk. Offered to the share
         /// sheet, where somebody may want the whole thing, and never uploaded.
         var original: URL
@@ -180,7 +187,7 @@ nonisolated enum INatExport {
         var upload: URL
 
         /// Everything there is, in the order the hand-off sheet offers them.
-        var all: [URL] { [audible, spectrogram, original].compactMap { $0 } }
+        var all: [URL] { [audible].compactMap { $0 } + photos + [original] }
 
         /// What goes to `/observation_sounds`. The audible copy leads because
         /// it is the one a reviewer can actually play in a browser.
@@ -199,7 +206,6 @@ nonisolated enum INatExport {
     /// long recording at 384 kHz is tens of megabytes — so this never runs
     /// inline.
     static func prepareFiles(wavURL: URL,
-                             overviewPNG: Data?,
                              recordingStart: Date,
                              pulses: [PulseRecord]) -> Files {
         let baseName = wavURL.deletingPathExtension().lastPathComponent
@@ -214,12 +220,6 @@ nonisolated enum INatExport {
         // upload would be paired with a full-length audible copy, and the
         // 20 MB limit would still bite on the file people actually play.
         files.audible = audibleCopy(of: files.upload, baseName: baseName)
-        if let overviewPNG {
-            let url = FileManager.default.temporaryDirectory
-                .appendingPathComponent("\(baseName)-spectrogram.png")
-            try? overviewPNG.write(to: url)
-            files.spectrogram = url
-        }
         return files
     }
 

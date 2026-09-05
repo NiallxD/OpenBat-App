@@ -318,6 +318,25 @@ struct WavPlayerView: View {
                                            passes: store.passes(forRecording: recording))
     }
 
+    /// What `INatImages` needs to build the observation's pictures: the
+    /// overview's own measurements (so the cropped export is re-colorized from
+    /// the same grid the screen is showing, not cut out of the finished image),
+    /// and the strongest call's thumbnail for the detail view.
+    ///
+    /// Cheap — it gathers references, and renders nothing.
+    private var inatImageSources: INatImageSources {
+        let passes = store.passes(forRecording: recording)
+        let best = passes.flatMap(\.pulses)
+            .filter { $0.imageFile != nil }
+            .max { $0.confidence < $1.confidence }
+        return INatImageSources(overviewRaw: overview?.rawTile,
+                                sampleRate: overview?.sampleRate ?? 0,
+                                palette: palette,
+                                noiseFloor: effectiveNoiseFloor,
+                                pulse: best,
+                                pulseImage: best.flatMap { store.image(for: $0) })
+    }
+
     var body: some View {
         mainLayout
         // The player is a page like any other on iPad — see `PageColumn`. The
@@ -332,6 +351,7 @@ struct WavPlayerView: View {
                                  recording: recording,
                                  passes: store.passes(forRecording: recording),
                                  wavURL: store.wavURL(for: recording),
+                                 imageSources: inatImageSources,
                                  overviewPNG: overview?.image.pngData())
         }
         .navigationTitle(recording.commonName)
