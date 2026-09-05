@@ -3285,16 +3285,21 @@ and telling a later reader nothing they could not already see. There is no
 registry to look a real name up in, and the set of mics that work as
 class-compliant USB audio at 384 kHz is small, so Settings → Detecting asks
 once and remembers: a short hand-maintained list (one entry today, Griff Mini by
-Phil Atkin) plus Other with a text field. It feeds GUANO `Make` and iNaturalist
-field 567, and unset falls back to the port name — a vague name in an archive
-beats a wrong one. Read straight from `UserDefaults` at chunk-build time rather
+Phil Atkin, and a "Generic Ultrasonic Mic" entry standing in for anything
+unlisted). It feeds GUANO `Make` and iNaturalist field 567, and unset falls back
+to the port name — a vague name in an archive beats a wrong one.
+
+**No free-text option, and that is the point** (Niall, same day, erring towards
+privacy). An "Other" text field was built and removed within the hour: this
+string goes into the metadata of every recording and onto a public iNaturalist
+record, people put their own names on their equipment, and there is no reliable
+way to sanitise a sentence somebody wrote. A fixed list cannot leak something a
+user did not realise they were publishing, and a mic that is not on the list is
+a reason to extend the list. `current` ignores any stored value not in `known`,
+so a string written by the build that had the text field is dropped rather than
+trusted. Read straight from `UserDefaults` at chunk-build time rather
 than pushed onto the recording queue like `setInputName`, so changing it
 mid-session takes effect on the next file.
-
-One consequence to watch: `AnonymizedUploadBuilder` sanitises `Make` for
-vendor serials, and Other now means it can carry free-typed text — people put
-their own names on their kit. Contribution is severed today, but that needs
-deciding before it is revived; noted at `sanitizedHardwareName`.
 
 **Still not done:** the rest of the fields — "Number of calls" and the source
 filename have no established community field, so they stay copyable-only.

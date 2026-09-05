@@ -459,12 +459,15 @@ struct SettingsView: View {
     }
 
     @AppStorage("detector.model") private var detectorChoice = ""
-    @AppStorage("detector.customName") private var detectorCustomName = ""
 
     /// Named by the user rather than detected, because what iOS reports is the
     /// firmware's own port name — the Griff calls itself `bat_detector_usb` —
     /// and that is what was going into every recording's GUANO `Make` field and
-    /// out to anyone the file was shared with. See `DetectorModel`.
+    /// out to anyone the file was shared with.
+    ///
+    /// A fixed list with no "Other": the value is published, and a free-text
+    /// box invites somebody to type something they did not think of as public.
+    /// See `DetectorModel`.
     private var detectorSection: some View {
         Section {
             ControlNote("Written into your recordings and any iNaturalist post.")
@@ -473,12 +476,6 @@ struct SettingsView: View {
                 ForEach(DetectorModel.known, id: \.self) { name in
                     Text(name).tag(name)
                 }
-                Text("Other…").tag(DetectorModel.otherKey)
-            }
-            if detectorChoice == DetectorModel.otherKey {
-                TextField("Make and model", text: $detectorCustomName)
-                    .textInputAutocapitalization(.words)
-                    .autocorrectionDisabled()
             }
         } header: {
             CardHeader("What detector do you use?", "The microphone, not the phone.")

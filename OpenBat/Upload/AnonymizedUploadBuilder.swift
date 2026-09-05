@@ -261,13 +261,10 @@ nonisolated enum AnonymizedUploadBuilder {
     /// device's own USB product string — a value the *microphone vendor* chose,
     /// not one we control.
     ///
-    /// **Note the user-typed case.** `DetectorModel`'s "Other" option puts free
-    /// text in here, so this can now carry whatever somebody typed into a
-    /// settings field, and people put their own names on their equipment. The
-    /// trimming below is shaped for vendor serials and will not catch that. If
-    /// contribution is ever revived (it is severed today — `UploadClient` has
-    /// no base URL), a free-typed detector name needs deciding on: either drop
-    /// it and keep only names from the known list, or ask before contributing. Most report a clean model
+    /// Both are vendor strings, never user-typed: `DetectorModel` deliberately
+    /// offers a fixed list and no free-text option, precisely so that nothing
+    /// a person wrote about themselves can arrive here. Keep it that way — the
+    /// trimming below is shaped for serials and could not sanitise a sentence. Most report a clean model
     /// name, but nothing stops a device from appending a serial, and a serial
     /// would be a per-unit identifier riding along inside a file that has
     /// otherwise had every identifier removed. One badly-behaved mic model would
