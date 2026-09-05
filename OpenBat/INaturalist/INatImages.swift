@@ -19,9 +19,11 @@
 //
 //  So an observation carries two:
 //
-//    • A CONTEXT view — the whole recording, cropped to the call band with
-//      20 kHz of headroom either side, so the shape of the pass and the number
-//      of calls are visible and the calls fill the frame.
+//    • A CONTEXT view — the recording with its silence cut out and cropped to
+//      the call band with 20 kHz of headroom either side, so the calls fill the
+//      frame instead of being six hairlines in a field of black. Its time axis
+//      is therefore not linear, which is why it carries no time axis and the
+//      numbered tiles, which are linear slices, do.
 //    • A DETAIL view — the strongest single call, tightly clipped, with kHz and
 //      millisecond axes drawn on it. This is the one somebody zooms into to
 //      argue about a species.
@@ -58,12 +60,19 @@ import SwiftUI
 struct INatImageSources {
     let wavURL: URL
     let overviewRaw: WavSpectrogramEngine.RawTile?
+    /// Length of the recording the overview covers, which the silence map needs
+    /// to turn columns back into sample positions.
+    let overviewTotalSamples: Int
     let sampleRate: Double
     let palette: Palette
     /// The user's own noise-floor setting, so both pictures look like what they
     /// were looking at when they decided the call was worth posting.
     let noiseFloor: Float
     let calibrationCurve: MicCalibrationCurve?
+    /// The player's own silence settings, so the exported picture cuts the
+    /// same gaps the user was looking at.
+    let silenceThresholdDB: Double
+    let silencePadding: Double
     /// Which call to draw in detail. Its stored thumbnail is the fallback only
     /// — see `pulsePlot`.
     let pulse: PulseRecord?
@@ -133,11 +142,27 @@ enum INatImages {
 
     // MARK: The context view
 
-    /// The whole recording, cropped to the band the calls occupy.
+    /// The recording with its silence taken out, cropped to the band the calls
+    /// occupy.
     ///
-    /// Runs the colorize pass off the main actor: it is bounded array maths
-    /// over a grid that is already in memory, but it is a full pass over that
-    /// grid and this is happening while a sheet is animating in.
+    /// **Silence removed, not just trimmed at the ends** (Niall, 2026-09-04).
+    /// A bout is mostly gaps: a ten-second recording with six calls in it draws
+    /// six hairlines in a field of black, and at the size iNaturalist shows an
+    /// observation photo those hairlines are a few pixels each. Cutting the
+    /// gaps out packs the calls together, which is the same thing the player's
+    /// own hide-silence does and the reason it exists.
+    ///
+    /// It is computed here rather than taken from the player, so the picture
+    /// does not depend on whether the user happened to have hide-silence
+    /// switched on — but from the player's own threshold and padding settings,
+    /// so it cuts the same gaps they were looking at.
+    ///
+    /// The time axis of the result is therefore NOT linear, which is why this
+    /// picture carries no time axis and the numbered tiles — which are linear
+    /// slices of the real recording — do.
+    ///
+    /// Runs off the main actor: bounded array maths over a grid already in
+    /// memory, but a full pass over it, while a sheet is animating in.
     private static func croppedOverview(sources: INatImageSources,
                                         pulses: [PulseRecord]) async -> UIImage? {
         guard let raw = sources.overviewRaw, sources.sampleRate > 0 else { return nil }
@@ -145,13 +170,32 @@ enum INatImages {
         let sampleRate = sources.sampleRate
         let palette = sources.palette
         let floor = sources.noiseFloor
+        let total = sources.overviewTotalSamples
+        let threshold = sources.silenceThresholdDB
+        let padding = sources.silencePadding
         return await Task.detached(priority: .userInitiated) {
-            WavSpectrogramEngine.colorize(raw, sampleRate: sampleRate,
-                                          minFreqHz: band.lowerBound,
-                                          maxFreqHz: band.upperBound,
-                                          palette: palette, noiseFloor: floor)?.image
+            let map = SilenceMap.compute(grid: raw.grid, nCols: raw.nCols,
+                                         binCount: STFTGrid.binCount,
+                                         totalSamples: total, sampleRate: sampleRate,
+                                         thresholdAboveFloorDB: threshold,
+                                         minFreqHz: minAnalysisFrequencyHz,
+                                         padSeconds: padding)
+            // A recording that is nearly all signal has nothing to gain and
+            // something to lose — packing it would make the axis non-linear for
+            // no benefit — so it is drawn as it is.
+            let packed = map.keptFraction < 0.9
+                ? WavSpectrogramEngine.compressedOverviewRawTile(from: raw, map: map)
+                : raw
+            return WavSpectrogramEngine.colorize(packed, sampleRate: sampleRate,
+                                                 minFreqHz: band.lowerBound,
+                                                 maxFreqHz: band.upperBound,
+                                                 palette: palette, noiseFloor: floor)?.image
         }.value
     }
+
+    /// Matches `WavPlayerView.minAnalysisFrequencyHz`: silence detection ignores
+    /// everything below this, so a rumble in the recording can't count as sound.
+    private static let minAnalysisFrequencyHz = 5_000.0
 
     /// The frequency range worth showing, from where the calls actually are.
     ///

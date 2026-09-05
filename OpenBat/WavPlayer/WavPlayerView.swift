@@ -332,10 +332,13 @@ struct WavPlayerView: View {
             .max { $0.confidence < $1.confidence }
         return INatImageSources(wavURL: store.wavURL(for: recording),
                                 overviewRaw: overview?.rawTile,
+                                overviewTotalSamples: overview?.totalSamples ?? 0,
                                 sampleRate: overview?.sampleRate ?? 0,
                                 palette: palette,
                                 noiseFloor: effectiveNoiseFloor,
                                 calibrationCurve: calibrationCurve,
+                                silenceThresholdDB: silenceThresholdDB,
+                                silencePadding: silencePadding,
                                 pulse: best,
                                 pulseImage: best.flatMap { store.image(for: $0) },
                                 recordingStart: recording.date)

@@ -3221,7 +3221,19 @@ a person is the opposite — a call filling its frame gives a reader no way to s
 that nothing was cut off and no quiet to judge it against. Widened to three
 times the call's own window and ±8 kHz.
 
-The context view is re-colorized from `Overview.rawTile` at a new band rather
+The context view has its **silence cut out** as well as its band cropped (Niall,
+2026-09-04): a bout is mostly gaps, so a ten-second recording with six calls in
+it drew six hairlines in a field of black, and at the size iNaturalist shows an
+observation photo those are a few pixels each. It reuses the player's own
+`SilenceMap` + `compressedOverviewRawTile`, computed in `INatImages` rather than
+taken from the player so the picture does not depend on whether the user
+happened to have hide-silence switched on — but off the player's own threshold
+and padding settings, so it cuts the same gaps they were looking at. Skipped
+when `keptFraction` is above 0.9, where packing would make the axis non-linear
+for no gain. The packed axis is why this picture carries no time axis while the
+numbered tiles, which are linear slices of the real recording, do.
+
+It is re-colorized from `Overview.rawTile` at a new band rather
 than cropped out of the finished image — `colorize` already does the band crop,
 so this is the same path the noise-floor slider takes and the export cannot
 drift from what the user was looking at. The detail view is `PulseImagePlot`
