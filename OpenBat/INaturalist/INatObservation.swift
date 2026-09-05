@@ -419,6 +419,15 @@ nonisolated enum INatExport {
     ///   3. Ambiguous across more than one genus  → Chiroptera
     ///   4. Anything else                         → GENUS
     ///
+    /// **No exceptions per taxon, ever** (Niall, 2026-09-04). There are genera
+    /// where the acoustics genuinely do separate the species and a rule that
+    /// knew about them could claim more — and that is exactly the change not to
+    /// make. This has to hold for every recording every user makes, so it has
+    /// to be one rule they can state; a list of special cases is unexplainable
+    /// at any scale, impossible to keep right as models and regions are added,
+    /// and each entry is an argument nobody can settle. Anything the flat rule
+    /// gives up is recoverable by a human from the notes and the pictures.
+    ///
     /// **Genus comes from the scientific name, not from a table.** The first
     /// word of a binomial is the genus, and unlike a complex's name it is
     /// always a real iNaturalist taxon that `INatClient.taxonID` can resolve.

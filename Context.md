@@ -3319,6 +3319,15 @@ by agreement, so a wrong species ID needs two people to disagree before it
 shifts, while a correct genus ID needs one person to refine it. Under-claiming
 costs a refinement somebody was going to make anyway.
 
+**And no per-taxon exceptions, ever** (Niall, 2026-09-04). There are genera
+where the acoustics genuinely do separate the species and a cleverer rule could
+claim more; that is precisely the change not to make. This runs on every
+recording every user makes, so it has to be one rule they can state — a list of
+special cases is unexplainable at scale, impossible to keep right as models and
+regions are added, and every entry in it is an argument nobody can settle.
+Whatever the flat rule gives up is recoverable by a human from the notes and the
+pictures.
+
 Most complexes turn out not to need special handling — Myotis, Pipistrellus,
 Nyctalus and Plecotus are each a single genus, so "can't separate these" and
 "genus" are the same answer. Only a complex spanning genera (`lowfreq`: Big
