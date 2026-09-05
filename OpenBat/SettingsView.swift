@@ -316,10 +316,24 @@ struct SettingsView: View {
     /// is a reason to do it; an account row in Settings that asks for a login
     /// before the user has anything to post is a wall in front of a feature
     /// they haven't met yet.
+    @State private var inatLogCopied = false
+
     @ViewBuilder
     private var iNaturalistSection: some View {
         if inatAuth.isSignedIn {
             Section {
+                // Sits with the account rather than with the classifier log
+                // because the two answer different questions: that one is "why
+                // did OpenBat call it that", this one is "why wouldn't it post".
+                ControlNote("What was sent and what came back. No tokens, locations rounded.")
+                Button {
+                    UIPasteboard.general.string = INatLog.shared.text
+                    inatLogCopied = true
+                } label: {
+                    Label(inatLogCopied ? "Copied" : "Copy the iNaturalist log",
+                          systemImage: inatLogCopied ? "checkmark" : "doc.on.doc")
+                }
+
                 Button("Sign out of iNaturalist", role: .destructive) {
                     inatAuth.signOut()
                 }

@@ -54,10 +54,7 @@ struct INatObservationSheet: View {
     @State private var postState = PostState.idle
     @State private var signingIn = false
     @State private var authError: String?
-    @State private var showFirstPostBriefing = false
-    /// Shown before somebody's FIRST post and never again — see
-    /// `firstPostBriefing`.
-    @AppStorage("openbat.inat.briefed") private var hasBeenBriefed = false
+    @State private var showPostBriefing = false
 
     private enum PhotoState { case idle, saving, saved, denied }
 
@@ -107,12 +104,9 @@ struct INatObservationSheet: View {
             .sheet(item: $shareFiles) { share in
                 ShareSheet(items: share.urls)
             }
-            .alert("Before your first post", isPresented: $showFirstPostBriefing) {
+            .alert("Before you post", isPresented: $showPostBriefing) {
                 Button("Back", role: .cancel) { }
-                Button("Post") {
-                    hasBeenBriefed = true
-                    post()
-                }
+                Button("Post") { post(briefed: true) }
             } message: {
                 Text(Self.briefing)
             }
@@ -157,6 +151,18 @@ struct INatObservationSheet: View {
                         .font(.caption)
                         .foregroundStyle(.red)
                         .multilineTextAlignment(.center)
+                    // A status code on its own is not a diagnosis — the first
+                    // live failure was a 404 whose actual cause was a malformed
+                    // URL, invisible from here. This puts the request and the
+                    // reply where they can be pasted into a bug report.
+                    Button {
+                        UIPasteboard.general.string = INatLog.shared.text
+                        flash("log")
+                    } label: {
+                        Label(copied == "log" ? "Copied" : "Copy the request log",
+                              systemImage: copied == "log" ? "checkmark" : "doc.on.doc")
+                            .font(.caption)
+                    }
                 }
 
                 if let assessment, !assessment.canPost {
@@ -241,24 +247,22 @@ struct INatObservationSheet: View {
         }
     }
 
-    /// The etiquette briefing, shown once, immediately before the first
-    /// observation this install ever posts.
+    /// The etiquette briefing, shown before EVERY post (Niall, 2026-09-04).
     ///
-    /// **Once, not every time.** It is advice, and advice that appears on every
-    /// post stops being read by the third one — at which point it has trained
-    /// the user to tap straight through the only screen that ever explains the
-    /// rules. The moment it does appear is the right one: somebody who has just
-    /// decided to post is paying far more attention than they were during
-    /// onboarding.
+    /// It was written to appear once, on the reasoning that repeated advice
+    /// gets tapped through — overruled, and the reason is sound: every post is
+    /// a permanent public record that somebody else will have to check, so the
+    /// pause belongs in front of all of them, not just the first. A user who
+    /// knows the text by heart is a user who has read it.
     ///
     /// None of the rules depend on it being read. The cap and the blockers are
     /// enforced in `INatUploadAssessment` either way; this is the courtesy of
     /// saying why before somebody runs into one.
     static let briefing = """
-        Every record on iNaturalist is checked by volunteers, so a few good ones \
-        are worth much more than a lot of rough ones. Post the recordings where \
-        the calls are clear and there's only one bat, and leave the rest on your \
-        phone.
+        Every record on iNaturalist is checked by volunteers, so a few good \
+        recordings are worth much more than a lot of rough recordings. Post the \
+        ones where the calls are clear and there's only one bat, and leave the \
+        rest on your phone.
 
         OpenBat won't post more than two of the same species from the same place \
         in one night. Past that you're asking somebody to verify the same bat \
@@ -268,10 +272,13 @@ struct INatObservationSheet: View {
         bat record can give away a roost.
         """
 
-    private func post() {
+    /// `briefed` is set only by the alert's own Post button, which is the one
+    /// path that has already shown the briefing. Everything else routes through
+    /// the alert first.
+    private func post(briefed: Bool = false) {
         guard let files else { return }
-        guard hasBeenBriefed else {
-            showFirstPostBriefing = true
+        guard briefed else {
+            showPostBriefing = true
             return
         }
         postState = .posting

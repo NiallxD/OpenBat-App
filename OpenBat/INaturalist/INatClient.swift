@@ -166,7 +166,7 @@ nonisolated enum INatClient {
             fields["longitude"] = longitude
         }
 
-        var request = try await authorized(URL(string: "observations", relativeTo: INatCredentials.apiBase)!)
+        var request = try await authorized(endpoint("observations"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         // v2 returns nothing but the id unless asked; `uuid` back confirms the
@@ -180,16 +180,14 @@ nonisolated enum INatClient {
     }
 
     private static func observationExists(uuid: UUID) async throws -> Bool {
-        var components = URLComponents(url: URL(string: "observations/\(uuid.uuidString.lowercased())",
-                                                relativeTo: INatCredentials.apiBase)!,
+        var components = URLComponents(url: endpoint("observations/\(uuid.uuidString.lowercased())"),
                                        resolvingAgainstBaseURL: true)!
         components.queryItems = [.init(name: "fields", value: "id")]
         let request = try await authorized(components.url!)
 
-        let (data, response) = try await URLSession.shared.data(for: request)
-        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        let (data, status) = try await perform(request)
         if status == 404 { return false }
-        guard status == 200 else { throw Failure.http(status, nil) }
+        guard status == 200 else { throw Failure.http(status, errorDetail(from: data)) }
         // v2 answers a missing record with 200 and an empty results array as
         // readily as with a 404, so the count is what actually decides.
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -229,13 +227,12 @@ nonisolated enum INatClient {
                                      fields: ["\(field)[observation_id]": uuid.uuidString.lowercased()])
         defer { try? FileManager.default.removeItem(at: body) }
 
-        var request = try await authorized(URL(string: path, relativeTo: INatCredentials.apiBase)!)
+        var request = try await authorized(endpoint(path))
         request.httpMethod = "POST"
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
 
-        let (_, response) = try await URLSession.shared.upload(for: request, fromFile: body)
-        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-        guard 200..<300 ~= status else { throw Failure.http(status, nil) }
+        let (data, status) = try await perform(request, uploading: body)
+        guard 200..<300 ~= status else { throw Failure.http(status, errorDetail(from: data)) }
     }
 
     /// Writes the multipart envelope around a file without reading the file
@@ -289,7 +286,7 @@ nonisolated enum INatClient {
         let defaults = UserDefaults.standard
         if let cached = defaults.object(forKey: key) as? Int { return cached }
 
-        var components = URLComponents(url: URL(string: "taxa", relativeTo: INatCredentials.apiBase)!,
+        var components = URLComponents(url: endpoint("taxa"),
                                        resolvingAgainstBaseURL: true)!
         components.queryItems = [
             .init(name: "q", value: scientificName),
@@ -300,12 +297,12 @@ nonisolated enum INatClient {
         var request = URLRequest(url: components.url!)
         request.setValue(INatCredentials.userAgent, forHTTPHeaderField: "User-Agent")
 
-        guard let (data, response) = try? await URLSession.shared.data(for: request),
-              (response as? HTTPURLResponse)?.statusCode == 200,
+        guard let (data, status) = try? await perform(request), status == 200,
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let results = json["results"] as? [[String: Any]],
               let first = results.first,
               let id = first["id"] as? Int else {
+            INatLog.shared.note("taxon lookup for \(scientificName) found nothing usable; posting with species_guess only")
             return nil
         }
         // Only trust an exact name match. `q` is a fuzzy search, and the first
@@ -315,11 +312,24 @@ nonisolated enum INatClient {
         guard (first["name"] as? String)?.caseInsensitiveCompare(scientificName) == .orderedSame else {
             return nil
         }
+        INatLog.shared.note("taxon \(scientificName) = \(id)")
         defaults.set(id, forKey: key)
         return id
     }
 
     // MARK: Plumbing
+
+    /// Builds an API URL by APPENDING to the base, never by resolving against
+    /// it.
+    ///
+    /// `URL(string: "observations", relativeTo: base)` looks like it does this
+    /// and does not: relative resolution replaces the base's last path segment
+    /// unless the base ends in a slash, so a base of `.../v2` silently produced
+    /// `api.inaturalist.org/observations` and every single call 404'd. Found on
+    /// the first live attempt, 2026-09-04.
+    private static func endpoint(_ path: String) -> URL {
+        INatCredentials.apiBase.appendingPathComponent(path)
+    }
 
     private static func authorized(_ url: URL) async throws -> URLRequest {
         var request = URLRequest(url: url)
@@ -329,10 +339,40 @@ nonisolated enum INatClient {
         return request
     }
 
+    /// Every request the client makes goes through here, so every request the
+    /// client makes is logged. Returns the status alongside the body rather
+    /// than throwing on a bad one — `observationExists` treats a 404 as an
+    /// answer, not an error.
+    private static func perform(_ request: URLRequest,
+                                uploading file: URL? = nil) async throws -> (Data, Int) {
+        let method = request.httpMethod ?? "GET"
+        let url = request.url!
+        INatLog.shared.request(method, url,
+                               authorized: request.value(forHTTPHeaderField: "Authorization") != nil,
+                               body: file.map { "<file \($0.lastPathComponent)>" }
+                                   ?? request.httpBody.map { String(decoding: $0.prefix(2048), as: UTF8.self) })
+        let began = Date.now
+        do {
+            let (data, response): (Data, URLResponse) = if let file {
+                try await URLSession.shared.upload(for: request, fromFile: file)
+            } else {
+                try await URLSession.shared.data(for: request)
+            }
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            INatLog.shared.response(method, url, status: status,
+                                    seconds: Date.now.timeIntervalSince(began), body: data)
+            return (data, status)
+        } catch {
+            // Logged here because the throw carries a URLError the user will
+            // only ever see as "the internet connection appears to be offline".
+            INatLog.shared.failure(method, url, error: error)
+            throw error
+        }
+    }
+
     @discardableResult
     private static func send(_ request: URLRequest) async throws -> Data {
-        let (data, response) = try await URLSession.shared.data(for: request)
-        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        let (data, status) = try await perform(request)
         guard 200..<300 ~= status else {
             throw Failure.http(status, errorDetail(from: data))
         }

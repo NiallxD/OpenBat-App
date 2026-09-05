@@ -144,6 +144,7 @@ final class INatAuth {
         guard value("state") == request.state else { throw INatAuthError.stateMismatch }
         guard let code = value("code") else { throw INatAuthError.badCallback }
 
+        INatLog.shared.note("callback received, state matched; exchanging the code")
         let token = try await exchange(code: code, verifier: request.verifier)
         Self.store(accessToken: token)
         isSignedIn = true
@@ -180,8 +181,11 @@ final class INatAuth {
         request.setValue("Bearer \(access)", forHTTPHeaderField: "Authorization")
         request.setValue(INatCredentials.userAgent, forHTTPHeaderField: "User-Agent")
 
+        INatLog.shared.request("GET", INatCredentials.apiTokenURL, authorized: true)
         let (data, response) = try await URLSession.shared.data(for: request)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        INatLog.shared.response("GET", INatCredentials.apiTokenURL,
+                                status: status, seconds: 0, body: data)
         guard status == 200,
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let token = json["api_token"] as? String else {
@@ -189,9 +193,13 @@ final class INatAuth {
             // settings. Dropping the access token turns that into a plain
             // "signed out" rather than an error they can only clear by
             // reinstalling.
-            if status == 401 { signOut() }
+            if status == 401 {
+                INatLog.shared.note("401 minting the API token — access revoked on iNaturalist's side; signing out")
+                signOut()
+            }
             throw INatAuthError.apiTokenFailed(status)
         }
+        INatLog.shared.note("minted a fresh API token, good for 20 hours")
         cachedAPIToken = (token, .now.addingTimeInterval(20 * 60 * 60))
         return token
     }
@@ -209,8 +217,12 @@ final class INatAuth {
             "code_verifier": verifier
         ])
 
+        INatLog.shared.request("POST", INatCredentials.tokenURL, authorized: false,
+                               body: "grant_type=authorization_code, PKCE S256")
         let (data, response) = try await URLSession.shared.data(for: request)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        INatLog.shared.response("POST", INatCredentials.tokenURL,
+                                status: status, seconds: 0, body: data)
         guard status == 200,
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let token = json["access_token"] as? String else {

@@ -3178,6 +3178,17 @@ where four rows out of sixty have a leaf. The ledger is cached and decoded once
 `INatPostSignal` exists so a row stops advertising a recording that was posted
 from two screens away.
 
+**The 404 on the first live post was ours, not iNaturalist's.** Every request
+was built with `URL(string: "observations", relativeTo: apiBase)`, and relative
+resolution REPLACES the base's last path segment unless the base ends in a
+slash — so a base of `.../v2` produced `api.inaturalist.org/observations` and
+every call 404'd. `INatClient.endpoint(_:)` appends instead, and exists so this
+cannot come back. The general lesson is the one this file keeps relearning: a
+status code with no URL beside it is not a diagnosis, which is why `INatLog`
+now exists. It logs every request and reply in a memory ring, redacts tokens
+outright and rounds coordinates to ~1 km so it is safe to hand to somebody, and
+is copyable from the failure state on the sheet and from Settings → Privacy.
+
 **Still not done:** observation *fields* (the bat2inat convention the application
 promises) are not posted — they are addressed by numeric field id and need a
 name→id lookup first. The numbers are all in the description, so nothing is lost
