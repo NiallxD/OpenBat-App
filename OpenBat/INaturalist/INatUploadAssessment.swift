@@ -214,6 +214,41 @@ nonisolated struct INatUploadAssessment {
                                     notes: notes)
     }
 
+    /// What the trimmed upload will weigh, WITHOUT trimming anything.
+    ///
+    /// `assess` needs the size of the trimmed file, and trimming means copying
+    /// tens of megabytes — fine for one recording on a confirmation screen,
+    /// impossible for every row of a scrolling list. The trim is a plain
+    /// proportion of the recording, though, so the size of its result is
+    /// arithmetic: the span the calls occupy, over the whole duration, times
+    /// the bytes on disk.
+    ///
+    /// It is an estimate only in that the WAV header is counted as if it were
+    /// audio (44 bytes) and the real trim rounds to a sample boundary. Both are
+    /// far below the resolution of anything that reads this.
+    ///
+    /// The one case to be careful of: a recording whose calls span most of the
+    /// file isn't trimmed at all, and `INatExport.trimmedToCalls` gives up when
+    /// the saving would be under 5%. This mirrors that, so a list badge and the
+    /// sheet cannot disagree about whether something fits.
+    static func estimatedUploadBytes(recording: Recording,
+                                     passes: [PassRecord],
+                                     fileBytes: Int) -> Int {
+        let pulses = passes.flatMap(\.pulses)
+        guard !pulses.isEmpty, recording.durationSeconds > 0 else { return fileBytes }
+
+        let offsets = pulses.map { $0.date.timeIntervalSince(recording.date) }
+        let longestPulse = (pulses.map(\.durationMs).max() ?? 0) / 1000
+        let start = max(0, (offsets.min() ?? 0) - INatExport.trimPaddingSeconds)
+        let end = min(recording.durationSeconds,
+                      (offsets.max() ?? recording.durationSeconds) + longestPulse + INatExport.trimPaddingSeconds)
+        guard end > start else { return fileBytes }
+
+        let fraction = (end - start) / recording.durationSeconds
+        guard fraction < 0.95 else { return fileBytes }
+        return Int(Double(fileBytes) * fraction)
+    }
+
     /// 0 at or below `from`, 1 at or above `to`, linear between. Every
     /// component above is one of these, so the weights are the only place the
     /// balance lives.
@@ -272,6 +307,21 @@ nonisolated struct Cell: Hashable, Codable {
 /// It is also NOT the authority on whether an observation exists — iNaturalist
 /// is, and `INatClient.post` asks it. This is the local shortcut that stops the
 /// user reaching that point.
+/// Tells the recording list that the ledger changed.
+///
+/// The rows work out their iNaturalist badge once, when they appear, off a
+/// snapshot of the ledger. Posting happens two screens away, so without this a
+/// row would keep saying "worth posting" about something already posted until
+/// the app was relaunched. Observing a counter is enough — the rows re-read the
+/// ledger themselves.
+@Observable
+final class INatPostSignal {
+    static let shared = INatPostSignal()
+    private(set) var changes = 0
+    private init() {}
+    func bump() { changes += 1 }
+}
+
 nonisolated enum INatPostLedger {
 
     static let perSpeciesPerNight = 2
@@ -286,9 +336,20 @@ nonisolated enum INatPostLedger {
 
     private static let key = "openbat.inat.posted"
 
+    /// Decoded once and held, because the recording list asks every row whether
+    /// it has been posted — re-decoding a year of JSON per row, per scroll, is
+    /// the kind of thing that makes a list stutter for no reason. Only `record`
+    /// writes, and it refreshes this itself.
+    nonisolated(unsafe) private static var cached: [Entry]?
+
     static var entries: [Entry] {
+        if let cached { return cached }
         guard let data = UserDefaults.standard.data(forKey: key),
-              let decoded = try? JSONDecoder().decode([Entry].self, from: data) else { return [] }
+              let decoded = try? JSONDecoder().decode([Entry].self, from: data) else {
+            cached = []
+            return []
+        }
+        cached = decoded
         return decoded
     }
 
@@ -315,6 +376,8 @@ nonisolated enum INatPostLedger {
         all = all.filter { $0.postedAt > cutoff }
         if let data = try? JSONEncoder().encode(all) {
             UserDefaults.standard.set(data, forKey: key)
+            cached = all
+            Task { @MainActor in INatPostSignal.shared.bump() }
         }
     }
 

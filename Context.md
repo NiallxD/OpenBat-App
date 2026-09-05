@@ -3165,6 +3165,19 @@ A recording that is still over 20 MB after trimming scores 0 and cannot be
 posted, because an acoustic observation with no audio cannot be verified by
 anyone.
 
+**The badge on a recording row** (`RecordingRow.iNatBadge`) is the same score,
+but it must never trim to get it: the trim copies tens of megabytes and a list is
+sixty rows deep. `INatUploadAssessment.estimatedUploadBytes` does the same
+arithmetic the trim does — call span over total duration, times the bytes on disk
+— so the badge and the sheet cannot disagree about whether something fits under
+20 MB. Only good news is drawn: a leaf on fair-and-above, a seal on what has been
+posted, and nothing at all on the rest, because a list where every row carries a
+grade answers "which of these is worth doing something with" much worse than one
+where four rows out of sixty have a leaf. The ledger is cached and decoded once
+(a JSON decode per row per scroll is a stutter for nothing), and
+`INatPostSignal` exists so a row stops advertising a recording that was posted
+from two screens away.
+
 **Still not done:** observation *fields* (the bat2inat convention the application
 promises) are not posted — they are addressed by numeric field id and need a
 name→id lookup first. The numbers are all in the description, so nothing is lost
