@@ -301,22 +301,12 @@ struct INatObservationSheet: View {
     /// enforced in `INatUploadAssessment` either way; this is the courtesy of
     /// saying why before somebody runs into one.
     static let briefing = """
-        Every record on iNaturalist is checked by volunteers, so a few good \
-        recordings are worth much more than a lot of rough recordings. Post the \
-        ones where the calls are clear and there's only one bat, and leave the \
-        rest on your phone.
+        Every record on iNaturalist is checked by the community. Upload quality \
+        over quantity.
 
-        OpenBat won't post more than two of the same species from the same place \
-        in one night. Past that you're asking somebody to verify the same bat \
-        twice, which costs them time and puts nothing new on the map.
+        Location is obscured to protect species locations.
 
-        Your location goes up obscured unless you change it, because a precise \
-        bat record can give away a roost.
-
-        OpenBat posts at genus and puts its species suggestion in the notes — an \
-        acoustic identification isn't strong enough to claim a species on a \
-        permanent public record. If you're sure of the species, add that \
-        identification yourself afterwards, and then a person has made the claim.
+        OpenBat uploads to genus level only — the community can help improve that.
         """
 
     /// `briefed` is set only by the alert's own Post button, which is the one
