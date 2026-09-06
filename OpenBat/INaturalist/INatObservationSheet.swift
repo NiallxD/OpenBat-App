@@ -44,7 +44,6 @@ struct INatObservationSheet: View {
     /// the cropped render fails.
     let overviewPNG: Data?
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.openURL) private var openURL
     /// SwiftUI's own wrapper around ASWebAuthenticationSession — see the note
     /// in `INatAuth` about why the view presents the browser and not the model.
     @Environment(\.webAuthenticationSession) private var webAuthentication
@@ -87,10 +86,6 @@ struct INatObservationSheet: View {
     @State private var excluded: Set<String> = []
 
     private struct ShareFiles: Identifiable { let id = UUID(); let urls: [URL] }
-
-    /// iNaturalist's web uploader. Opened in the browser rather than deep-linked
-    /// into the app on purpose: the app is the route that cannot take the sound.
-    static let uploaderURL = URL(string: "https://www.inaturalist.org/observations/upload")!
 
     var body: some View {
         NavigationStack {
@@ -136,28 +131,85 @@ struct INatObservationSheet: View {
                 let png = overviewPNG
                 let start = recording.date
                 let pulses = passes.flatMap(\.pulses)
-                var prepared = await Task.detached(priority: .userInitiated) {
-                    INatExport.prepareFiles(wavURL: url,
-                                            recordingStart: start,
-                                            pulses: pulses)
+                let baseName = url.deletingPathExtension().lastPathComponent
+                // One answer to "where are the calls", shared by where the
+                // segment is cut, where the audible copy is spliced and where
+                // the whole-pass picture's gaps are — see
+                // `INatImages.silenceMap`.
+                let silence = await INatImages.silenceMap(sources: imageSources)
+
+                // The bat pass, cut out of the recording in its own real time.
+                // Everything below is made from THIS, not from the file on
+                // disk, so no picture can be of audio nobody was sent.
+                let segment = await Task.detached(priority: .userInitiated) {
+                    INatExport.passSegment(wavURL: url,
+                                           recordingStart: start,
+                                           pulses: pulses,
+                                           silence: silence,
+                                           byteBudget: INatCredentials.maxSoundBytes,
+                                           baseName: baseName)
                 }.value
+
+                var prepared: INatExport.Files
+                let sources: INatImageSources
+                if let segment {
+                    sources = await imageSources.rebased(on: segment)
+                    prepared = await Task.detached(priority: .userInitiated) {
+                        INatExport.prepareFiles(segment: segment, baseName: baseName)
+                    }.value
+                } else {
+                    // Unreadable, or not the canonical layout every reader here
+                    // assumes. The recording still goes up whole; the size
+                    // blocker catches it if it is too big.
+                    sources = imageSources
+                    prepared = INatExport.Files(audible: nil, photos: [], original: url, upload: url)
+                }
 
                 // The pictures, and copies of them on disk so the manual
                 // uploader route offers exactly what the API route would send.
-                photos = await INatImages.render(sources: imageSources,
+                photos = await INatImages.render(sources: sources,
                                                  pulses: pulses,
-                                                 fallbackPNG: png)
+                                                 fallbackPNG: png,
+                                                 silence: segment?.silence ?? silence)
                 previews = photos.map { UIImage(data: $0.data) }
+                // Named after the recording, exactly as the two sounds are
+                // (Niall, 2026-09-06). These used to carry the recording's UUID
+                // instead, so a saved folder held six files under two unrelated
+                // names, sorted apart, one of them a hex string that means
+                // nothing to anybody. Those filenames are what somebody reads
+                // while attaching the files on iNaturalist's website, and since
+                // saving them is now the whole of the manual route, they are
+                // most of that screen's output.
+                //
+                // The UUID was there to stop two recordings colliding in the
+                // temporary directory. `baseName` is the WAV's own filename —
+                // a timestamp to the millisecond plus the species — so it is
+                // unique for the same reason the recording file itself is.
                 prepared.photos = photos.compactMap { photo in
                     let url = FileManager.default.temporaryDirectory
-                        .appendingPathComponent("\(recording.id.uuidString)-\(photo.name)")
+                        .appendingPathComponent("\(baseName)-\(photo.name)")
                     guard (try? photo.data.write(to: url)) != nil else { return nil }
                     return url
                 }
                 files = prepared
+
+                // Reverberation, measured on the segment — the audio that
+                // actually goes up — and after the pictures, so the sheet fills
+                // in rather than waiting on an FFT per call.
+                let echoURL = sources.wavURL
+                let echoStart = sources.recordingStart
+                let rate = sources.sampleRate
+                let curve = sources.calibrationCurve
+                let echo = await Task.detached(priority: .userInitiated) {
+                    EchoAnalysis.measure(wavURL: echoURL, sampleRate: rate,
+                                         segmentStart: echoStart, pulses: pulses,
+                                         calibrationCurve: curve)
+                }.value
+
                 assessment = INatUploadAssessment.assess(recording: recording,
                                                          passes: passes,
-                                                         uploadBytes: prepared.uploadBytes)
+                                                         uploadBytes: prepared.uploadBytes,
+                                                         echo: echo)
             }
         }
     }
@@ -418,8 +470,8 @@ struct INatObservationSheet: View {
                 // something a person deciding whether to post needs to weigh.
                 ForEach(Array(files.sounds.enumerated()), id: \.offset) { index, _ in
                     Label(index == 0
-                          ? "Slowed \(INatExport.expansionFactor)× so you can hear it"
-                          : "The original, at full speed",
+                          ? "Cleaned up and slowed \(INatExport.expansionFactor)× so you can hear it"
+                          : "The pass as recorded, full speed and bandwidth",
                           systemImage: "waveform")
                         .font(.callout)
                         .foregroundStyle(.secondary)
@@ -564,12 +616,22 @@ struct INatObservationSheet: View {
         }
     }
 
+    /// The manual route: take the files, and go wherever you were going.
+    ///
+    /// **It no longer opens iNaturalist for you** (Niall, 2026-09-06). A link
+    /// straight to the uploader assumed both the destination and the moment —
+    /// somebody standing in a field with no signal, or headed for a local
+    /// records centre rather than iNaturalist at all, got sent to a web page
+    /// they had not asked for and had to come back from. Saving to Files is
+    /// also the step that has to happen FIRST whichever way they are going,
+    /// since the uploader needs files that already exist on the device. So this
+    /// hands over the files and stops, and the destination stays the user's.
+    ///
+    /// What it hands over is byte-for-byte what the automatic route would post
+    /// — see `INatExport.Files.all`.
     private var manualSection: some View {
         TileCard("Or do it by hand", "No account needed.") {
-            ControlNote("The website takes sound; the iPhone app can't.")
-            Link(destination: INatObservationSheet.uploaderURL) {
-                Label("Open the iNaturalist Uploader", systemImage: "safari")
-            }
+            ControlNote("Save these, then add them to iNaturalist's website — its own iPhone app can't take sound.")
             Button {
                 shareFiles = ShareFiles(urls: files?.all ?? [])
             } label: {
@@ -580,7 +642,6 @@ struct INatObservationSheet: View {
                 }
             }
             .disabled(files == nil)
-
         }
     }
 

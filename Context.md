@@ -3153,7 +3153,154 @@ uncapped: what the cap removes is effortless bulk posting, not the ability to
 post. Signing out deliberately does NOT reset the ledger — that would be a
 one-tap bypass.
 
-**Trimming is not a size optimisation, it is what makes the feature work.**
+**One segment, and everything is made from it** (Niall, 2026-09-06). An
+identifier reported that the uploaded audio did not match the spectrogram, and
+they were right about something worse than they could see: the sounds were cut
+out of the recording and the pictures were drawn from the whole file on disk, so
+no picture and no sound shared a zero. "Part 1 of 6, 0–2 s" was the recorder's
+PRE-ROLL — up to five seconds of dead air that appears in no attachment anybody
+can download — and every later tile's clock was offset from the audio by however
+much had been trimmed off the front.
+
+So `INatExport.passSegment` now cuts the bat pass out of the recording once, as
+a plain span of real time, and that segment is the only thing anything
+downstream reads. The full-spectrum sound IS the segment. The audible copy is
+the segment with its gaps spliced out. Every spectrogram is drawn from the
+segment with its first sample as time zero — `INatImageSources.rebased(on:)`
+does that, re-analysing the overview grid rather than cropping the player's,
+since the player's covers the whole recording and its columns are that much
+coarser. The pre-roll disappears for free, because it is outside the segment.
+
+An observation therefore carries two views of one clip: the numbered tiles are
+consecutive real-time slices of the full-spectrum file, and the whole-pass
+picture is the silence-removed view that matches the 16× audio. Each still says
+which timebase it is on, and the description now says they are the same clip.
+
+**The span is the union of what the app HEARD and what the classifier KEPT.**
+The trim this replaces ran from the first classified pulse to the last, and a
+pulse list holds only the calls a model kept — so a pass opening with two calls
+the classifier skipped had those two cut off the front of the upload, audio the
+app had already decided was sound and had drawn on screen. The bound is now the
+silence map's outermost kept region, widened by the pulses where they fall
+outside it. Both opinions can only ever add.
+
+**The margin is what the size budget can afford**, asked for at
+`preferredPaddingSeconds` (1 s, up from 0.33) and shrunk — never below
+`minimumPaddingSeconds` (0.15 s) — until the segment fits under 20 MB. A third
+of a second was enough to prove a call was not clipped and not enough to HEAR a
+pass, and the file is the thing people play; two seconds of 384 kHz audio is
+1.5 MB out of 20. Padding is the first thing to go and the calls are the last,
+which is the opposite of what a fixed margin does when a pass is long.
+
+**The packed audio's margin has its own floor**,
+`INatImages.minimumPackPaddingSeconds` (20 ms), above whatever the player's
+slider says. The player defaults to 5 ms, which is right for looking at a
+spectrogram and wrong for listening: the audible copy plays at 16×, so 5 ms of
+air before a call is 80 ms of it and every call started abruptly enough to sound
+clipped. 20 ms is `SilenceMap.compute`'s own documented default and is a third
+of a second of room at 16×. A floor, not a replacement — a user asking for more
+still gets more, and the seams stay the ones they were looking at.
+
+**The manual route hands over the same files as the automatic one, and stops
+there** (Niall, 2026-09-06). Two things were wrong with it.
+
+It offered the untrimmed recording and not the segment, which was the last place
+the mismatch an identifier reported still survived: every picture describes the
+segment, so somebody building the observation by hand attached audio seconds
+longer than the pictures, starting somewhere else. `Files.all` is now
+`sounds + photos` — byte-for-byte what the automatic route posts — and the whole
+recording is gone from it. Offering two files that both look like "the
+recording" is also a choice nobody should have to make while standing in
+iNaturalist's uploader. Anyone who wants the whole thing has Share Recording on
+the player, which is where that belongs.
+
+And it opened iNaturalist's web uploader for you. That assumed both the
+destination and the moment: somebody in a field with no signal, or headed for a
+local records centre rather than iNaturalist at all, got sent to a web page they
+had not asked for and had to come back from. Saving to Files is also the step
+that has to happen FIRST whichever way they are going, since the uploader needs
+files that already exist on the device. So the screen hands over the files and
+stops, and the destination stays the user's.
+
+**The two sounds are now for two different jobs, and only one is evidence**
+(Niall, 2026-09-06). The export had no denoising in it at all — nothing in
+`INaturalist/` referenced `SpectralDenoiser`, so the player's background control
+(Off / Reduce / Scrub, and it drives the app's own speaker) never reached the
+file anybody actually plays. At 16× the hiss is continuous and under everything,
+which is a large part of why acoustic observations go unlistened-to.
+
+So the listening copy is now the segment put through three steps in order: the
+gaps cut out, the background SCRUBBED, then slowed 16×. The full-spectrum copy
+gets none of it and goes up exactly as recorded, because that file is what
+somebody re-analyses and spectral subtraction would quietly change every
+measurement made from it. The description says which is which and tells a reader
+to measure the raw one.
+
+Three details worth keeping:
+
+- **Packed before scrubbed.** The scrub measures the noise it removes from the
+  audio it is handed, and packing removes gaps, not background — a packed pass
+  is still roughly 90% background by duration (thirty calls of 5 ms inside
+  1.7 seconds), so the median `estimateNoiseOffline` takes still lands in the
+  noise. It is also four times less audio to run an FFT over.
+- **Slowed last, though it makes no difference to the samples.** Expansion is a
+  header rewrite, so the denoiser sees the same buffer either way; doing it last
+  keeps "nothing after the expansion touches the audio" true.
+- **Scrub is fixed, not the player's setting.** The player defaults its
+  background control to Off on purpose — a recording being reviewed is evidence
+  — which is right for the screen and wrong here. Following it would mean almost
+  every observation carried an untreated file, and the person it costs is a
+  stranger on iNaturalist with no way to switch it on.
+
+The doc comment on `expansionFactor` used to say the copy "sounds the same as it
+did in the app". That was untrue in both directions even before this — the
+player keeps its gaps and defaults its background to Off — and it is not the
+goal. What the copy matches is the player's slowest SPEED.
+
+⚠️ **`estimatedUploadBytes` cannot see the silence map, and the real cut can.**
+The row badge has no map — computing one per row is an FFT over the file — so it
+still estimates from the pulse span, and the real segment is sometimes bigger.
+The consequence is bounded because the real cut shrinks its own margins to fit:
+the only recording that can be over the limit on the sheet and under it on the
+badge is one whose calls alone span more than 27 seconds, and that one gets its
+blocker on the sheet before anything is posted.
+
+**Echoes are measured, and cost 20 points** (Niall, 2026-09-06). A call recorded
+beside a wall, a road surface or a rock face arrives again a few milliseconds
+later and keeps arriving until the reflections smear into a tail — and that tail
+sits at the call's own frequencies, so it fills in the sweeps and blurs the one
+thing an identifier reads. `EchoAnalysis` measures, per call, how far the sound
+in the call's own band has fallen 6–40 ms after the peak, against the peak, with
+the recording's own background as zero; the recording's figure is the median
+across calls. A call with another call closer than 60 ms behind it is skipped,
+since the neighbour would be read as the echo — which excludes a feeding buzz
+entirely, correctly, because its calls overlap their own echoes by design.
+
+It is a deduction, not a component, so a recording with no measurement scores
+exactly what it always did. **Ten points, revised down from twenty the same day**
+(Niall: "a high quality recording with echo is still good"). Reflections blur the
+sweep an identifier reads, so they belong in the score — but they are one
+property among several, and at twenty they could outweigh the confidence term and
+most of the call count together. A clean, confident, twelve-call pass recorded
+beside a wall is still a better record than a quiet two-call one in the open, and
+the score has to keep saying so. It is never a blocker either — a reverberant
+recording is still a true presence record, and where the bat was is the half that
+does not blur.
+
+⚠️ **Its two thresholds are reasoned, not measured.** `cleanIndex` (0.30) and
+`reverberantIndex` (0.65) come from what the arithmetic implies, not from a
+corpus of known-reverberant recordings, because there isn't one. They are the
+part of this most likely to be wrong, and the way to fix them is to record the
+same bat in the open and against a wall and see what the two files report.
+
+The row badge does not measure this — an FFT per call, times sixty rows — so it
+passes nil and deducts nothing, which can leave a badge one grade more generous
+than the sheet. Same direction the size estimate already errs in, and the sheet
+is where the decision is made.
+
+**Superseded 2026-09-06, kept for the trap in its last sentence:** trimming is
+not a size optimisation, it is what makes the feature work.
+
 iNaturalist rejects sound files over 20 MB, and at 384 kHz that is 27 seconds.
 `INatExport.trimmedToCalls` cuts to the span the pulses occupy plus a third of a
 second either side, using the classifier's own pulse timestamps rather than a
@@ -3178,8 +3325,15 @@ model", which the row already implies and the detail screen states properly,
 while the leaf answers "should I do anything with this one" — the question a
 list of sixty recordings exists to answer.
 
-Green filled leaf for Good and Excellent, orange outline for Fair, nothing below
-that, and a green seal once it has been posted. Only good news is drawn: a list
+Gold filled leaf for Excellent, green filled for Good, orange outline for Fair,
+nothing below that, and a green seal once it has been posted. **Three tiers, not
+two** (Niall, 2026-09-06): Excellent used to share the green leaf with Good, so
+the best recording of a night looked exactly like a merely solid one and the list
+could not answer "which is the BEST of these" — the question somebody with a cap
+of two posts per species per night is actually asking. Gold rather than a
+brighter green, because two greens a shade apart are not a distinction anybody
+can make at caption size in a scrolling list, and not yellow, which reads as a
+warning beside the orange tier. The colour is `Color.goldLeaf`. Only good news is drawn: a list
 where every row carries a grade answers the question much worse than one where
 four rows in sixty have a leaf.
 
@@ -3443,6 +3597,64 @@ who downloads them all gets them back in that order rather than alphabetically.
 The audio order matters most: iNaturalist plays the first sound, and a 384 kHz
 file plays in no browser, so leading with it would hand every visitor silence.
 
+**Two raw confidences, and only one of them pairs with the weighted figure**
+(2026-09-05). The description printed "Confidence: 76% (location-weighted)"
+above "Raw model confidence: 81%", which reads as a weighting that pushed the
+species DOWN. It hadn't: the species' prior was 1.00, 21 of 31 were below 0.20,
+and posteriors are renormalised after weighting, so its score could only go up.
+The two numbers were different measurements. `PassRecord.rawConfidence` is the
+mean of each call's own TOP raw score — whatever that call was individually
+taken for — so on a pass whose calls disagree it is a maximum across several
+species and sits above any one of them. `PassAggregation.Outcome` now also
+carries `rawSpeciesConfidence`, the reported species' own mean raw score over
+the same calls, and it rides the same path the weighted figure does
+(`AutoIDOutcome` → `RecordingReport` → `Recording.rawSpeciesConfidence`) so the
+pair is computed from one pulse set and their difference is the weighting and
+nothing else. Optional, and the line is simply absent on anything recorded
+before today — the raw scores were never stored, so there is nothing to
+recover. The pass-level number is untouched: the CSV export and the upload
+assessment both want "were these calls decisive", which is exactly what it
+measures.
+
+**The audible copy is packed; the full-spectrum one is not** (Niall,
+2026-09-05). Trimming to the outermost call leaves every gap inside the bout,
+and the audible copy plays 16× slower — so a 24-second recording of 30 calls
+arrived as six and a half minutes of mostly nothing. It is now spliced from the
+player's own `SilenceMap` (`INatExport.packedToCalls`), with a 2 ms taper at
+each seam because a splice is a step discontinuity and a step slowed 16× is an
+audible thump between every call. The full-spectrum file deliberately keeps the
+recording's real timing: pulse INTERVAL is an identification parameter, and
+splicing would rewrite it silently for anyone re-analysing the file. The map is
+computed once in the sheet and handed to both the audio and the whole-pass
+picture, so the two cut at the same seams — the description claims they do, and
+two independent answers to "where are the calls" would eventually disagree.
+
+**The whole pass now leads** (Niall, 2026-09-05), reversing the picture half of
+that order: the packed whole pass, then the slices in sequence, then the
+close-up. The first image is the observation's thumbnail everywhere iNaturalist
+lists it, and "part 1 of 9" is a poor thing to be identified by — the
+silence-removed whole pass is the one frame that says what the observation is.
+Detail-last is intact; only the summary moved to the front. The audio order is
+unchanged.
+
+**Why the packed picture was the blurry one** (2026-09-05). All three pictures
+are drawn into a 600 pt frame at 3×, so the PNG holds 1800 pixels of spectrogram
+across, and anything analysed at fewer columns than that was being upscaled to
+fill it. The whole pass was the worst case by a wide margin: it was cut out of
+the overview grid, and packing keeps only the columns that held sound, so a pass
+that is 90% gaps left about 400 columns stretched across 1800 pixels. It is now
+re-analysed from the WAV over the retained audio
+(`renderRawTileStitched`) at `INatExportPlot.pixelWidth` columns, with the
+silence map still computed from the overview so it cuts exactly the gaps the
+player did; the tiles and the close-up ask for the same number instead of their
+old 1600 and 600. Vertically there is no more resolution to be had — 1024 bins
+over 192 kHz, so a 75 kHz band is 400 rows — but the log warp was *throwing some
+away*: at 1:1 it has to drop source rows at the top of the band to make room for
+the ones it duplicates at the bottom, and the top of the band is where the
+harmonics are. `LogFrequencyWarp.warp` gained a `heightScale`, and the export
+asks for enough rows to cover the pixels it will be drawn at. The live views
+still warp 1:1, where it is invisible and the memory is not worth it.
+
 **Tiled 16:9 walk-through.** One picture of a ten-second pass gives an identifier
 a few pixels per call, and call SHAPE is what they read. So the pass is also
 uploaded as consecutive 2-second 16:9 tiles (max 12, skipped entirely for a
@@ -3451,6 +3663,20 @@ axis, absolute start/end seconds and a "part n of m" line so a claim can be
 pointed at one call. The tiles are scaled into 16:9 rather than cropped to it —
 a tile's natural height is however many frequency bins the band covers, and
 cropping would throw away the frequencies the picture exists to show.
+
+**The description is markdown, with two links out** (Niall, 2026-09-05).
+iNaturalist renders markdown in a description and OpenBat was writing a flat
+wall of lines, which is what it looked like on the page. It now has three
+blocks — the AutoID suggestion, the call parameters, the caveats — and the
+classifier's name links to *The Two Models OpenBat Uses* while every
+"Location weighting" line links to *OpenBat Species Priors for Location
+Weighting*. The links are the point: an identifier who has never heard of NABat
+ML cannot weigh what it said, and the alternative to a link is explaining the
+same thing on every observation or not explaining it at all. One trap — markdown
+folds a single newline into a space, so a run of one-fact-per-line rows renders
+as one paragraph; every line with another directly under it gets the two-space
+hard break, and none before a blank line, or there is a stray `<br>` above each
+heading.
 
 **The detector is named by the user, not detected** (`DetectorModel`,
 2026-09-04). iOS reports a USB audio device's port name, and that is firmware's
@@ -4081,6 +4307,20 @@ leads to check, not as confirmed regressions.
 ---
 
 ## 16. Open questions
+
+- **The echo deduction is live and its thresholds have never been measured
+  (2026-09-06).** `EchoAnalysis.cleanIndex` (0.30) and `reverberantIndex` (0.65)
+  come from what the arithmetic implies, not from recordings where the answer is
+  known — OpenBat has no corpus of reverberant files. Too strict and good
+  recordings lose points they should keep; too loose and the term never fires.
+  It is deducting up to 10 points on real observations in the meantime, which
+  Niall decided to leave running (2026-09-06).
+
+  Settling it is one evening's work: record a bat in the open and again close to
+  a wall or a hard road surface, and compare what the two files report. The
+  measurement itself is not in doubt — the close-up exported on 2026-09-06 shows
+  a textbook tail from 17 to 28 ms — only where the line between "clean" and
+  "reverberant" belongs. See §11.
 
 - **The presence verification suite has no boreal cases, and that hid a real
   regression (2026-08-27).** Its northernmost check is London at 51.5 N, so a

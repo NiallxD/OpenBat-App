@@ -30,6 +30,9 @@ struct DiagnosticsView: View {
     /// catcher. Read here only for its failure dump — this panel is how that
     /// dump gets off a device, which is the only place the failure happens.
     let sessionButtonLocator: SessionButtonLocator
+    /// The remote kill switches, listed at the top so the first thing this
+    /// screen answers is "what is currently switched off".
+    let flags: FeatureFlagStore
     @Environment(\.dismiss) private var dismiss
     @State private var showDemoPicker = false
     /// Last file written by the dump button, so it can be shared without
@@ -47,6 +50,7 @@ struct DiagnosticsView: View {
                 // update. Same @Observable-churn fix as ContentView's RecordButton —
                 // see Context.md §13.
                 VStack(spacing: 20) {
+                    ConfigFeatureSection(flags: flags)
                     DiagnosticsStatusLine(audio: audio)
                     DiagnosticsCard(audio: audio, recorder: recorder)
                     DiagnosticsLevelMeter(audio: audio)
@@ -59,7 +63,7 @@ struct DiagnosticsView: View {
                 }
                 .padding()
             }
-            .navigationTitle("Debug")
+            .navigationTitle("Configuration")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {

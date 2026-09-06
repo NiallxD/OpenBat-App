@@ -63,6 +63,50 @@ struct SilenceMap: Equatable {
         realTotal > 0 ? Double(virtualTotal) / Double(realTotal) : 1
     }
 
+    /// The span from the start of the first kept region to the end of the
+    /// last, in real samples — everything the map thinks is sound, plus the
+    /// gaps between. nil for an empty map, which `compute` never produces.
+    ///
+    /// This is what the iNaturalist export trims to. It is deliberately the
+    /// map's answer rather than the classifier's: a pulse list holds only the
+    /// calls a model kept, so a pass that opens with two calls the classifier
+    /// skipped had those two cut off the front of the upload — audio the app
+    /// itself had already decided was sound. See `INatExport.passSegment`.
+    var soundSpan: Range<Int>? {
+        guard let first = segments.first, let last = segments.last else { return nil }
+        return first.realStart..<last.realEnd
+    }
+
+    /// The same map seen from inside `range` — regions clipped to it and
+    /// rebased so `range.lowerBound` becomes sample zero.
+    ///
+    /// Exists so a segment cut out of a recording can be packed and drawn with
+    /// the map the player already computed over the whole file, rather than a
+    /// second, independently-tuned opinion about where the calls are. The
+    /// alternative — re-running detection on the segment — would let the
+    /// exported picture and the exported sound cut at different seams from the
+    /// ones the user was looking at, which is the failure this map exists to
+    /// prevent.
+    ///
+    /// `isFallback` survives, because a map that hides nothing still hides
+    /// nothing after being narrowed.
+    func rebased(to range: Range<Int>) -> SilenceMap {
+        let total = range.count
+        guard total > 0 else { return .wholeFile(totalSamples: 0, isFallback: isFallback) }
+        var rebased: [Segment] = []
+        var cursor = 0
+        for segment in segments {
+            let start = max(segment.realStart, range.lowerBound) - range.lowerBound
+            let end = min(segment.realEnd, range.upperBound) - range.lowerBound
+            guard end > start else { continue }
+            rebased.append(Segment(realStart: start, realEnd: end, virtualStart: cursor))
+            cursor += end - start
+        }
+        guard !rebased.isEmpty else { return .wholeFile(totalSamples: total, isFallback: true) }
+        return SilenceMap(segments: rebased, virtualTotal: cursor,
+                          realTotal: total, isFallback: isFallback)
+    }
+
     // MARK: Domain mapping
 
     /// The real sample a virtual position corresponds to. Clamped to the

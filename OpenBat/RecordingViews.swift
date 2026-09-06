@@ -171,6 +171,13 @@ struct RecordingRow: View {
     /// sixty have a leaf on them. Poor and blocked recordings say nothing at all
     /// rather than wearing a red mark — the full reasoning is one tap away on
     /// the observation sheet, which is where somebody has actually asked.
+    ///
+    /// **Three tiers, not two** (Niall, 2026-09-06). Excellent used to share the
+    /// green filled leaf with Good, so the best recording of a night looked
+    /// exactly like a merely solid one and the list could not answer "which is
+    /// the BEST of these" — which is the question somebody with a nightly cap of
+    /// two posts per species is actually asking. Gold, green, orange outline,
+    /// and nothing below that.
     @ViewBuilder private var iNatBadge: some View {
         if iNatPosted {
             Image(systemName: "checkmark.seal.fill")
@@ -179,11 +186,16 @@ struct RecordingRow: View {
                 .accessibilityLabel("Posted to iNaturalist")
         } else if let iNatRating {
             switch iNatRating {
-            case .excellent, .good:
+            case .excellent:
+                Image(systemName: "leaf.fill")
+                    .font(.caption)
+                    .foregroundStyle(Color.goldLeaf)
+                    .accessibilityLabel("Worth posting to iNaturalist: excellent")
+            case .good:
                 Image(systemName: "leaf.fill")
                     .font(.caption)
                     .foregroundStyle(.green)
-                    .accessibilityLabel("Worth posting to iNaturalist: \(iNatRating.rawValue.lowercased())")
+                    .accessibilityLabel("Worth posting to iNaturalist: good")
             case .fair:
                 Image(systemName: "leaf")
                     .font(.caption)

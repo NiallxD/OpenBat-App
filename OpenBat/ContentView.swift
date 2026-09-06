@@ -43,6 +43,15 @@ extension Color {
     static let batAccent = Color(red: 0.914, green: 0.514, blue: 0.114) // #E9831D
     static let toggleOn = batAccent
     static let toggleOff = Color.secondary
+
+    /// The top tier of the iNaturalist leaf badge — see `RecordingRow`'s
+    /// `iNatBadge`. Gold rather than a brighter green, because the tier below it
+    /// is already green and two greens a shade apart are not a distinction
+    /// anybody can make at caption size in a scrolling list.
+    ///
+    /// Deliberately not `.yellow`, which reads as a warning beside the orange
+    /// tier, and darkened enough to hold its own against white in light mode.
+    static let goldLeaf = Color(red: 0.812, green: 0.612, blue: 0.078) // #CF9C14
 }
 
 struct ContentView: View {
@@ -54,6 +63,12 @@ struct ContentView: View {
     @State private var pulseDetector = PulseDetector()
     @State private var recorder = AudioRecorder()
     @State private var autoIDSettings = AutoIDSettings()
+    /// Remote kill switches — see `FeatureFlags.swift`. Threaded down rather
+    /// than read from a global so a preview or a test can hand a screen its own
+    /// answers, and so the compiler tells us every place that asks.
+    @State private var featureFlags = FeatureFlagStore()
+    /// The maintenance notice, shown once per distinct message.
+    @State private var maintenanceNotice: String?
     /// Live snippet-expansion settings. Threaded down (rather than owned by the
     /// tuning overlay) because the processor has to be seeded with them at
     /// capture start, not only when the overlay happens to be open.
@@ -83,7 +98,6 @@ struct ContentView: View {
     @State private var showBatSwarm = false
     /// Persisted so the unlock survives a relaunch — the ten taps are a way in,
     /// not something to repeat every launch. Toggled by `registerVersionTap`.
-    @AppStorage("debugModeEnabled") private var debugModeEnabled = false
     @State private var showDiagnostics = false
     @State private var showSettings = false
     /// Set once per launch when a previously-granted consent predates the
@@ -299,7 +313,8 @@ struct ContentView: View {
                                     onStartDemo: startDemo, onEndDemo: endDemo,
                                     onOpenTuning: { showTuningOverlay = true },
                                     onDumpSettings: dumpSettings,
-                                    sessionButtonLocator: sessionButtonLocator)
+                                    sessionButtonLocator: sessionButtonLocator,
+                                    flags: featureFlags)
                 }
                 .sheet(isPresented: $showHelp) {
                     SafariView(url: PrivacyLinks.helpURL)
@@ -342,7 +357,12 @@ struct ContentView: View {
                                  pulseDetector: pulseDetector, recorder: recorder,
                                  location: location, consent: consent, classStore: classStore,
                                  audio: audio, micCalSettings: micCalSettings,
-                                 haptics: haptics, snippetExpansion: snippetSettings)
+                                 haptics: haptics, snippetExpansion: snippetSettings,
+                                 flags: featureFlags,
+                                 onOpenConfig: {
+                                     showSettings = false
+                                     showDiagnostics = true
+                                 })
                 }
                 // Someone who opted in, then had the terms change under them,
                 // has silently stopped contributing. Settings carries the same
@@ -484,6 +504,24 @@ struct ContentView: View {
         // Classification history: three JSON files, decoded off the main thread.
         // Same reason as the two above — see `ClassificationStore.load()`.
         .task { await classStore.load() }
+        // The remote kill switches. Cached answer first so a phone with no
+        // signal still gets the last one it was given, then GitHub. Deliberately
+        // NOT awaited by anything: every feature asks at the point it is used,
+        // so a late answer takes the feature away rather than being missed.
+        .task {
+            featureFlags.loadCached()
+            await featureFlags.refreshFromRemote()
+            if let message = featureFlags.pendingMaintenanceMessage() {
+                maintenanceNotice = message
+                featureFlags.markMaintenanceMessageSeen()
+            }
+        }
+        .alert("OpenBat", isPresented: .init(get: { maintenanceNotice != nil },
+                                             set: { if !$0 { maintenanceNotice = nil } })) {
+            Button("OK") { }
+        } message: {
+            Text(maintenanceNotice ?? "")
+        }
         .onAppear {
             // First, before anything below reads a persisted setting: the stores
             // are constructed EMPTY on purpose (see each type's `init()` doc
@@ -544,6 +582,7 @@ struct ContentView: View {
                 let recordingID = UUID()
                 classStore.addRecording(id: recordingID, date: report.date, durationSeconds: report.durationSeconds,
                                         species: report.species, confidence: report.confidence,
+                                        rawSpeciesConfidence: report.rawSpeciesConfidence,
                                         pulseCount: report.pulseCount, sessionID: report.sessionID,
                                         coordinate: report.coordinate.map {
                                             CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon)
@@ -2078,14 +2117,6 @@ struct ContentView: View {
             Button { showHelp = true } label: {
                 Label("Help", systemImage: "questionmark.circle")
             }
-            // Hidden until debug mode is unlocked by tapping the footer version
-            // number 10x — see `registerVersionTap`.
-            if debugModeEnabled {
-                Divider()
-                Button { showDiagnostics = true } label: {
-                    Label("Debug", systemImage: "gauge.medium")
-                }
-            }
         } label: {
             label()
         }
@@ -2722,22 +2753,18 @@ struct ContentView: View {
     private func registerVersionTap() {
         versionTapResetWork?.cancel()
         versionTapCount += 1
+        // **The swarm, and nothing behind it** (Niall, 2026-09-06). Five more
+        // taps used to toggle the debug menu on. That menu now lives in
+        // Settings behind a passcode, where a reviewer can find it and where
+        // the people it is for can actually reach it — so this gesture is back
+        // to being only what it was always best at, which is an Easter egg.
         switch versionTapCount {
         case 10:
             releaseBatSwarm()
-        case 15:
             versionTapCount = 0
-            debugModeEnabled.toggle()
-            UINotificationFeedbackGenerator()
-                .notificationOccurred(debugModeEnabled ? .success : .warning)
             return
         default:
-            // A tick acknowledging the tap registered. Past the swarm the ticks
-            // harden, so the five taps to the debug toggle feel like they're
-            // building to something rather than trailing off after the payoff.
-            let style: UIImpactFeedbackGenerator.FeedbackStyle =
-                versionTapCount < 10 ? .light : (versionTapCount < 13 ? .medium : .heavy)
-            UIImpactFeedbackGenerator(style: style).impactOccurred()
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
         }
         let resetWork = DispatchWorkItem { versionTapCount = 0 }
         versionTapResetWork = resetWork

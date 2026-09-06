@@ -286,3 +286,41 @@ struct SilenceMapTests {
         #expect(SilenceMap.wholeFile(totalSamples: 100).isFallback == false)
     }
 }
+
+// MARK: - Narrowing a map onto one segment
+
+extension SilenceMapTests {
+
+    /// `rebased` is what lets the iNaturalist export cut a pass out of a
+    /// recording and still pack it at the seams the player was showing. The
+    /// regions have to move with the window, not stay where they were.
+    @Test func rebasedClipsAndShiftsRegions() {
+        let m = twoSegmentMap()
+        // A window starting mid-way through the first kept region and ending
+        // mid-way through the second.
+        let r = m.rebased(to: 1500..<5500)
+        #expect(r.realTotal == 4000)
+        #expect(r.segments.count == 2)
+        #expect(r.segments[0].realStart == 0)      // 1500 -> 0
+        #expect(r.segments[0].realEnd == 500)      // 2000 -> 500
+        #expect(r.segments[1].realStart == 3500)   // 5000 -> 3500
+        #expect(r.segments[1].realEnd == 4000)     // clipped at the window's end
+        #expect(r.virtualTotal == 1000)
+    }
+
+    /// A window that misses every kept region has no seams to cut, and must
+    /// come back as a whole-window fallback rather than an empty timeline —
+    /// every consumer assumes a map is non-empty.
+    @Test func rebasedOntoSilenceFallsBackToTheWholeWindow() {
+        let r = twoSegmentMap().rebased(to: 2500..<4500)
+        #expect(r.isFallback)
+        #expect(r.segments.count == 1)
+        #expect(r.segments[0].realStart == 0)
+        #expect(r.segments[0].realEnd == 2000)
+    }
+
+    /// The span the export trims to: first sound to last, gaps included.
+    @Test func soundSpanCoversFirstToLastKeptRegion() {
+        #expect(twoSegmentMap().soundSpan == 1000..<6000)
+    }
+}

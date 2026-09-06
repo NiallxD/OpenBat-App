@@ -120,13 +120,21 @@ nonisolated struct INatUploadAssessment {
 
     // MARK: Assessing
 
-    /// `uploadBytes` is the size of what would actually be attached — the
-    /// TRIMMED file, not the file on disk. Trimming silence off a bout can be
-    /// the difference between a 30 MB recording and a 2 MB one, so assessing
-    /// the untrimmed size would reject records that are perfectly fine.
+    /// `uploadBytes` is the size of what would actually be attached — the pass
+    /// SEGMENT, not the file on disk. Cutting the pass out of a recording can
+    /// be the difference between 30 MB and 2 MB, so assessing the whole file
+    /// would reject records that are perfectly fine.
+    /// `echo` is `EchoAnalysis`'s verdict on the pass segment, or nil where
+    /// nothing measured it — which is every row of the recordings list, since
+    /// the measurement is an FFT per call and a list is sixty rows deep. A nil
+    /// deducts nothing rather than assuming the worst, so a badge can be a
+    /// grade more generous than the sheet on a reverberant recording. That is
+    /// the same direction the size estimate already errs in, and the sheet is
+    /// where the decision is actually made.
     static func assess(recording: Recording,
                        passes: [PassRecord],
-                       uploadBytes: Int) -> INatUploadAssessment {
+                       uploadBytes: Int,
+                       echo: EchoAnalysis.Result? = nil) -> INatUploadAssessment {
         var blockers: [String] = []
         var notes: [String] = []
 
@@ -252,44 +260,77 @@ nonisolated struct INatUploadAssessment {
         let fill = Double(uploadBytes) / Double(INatCredentials.maxSoundBytes)
         score += 10 * (1 - ramp(fill, from: 0.4, to: 1.0))
 
-        return INatUploadAssessment(score: Int(score.rounded()),
+        // Echoes (−10). A deduction rather than a component, so a recording
+        // with no echo measurement scores exactly what it always did and only
+        // a measurably reverberant one loses anything.
+        //
+        // **Ten points, down from twenty** (Niall, 2026-09-06): "a high quality
+        // recording with echo is still good". Reflections blur the sweep shape
+        // an identifier reads, so they belong in the score — but they are one
+        // property of a recording among several, and at twenty they could
+        // outweigh the confidence term and most of the call count together. A
+        // clean, confident, twelve-call pass that happens to have been recorded
+        // beside a wall is still a better record than a quiet two-call one in
+        // the open, and the score has to keep saying so.
+        //
+        // It is never a blocker — a reverberant recording is still a true
+        // presence record, and where the bat was is the half that doesn't blur.
+        if let echo {
+            let penalty = 10 * ramp(echo.index,
+                                    from: EchoAnalysis.cleanIndex,
+                                    to: EchoAnalysis.reverberantIndex)
+            score -= penalty
+            if penalty >= 3 {
+                notes.append("The calls trail off into their own echoes, which blurs the shape an identifier reads. Somewhere more open, or pointing the microphone away from hard surfaces, records the same bat much more clearly.")
+            }
+        }
+
+        return INatUploadAssessment(score: Int(max(0, score).rounded()),
                                     blockers: blockers,
                                     alreadyPosted: alreadyPosted,
                                     overridden: overridden,
                                     notes: notes)
     }
 
-    /// What the trimmed upload will weigh, WITHOUT trimming anything.
+    /// What the upload will weigh, WITHOUT cutting the segment out.
     ///
-    /// `assess` needs the size of the trimmed file, and trimming means copying
-    /// tens of megabytes — fine for one recording on a confirmation screen,
-    /// impossible for every row of a scrolling list. The trim is a plain
-    /// proportion of the recording, though, so the size of its result is
-    /// arithmetic: the span the calls occupy, over the whole duration, times
-    /// the bytes on disk.
+    /// `assess` needs the size of what actually gets attached, and producing it
+    /// means copying tens of megabytes — fine for one recording on a
+    /// confirmation screen, impossible for every row of a scrolling list. The
+    /// segment is a plain span of the recording, though, so the size of its
+    /// result is arithmetic: the span the calls occupy plus its margins, over
+    /// the whole duration, times the bytes on disk.
     ///
-    /// It is an estimate only in that the WAV header is counted as if it were
-    /// audio (44 bytes) and the real trim rounds to a sample boundary. Both are
-    /// far below the resolution of anything that reads this.
-    ///
-    /// The one case to be careful of: a recording whose calls span most of the
-    /// file isn't trimmed at all, and `INatExport.trimmedToCalls` gives up when
-    /// the saving would be under 5%. This mirrors that, so a list badge and the
-    /// sheet cannot disagree about whether something fits.
+    /// **It cannot see the silence map, and the real cut does** (2026-09-06).
+    /// `INatExport.passSegment` widens the span to cover everything the app
+    /// heard, including calls the classifier didn't keep, so the real segment
+    /// is sometimes bigger than this says. The direction is the same one this
+    /// estimate has always erred in and the consequence is bounded: the real
+    /// cut also SHRINKS its own margins to fit under the size limit, so the
+    /// only recording that can be over the limit in the sheet and under it here
+    /// is one whose calls alone span more than 27 seconds — and that one gets
+    /// its blocker on the sheet, before anything is posted.
     static func estimatedUploadBytes(recording: Recording,
                                      passes: [PassRecord],
                                      fileBytes: Int) -> Int {
         let pulses = passes.flatMap(\.pulses)
-        guard !pulses.isEmpty, recording.durationSeconds > 0 else { return fileBytes }
+        guard !pulses.isEmpty, recording.durationSeconds > 0, fileBytes > 0 else { return fileBytes }
 
         let offsets = pulses.map { $0.date.timeIntervalSince(recording.date) }
         let longestPulse = (pulses.map(\.durationMs).max() ?? 0) / 1000
-        let start = max(0, (offsets.min() ?? 0) - INatExport.trimPaddingSeconds)
-        let end = min(recording.durationSeconds,
-                      (offsets.max() ?? recording.durationSeconds) + longestPulse + INatExport.trimPaddingSeconds)
-        guard end > start else { return fileBytes }
+        let core = max(0, (offsets.max() ?? 0) + longestPulse - (offsets.min() ?? 0))
 
-        let fraction = (end - start) / recording.durationSeconds
+        // The margin the real cut asks for, and gives back where the size limit
+        // takes it — mirrored here so a badge and the sheet cannot disagree
+        // about whether something fits. See `INatExport.passSegment`.
+        let budgetSeconds = Double(INatCredentials.maxSoundBytes)
+            / Double(fileBytes) * recording.durationSeconds
+        let affordable = max(0, (budgetSeconds - core) / 2)
+        let padding = min(INatExport.preferredPaddingSeconds,
+                          max(INatExport.minimumPaddingSeconds, affordable))
+
+        let span = min(recording.durationSeconds, core + 2 * padding)
+        let fraction = span / recording.durationSeconds
         guard fraction < 0.95 else { return fileBytes }
         return Int(Double(fileBytes) * fraction)
     }

@@ -62,7 +62,18 @@ struct SettingsView: View {
     @Bindable var micCalSettings: MicCalibrationSettings
     @Bindable var haptics: PulseHaptics
     @Bindable var snippetExpansion: SnippetExpansionSettings
+    /// Remote kill switches, so the configuration card can show and override
+    /// them — see `FeatureFlags.swift`.
+    let flags: FeatureFlagStore
+    /// Opens the configuration menu, which lives in `ContentView` because it
+    /// needs the demo feed and the tuning overlay. Settings only asks.
+    let onOpenConfig: () -> Void
     @State private var showMicCalibration = false
+    /// Passcode entry for the configuration card. Not persisted — the unlock
+    /// itself is, so this is only ever in memory while somebody is typing.
+    @State private var configPasscode = ""
+    @State private var configPasscodeWrong = false
+    @AppStorage("configMenuUnlocked") private var configUnlocked = false
     @Environment(\.dismiss) private var dismiss
     @State private var selectedTab = "general"
 
@@ -164,6 +175,7 @@ struct SettingsView: View {
             storageSections
             privacySections
             classifierLogSections
+            configurationSection
         }
         .onAppear { logBytes = ClassificationLogger.shared.totalBytesOnDisk() }
         // The share sheet is deliberately behind a confirmation. The log is a
@@ -212,6 +224,58 @@ struct SettingsView: View {
 
     @State private var showDeleteAllSessionsConfirmation = false
     @State private var showDeleteNoIDConfirm = false
+
+    /// The way into the configuration menu.
+    ///
+    /// **In Settings, not behind fifteen taps on the version number** (Niall,
+    /// 2026-09-06). A menu hidden behind a gesture is the shape of Apple's
+    /// guideline on undocumented features, and the hiding bought nothing — the
+    /// people it kept out were the people it was for. Visible, explained, and
+    /// behind a passcode is both more honest and more effective. The bat swarm
+    /// on the tenth tap stays; it was always the better half of that gesture.
+    ///
+    /// The card disappears entirely when the config file locks it, which is the
+    /// recourse if the passcode ever circulates — see
+    /// `FeatureFlagStore.configMenuAvailable`.
+    @ViewBuilder
+    private var configurationSection: some View {
+        if flags.configMenuAvailable {
+            Section {
+                if configUnlocked {
+                    Button("Open configuration") { onOpenConfig() }
+                    Button("Lock again") {
+                        configUnlocked = false
+                        configPasscode = ""
+                    }
+                    .foregroundStyle(.secondary)
+                } else {
+                    SecureField("Passcode", text: $configPasscode)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .onSubmit(unlockConfig)
+                    if configPasscodeWrong {
+                        Text("That passcode isn't right.")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+                    Button("Unlock", action: unlockConfig)
+                        .disabled(configPasscode.isEmpty)
+                }
+            } header: {
+                CardHeader("Configuration", ConfigMenu.explanation)
+            }
+        }
+    }
+
+    private func unlockConfig() {
+        if ConfigPasscode.accepts(configPasscode) {
+            configUnlocked = true
+            configPasscodeWrong = false
+            configPasscode = ""
+        } else {
+            configPasscodeWrong = true
+        }
+    }
 
     @ViewBuilder
     private var storageSections: some View {
