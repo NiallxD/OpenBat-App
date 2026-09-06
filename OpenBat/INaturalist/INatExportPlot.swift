@@ -70,7 +70,19 @@ struct INatExportPlot: View {
 
     // MARK: Geometry
 
-    private static let plotWidth: CGFloat = 600
+    /// The picture's width in points, and the scale it is rasterised at, so
+    /// `pixelWidth` is how many real pixels of spectrogram the finished PNG
+    /// holds.
+    ///
+    /// Not private, because a renderer that hands this frame fewer columns
+    /// than that gets them upscaled to fill it — and upscaled is what "a bit
+    /// blurry" was. The callers ask for `pixelWidth` columns instead of
+    /// guessing a number.
+    /// `nonisolated` because the renderers read it off the main actor, where
+    /// the analysis they size actually runs.
+    nonisolated static let plotWidth: CGFloat = 600
+    nonisolated static let renderScale: CGFloat = 3
+    nonisolated static var pixelWidth: Int { Int(plotWidth * renderScale) }
     private static let axisWidth: CGFloat = 42
     private var plotHeight: CGFloat { (Self.plotWidth / aspect).rounded() }
     private static let gap: CGFloat = 6

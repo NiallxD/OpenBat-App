@@ -235,6 +235,17 @@ struct Recording: Codable, Identifiable, NoIDFilterable {
     var species: String             // never "NOISE" — those are rejected before saving; mutable for a manual correction (see `ClassificationStore.setManualSpecies`)
     var commonName: String
     let confidence: Float?          // nil for a NoID recording
+    /// The reported species' own score BEFORE location weighting, over the same
+    /// pulses `confidence` was computed from — so the two are a genuine
+    /// before/after pair and their difference is the weighting and nothing
+    /// else.
+    ///
+    /// Deliberately not `PassRecord.rawConfidence`, which is the top score of
+    /// whatever each pulse individually predicted and therefore sits above the
+    /// reported species' own score whenever the pulses disagreed. Optional, so
+    /// records written before this existed decode as nil — there is no way to
+    /// recover it for them, since the raw scores were never stored.
+    var rawSpeciesConfidence: Float?
     let pulseCount: Int
     var sessionID: UUID?            // nil = recorded outside a session (legacy, or demo)
     var latitude: Double?
@@ -595,7 +606,8 @@ final class ClassificationStore {
     /// before the (asynchronous, JPEG-write-gated) insert has happened, so anything
     /// that raced ahead of it would silently no-op against a not-yet-existing id.
     func addRecording(id: UUID = UUID(), date: Date, durationSeconds: Double,
-                      species: String, confidence: Float?, pulseCount: Int,
+                      species: String, confidence: Float?,
+                      rawSpeciesConfidence: Float? = nil, pulseCount: Int,
                       sessionID: UUID?, coordinate: CLLocationCoordinate2D?,
                       relativeWavPath: String, spectrogramImage: UIImage?,
                       onInserted: (() -> Void)? = nil) {
@@ -610,7 +622,9 @@ final class ClassificationStore {
             let recording = Recording(id: id, date: date, durationSeconds: durationSeconds,
                                       species: species,
                                       commonName: SpeciesInfo.commonName[species] ?? species,
-                                      confidence: confidence, pulseCount: pulseCount,
+                                      confidence: confidence,
+                                      rawSpeciesConfidence: rawSpeciesConfidence,
+                                      pulseCount: pulseCount,
                                       sessionID: sessionID,
                                       latitude: coordinate?.latitude, longitude: coordinate?.longitude,
                                       relativeWavPath: relativeWavPath, spectrogramImageFile: file)

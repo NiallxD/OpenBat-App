@@ -17,6 +17,20 @@ Offline scripts. Nothing here is part of the app target or runs on device.
   python3 tools/verify_presence_data.py                          # 17 assertions
   ```
 
+- **`update_presence_data.py`** — the whole publish runbook in one run: pulls
+  the sibling field guide clone, regenerates, verifies, and — only if something
+  actually changed — bumps the version, commits `SpeciesPresenceData.json` to
+  the guide repo and pushes it. Stops without publishing if the generator
+  reports failures, if verification fails, or if a species that had a range
+  comes back with none. It does not touch the app repo: the bundled copy in
+  `OpenBat/FieldGuide/` is a cold-install seed refreshed at release time, and
+  the `DATA_VERSION` bump in the generator is left for you to commit.
+
+  ```
+  python3 -u tools/update_presence_data.py --dry-run   # pull, build, verify, report
+  python3 -u tools/update_presence_data.py             # ~1 minute, publishes
+  ```
+
 - **`probe_range_coverage.py`** — read-only survey of which species have usable
   GBIF data and whether the app queries them under the name GBIF files them
   under. Worth re-running whenever a model is added; writes nothing.

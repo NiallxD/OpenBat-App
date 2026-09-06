@@ -195,4 +195,43 @@ struct PassAggregationTests {
         #expect(abs(pip - 0.80) < 0.001, "expected the mean (0.80), got \(pip)")
         #expect(abs(outcome.confidence - 0.80) < 0.001)
     }
+
+    // MARK: The two raw numbers
+
+    /// `rawSpeciesConfidence` is the REPORTED species' own raw score, and
+    /// `meanRawConfidence` is the top score of whatever each call was
+    /// individually taken for. On a pass where the calls disagree they are
+    /// different numbers, and only the first one can be printed beside the
+    /// weighted confidence — printing the second made a weighting that pushed
+    /// a species up read as having pushed it down (2026-09-05).
+    @Test func rawSpeciesConfidenceIsTheReportedSpeciesOwnScore() throws {
+        let pulses = [
+            pulse(raw: ["LASCIN": 0.80, "LASNOC": 0.20]),
+            pulse(raw: ["LASNOC": 0.90, "LASCIN": 0.10]),
+            pulse(raw: ["LASCIN": 0.85, "LASNOC": 0.15]),
+            pulse(raw: ["LASCIN": 0.75, "LASNOC": 0.25]),
+        ]
+        let outcome = try #require(aggregate(pulses))
+        #expect(outcome.species == "LASCIN")
+        // LASCIN's own mean: (0.80 + 0.10 + 0.85 + 0.75) / 4 = 0.625.
+        #expect(abs(outcome.rawSpeciesConfidence - 0.625) < 0.001,
+                "expected LASCIN's own mean raw score, got \(outcome.rawSpeciesConfidence)")
+        // Mean top raw: (0.80 + 0.90 + 0.85 + 0.75) / 4 = 0.825 — higher,
+        // because one call was taken for the other species.
+        #expect(abs(outcome.meanRawConfidence - 0.825) < 0.001)
+        #expect(outcome.rawSpeciesConfidence < outcome.meanRawConfidence)
+    }
+
+    /// With neutral priors the pair collapses: nothing was weighted, so the
+    /// species' raw score and its reported confidence are the same number. Any
+    /// difference a real record shows between them is therefore the weighting
+    /// and nothing else, which is the whole claim the description makes.
+    @Test func neutralPriorsLeaveTheRawAndWeightedFiguresEqual() throws {
+        let pulses = [
+            pulse(raw: ["LASCIN": 0.80, "LASNOC": 0.20]),
+            pulse(raw: ["LASCIN": 0.70, "LASNOC": 0.30]),
+        ]
+        let outcome = try #require(aggregate(pulses))
+        #expect(abs(outcome.rawSpeciesConfidence - outcome.confidence) < 0.001)
+    }
 }

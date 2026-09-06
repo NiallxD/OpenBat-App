@@ -30,6 +30,9 @@ struct RecordingReport {
     let durationSeconds: Double
     let species: String
     let confidence: Float?
+    /// The same species' score before location weighting — see
+    /// `Recording.rawSpeciesConfidence`.
+    let rawSpeciesConfidence: Float?
     let pulseCount: Int
     let sessionID: UUID?
     let coordinate: (lat: Double, lon: Double)?
@@ -656,11 +659,12 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
         // on the recorder queue, and only value types cross to `reportQueue`.
         let docs = CloudStorage.baseDirectory
         let relativePath = String(finalURL.path.dropFirst(docs.path.count + 1))
-        let (species, confidence, pulseCount): (String, Float?, Int)
+        let (species, confidence, rawSpecies, pulseCount): (String, Float?, Float?, Int)
         switch outcome {
-        case .species(let code, let conf, let count): (species, confidence, pulseCount) = (code, conf, count)
-        case .noID(let count): (species, confidence, pulseCount) = ("NOID", nil, count)
-        case .noise: (species, confidence, pulseCount) = ("NOISE", nil, 0)   // unreachable — rejected before this is called
+        case .species(let code, let conf, let raw, let count):
+            (species, confidence, rawSpecies, pulseCount) = (code, conf, raw, count)
+        case .noID(let count): (species, confidence, rawSpecies, pulseCount) = ("NOID", nil, nil, count)
+        case .noise: (species, confidence, rawSpecies, pulseCount) = ("NOISE", nil, nil, 0)   // unreachable — rejected before this is called
         }
         let reportDate = segmentStartDate ?? Date()
         let duration = sr > 0 ? Double(closedDataBytes / 2) / sr : 0
@@ -677,7 +681,8 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
             let report = RecordingReport(
                 date: reportDate,
                 durationSeconds: duration,
-                species: species, confidence: confidence, pulseCount: pulseCount,
+                species: species, confidence: confidence,
+                rawSpeciesConfidence: rawSpecies, pulseCount: pulseCount,
                 sessionID: sessionID, coordinate: coordinate,
                 relativeWavPath: relativePath, spectrogramImage: image)
             DispatchQueue.main.async { [weak self] in self?.onRecordingSaved?(report) }
@@ -767,7 +772,7 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
                                 String(format: "%.6f %.6f", c.lat, c.lon), tightColon: true))
         }
         switch outcome {
-        case .species(let code, let confidence, let pulseCount):
+        case .species(let code, let confidence, _, let pulseCount):
             fields.append(.init("Species Auto ID", code))
             fields.append(.init("OpenBat|Species Confidence", String(format: "%.3f", confidence)))
             fields.append(.init("OpenBat|Species Pulse Count", String(pulseCount)))
@@ -793,7 +798,7 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
     /// pulse that couldn't be classified is still evidence something happened, and
     /// only the model's own "definitely not a bat" call is discarded.
     enum AutoIDOutcome {
-        case species(code: String, confidence: Float, pulseCount: Int)
+        case species(code: String, confidence: Float, rawSpeciesConfidence: Float, pulseCount: Int)
         /// `pulseCount` is however many pulses WERE classified during the segment
         /// (0 when none were — e.g. recording armed with no AutoID model active, or
         /// classification just didn't keep up) — never assume it's 0.
@@ -861,7 +866,9 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
             return .noID(pulseCount: inSegment.count)
         }
         if let noiseClassName, outcome.species == noiseClassName { return .noise }
-        return .species(code: outcome.species, confidence: outcome.confidence, pulseCount: inSegment.count)
+        return .species(code: outcome.species, confidence: outcome.confidence,
+                        rawSpeciesConfidence: outcome.rawSpeciesConfidence,
+                        pulseCount: inSegment.count)
     }
 
     private static let iso8601: ISO8601DateFormatter = {
@@ -937,7 +944,7 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
     /// ever called, and "No ID" has no code to sanitize).
     private static func filenameSuffix(for outcome: AutoIDOutcome) -> String {
         switch outcome {
-        case .species(let code, _, _): return code
+        case .species(let code, _, _, _): return code
         case .noID: return "NoID"
         case .noise: return "NOISE"   // unreachable — rejected before renaming
         }

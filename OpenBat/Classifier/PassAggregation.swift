@@ -50,6 +50,18 @@ nonisolated enum PassAggregation {
         /// it is the only number that says how strong the acoustic evidence was
         /// independently of the user's own location and species settings.
         let meanRawConfidence: Float
+        /// Mean RAW score of the species actually reported — the same quantity
+        /// as `confidence`, measured before the priors were applied and the
+        /// posteriors renormalized.
+        ///
+        /// `meanRawConfidence` above is NOT that: it is the top score of
+        /// whatever each pulse individually predicted, so on a pass where the
+        /// pulses disagreed it is a maximum across several species and sits
+        /// ABOVE the reported species' own score. Printing the two side by side
+        /// as "before and after weighting" made a pass whose weighting had
+        /// pushed the species UP look as though it had been pushed down
+        /// (2026-09-05). This is the number that pairs with `confidence`.
+        let rawSpeciesConfidence: Float
     }
 
     /// Mean per-pulse raw confidence below this is NoID — the reference pipeline's
@@ -110,7 +122,8 @@ nonisolated enum PassAggregation {
             return Outcome(species: noiseClassName,
                            confidence: rawBest.value / n,
                            meanScores: rawSum.mapValues { $0 / n },
-                           meanRawConfidence: rawConfidence)
+                           meanRawConfidence: rawConfidence,
+                           rawSpeciesConfidence: rawBest.value / n)
         }
 
         // Real bat call by raw evidence — now defer to prior-adjusted posteriors to
@@ -127,7 +140,8 @@ nonisolated enum PassAggregation {
 
         return Outcome(species: best.key, confidence: meanConf,
                        meanScores: adjSum.mapValues { $0 / n },
-                       meanRawConfidence: rawConfidence)
+                       meanRawConfidence: rawConfidence,
+                       rawSpeciesConfidence: (rawSum[best.key] ?? 0) / n)
     }
 }
 

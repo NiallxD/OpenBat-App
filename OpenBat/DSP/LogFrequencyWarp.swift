@@ -48,7 +48,21 @@ nonisolated enum LogFrequencyWarp {
     /// finds which row of the SOURCE (linear) image already shows that Hz,
     /// and copies it across. Returns `image` unchanged if the inputs don't
     /// support warping (degenerate range, no backing CGImage, etc).
-    static func warp(_ image: UIImage, loHz: Double, hiHz: Double) -> UIImage? {
+    /// `heightScale` supersamples the result vertically: the destination has
+    /// that many times the rows of the source, each still copied whole from
+    /// the nearest source row.
+    ///
+    /// It adds no frequency resolution — there are only ever `binCount` real
+    /// measurements — but it stops the warp from THROWING resolution away.
+    /// At 1:1 the log stretch has to drop source rows at the top of the band
+    /// (where a log axis compresses) to make room for the ones it duplicates
+    /// at the bottom, and on a bat call the top of the band is where the
+    /// harmonics are. On screen that is invisible at a glance and not worth
+    /// the memory; in an exported picture that somebody zooms into to argue
+    /// about a species, it is the difference between a harmonic being there
+    /// and not. So the export asks for it and the live views don't.
+    static func warp(_ image: UIImage, loHz: Double, hiHz: Double,
+                     heightScale: Int = 1) -> UIImage? {
         let lo = clampedLo(loHz)
         guard hiHz > lo,
               let cg = image.cgImage,
@@ -60,14 +74,15 @@ nonisolated enum LogFrequencyWarp {
         let width = cg.width
         let height = cg.height
         guard height > 1 else { return image }
+        let outHeight = height * max(1, heightScale)
         let bytesPerRow = cg.bytesPerRow
-        var out = [UInt8](repeating: 0, count: bytesPerRow * height)
+        var out = [UInt8](repeating: 0, count: bytesPerRow * outHeight)
         let logSpan = log(hiHz / lo)
 
         out.withUnsafeMutableBytes { dst in
             guard let dstBase = dst.baseAddress else { return }
-            for y in 0..<height {
-                let v = Double(y) / Double(height - 1)                 // 0 = top, 1 = bottom
+            for y in 0..<outHeight {
+                let v = Double(y) / Double(outHeight - 1)              // 0 = top, 1 = bottom
                 let hz = lo * exp((1 - v) * logSpan)                   // log-axis Hz at this row
                 let linearFrac = (hiHz - hz) / (hiHz - loHz)           // where that Hz sits in the ORIGINAL linear source
                 let srcY = min(height - 1, max(0, Int((linearFrac * Double(height - 1)).rounded())))
@@ -78,7 +93,7 @@ nonisolated enum LogFrequencyWarp {
         }
 
         guard let provider = CGDataProvider(data: Data(out) as CFData),
-              let warped = CGImage(width: width, height: height,
+              let warped = CGImage(width: width, height: outHeight,
                                    bitsPerComponent: cg.bitsPerComponent, bitsPerPixel: cg.bitsPerPixel,
                                    bytesPerRow: bytesPerRow,
                                    space: cg.colorSpace ?? CGColorSpaceCreateDeviceRGB(),

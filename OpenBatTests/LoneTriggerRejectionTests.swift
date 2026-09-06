@@ -51,8 +51,8 @@ struct LoneTriggerRejectionTests {
     func keepsSpeciesRegardless() {
         // The detector's own gate decides whether a pass this thin can be named;
         // once it HAS been named, the recording is evidence and stays.
-        #expect(!AudioRecorder.rejectsSegment(.species(code: "LACI", confidence: 0.4, pulseCount: 1)))
-        #expect(!AudioRecorder.rejectsSegment(.species(code: "MYVO", confidence: 0.8, pulseCount: 30)))
+        #expect(!AudioRecorder.rejectsSegment(.species(code: "LACI", confidence: 0.4, rawSpeciesConfidence: 0.4, pulseCount: 1)))
+        #expect(!AudioRecorder.rejectsSegment(.species(code: "MYVO", confidence: 0.8, rawSpeciesConfidence: 0.8, pulseCount: 30)))
     }
 
     @Test("NOISE is still rejected outright")
