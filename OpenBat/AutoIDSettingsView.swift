@@ -11,11 +11,26 @@
 import SwiftUI
 
 struct AutoIDSettingsView: View {
+    @Environment(FeatureFlagStore.self) private var flags
     @Bindable var settings: AutoIDSettings
     @Bindable var location: LocationProvider
 
     var body: some View {
         Form {
+            // **Says so at the top, and leaves the controls alone** (Niall,
+            // 2026-09-06). Somebody who opens this screen while identification
+            // is switched off is asking why nothing is being named, so the
+            // answer belongs where they are looking. The model list stays live
+            // underneath: choosing a model is a preference that will take
+            // effect when the switch comes back, and disabling it would lose
+            // that choice for no gain.
+            if flags.isRemotelyDisabled(.automaticID) && !flags.isEnabled(.automaticID) {
+                Section {
+                    Text(Feature.automaticID.unavailableNote)
+                        .font(.callout)
+                    ControlNote("Recording, playback and export are unaffected. Anything you pick here will apply when it comes back.")
+                }
+            }
             locationUnavailableSection
             locationSuggestionSection
 

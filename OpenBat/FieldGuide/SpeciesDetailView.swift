@@ -150,6 +150,7 @@ private struct ReadingColumn: ViewModifier {
 }
 
 struct SpeciesDetailView: View {
+    @Environment(FeatureFlagStore.self) private var flags
     let species: GuideSpecies
     let store: SpeciesGuideStore
     let presenceStore: SpeciesPresenceStore
@@ -531,15 +532,33 @@ struct SpeciesDetailView: View {
                         }
                         .guideSection(.quickFacts, offsets: $sectionOffsets, tracking: link != nil)
                     }
-                    GuideCard(title: "Distribution",
-                              accessory: AnyView(GBIFDistributionModePill(
-                                  species: species, presenceStore: presenceStore,
-                                  mode: $rangeMode))) {
-                        GBIFDistributionCard(species: species, presenceStore: presenceStore,
-                                             mode: $rangeMode, mapHeight: 200)
-                            .clipShape(RoundedRectangle(cornerRadius: 12))
+                    // **The card stays and its map is replaced, rather than
+                    // the section disappearing** (Niall, 2026-09-06). This
+                    // switch exists for range data that turns out to be wrong,
+                    // and a species page that silently loses a section reads as
+                    // a page that never had one — somebody comparing two
+                    // species would think one of them simply has no range
+                    // recorded. Saying the map is unavailable is the honest
+                    // version, and it is a sentence rather than a section.
+                    if flags.isEnabled(.rangeMaps) {
+                        GuideCard(title: "Distribution",
+                                  accessory: AnyView(GBIFDistributionModePill(
+                                      species: species, presenceStore: presenceStore,
+                                      mode: $rangeMode))) {
+                            GBIFDistributionCard(species: species, presenceStore: presenceStore,
+                                                 mode: $rangeMode, mapHeight: 200)
+                                .clipShape(RoundedRectangle(cornerRadius: 12))
+                        }
+                        .guideSection(.distribution, offsets: $sectionOffsets, tracking: link != nil)
+                    } else {
+                        GuideCard(title: "Distribution") {
+                            Text(Feature.rangeMaps.unavailableNote)
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .guideSection(.distribution, offsets: $sectionOffsets, tracking: link != nil)
                     }
-                    .guideSection(.distribution, offsets: $sectionOffsets, tracking: link != nil)
                     if species.measurements != nil || species.morphology != nil {
                         GuideCard(title: "Measurements & Morphology") { measurementsContent }
                             .guideSection(.measurements, offsets: $sectionOffsets, tracking: link != nil)

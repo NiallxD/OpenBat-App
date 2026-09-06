@@ -78,6 +78,7 @@ struct RecordingRow: View {
     /// nil while it is still being worked out. See `iNatBadge`.
     @State private var iNatRating: INatUploadAssessment.Rating?
     @State private var iNatPosted = false
+    @Environment(FeatureFlagStore.self) private var flags
     @State private var postSignal = INatPostSignal.shared
 
     /// Wide enough that the picture reads as the square end of the row — the
@@ -122,6 +123,24 @@ struct RecordingRow: View {
     private var text: some View {
         HStack(alignment: .center, spacing: 8) {
             VStack(alignment: .leading, spacing: 2) {
+                // **No species lines at all while identification is switched
+                // off** (Niall, 2026-09-06), rather than sixty rows each
+                // reading "Not identified" — the same dead phrase repeated
+                // down a list says less than its absence does, and the launch
+                // notice has already explained why. What is left is what the
+                // app still knows for certain: how long it was, how many
+                // pulses, and when.
+                //
+                // Names already stored are hidden too, not just new ones. This
+                // switch exists for a model producing bad identifications, and
+                // in that case the old ones are exactly what should stop being
+                // shown.
+                if !flags.isEnabled(.automaticID) {
+                    Text(Self.time(recording.date)).font(.headline)
+                    Text("\(Self.durationString(recording.durationSeconds)) · \(recording.pulseCount) pulse\(recording.pulseCount == 1 ? "" : "s")")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
                 HStack(spacing: 6) {
                     Text(recording.species).font(.headline)
                     Text("·").foregroundStyle(.secondary)
@@ -148,6 +167,7 @@ struct RecordingRow: View {
                 Text("\(Self.durationString(recording.durationSeconds)) · \(recording.pulseCount) pulse\(recording.pulseCount == 1 ? "" : "s") · \(Self.time(recording.date))")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                }
             }
             Spacer(minLength: 4)
             uploadBadge
@@ -215,6 +235,16 @@ struct RecordingRow: View {
     /// impossible for a scrolling list. The estimate is the same arithmetic the
     /// trim performs, so the list and the sheet agree.
     private func assessForINaturalist(_ passes: [PassRecord]) {
+        // Nothing to advertise while posting is switched off, and no reason to
+        // pay for the scan — see `Feature.iNaturalistUpload`. Cleared rather
+        // than left standing, so a switch thrown mid-session takes the badges
+        // with it instead of leaving a leaf on a row that can no longer be
+        // posted.
+        guard flags.isEnabled(.iNaturalistUpload) else {
+            iNatRating = nil
+            iNatPosted = false
+            return
+        }
         // Cheapest question first: a posted recording draws the seal and needs
         // no score, so it never touches the filesystem.
         iNatPosted = INatPostLedger.hasPosted(recordingID: recording.id)

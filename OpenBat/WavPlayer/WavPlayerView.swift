@@ -182,6 +182,7 @@ struct WavPlayerView: View {
     /// looking at the actual spectrogram. That live slider is now the ONLY
     /// control for it — the duplicate in Settings was removed 2026-08-18.
     @AppStorage("display.playbackThumbnailNoiseFloor") private var noiseFloor = 0.40
+    @Environment(FeatureFlagStore.self) private var flags
     /// Fixed, not stored. This was an `@AppStorage` slider in Settings, removed
     /// 2026-08-18 with the rest of that sheet's research parameters: it has no
     /// meaning that can be stated plainly to a general user, and no calibration
@@ -308,6 +309,23 @@ struct WavPlayerView: View {
             let item = WavExport.makeShareItem(wavURL: url, overview: image, baseName: baseName)
             await MainActor.run { shareItem = ShareItem(url: item) }
         }
+    }
+
+    /// The share menu's iNaturalist entry, or nil when posting is switched off.
+    ///
+    /// Gone rather than disabled: `PlaybackView` draws a plain share button
+    /// instead of a menu when this is nil, so the screen reads as one that
+    /// never had the feature. Anybody who got this far has already had the
+    /// maintenance notice on launch (Niall, 2026-09-06).
+    ///
+    /// Hoisted out of the call site because putting the condition inline there
+    /// tipped that expression past what the type-checker would do — the same
+    /// wall `ContentView`'s body keeps running into. Written as a `guard` and a
+    /// closure rather than a ternary for the same reason: a ternary choosing
+    /// between a bare method reference and `nil` was still enough to defeat it.
+    private var iNaturalistAction: (() -> Void)? {
+        guard flags.isEnabled(.iNaturalistUpload) else { return nil }
+        return { addToINaturalist() }
     }
 
     /// Builds the iNaturalist hand-off and opens the sheet. The text is cheap
@@ -522,7 +540,7 @@ struct WavPlayerView: View {
             // of the screen rather than sitting with the transport controls
             // where they belong: snug under the minimap/time readout.
             PlaybackControlsView(engine: engine, onShare: shareRecording,
-                                 onAddToINaturalist: addToINaturalist)
+                                 onAddToINaturalist: iNaturalistAction)
                 .padding(.bottom, 8)
         }
     }

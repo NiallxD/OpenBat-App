@@ -63,9 +63,10 @@ struct ContentView: View {
     @State private var pulseDetector = PulseDetector()
     @State private var recorder = AudioRecorder()
     @State private var autoIDSettings = AutoIDSettings()
-    /// Remote kill switches — see `FeatureFlags.swift`. Threaded down rather
-    /// than read from a global so a preview or a test can hand a screen its own
-    /// answers, and so the compiler tells us every place that asks.
+    /// Remote kill switches — see `FeatureFlags.swift`. Owned here and put into
+    /// the environment below, so the leaf views that actually ask (the
+    /// recordings list, the player, Settings) read it without every initializer
+    /// in between having to carry it.
     @State private var featureFlags = FeatureFlagStore()
     /// The maintenance notice, shown once per distinct message.
     @State private var maintenanceNotice: String?
@@ -269,6 +270,10 @@ struct ContentView: View {
 
     var body: some View {
         tabHost
+            // Read by leaf views — the recordings list, the player, Settings —
+            // rather than threaded through every initializer between here and
+            // them. A sheet inherits it, so the iNaturalist screens see it too.
+            .environment(featureFlags)
             // Keyed on the session start, so it re-arms for each new listening
             // run and cancels automatically if the user stops before 60 s.
             // A sleep beats polling here: there is exactly one deadline.
@@ -496,7 +501,9 @@ struct ContentView: View {
             // so whichever finishes second has to be the one that triggers it,
             // or a launch where the fix wins leaves every species unresolved.
             if let coordinate = location.currentCoordinate {
-                await autoIDSettings.refreshPriors(at: coordinate, using: speciesPresence)
+                if featureFlags.isEnabled(.locationWeighting) {
+                    await autoIDSettings.refreshPriors(at: coordinate, using: speciesPresence)
+                }
                 recordPriorSnapshot()
             }
             await speciesPresence.refreshFromRemote()
@@ -510,7 +517,16 @@ struct ContentView: View {
         // so a late answer takes the feature away rather than being missed.
         .task {
             featureFlags.loadCached()
+            autoIDSettings.remotelyDisabled = !featureFlags.isEnabled(.automaticID)
+            autoIDSettings.locationWeightingDisabled = !featureFlags.isEnabled(.locationWeighting)
             await featureFlags.refreshFromRemote()
+            // Set again after the network answer, which can differ from the
+            // cached one and can land seconds into a session. The detector
+            // rebuilds its classifier lazily, so a switch thrown here stops
+            // classification from the next pulse rather than at the next launch.
+            autoIDSettings.remotelyDisabled = !featureFlags.isEnabled(.automaticID)
+            autoIDSettings.locationWeightingDisabled = !featureFlags.isEnabled(.locationWeighting)
+            pulseDetector.refreshModel()
             if let message = featureFlags.pendingMaintenanceMessage() {
                 maintenanceNotice = message
                 featureFlags.markMaintenanceMessageSeen()
@@ -609,7 +625,7 @@ struct ContentView: View {
             }
             pulseDetector.autoIDSettings = autoIDSettings
             pulseDetector.store = classStore
-            recorder.setActiveModel(id: autoIDSettings.activeModelID)
+            recorder.setActiveModel(id: autoIDSettings.effectiveModelID)
             recorder.setPassGates(minConfidence: autoIDSettings.minPassConfidence,
                                   minPulseCount: autoIDSettings.minPassPulseCount)
             pulseDetector.coordinateProvider = { [location] in location.currentCoordinate }
@@ -993,7 +1009,8 @@ struct ContentView: View {
                 .padding(.horizontal, 8)
                 .padding(.top, 8)
                 .padding(.bottom, 4)
-            SpeciesFeedView(store: classStore, guide: speciesGuide, presenceStore: speciesPresence, activeSessionID: classStore.activeSessionID, sessionStart: feedSessionStart, autoIDActive: autoIDSettings.activeModelID != nil)
+            SpeciesFeedView(store: classStore, guide: speciesGuide, presenceStore: speciesPresence, activeSessionID: classStore.activeSessionID, sessionStart: feedSessionStart, autoIDActive: autoIDSettings.effectiveModelID != nil,
+                                identificationDisabled: autoIDSettings.remotelyDisabled)
         }
         .panelCard()
     }
@@ -1892,7 +1909,9 @@ struct ContentView: View {
     private func recordPriorSnapshot(sessionID: UUID? = nil) {
         guard let data = autoIDSettings.priorSnapshotData else { return }
         classStore.recordPriorSnapshot(modelID: data.modelID, priors: data.priors,
-                                       disabled: data.disabled, sessionID: sessionID)
+                                       disabled: data.disabled,
+                                       locationWeightingApplied: !autoIDSettings.locationWeightingDisabled,
+                                       sessionID: sessionID)
     }
 
     /// Offers to calibrate a microphone the first time it turns up, if this is a
@@ -2060,7 +2079,14 @@ struct ContentView: View {
     /// Which bats are plausible near the user right now — same presence data
     /// the field guide's "Nearby" view uses, just a button away from the
     /// detector instead of a tab switch.
+    /// **Hidden when location weighting is off** (Niall, 2026-09-06). "Which
+    /// bats are near you" is the weighting's own question asked directly, so
+    /// with the weighting switched off there is no answer to give — and showing
+    /// the model's whole species list unfiltered would answer a different
+    /// question while looking like this one.
+    @ViewBuilder
     private var nearbySpeciesButton: some View {
+        if featureFlags.isEnabled(.locationWeighting) {
         Button { showNearbySpecies = true } label: {
             Image("batIcon")
                 .resizable()
@@ -2071,6 +2097,7 @@ struct ContentView: View {
         // its own, so it must never ride along with an ambient withAnimation.
         .transaction { $0.animation = nil }
         .accessibilityLabel("Bats near you")
+        }
     }
 
     /// Settings / diagnostics menu — shown in the nav-bar trailing slot on the
@@ -2246,7 +2273,8 @@ struct ContentView: View {
                 .allowsHitTesting(!effectiveSpectrogramShowsSpeciesID)
 
             if effectiveSpectrogramShowsSpeciesID {
-                SpeciesFeedView(store: classStore, guide: speciesGuide, presenceStore: speciesPresence, activeSessionID: classStore.activeSessionID, sessionStart: feedSessionStart, autoIDActive: autoIDSettings.activeModelID != nil)
+                SpeciesFeedView(store: classStore, guide: speciesGuide, presenceStore: speciesPresence, activeSessionID: classStore.activeSessionID, sessionStart: feedSessionStart, autoIDActive: autoIDSettings.effectiveModelID != nil,
+                                identificationDisabled: autoIDSettings.remotelyDisabled)
             }
         }
     }
@@ -2262,7 +2290,8 @@ struct ContentView: View {
             if showsSpeciesID {
                 // Mirrors the spectrogram panel's species ID list, thumbnail
                 // included — see `spectrogramPanelContent`.
-                SpeciesFeedView(store: classStore, guide: speciesGuide, presenceStore: speciesPresence, activeSessionID: classStore.activeSessionID, sessionStart: feedSessionStart, autoIDActive: autoIDSettings.activeModelID != nil)
+                SpeciesFeedView(store: classStore, guide: speciesGuide, presenceStore: speciesPresence, activeSessionID: classStore.activeSessionID, sessionStart: feedSessionStart, autoIDActive: autoIDSettings.effectiveModelID != nil,
+                                identificationDisabled: autoIDSettings.remotelyDisabled)
             }
         }
     }

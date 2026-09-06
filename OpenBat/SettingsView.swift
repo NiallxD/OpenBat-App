@@ -403,7 +403,16 @@ struct SettingsView: View {
                 }
                 ControlNote("Observations you've already posted stay on iNaturalist — this only forgets the credential on this phone. You can also revoke OpenBat from your iNaturalist account settings, which stops it working even if the phone is lost.")
             } header: {
-                CardHeader("iNaturalist", "Signed in. OpenBat only ever posts when you tap Post.")
+                // **The card stays when posting is switched off, and only its
+                // description changes** (Niall, 2026-09-06). Everything in it
+                // is account and privacy — the log, and signing out — and
+                // taking those away would leave somebody signed in to a service
+                // with no way to sign out of it. What does change is the line
+                // promising OpenBat posts when you tap Post, which is not true
+                // while there is nothing to tap.
+                CardHeader("iNaturalist", flags.isEnabled(.iNaturalistUpload)
+                           ? "Signed in. OpenBat only ever posts when you tap Post."
+                           : "Signed in. Posting is switched off at the moment.")
             }
         }
     }

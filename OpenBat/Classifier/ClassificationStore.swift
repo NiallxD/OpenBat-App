@@ -53,6 +53,16 @@ struct PriorSnapshot: Codable, Identifiable {
     /// listed separately because "off" and "very unlikely" are different
     /// statements and only one of them is the user's decision.
     let disabled: [String]
+    /// False when location weighting was switched off remotely while this
+    /// session ran — see `Feature.locationWeighting`. Optional `Codable`, so
+    /// every record written before this existed decodes as nil and is read as
+    /// true, which is what those sessions actually did.
+    ///
+    /// It matters for the iNaturalist description: a snapshot of all-1.00
+    /// weights and a session with no weighting at all produce the same numbers
+    /// and are different claims, and an identifier reading "weighted 1.00" has
+    /// no way to tell that nothing was weighing anything.
+    var locationWeightingApplied: Bool?
 }
 
 struct RecordingSession: Codable, Identifiable {
@@ -508,16 +518,19 @@ final class ClassificationStore {
     /// A snapshot identical to the last one is dropped — a refresh that changed
     /// nothing is not an event.
     func recordPriorSnapshot(modelID: String, priors: [String: Float], disabled: [String],
+                             locationWeightingApplied: Bool = true,
                              sessionID: UUID? = nil) {
         guard let target = sessionID ?? activeSessionID,
               let i = sessions.firstIndex(where: { $0.id == target })
         else { return }
         if let last = sessions[i].priorSnapshots?.last,
-           last.modelID == modelID, last.priors == priors, last.disabled == disabled {
+           last.modelID == modelID, last.priors == priors, last.disabled == disabled,
+           (last.locationWeightingApplied ?? true) == locationWeightingApplied {
             return
         }
         let snapshot = PriorSnapshot(id: UUID(), takenAt: Date(), modelID: modelID,
-                                     priors: priors, disabled: disabled)
+                                     priors: priors, disabled: disabled,
+                                     locationWeightingApplied: locationWeightingApplied)
         sessions[i].priorSnapshots = (sessions[i].priorSnapshots ?? []) + [snapshot]
         persistSessions()
     }

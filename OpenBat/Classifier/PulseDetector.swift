@@ -466,7 +466,7 @@ final class PulseDetector {
         lastPassPulseCount = passPulseCount
         lastPassDate = Date()
         ClassificationLogger.shared.logPass(passResult, pulseCount: passPulseCount,
-                                            modelID: autoIDSettings?.activeModelID)
+                                            modelID: autoIDSettings?.effectiveModelID)
 
         // Second-place species by mean posterior — surfaced as a runner-up suggestion
         // in the species feed. Not meaningful for a NOISE outcome (its meanScores are
@@ -479,7 +479,7 @@ final class PulseDetector {
         // is one it can't cleanly separate? And is the runner-up a complex-mate running
         // close enough to make this an *active* ambiguity? Both are surfaced in the UI
         // so a confident-looking number isn't shown for a confusable species in silence.
-        let complex = ModelRegistry.descriptor(id: autoIDSettings?.activeModelID)?
+        let complex = ModelRegistry.descriptor(id: autoIDSettings?.effectiveModelID)?
             .complex(for: outcome.species)
         let complexAmbiguous = complex.map { c in
             runnerUp.map { c.codes.contains($0.key)
@@ -604,7 +604,11 @@ final class PulseDetector {
     /// Resolves (and caches) the classifier + descriptor for the active model, or nil
     /// when no model is active or it fails to load. Called on the main thread.
     private func activeClassifier() -> (classifier: SpeciesClassifier, descriptor: ModelDescriptor)? {
-        guard let id = autoIDSettings?.activeModelID,
+        // `effectiveModelID`, not `activeModelID`: identification switched off
+        // remotely means no classifier is built and none runs, which is what a
+        // kill switch on this has to mean. Detection, recording, spectrograms
+        // and playback are all upstream of here and continue untouched.
+        guard let id = autoIDSettings?.effectiveModelID,
               let descriptor = ModelRegistry.descriptor(id: id) else {
             cachedModelID = nil
             cachedClassifier = nil

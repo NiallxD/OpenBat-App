@@ -975,6 +975,11 @@ nonisolated enum INatExport {
     /// lines nobody reads; what matters is the weight on the species being
     /// claimed, and how aggressively everything else was pushed down.
     private static func priorLines(recording: Recording, snapshot: PriorSnapshot?) -> [String] {
+        // Nothing was weighing anything, and an all-1.00 snapshot would say
+        // that only to somebody who worked it out from forty numbers.
+        if let snapshot, snapshot.locationWeightingApplied == false {
+            return ["[Location weighting](\(priorsPostURL)): switched off for this session, so every species the model knows was treated as equally likely here."]
+        }
         guard let snapshot, !snapshot.priors.isEmpty else {
             // Silence would read as "no weighting was applied", which is a
             // different and much stronger claim than "we didn't record it".

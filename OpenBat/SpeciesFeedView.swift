@@ -33,6 +33,10 @@ struct SpeciesFeedView: View {
     /// the feed can never populate in that state, so the empty view explains how to
     /// turn a classifier on instead of implying the app is just waiting for a bat.
     var autoIDActive: Bool = true
+    /// True when identification is switched off remotely rather than simply
+    /// unselected. The two look identical in the feed and need opposite
+    /// messages: one is a thing the user can fix in Settings, the other is not.
+    var identificationDisabled: Bool = false
 
     private var entries: [PassRecord] {
         store.speciesFeed(sessionID: activeSessionID, since: sessionStart)
@@ -92,6 +96,11 @@ struct SpeciesFeedView: View {
     }
 
     private var emptyMessage: String {
+        if identificationDisabled {
+            // No instruction, because there is nothing the user can do — and no
+            // reason either, because the launch notice already gave one.
+            return "Identification is switched off."
+        }
         if !autoIDActive {
             return "No AutoID model is active. Turn one on in Settings ▸ AutoID to identify species."
         }

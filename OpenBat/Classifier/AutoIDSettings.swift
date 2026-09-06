@@ -61,6 +61,28 @@ final class AutoIDSettings {
 
     /// The single active model. `nil` means AutoID is off (capture/stats still run).
     var activeModelID: String?
+
+    /// Set from the remote config on every launch, and NEVER persisted — see
+    /// `Feature.automaticID`.
+    ///
+    /// Deliberately separate from `activeModelID` rather than clearing it: a
+    /// switch thrown while the app is off should not silently forget which
+    /// model the user chose, or turning identification back on would leave
+    /// everybody with nothing selected and no idea why.
+    var remotelyDisabled = false
+
+    /// Set from the remote config on every launch, and never persisted — see
+    /// `Feature.locationWeighting`. Off, every species the user has left
+    /// enabled is weighted equally; their own enable/disable choices still
+    /// apply, because those are theirs and not the weighting's.
+    var locationWeightingDisabled = false
+
+    /// The model that will actually classify, which is nothing at all while
+    /// identification is switched off remotely. Read this anywhere the answer
+    /// decides whether classification HAPPENS; `activeModelID` is still the
+    /// right thing to read and write where the answer is which model the user
+    /// has picked.
+    var effectiveModelID: String? { remotelyDisabled ? nil : activeModelID }
     /// Settings for every known model, keyed by model id.
     var perModel: [String: ModelSettings]
 
@@ -340,16 +362,21 @@ final class AutoIDSettings {
         var priors: [String: Float] = [:]
         var disabled: [String] = []
         for (code, state) in model.species {
-            priors[code] = state.enabled ? max(0.01, state.prior) : 0.01
+            priors[code] = effectivePrior(for: code)
             if !state.enabled { disabled.append(code) }
         }
         return (id, priors, disabled.sorted())
     }
 
     /// Prior to apply during classification. Disabled species are suppressed to 0.01.
+    ///
+    /// With location weighting switched off remotely every enabled species
+    /// weighs the same. The user's own switches are still honoured: turning off
+    /// a species is their decision about their own data, and has nothing to do
+    /// with the range grid this flag governs.
     func effectivePrior(for code: String) -> Float {
         guard let s = activeModel?.species[code], s.enabled else { return 0.01 }
-        return max(0.01, s.prior)
+        return locationWeightingDisabled ? 1.0 : max(0.01, s.prior)
     }
 
     /// Snapshot of the active model's quality gate (plain value type, off the @Observable).
