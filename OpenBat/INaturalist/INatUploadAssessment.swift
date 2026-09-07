@@ -184,12 +184,28 @@ nonisolated struct INatUploadAssessment {
 
         // ---- Score ----
 
+        // **A recording nobody classified is scored out of the components that
+        // still mean something, rescaled to 100** (Niall, 2026-09-06).
+        // Confidence, species agreement and the runner-up margin are 60 points
+        // between them and none of them exists without a model. Left in, every
+        // such recording would top out at 40 and read as poor — which is wrong:
+        // a clean twelve-call pass with a location is a genuinely good record
+        // whether or not a model put a name on it, and iNaturalist's whole
+        // premise is that a person supplies the name.
+        //
+        // So those three are skipped and what remains — how much there is to
+        // look at, how consistent it is, room under the size limit, and the
+        // echo deduction — is scaled up to fill the scale. The grades then mean
+        // the same thing on both kinds of recording, which is what lets them
+        // sort in one list.
+        let identified = !recording.isUnidentified
         var score = 0.0
 
         // Confidence (35). The RAW figure, not the location-weighted one: the
         // weighted score has the observer's own settings baked into it, and
         // what is being judged here is how good the evidence is, not how
         // plausible the species is where they happen to be standing.
+        if identified {
         let raws = passes.compactMap(\.rawConfidence)
         let confidence = raws.isEmpty
             ? (recording.confidence ?? 0)
@@ -224,6 +240,9 @@ nonisolated struct INatUploadAssessment {
         score += 10 * ramp(margin, from: 0.05, to: 0.5)
         if let best, best.isComplexAmbiguous {
             notes.append("Another species in the same group scored close behind, and the two can't be told apart acoustically.")
+        }
+        } else {
+            notes.append("Nothing identified this recording — species identification wasn't running — so it goes up as a bat, for somebody else to name.")
         }
 
         // How much there is to look at (20). One call is a guess; a sequence is
@@ -285,7 +304,11 @@ nonisolated struct INatUploadAssessment {
             }
         }
 
-        return INatUploadAssessment(score: Int(max(0, score).rounded()),
+        // The three skipped components are 60 of the 100, so what is left is
+        // worth 40 and is stretched over the full scale.
+        if !identified { score *= 100.0 / 40.0 }
+
+        return INatUploadAssessment(score: Int(max(0, min(100, score)).rounded()),
                                     blockers: blockers,
                                     alreadyPosted: alreadyPosted,
                                     overridden: overridden,

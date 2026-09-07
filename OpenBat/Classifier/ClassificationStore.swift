@@ -201,6 +201,19 @@ struct PassRecord: Codable, Identifiable, NoIDFilterable {
     /// list (so the user can see "we heard something, it wasn't a bat"), but excluded
     /// from the session map (see `AutoIDSettings.isMappable`).
     var isNoise: Bool { species == "NOISE" }
+    /// True when this pass's calls were never put to a model at all — species
+    /// identification was switched off, or no model was active — as opposed to
+    /// having been classified and come back inconclusive.
+    ///
+    /// **Its own state, and emphatically not NOID.** A NoID pass is one the app
+    /// tried to name and could not, which makes it junk worth sweeping up:
+    /// "Delete NoID Recordings" exists precisely to bulk-delete them. A pass
+    /// that was never offered to a model is not junk — it is a perfectly good
+    /// recording of a bat that nothing was asked about, and it still carries
+    /// every measurement an identifier needs. Filing it as NOID would have put
+    /// it one tap from deletion (Niall, 2026-09-06).
+    var isUnidentified: Bool { species == "UNID" }
+
     /// True when a pulse triggered the detector and was classified, but the pass's
     /// mean raw confidence never cleared the model's NoID threshold (or the winning
     /// species didn't clear the user's own confidence/pulse-count gates) — see
@@ -268,6 +281,9 @@ struct Recording: Codable, Identifiable, NoIDFilterable {
     /// nil means no upload was ever attempted (recorded before this field existed,
     /// or while community-science contribution was off) — see UploadStatus.swift.
     var uploadStatus: UploadStatus? = nil
+    /// See `PassRecord.isUnidentified` — never classified, as against
+    /// classified and inconclusive.
+    var isUnidentified: Bool { species == "UNID" }
     var isNoID: Bool { species == "NOID" }
     var coordinate: CLLocationCoordinate2D? {
         guard let latitude, let longitude else { return nil }
@@ -1298,6 +1314,7 @@ enum SpeciesInfo {
         "MYYU": "Yuma Myotis",
         "NOISE": "Non-bat noise",
         "NOID": "Unidentified",
+        "UNID": "Not identified",
         "NYHU": "Evening Bat",
         "NYMA": "Big Free-tailed Bat",
         "PAHE": "Canyon Bat",

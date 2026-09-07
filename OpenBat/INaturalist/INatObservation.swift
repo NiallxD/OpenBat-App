@@ -48,9 +48,9 @@
 //
 //  WHAT GOES IN THE BUNDLE
 //  -----------------------
-//    • An AUDIBLE copy of the call — see `audibleCopy`. The original is 384 kHz
-//      and no browser will play it, which makes the sound attachment on a lot of
-//      existing bat observations effectively decorative.
+//    • The bat pass as recorded — full spectrum, 384 kHz, real timing. It is
+//      the only sound that goes, and it needs a program that can slow it down
+//      to be heard; the spectrograms are what a reader looks at.
 //    • Two spectrograms, built by `INatImages`: the pass cropped to the call
 //      band, and one call in detail with kHz/ms axes on it. The full-range
 //      overview the player draws is deliberately NOT what gets sent — see that
@@ -266,6 +266,13 @@ nonisolated enum INatExport {
     /// photo and which is a sound, and telling them apart by file extension
     /// afterwards is the kind of thing that quietly breaks.
     struct Files {
+        /// The audible time-expanded copy.
+        ///
+        /// **No longer built, and so never attached** (Niall, 2026-09-06).
+        /// `prepareFiles` leaves this nil and both routes carry the
+        /// full-spectrum pass alone. The pipeline that made it — `packedToCalls`,
+        /// `scrubbed`, `audibleCopy` — is still here and still tested; setting
+        /// this again is the whole of bringing the second sound back.
         var audible: URL?
         /// The rendered spectrograms — the cropped context view and the
         /// axis-labelled call detail. Written by the sheet once `INatImages`
@@ -283,8 +290,8 @@ nonisolated enum INatExport {
         var upload: URL
 
         /// What the manual route hands over — and it is exactly what the
-        /// automatic route posts: the two sounds in upload order, then the
-        /// pictures in theirs.
+        /// automatic route posts: the sound, then the pictures in upload
+        /// order.
         ///
         /// **The untrimmed recording is deliberately not in here** (Niall,
         /// 2026-09-06). It used to be, and it was the last place the mismatch
@@ -298,65 +305,47 @@ nonisolated enum INatExport {
         /// belongs.
         var all: [URL] { sounds + photos }
 
-        /// What goes to `/observation_sounds`, in upload order: the audible
-        /// time-expanded copy first, then the recording at its own rate.
+        /// What goes to `/observation_sounds`: the pass at its own rate, and
+        /// with `audible` unset that is the only sound.
         ///
-        /// That order is the point. iNaturalist plays the first sound on an
-        /// observation, and a 384 kHz file plays in no browser at all — leading
-        /// with it would give every visitor silence and leave them assuming the
-        /// record has no audio, which is what has happened to a lot of the
-        /// acoustic observations already on the site.
+        /// The order is kept anyway. iNaturalist plays the first sound on an
+        /// observation and a 384 kHz file plays in no browser at all, so
+        /// anything playable has to lead — which is the rule that matters again
+        /// the moment `audible` is populated.
         var sounds: [URL] { [audible, upload].compactMap { $0 } }
 
-        /// What the size limit and the upload score are judged against. The
-        /// audible copy is packed and so never larger, and the two are the same
-        /// length whenever it isn't — either way this is the binding figure.
+        /// What the size limit and the upload score are judged against — and,
+        /// now that this is the only sound, simply the size of what goes.
         var uploadBytes: Int {
             (try? FileManager.default.attributesOfItem(atPath: upload.path)[.size] as? Int)
                 .flatMap { $0 } ?? 0
         }
     }
 
-    /// Built off the main actor: the pass segment's audible copy, and the
-    /// bookkeeping that says which file goes where. Slow enough to matter — a
-    /// long recording at 384 kHz is tens of megabytes — so this never runs
-    /// inline.
+    /// Built off the main actor: the bookkeeping that says which file goes
+    /// where. It used to make the audible copy too, which is why it is
+    /// detached — a long recording at 384 kHz is tens of megabytes — and it
+    /// stays detached, because that is where the copy would go back.
     ///
     /// **Everything downstream comes from the segment, not from the file on
-    /// disk** (Niall, 2026-09-06). The segment IS the bat pass in real time;
-    /// the audible copy is that segment with its gaps spliced out, and the
-    /// pictures are drawn from the same segment by `INatImages`. Before this,
+    /// disk** (Niall, 2026-09-06). The segment IS the bat pass in real time,
+    /// and the pictures are drawn from that same segment by `INatImages`.
+    /// Before this,
     /// the sounds were cut out of the recording and the pictures were drawn
     /// from the whole file — so an observation's first spectrogram tile showed
     /// the recorder's pre-roll, seconds of dead air that appeared in no
     /// attachment anybody could download, and no picture shared a zero with
     /// any sound. An identifier noticed, which is exactly the person who
     /// should never have to wonder whether the picture is of the audio.
+    /// **The listening copy is not made here any more** (Niall, 2026-09-06).
+    /// The segment used to be packed to its calls, scrubbed and slowed 16× as
+    /// well, and that processed file went up as the observation's first sound.
+    /// What goes now is the recording and nothing derived from it. The steps
+    /// are still written down in `packedToCalls`, `scrubbed` and `audibleCopy`,
+    /// in the order they have to run in; this is the one line that used to call
+    /// them.
     static func prepareFiles(segment: PassSegment, baseName: String) -> Files {
-        var files = Files(original: segment.sourceURL, upload: segment.url)
-        // The listening copy is the segment put through three steps, in this
-        // order: the gaps cut out, the background scrubbed, then slowed 16×.
-        //
-        // Packed first, and scrubbed second, because the scrub measures the
-        // noise it removes from the audio it is handed — and packing removes
-        // gaps, not background. A packed pass is still around 90% background by
-        // duration (thirty calls of five milliseconds inside 1.7 seconds), so
-        // the median the estimator takes still lands in the noise, and there is
-        // four times less audio to run the FFT over.
-        //
-        // Slowed LAST, though it makes no difference to the samples: expansion
-        // is a header rewrite, so the denoiser would see exactly the same
-        // buffer either way. Doing it last keeps the rule "nothing after the
-        // expansion touches the audio" true.
-        //
-        // Never from the original, or the small upload would be paired with a
-        // full-length listening copy and the 20 MB limit would still bite on
-        // the file people actually play.
-        let packed = packedToCalls(source: segment.url, map: segment.silence, baseName: baseName)
-        let listenable = packed ?? segment.url
-        let scrubbed = scrubbed(listenable, baseName: baseName) ?? listenable
-        files.audible = audibleCopy(of: scrubbed, baseName: baseName)
-        return files
+        Files(original: segment.sourceURL, upload: segment.url)
     }
 
     // MARK: Scrubbing
@@ -804,6 +793,14 @@ nonisolated enum INatExport {
                               passes: [PassRecord],
                               descriptor: ModelDescriptor?) -> (name: String, note: String) {
         let order = "Chiroptera"
+        // Nothing was ever asked, which is a different sentence from "we asked
+        // and could not tell" — and the honest one to put on a public record.
+        // The observation is still worth making: the audio, the pictures, the
+        // measurements and the place are all there, and a human identifier is
+        // the point of iNaturalist anyway.
+        guard !recording.isUnidentified else {
+            return (order, "Species identification wasn't running for this recording, so it's logged only as a bat. Everything needed to identify it is attached.")
+        }
         guard !recording.isNoID, recording.species != "NOISE" else {
             return (order, "OpenBat couldn't identify this one, so it's logged only as a bat.")
         }
@@ -879,6 +876,12 @@ nonisolated enum INatExport {
         if let model = descriptor {
             lines.append("AutoID Classifier: [\(model.displayName)](\(modelsPostURL))")
         }
+        // Nothing to suggest, and saying so beats printing "Not identified
+        // (UNID)" as though it were a species. The measurements below are the
+        // whole of what this observation offers, and they are enough.
+        if recording.isUnidentified {
+            lines.append("No automatic identification: species identification was switched off when this was recorded. The call measurements below are unaffected — they are measured from the audio, not produced by a model.")
+        } else {
         // Spelled out as a SUGGESTION, and with the binomial, because the
         // observation itself is posted at genus — this line is the species
         // claim, and it needs to be findable and unambiguous for whoever
@@ -914,7 +917,10 @@ nonisolated enum INatExport {
         if let complex = passes.compactMap(\.complex).first {
             lines.append("Note: \(complex.name) — species in this group are hard to separate acoustically.")
         }
-        lines.append(contentsOf: priorLines(recording: recording, snapshot: priors))
+        }
+        if !recording.isUnidentified {
+            lines.append(contentsOf: priorLines(recording: recording, snapshot: priors))
+        }
 
         let pulses = passes.flatMap(\.pulses)
         lines.append("")
@@ -931,7 +937,7 @@ nonisolated enum INatExport {
 
         lines.append("")
         lines.append("**Notes:**")
-        lines.append("Both sounds and every picture here come from the same clip: the bat pass cut out of a longer recording, with a second of air either side. The full spectrum file is that clip exactly as recorded — original 384 kHz, real timing, nothing removed — and the numbered spectrograms are consecutive slices of it, so a time on a picture is the same time in that file. Use that one for any measurement. The other sound is for listening: the same clip with the gaps between calls cut out, the background removed, and played \(expansionFactor)× slower to bring it into hearing range. It is processed audio and is not evidence of anything; the whole-pass picture shows which gaps were cut. Call parameters are produced automatically by OpenBat from the recording. Nothing here has been checked by a person, and the identification suggestion is a best guess by an ML model, please treat all of it as a starting point rather than a result.")
+        lines.append("The sound and every picture here come from the same clip: the bat pass cut out of a longer recording, with a second of air either side. The sound is that clip exactly as recorded — original 384 kHz, real timing, nothing removed, nothing processed — and the numbered spectrograms are consecutive slices of it, so a time on a picture is the same time in the file. It is full spectrum, so it will need a bat sound program or a player that can slow it down before there is anything to hear. Call parameters are produced automatically by OpenBat from the recording. Nothing here has been checked by a person, and the identification suggestion is a best guess by an ML model, please treat all of it as a starting point rather than a result.")
         // The one thing the observation itself cannot say. It is posted at
         // genus deliberately, and without this a reader sees a species in the
         // notes and a genus on the record and reads it as a mistake rather

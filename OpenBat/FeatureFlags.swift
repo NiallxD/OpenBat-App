@@ -37,10 +37,15 @@
 //
 //  ⚠️ THE BRANCH MATTERS
 //  ---------------------
-//  `remoteURL` names a branch, and the repo's default branch is `master` while
-//  development happens on version branches. A flag edited on the wrong branch
-//  changes nothing and looks exactly like a bug in this file. Commit config
-//  changes straight to the branch named below.
+//  `remoteURL` names a branch — `main` — while development happens on version
+//  branches. A flag edited on the wrong branch changes nothing and looks
+//  exactly like a bug in this file. Commit config changes straight to `main`.
+//
+//  `main` carries the config file and nothing else that matters: it is a June
+//  checkpoint of the code, deliberately left behind. That is the point. The
+//  branch has to outlive every version branch, because a shipped build asks for
+//  this URL forever — pointing it at `v1.1` would break v1.1 installs the day
+//  v1.2 became the branch people edit. Never fetched as code, only as config.
 //
 //  SEQUENCING A RELEASE
 //  --------------------
@@ -145,7 +150,7 @@ final class FeatureFlagStore {
     /// serves HTML. Tracks a branch rather than a commit so an edit takes
     /// effect on the next launch. See the branch warning in this file's header.
     static let remoteURL = URL(string:
-        "https://raw.githubusercontent.com/NiallxD/OpenBat-App/master/OpenBatConfig.json")!
+        "https://raw.githubusercontent.com/NiallxD/OpenBat-App/main/OpenBatConfig.json")!
 
     /// What the remote file has switched OFF. Absent means on.
     private var remoteOff: Set<Feature> = []

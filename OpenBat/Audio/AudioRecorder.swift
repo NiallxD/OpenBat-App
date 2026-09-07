@@ -168,6 +168,16 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
     // async and per-pulse, so it doesn't line up with the recorder's own segment
     // boundaries. Trimmed on every insert so it never grows unbounded.
     private var recentClassificationsQ: [(date: Date, raw: [String: Float], adjusted: [String: Float])] = []
+    /// Every pulse the detector kept, classified or not (from
+    /// `PulseDetector.onPulseDetected`).
+    ///
+    /// Needed because a segment's pulse count used to come from the
+    /// classifications alone, so a recording made with no model active reported
+    /// zero pulses and read as an empty trigger — which is what made it
+    /// unpostable. The two queues are separate rather than one with an optional
+    /// score, because "how many calls are in this" and "what did the model make
+    /// of them" are different questions and only the second one can be absent.
+    private var recentDetectionsQ: [Date] = []
     // We write the WAV manually (RIFF header + 16-bit PCM) rather than via AVAudioFile:
     // AVAudioFile's WAV writer caps at 192 kHz and silently HALVES a 384 kHz capture on
     // write. Writing the header ourselves guarantees the file rate == the capture rate.
@@ -366,6 +376,17 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
     /// Record a single pulse's classification result (wire to
     /// `PulseDetector.onPulseClassified`). Whichever segment is open when the pulse's
     /// date falls inside its span picks this up as its `Species Auto ID` at close.
+    /// Record that a pulse was detected and kept, whether or not anything
+    /// classified it (wire to `PulseDetector.onPulseDetected`).
+    func addDetectedPulse(date: Date) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            recentDetectionsQ.append(date)
+            let cutoff = Date().addingTimeInterval(-(maxSegmentSecondsQ + 5))
+            recentDetectionsQ.removeAll { $0 < cutoff }
+        }
+    }
+
     func addClassifiedPulse(result: ClassificationResult, date: Date) {
         queue.async { [weak self] in
             guard let self else { return }
@@ -664,6 +685,7 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
         case .species(let code, let conf, let raw, let count):
             (species, confidence, rawSpecies, pulseCount) = (code, conf, raw, count)
         case .noID(let count): (species, confidence, rawSpecies, pulseCount) = ("NOID", nil, nil, count)
+        case .unidentified(let count): (species, confidence, rawSpecies, pulseCount) = ("UNID", nil, nil, count)
         case .noise: (species, confidence, rawSpecies, pulseCount) = ("NOISE", nil, nil, 0)   // unreachable — rejected before this is called
         }
         let reportDate = segmentStartDate ?? Date()
@@ -779,6 +801,15 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
         case .noID(let pulseCount):
             fields.append(.init("Species Auto ID", "No ID"))
             fields.append(.init("OpenBat|Species Pulse Count", String(pulseCount)))
+        case .unidentified(let pulseCount):
+            // GUANO's own vocabulary has no word for "nobody was asked", and
+            // "No ID" is the closest true thing to say to another tool: this
+            // file carries no identification. The pulse count is still real and
+            // still worth stating — it is what tells a reader the calls are in
+            // there. Our own record keeps the distinction (`isUnidentified`);
+            // the file does not have to.
+            fields.append(.init("Species Auto ID", "No ID"))
+            fields.append(.init("OpenBat|Species Pulse Count", String(pulseCount)))
         case .noise:
             fields.append(.init("Species Auto ID", "NOISE"))   // unreachable — rejected before this is called
         }
@@ -803,6 +834,12 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
         /// (0 when none were — e.g. recording armed with no AutoID model active, or
         /// classification just didn't keep up) — never assume it's 0.
         case noID(pulseCount: Int)
+        /// Pulses were detected but nothing was asked to name them —
+        /// identification switched off, or no model active. Distinct from
+        /// `noID`, which is a model's inconclusive answer and marks a recording
+        /// as junk that "Delete NoID Recordings" will sweep up. See
+        /// `PassRecord.isUnidentified`.
+        case unidentified(pulseCount: Int)
         case noise
     }
 
@@ -820,6 +857,13 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
             // is NOT a lone trigger: it means nothing was classified in this
             // segment (no model active, or classification not keeping up, which
             // is what a feeding buzz does), so it is kept.
+            return pulseCount > 0 && pulseCount < PulseDetector.minRecordedPassPulseCount
+        case .unidentified(let pulseCount):
+            // Same lone-trigger rule, for the same reason: one pulse with
+            // silence either side is a knock or a footfall whether or not a
+            // model was there to have an opinion about it. Zero cannot occur —
+            // `speciesAutoID` only reports this case when it counted some — but
+            // the expression is written to hold if it ever did.
             return pulseCount > 0 && pulseCount < PulseDetector.minRecordedPassPulseCount
         case .species:
             return false
@@ -843,7 +887,14 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
     private func speciesAutoID(segmentStart: Date, segmentEnd: Date) -> AutoIDOutcome {
         let inSegment = recentClassificationsQ.filter { $0.date >= segmentStart && $0.date <= segmentEnd }
         recentClassificationsQ.removeAll { $0.date <= segmentEnd }
-        guard !inSegment.isEmpty else { return .noID(pulseCount: 0) }
+        let detected = recentDetectionsQ.filter { $0 >= segmentStart && $0 <= segmentEnd }.count
+        recentDetectionsQ.removeAll { $0 <= segmentEnd }
+        guard !inSegment.isEmpty else {
+            // Calls were found and none was classified: report them, so the
+            // recording says how much is in it rather than reading as an empty
+            // trigger. Zero detections as well is the old case and stays NoID.
+            return detected > 0 ? .unidentified(pulseCount: detected) : .noID(pulseCount: 0)
+        }
 
         let descriptor = ModelRegistry.descriptor(id: activeModelIDQ)
         // NOT `descriptor?.noiseClassName ?? "NOISE"` — that would silently overwrite
@@ -946,6 +997,7 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
         switch outcome {
         case .species(let code, _, _, _): return code
         case .noID: return "NoID"
+        case .unidentified: return "Unidentified"
         case .noise: return "NOISE"   // unreachable — rejected before renaming
         }
     }

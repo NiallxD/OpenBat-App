@@ -332,6 +332,11 @@ final class PulseDetector {
     /// in-app passes — classification is per-pulse and async, independent of the
     /// recorder's own segment boundaries.
     var onPulseClassified: ((ClassificationResult, Date) -> Void)?
+    /// Every pulse the detector keeps, classified or not — the recorder counts
+    /// these so a segment knows how many calls are in it even when nothing was
+    /// asked to name them. Fires alongside `onPulseClassified`, never instead
+    /// of it, so the two are not an either/or at the receiving end.
+    var onPulseDetected: ((Date) -> Void)?
 
     /// Called on the main thread whenever `isInPulse` changes. Wire to
     /// `AudioRecorder.setPulseActive` directly instead of observing `isInPulse` from a
@@ -433,6 +438,18 @@ final class PulseDetector {
         // is the honest split — the detector did fire, it just has nothing worth
         // filing.
         guard passPulseCount >= Self.minRecordedPassPulseCount else { return }
+
+        // Nothing was ever put to a model — identification is switched off, or
+        // none is active. There is nothing to aggregate and no verdict to
+        // report, but the pulses carry their measurements and the pass is a
+        // real one, so it is filed under its own species rather than as NOID.
+        // See `PassRecord.isUnidentified` for why that distinction matters.
+        if passAggPulses.isEmpty {
+            store?.addPass(species: "UNID", confidence: 0, pulses: passPulses,
+                           sessionID: activeSessionID,
+                           coordinate: activeSessionID != nil ? coordinateProvider?() : nil)
+            return
+        }
 
         let descriptor = activeClassifier()?.descriptor
         guard let outcome = PassAggregation.aggregate(
@@ -904,7 +921,39 @@ final class PulseDetector {
             guard let classification else {
                 DispatchQueue.main.async { [weak self] in
                     guard let self, self.captureGeneration == generation else { return }
-                    self.pendingClassifications -= 1
+                    defer { self.pendingClassifications -= 1 }
+                    // **A pulse nobody classified is still a pulse** (Niall,
+                    // 2026-09-06). This used to drop it here, which meant a
+                    // recording made with no model active kept its audio and
+                    // none of its measurements — no timestamps, no peak
+                    // frequencies, no durations — and the iNaturalist sheet
+                    // refused it outright with "No calls were detected". The
+                    // detector had found the calls, drawn them, and counted
+                    // them; only the record of them was thrown away.
+                    //
+                    // So the measurements are kept and the species is left
+                    // unfilled. `passAggPulses` is deliberately NOT appended
+                    // to: there are no scores to aggregate, and its emptiness
+                    // is what tells `finalizePass` this pass was never
+                    // classified rather than classified inconclusively.
+                    //
+                    // Only when the render succeeded — without it there is no
+                    // frequency, no duration and no thumbnail, so the pulse
+                    // would be a bare timestamp claiming to be evidence.
+                    guard let r = result else { return }
+                    self.passPulseCount += 1
+                    self.passPulses.append(CapturedPulse(
+                        date: captureDate,
+                        species: "UNID",
+                        confidence: 0,
+                        peakFreqHz: r.peakFreq,
+                        durationMs: r.durationMs,
+                        topScores: [],
+                        image: r.cleanImage ?? r.image,
+                        imageFreqMinHz: r.cleanFreqMinHz,
+                        imageFreqMaxHz: r.cleanFreqMaxHz,
+                        imageSpanMs: r.cleanSpanMs))
+                    self.onPulseDetected?(captureDate)
                 }
                 return
             }
@@ -938,6 +987,7 @@ final class PulseDetector {
                                              imageFreqMaxHz: result?.cleanFreqMaxHz,
                                              imageSpanMs: result?.cleanSpanMs)
                 self.accumulatePulse(captured, raw: classification.rawScores, adjusted: classification.allScores)
+                self.onPulseDetected?(captured.date)
                 self.onPulseClassified?(classification, captured.date)
                 ClassificationLogger.shared.logPulse(classification,
                                                      modelID: self.autoIDSettings?.activeModelID)

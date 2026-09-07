@@ -133,9 +133,8 @@ struct INatObservationSheet: View {
                 let pulses = passes.flatMap(\.pulses)
                 let baseName = url.deletingPathExtension().lastPathComponent
                 // One answer to "where are the calls", shared by where the
-                // segment is cut, where the audible copy is spliced and where
-                // the whole-pass picture's gaps are — see
-                // `INatImages.silenceMap`.
+                // segment is cut and where the whole-pass picture's gaps are —
+                // see `INatImages.silenceMap`.
                 let silence = await INatImages.silenceMap(sources: imageSources)
 
                 // The bat pass, cut out of the recording in its own real time.
@@ -172,7 +171,7 @@ struct INatObservationSheet: View {
                                                  fallbackPNG: png,
                                                  silence: segment?.silence ?? silence)
                 previews = photos.map { UIImage(data: $0.data) }
-                // Named after the recording, exactly as the two sounds are
+                // Named after the recording, exactly as the sound is
                 // (Niall, 2026-09-06). These used to carry the recording's UUID
                 // instead, so a saved folder held six files under two unrelated
                 // names, sorted apart, one of them a hex string that means
@@ -465,11 +464,13 @@ struct INatObservationSheet: View {
             }
 
             if let files {
-                // The two sounds by what they are, and nothing about bytes:
-                // trimming and file sizes are how the feature works, not
-                // something a person deciding whether to post needs to weigh.
-                ForEach(Array(files.sounds.enumerated()), id: \.offset) { index, _ in
-                    Label(index == 0
+                // Each sound by what it is, and nothing about bytes: trimming
+                // and file sizes are how the feature works, not something a
+                // person deciding whether to post needs to weigh. Described by
+                // which file it is rather than by its position, so the labels
+                // stay right whether or not `audible` is there.
+                ForEach(Array(files.sounds.enumerated()), id: \.offset) { _, url in
+                    Label(url == files.audible
                           ? "Cleaned up and slowed \(INatExport.expansionFactor)× so you can hear it"
                           : "The pass as recorded, full speed and bandwidth",
                           systemImage: "waveform")

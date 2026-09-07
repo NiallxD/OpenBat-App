@@ -362,10 +362,11 @@ enum INatImages {
 
     /// Where the calls are, by the player's own rule.
     ///
-    /// Computed once over the whole recording and used for three things that
-    /// have to agree: where the pass segment starts and ends, where the
-    /// audible copy's splices fall, and where the whole-pass picture's gaps are
-    /// cut. Two independent computations of "where the calls are" would
+    /// Computed once over the whole recording and used for two things that
+    /// have to agree: where the pass segment starts and ends, and where the
+    /// whole-pass picture's gaps are cut. It is also what `packedToCalls`
+    /// splices on, if the audible copy is ever built again. Two independent
+    /// computations of "where the calls are" would
     /// eventually disagree. Off the main actor: a full pass over the overview
     /// grid while a sheet is animating in.
     static func silenceMap(sources: INatImageSources) async -> SilenceMap? {

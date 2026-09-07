@@ -586,6 +586,9 @@ struct ContentView: View {
                 // user this IS the output, not a garnish on the audio.
                 haptics.pulse(frequency: freq, level: level)
             }
+            pulseDetector.onPulseDetected = { [recorder] date in
+                recorder.addDetectedPulse(date: date)
+            }
             pulseDetector.onPulseClassified = { [recorder] result, date in
                 recorder.addClassifiedPulse(result: result, date: date)
             }

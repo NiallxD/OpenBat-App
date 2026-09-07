@@ -8,7 +8,7 @@
 //    GET  /observations/{uuid}  has this recording already been posted?
 //    POST /observations         create one, on the user's own account
 //    POST /observation_photos   attach the spectrogram
-//    POST /observation_sounds   attach the audible copy and the original
+//    POST /observation_sounds   attach the recording
 //    POST /observation_field_values  the bat-recording community's own fields
 //    POST /annotations          marks it Alive, which a calling bat is
 //
@@ -33,8 +33,7 @@
 //
 //  UPLOADS ARE STREAMED FROM DISK
 //  ------------------------------
-//  A 384 kHz recording is tens of megabytes and the audible copy is exactly the
-//  same size (it is a header rewrite, not a resample). Multipart bodies are
+//  A 384 kHz recording is tens of megabytes. Multipart bodies are
 //  therefore assembled into a temporary file and handed to
 //  `URLSession.upload(fromFile:)`, so a long recording never sits in memory
 //  twice while the phone is also drawing a spectrogram.

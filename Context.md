@@ -3763,6 +3763,24 @@ the fields.
 **Still not done:** the rest of the fields — "Number of calls" and the source
 filename have no established community field, so they stay copyable-only.
 
+**The listening copy no longer goes** (Niall, 2026-09-06). An observation now
+carries one sound, the full-spectrum pass exactly as recorded, on both routes —
+the API post and the files the manual route hands over. Everything above about
+the audible copy describes how it was BUILT, and all of that code is still
+there, still tested, and still correct; what changed is that nothing calls it.
+`INatExport.prepareFiles` leaves `Files.audible` nil, so `sounds` and `all`
+carry the segment alone, and the observation description no longer promises a
+second file or explains which one to measure from.
+
+What it costs is real and was the reason the copy existed: iNaturalist plays the
+first sound it has, no browser will play 384 kHz, and a visitor who presses play
+now gets nothing. The judgement is that a processed file — packed, scrubbed and
+slowed — sitting on a permanent public record as the thing most people will
+actually hear is the worse of the two, and that a reader is better served by the
+spectrograms plus a recording that is unambiguously evidence. Putting it back is
+one line in `prepareFiles`; the upload order in `sounds` already leads with
+`audible` for exactly that case.
+
 ### GPS tracking removed, every run is a session (2026-08-16)
 
 **No continuous location, and never "Always" authorization.** A "New Session"
@@ -4249,6 +4267,27 @@ Easy to get silently wrong:
 - **The bundled demo clip is discovered by prefix** (`Demo*.wav` under
   `OpenBat/`), not by a hardcoded name, so it can be re-stitched and renamed
   freely.
+
+### The remote kill switches were never reachable (2026-09-06)
+
+`FeatureFlagStore` fetches `OpenBatConfig.json` from GitHub once per launch, and
+the URL named `master`. **This repo has never had a `master` branch** — the
+branches are `main` and the version branches — so every fetch 404'd, and the
+failure is invisible by design: an unreadable config falls back to the compiled
+defaults, which is the safe direction and also exactly what a working config of
+all-`true` looks like. The file itself only ever existed on `v1.1`, unpushed, so
+there was nothing to fetch either way.
+
+The URL now names `main`, and `main` carries the file. **`main` is a June
+checkpoint of the code and is meant to stay one.** A shipped build asks for that
+URL forever, so the branch holding the config has to outlive every version
+branch — pointing it at `v1.1` would strand v1.1 installs the day v1.2 became
+the branch anybody edited. It is fetched as config, never as code, so the stale
+source on it costs nothing.
+
+The lesson worth keeping is the shape of the bug rather than the typo: a kill
+switch that fails safe cannot be tested by looking at the app. `curl` the raw
+URL before trusting one.
 
 ---
 

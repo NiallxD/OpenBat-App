@@ -57,9 +57,8 @@ nonisolated enum INatCredentials {
     /// they can attribute is one they can ask about rather than simply block.
     static let userAgent = "OpenBat/1.0 (iOS; +https://openbat.org)"
 
-    /// iNaturalist rejects sound files over this size. It bites harder here
-    /// than it looks: `INatExport.audibleCopy` rewrites the header rather than
-    /// resampling, so the audible copy is exactly as many bytes as the
-    /// original — if one is too big, both are.
+    /// iNaturalist rejects sound files over this size, which is why
+    /// `INatExport.passSegment` takes a byte budget: the pass is cut to fit,
+    /// and the full-spectrum segment is the only sound there is to fit.
     static let maxSoundBytes = 20 * 1024 * 1024
 }
