@@ -109,6 +109,19 @@ struct SettingsView: View {
                 default:        generalTab
                 }
             }
+            // **The strip above the tabs is part of the form's page** (Niall,
+            // 2026-09-06). The picker sits outside the `Form`, so it was drawn
+            // on the sheet's own `systemBackground` while everything below it
+            // was on the grouped ground a form paints for itself — white
+            // against grey in light mode, and a visible band across the top of
+            // the sheet.
+            //
+            // Matched in this direction, and not by moving the form onto the
+            // app's own page: a form's page and its section cards are a pair
+            // (`systemGroupedBackground` behind `secondarySystemGroupedBackground`)
+            // and repainting the page leaves every settings card white on
+            // white. See `View.pageBackground()`.
+            .background(Color(.systemGroupedBackground))
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
