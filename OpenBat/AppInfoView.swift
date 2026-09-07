@@ -320,6 +320,9 @@ struct AppInfoView: View {
     /// the session first — see `startDemo` there.
     let startDemo: (URL, String) -> Void
     @Environment(\.dismiss) private var dismiss
+    /// Decides whether a tile has room for its line of explanation — see
+    /// `tileNameplate`.
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     /// The second tour — the retired middle of onboarding. Presented from here
     /// rather than flagged-and-dismissed like the guided one: it has nothing to
     /// spotlight, so it has no reason to wait for this sheet to get out of the way.
@@ -342,14 +345,17 @@ struct AppInfoView: View {
 
                     // The four things you can do from here, as a 2×2 grid of
                     // square tiles rather than four full-width buttons each
-                    // trailing a caption paragraph. Four equal doors, not one
-                    // offer with three footnotes — which is why they are all one
-                    // material and one shape. That material used to be a flat
+                    // trailing a caption paragraph. Three equal doors, not one
+                    // offer with two footnotes — which is why they are all one
+                    // material and one shape. Three across rather than the old
+                    // 2×2: What's New left the grid for a line at the bottom
+                    // (see `whatsNewLink`), and three squares in a row is the
+                    // arrangement that does not strand one of them alone. That material used to be a flat
                     // accent fill and is now the guide's own card (Niall,
                     // 2026-09-02); artwork goes behind each one as it arrives.
-                    LazyVGrid(columns: [GridItem(.flexible(), spacing: 12),
-                                        GridItem(.flexible(), spacing: 12)],
-                              spacing: 12) {
+                    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10),
+                                             count: 3),
+                              spacing: 10) {
                         Button {
                             // Flag the tour, then dismiss; the host starts it from
                             // the sheet's onDismiss so the spotlight lands on the
@@ -405,18 +411,6 @@ struct AppInfoView: View {
                         }
                         .buttonStyle(.plain)
 
-                        // Where What's New lives once the after-update sheet has
-                        // been dismissed. A push rather than another sheet:
-                        // stacking sheets is how a user loses track of what
-                        // dismissing gets them back to.
-                        NavigationLink {
-                            WhatsNewContent()
-                        } label: {
-                            infoTile("clock.arrow.circlepath", "What's New",
-                                     "What changed in this version.",
-                                     art: "infoCardWhatsNew")
-                        }
-                        .buttonStyle(.plain)
                     }
 
                     featureList
@@ -432,7 +426,12 @@ struct AppInfoView: View {
                     .font(.headline)
                     .tint(.batAccent)
 
+                    // Below the sources, at the very bottom of the sheet
+                    // (Niall, 2026-09-06). Reference material, in the place the
+                    // rest of the reference material already is.
                     attributionSection
+
+                    whatsNewLink
                 }
                 .padding(20)
             }
@@ -520,10 +519,11 @@ struct AppInfoView: View {
     /// One action tile — **built as a species card is built** (Niall,
     /// 2026-09-02): a square glass tile, artwork running full bleed inside it,
     /// and the name legible over a scrim along the bottom. See `GuideSpeciesCard`,
-    /// which is the same object; these four are the guide's cards pointed at the
-    /// app's own features rather than at a bat.
+    /// which is the same object; these three are the guide's cards pointed at the
+    /// app's own features rather than at a bat — with the picture blurred, which
+    /// is where the two part company.
     ///
-    /// `art` names an image in the asset catalog and is OPTIONAL, so the four
+    /// `art` names an image in the asset catalog and is OPTIONAL, so the three
     /// tiles work now and get their pictures when the pictures exist. With no
     /// artwork the glass is the card — the icon takes the accent colour and the
     /// text takes the page's own ink; with artwork it all goes white over the
@@ -538,9 +538,21 @@ struct AppInfoView: View {
             .aspectRatio(1, contentMode: .fit)
             .overlay {
                 if let artwork {
+                    // **Blurred, with everything over it sharp** (Niall,
+                    // 2026-09-06). At a third of the width these tiles are too
+                    // small for a photograph to be read as one, and a detailed
+                    // picture behind a title is just noise under it. Blurred, the
+                    // artwork does what it is actually for here — giving each
+                    // door its own colour — and the title stops fighting it.
+                    //
+                    // Scaled up first because a blur samples past the edges of
+                    // what it is given: at 1.0 the corners fade to nothing and
+                    // the tile looks like it has a soft vignette cut into it.
                     Image(uiImage: artwork)
                         .resizable()
                         .scaledToFill()
+                        .scaleEffect(1.2)
+                        .blur(radius: 12)
                 }
             }
             .clipped()
@@ -559,17 +571,26 @@ struct AppInfoView: View {
     /// position. Over artwork it is white on a scrim; over bare glass it takes
     /// the page's ink and needs no scrim — a black gradient laid over glass
     /// reads as a smudge rather than as a photo caption.
+    /// **The line of explanation is dropped on a phone** (Niall, 2026-09-06).
+    /// Three tiles across a phone is about 110pt each, and "Points at each
+    /// control on the detector" set in caption across 80pt of that is five
+    /// lines of two words — taller than the picture it sits on and unreadable
+    /// at the end of it. The title alone carries the tile at that size; where
+    /// there is room, the sentence comes back.
     private func tileNameplate(_ title: String, _ subtitle: String,
                                over artwork: Bool) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(title)
-                .font(.headline)
+                .font(.subheadline.weight(.semibold))
                 .foregroundStyle(artwork ? AnyShapeStyle(.white) : AnyShapeStyle(.primary))
-            Text(subtitle)
-                .font(.caption)
-                .foregroundStyle(artwork ? AnyShapeStyle(.white.opacity(0.85))
-                                         : AnyShapeStyle(.secondary))
                 .fixedSize(horizontal: false, vertical: true)
+            if horizontalSizeClass != .compact {
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(artwork ? AnyShapeStyle(.white.opacity(0.85))
+                                             : AnyShapeStyle(.secondary))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .multilineTextAlignment(.leading)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -591,6 +612,34 @@ struct AppInfoView: View {
     }
 
     // MARK: Attribution
+
+    /// Where What's New lives once the after-update sheet has been dismissed.
+    ///
+    /// **A line at the bottom, not one of the doors at the top** (Niall,
+    /// 2026-09-06). It was a fourth tile, which gave "what changed in a version
+    /// you are already running" the same weight as the tour and the demo — the
+    /// two things somebody opens this sheet to do. It is reference material,
+    /// read once after an update, so it sits with the rest of the reference
+    /// material, under the data models and sources.
+    ///
+    /// Still a push rather than a sheet: stacking sheets is how somebody loses
+    /// track of what dismissing gets them back to.
+    private var whatsNewLink: some View {
+        NavigationLink {
+            WhatsNewContent()
+        } label: {
+            HStack {
+                Label("What's New", systemImage: "clock.arrow.circlepath")
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .font(.subheadline)
+        }
+        .buttonStyle(.plain)
+        .tint(.batAccent)
+    }
 
     private var attributionSection: some View {
         DataModelSourcesView()

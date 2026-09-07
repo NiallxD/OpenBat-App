@@ -76,6 +76,10 @@ struct SettingsView: View {
     @AppStorage("configMenuUnlocked") private var configUnlocked = false
     @Environment(\.dismiss) private var dismiss
     @State private var selectedTab = "general"
+    /// The two halves of the reset: the confirmation before it, and the notice
+    /// after it — see `resetSection`.
+    @State private var confirmingReset = false
+    @State private var resetDone = false
 
     var body: some View {
         NavigationStack {
@@ -206,6 +210,7 @@ struct SettingsView: View {
             storageSections
             privacySections
             classifierLogSections
+            resetSection
             configurationSection
         }
         .onAppear { logBytes = ClassificationLogger.shared.totalBytesOnDisk() }
@@ -255,6 +260,61 @@ struct SettingsView: View {
 
     @State private var showDeleteAllSessionsConfirmation = false
     @State private var showDeleteNoIDConfirm = false
+    /// Everything back to how a fresh install has it.
+    ///
+    /// **Last card but one, destructive role, and behind a confirmation.** It
+    /// undoes a lot of small decisions at once and there is no undo for it —
+    /// the same shape as "Delete NoID Recordings" in Storage, for the same
+    /// reason.
+    ///
+    /// The list under the button is the point of the card. Somebody about to
+    /// press this is worried about what else goes with it, and the honest
+    /// answer — nothing you have recorded — is worth more than any warning.
+    private var resetSection: some View {
+        Section {
+            Button("Reset all settings", role: .destructive) { confirmingReset = true }
+            ControlNote("Puts every setting back to the value a new install has. "
+                      + "Your recordings, sessions and log are untouched, and so are "
+                      + "your iNaturalist sign-in and your microphone calibration.")
+        } header: {
+            CardHeader("Reset", "Back to the settings a new install has.")
+        }
+        .confirmationDialog("Reset all settings?", isPresented: $confirmingReset,
+                            titleVisibility: .visible) {
+            Button("Reset Settings", role: .destructive) { resetAllSettings() }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("Every setting goes back to its default. Nothing you have recorded is deleted.")
+        }
+        .alert("Settings reset", isPresented: $resetDone) {
+            Button("OK") { }
+        } message: {
+            // **Says to reopen, because some of it genuinely needs that**
+            // (Niall, 2026-09-06). The stores that can be re-seeded in place are
+            // re-seeded below, but `PulseDetector` reads its tuning once in
+            // `init` and writes on change, so its live values would otherwise be
+            // written back over the defaults this just restored. Promising a
+            // clean slate and delivering most of one is the failure worth
+            // avoiding here — especially for the reason this button exists,
+            // which is making two devices agree.
+            Text("Close and reopen OpenBat to finish putting everything back.")
+        }
+    }
+
+    /// Clears the preferences, then re-seeds the stores that can re-read them
+    /// without a relaunch — see `SettingsReset` for what is deliberately kept.
+    private func resetAllSettings() {
+        SettingsReset.eraseUserPreferences()
+        // Before anything else: this sheet's Done writes `settings` back out, so
+        // an AutoIDSettings still holding the old values in memory would undo
+        // half of this on the way out.
+        settings.loadPersisted()
+        haptics.resetToDefaults()
+        snippetExpansion.reset()
+        resetDone = true
+    }
+
+
 
     /// The way into the configuration menu.
     ///
