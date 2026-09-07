@@ -39,6 +39,13 @@ struct DiagnosticsView: View {
     /// re-capturing (a second capture would be a different moment in time).
     @State private var dumpedFile: URL?
     @State private var dumpFailed = false
+    /// See `demoLogSection`. The switch is read by `DemoLogger` at the start of
+    /// a run, not by anything here.
+    @AppStorage(DemoLogger.enabledKey) private var demoLogEnabled = false
+    @State private var demoLogShare: DemoLogShare?
+    @State private var demoLogsCleared = false
+
+    private struct DemoLogShare: Identifiable { let id = UUID(); let url: URL }
 
     var body: some View {
         NavigationStack {
@@ -56,6 +63,7 @@ struct DiagnosticsView: View {
                     DiagnosticsLevelMeter(audio: audio)
                     DiagnosticsMicQualityCard(audio: audio)
                     demoSection
+                    demoLogSection
                     iNaturalistSection
                     tuningSection
                     settingsDumpSection
@@ -133,6 +141,86 @@ struct DiagnosticsView: View {
         }
         .padding()
         .background(.quaternary, in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    /// The switch that makes a demo run write a file, and the way to get the
+    /// files off the phone.
+    ///
+    /// **Its own card, under Demo Mode, because it is not a demo control** — it
+    /// changes nothing about how the demo runs, and a run with it on and a run
+    /// with it off must produce the same detections or the log is worthless.
+    ///
+    /// Why this exists at all: the demo is the one input two phones can be given
+    /// identically, so it is the only fair way to ask whether they behave the
+    /// same. See `DemoLogger` for what a file holds and why it is not the
+    /// classifier log.
+    private var demoLogSection: some View {
+        VStack(spacing: 12) {
+            HStack {
+                Text("Demo log")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if DemoLogger.shared.isLogging {
+                    Text("recording")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+            }
+            Toggle("Log demo runs", isOn: $demoLogEnabled)
+                .font(.callout)
+            Text("Writes one CSV per demo run: every pulse the detector kept, every "
+               + "pulse nothing was asked to name, every score the model produced, and "
+               + "every pass they were aggregated into. The file's header carries the "
+               + "device, the OS, the build and every threshold in force, so two "
+               + "phones' runs of the same clip can be compared line for line.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Text("Switched on or off, a demo detects exactly the same things. Live "
+               + "capture never writes here.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            let logs = DemoLogger.shared.existingLogs()
+            Button {
+                if let url = DemoLogger.shared.makeShareItem() {
+                    demoLogShare = DemoLogShare(url: url)
+                }
+            } label: {
+                Label(logs.isEmpty ? "No demo logs yet" : "Share \(logs.count) demo log\(logs.count == 1 ? "" : "s")",
+                      systemImage: "square.and.arrow.up")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .disabled(logs.isEmpty)
+
+            Button(role: .destructive) {
+                DemoLogger.shared.deleteAllLogs()
+                demoLogsCleared = true
+            } label: {
+                Label(demoLogsCleared ? "Deleted" : "Delete demo logs",
+                      systemImage: demoLogsCleared ? "checkmark" : "trash")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .disabled(logs.isEmpty && !demoLogsCleared)
+
+            // They are in Documents, so a Mac or the Files app reaches them
+            // without going through the share sheet at all — worth saying, since
+            // that is the easier route when the phone is already plugged in.
+            Text("Files are named demo_<clip>_<device>_<time>.csv and sit alongside "
+               + "your recordings, so the Files app reaches them too.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding()
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 16))
+        .sheet(item: $demoLogShare) { item in
+            ShareSheet(items: [item.url])
+        }
     }
 
     /// Entry point for the live tuning card. Available during a demo and during

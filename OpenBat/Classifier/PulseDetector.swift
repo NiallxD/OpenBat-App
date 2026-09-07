@@ -448,6 +448,7 @@ final class PulseDetector {
             store?.addPass(species: "UNID", confidence: 0, pulses: passPulses,
                            sessionID: activeSessionID,
                            coordinate: activeSessionID != nil ? coordinateProvider?() : nil)
+            DemoLogger.shared.logUnclassifiedPass(pulseCount: passPulseCount, species: "UNID")
             return
         }
 
@@ -471,6 +472,11 @@ final class PulseDetector {
                            sessionID: activeSessionID,
                            coordinate: activeSessionID != nil ? coordinateProvider?() : nil,
                            rawConfidence: PassAggregation.meanRawConfidence(passAggPulses))
+            // Logged as its own kind: a pass that WAS classified and came back
+            // inconclusive is a different result from one nothing was asked
+            // about, and a comparison that conflated them would be reading two
+            // failures as one.
+            DemoLogger.shared.logUnclassifiedPass(pulseCount: passPulseCount, species: "NOID")
             return
         }
 
@@ -484,6 +490,8 @@ final class PulseDetector {
         lastPassDate = Date()
         ClassificationLogger.shared.logPass(passResult, pulseCount: passPulseCount,
                                             modelID: autoIDSettings?.effectiveModelID)
+        DemoLogger.shared.logPass(passResult, pulseCount: passPulseCount,
+                                  modelID: autoIDSettings?.effectiveModelID)
 
         // Second-place species by mean posterior — surfaced as a runner-up suggestion
         // in the species feed. Not meaningful for a NOISE outcome (its meanScores are
@@ -954,6 +962,15 @@ final class PulseDetector {
                         imageFreqMaxHz: r.cleanFreqMaxHz,
                         imageSpanMs: r.cleanSpanMs))
                     self.onPulseDetected?(captureDate)
+                    // The row the field log has no way of writing: a call the
+                    // detector kept and nothing was asked about. Two devices
+                    // differing here differ in what they HEARD, which is a
+                    // different finding from differing in what they named.
+                    DemoLogger.shared.logUnclassifiedPulse(
+                        peakFreqHz: r.peakFreq, durationMs: r.durationMs,
+                        note: self.activeClassifier() == nil ? "no active model"
+                                                             : "not classified",
+                        at: captureDate)
                 }
                 return
             }
@@ -991,6 +1008,13 @@ final class PulseDetector {
                 self.onPulseClassified?(classification, captured.date)
                 ClassificationLogger.shared.logPulse(classification,
                                                      modelID: self.autoIDSettings?.activeModelID)
+                // Silent unless a demo is being logged — see `DemoLogger`.
+                DemoLogger.shared.logClassifiedPulse(
+                    classification,
+                    peakFreqHz: result?.peakFreq ?? 0,
+                    durationMs: result?.durationMs ?? 0,
+                    modelID: self.autoIDSettings?.activeModelID,
+                    at: captureDate)
             }
         }
     }

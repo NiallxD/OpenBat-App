@@ -2917,6 +2917,27 @@ struct ContentView: View {
         // no mic (see Context.md §6).
         liveActivity.start(sessionTitle: "Demo", isDemo: true, startDate: feedSessionStart ?? Date())
         seedSnippetProcessor()
+        // Off unless the config menu's "Demo log" switch is on. The context is
+        // gathered here rather than inside the logger because this is where the
+        // settings in force are known — see `DemoLogger`, whose header is half
+        // the point of the file.
+        DemoLogger.shared.begin(clip: name, context: [
+            ("clip", name),
+            ("model", autoIDSettings.effectiveModelID ?? "none"),
+            ("identification_disabled", String(autoIDSettings.remotelyDisabled)),
+            ("location_weighting_disabled", String(autoIDSettings.locationWeightingDisabled)),
+            ("trigger_mode", pulseDetector.triggerMode.rawValue),
+            ("amplitude_threshold", String(format: "%.3f", pulseDetector.amplitudeThreshold)),
+            ("min_frequency_hz", String(format: "%.0f", pulseDetector.minFrequencyHz)),
+            ("min_consecutive_columns", String(pulseDetector.minConsecutiveColumns)),
+            ("hold_off_seconds", String(format: "%.3f", pulseDetector.holdOffSeconds)),
+            ("max_gap_ms", String(format: "%.0f", pulseDetector.maxGapMs)),
+            ("min_pass_confidence", String(format: "%.3f", autoIDSettings.minPassConfidence)),
+            ("min_pass_pulse_count", String(autoIDSettings.minPassPulseCount)),
+            ("quality_gate_enabled", String(autoIDSettings.qualityGate.enabled)),
+            ("quality_sn_threshold", String(format: "%.2f", autoIDSettings.qualityGate.snThreshold)),
+            ("quality_amp_threshold", String(format: "%.2f", autoIDSettings.qualityGate.ampThreshold)),
+        ])
         Task { await audio.startDemo(url: url, name: name) }
     }
 
@@ -2946,6 +2967,9 @@ struct ContentView: View {
         // After finalizePass, so the pass it just closed is swept up with the
         // rest of the demo's output rather than outliving it.
         classStore.endDemoRun()
+        // After `finalizePass` above, so the last pass of the run is in the file
+        // before the file stops accepting rows.
+        DemoLogger.shared.end()
         feedSessionStart = nil
     }
 
