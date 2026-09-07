@@ -2,12 +2,12 @@
   "schemaVersion": 1,
   "_comment": "Remote kill switches for OpenBat. See OpenBat/FeatureFlags.swift. Only `false` does anything: every flag is compiled ON in the app, and this file can only override a default to off. Setting a flag back to true (or removing it) returns the app to the state Apple reviewed. Edit this file on `main` \u2014 the branch FeatureFlagStore.remoteURL names \u2014 or nothing happens; the copy on a version branch is only source. Leave everything true while a build is in review; flip after approval and before release. `configMenu` locks the config menu itself: setting it false closes the menu, drops every local override it had set, and returns the iNaturalist posting-cap bypass to its compiled state.",
   "features": {
-    "inaturalistUpload": false,
-    "automaticID": false,
-    "rangeMaps": false,
-    "locationWeighting": false,
+    "inaturalistUpload": true,
+    "automaticID": true,
+    "rangeMaps": true,
+    "locationWeighting": true,
     "configMenu": true
   },
-  "maintenance": true,
-  "maintenanceMessage": "Hi! We recently encountered some issues with the [features] and have taken the decision to disable them temporarily while we work to fix the issue. For more informaiton, visit the OpenBat.app blog. Sorry for any incovenience."
+  "maintenance": false,
+  "maintenanceMessage": ""
 }
