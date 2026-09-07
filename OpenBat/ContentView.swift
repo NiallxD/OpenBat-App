@@ -68,8 +68,6 @@ struct ContentView: View {
     /// recordings list, the player, Settings) read it without every initializer
     /// in between having to carry it.
     @State private var featureFlags = FeatureFlagStore()
-    /// The maintenance notice, shown once per distinct message.
-    @State private var maintenanceNotice: String?
     /// Live snippet-expansion settings. Threaded down (rather than owned by the
     /// tuning overlay) because the processor has to be seeded with them at
     /// capture start, not only when the overlay happens to be open.
@@ -527,17 +525,10 @@ struct ContentView: View {
             autoIDSettings.remotelyDisabled = !featureFlags.isEnabled(.automaticID)
             autoIDSettings.locationWeightingDisabled = !featureFlags.isEnabled(.locationWeighting)
             pulseDetector.refreshModel()
-            if let message = featureFlags.pendingMaintenanceMessage() {
-                maintenanceNotice = message
-                featureFlags.markMaintenanceMessageSeen()
-            }
         }
-        .alert("OpenBat", isPresented: .init(get: { maintenanceNotice != nil },
-                                             set: { if !$0 { maintenanceNotice = nil } })) {
-            Button("OK") { }
-        } message: {
-            Text(maintenanceNotice ?? "")
-        }
+        // The launch notice — alert, queue and release in one modifier, the
+        // same shape (and for the same reason) as `.inatUploadAlerts` above.
+        .maintenanceNotice(flags: featureFlags, isBusy: presentationIsBusy)
         .onAppear {
             // First, before anything below reads a persisted setting: the stores
             // are constructed EMPTY on purpose (see each type's `init()` doc
@@ -2468,6 +2459,19 @@ struct ContentView: View {
         showDiagnostics || showSettings || showHelp || showInfo || showWhatsNew || showingChangeSummary
     }
 
+    /// Anything at all that would swallow an alert raised right now.
+    ///
+    /// Wider than `menuIsOpen`, which only asks whether the detector is
+    /// covered: a sheet the detector is happy to keep rendering behind still
+    /// takes the one presentation slot an alert needs.
+    private var presentationIsBusy: Bool {
+        menuIsOpen || tourActive || showNearbySpecies || showReconsentPrompt
+            || showCalibrationOffer || showMicCalibration
+            || suggestedModelToOffer != nil || exportManager.ready != nil
+    }
+
+
+
     private func applyBand() {
         processor.peakMinFraction = max(bandLow, 0.01)
         processor.peakMaxFraction = bandHigh
@@ -3354,3 +3358,72 @@ private extension View {
 }
 
 #Preview { ContentView() }
+
+// MARK: - The maintenance notice
+
+/// The remote maintenance message, shown once, as an alert, on the first launch
+/// that can actually show it.
+///
+/// **Why this is a modifier and not four lines in `ContentView.body`.** Two of
+/// them, really. The chain in that body is already at the Swift type-checker's
+/// limit — adding an `.onChange` beside the `.alert` tipped it into "unable to
+/// type-check this expression in reasonable time" — and the alert, the queue and
+/// the release are one behaviour that reads far better in one place than
+/// scattered down a 3,000-line view. `.inatUploadAlerts` exists for the same two
+/// reasons.
+private struct MaintenanceNoticeModifier: ViewModifier {
+    let flags: FeatureFlagStore
+    /// Whether something else is presented. An alert raised over a sheet is not
+    /// queued by SwiftUI, it is dropped — see `isBusy`'s caller.
+    let isBusy: Bool
+
+    /// Set once the remote answer has landed and cleared as soon as it is shown.
+    @State private var queued: String?
+    @State private var showing: String?
+
+    func body(content: Content) -> some View {
+        content
+            // The store's message arrives with the remote config, a second or
+            // two into launch — which is exactly when What's New and the
+            // re-consent prompt are up.
+            .onChange(of: flags.maintenanceMessage) { _, _ in
+                queued = flags.pendingMaintenanceMessage()
+                showIfClear()
+            }
+            .onChange(of: isBusy) { _, busy in if !busy { showIfClear() } }
+            // And once on the way in, for a `ContentView` created after the
+            // answer had already landed: `onChange` says nothing about a value
+            // that was set before this modifier existed.
+            .task {
+                queued = flags.pendingMaintenanceMessage()
+                showIfClear()
+            }
+            .alert("OpenBat", isPresented: .init(get: { showing != nil },
+                                                 set: { if !$0 { showing = nil } })) {
+                // Marked seen HERE, on the way out, and not when the notice was
+                // raised. A message counts as delivered when somebody has
+                // dismissed it, not when the app decided to try: marking it on
+                // the way in meant that losing the race against a launch sheet
+                // burned the message permanently, and it never appeared again
+                // on any later launch (Niall, 2026-09-06).
+                Button("OK") { flags.markMaintenanceMessageSeen() }
+            } message: {
+                Text(showing ?? "")
+            }
+    }
+
+    /// Safe to call as often as you like: it re-asks the store, so a message
+    /// already dismissed is never raised a second time.
+    private func showIfClear() {
+        guard queued != nil, !isBusy,
+              let message = flags.pendingMaintenanceMessage() else { return }
+        queued = nil
+        showing = message
+    }
+}
+
+extension View {
+    func maintenanceNotice(flags: FeatureFlagStore, isBusy: Bool) -> some View {
+        modifier(MaintenanceNoticeModifier(flags: flags, isBusy: isBusy))
+    }
+}

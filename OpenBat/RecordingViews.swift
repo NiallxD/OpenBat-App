@@ -104,7 +104,9 @@ struct RecordingRow: View {
                 // whole library, so asking twice per row would double the cost
                 // of every scroll.
                 let passes = store.passes(forRecording: recording)
-                if !recording.isNoID { runnerUp = runnerUpLine(in: passes) }
+                if !recording.isNoID && !recording.isUnidentified {
+                    runnerUp = runnerUpLine(in: passes)
+                }
                 assessForINaturalist(passes)
                 image = await RecordingThumbnailLoader.load(
                     recording, store: store,
@@ -123,19 +125,24 @@ struct RecordingRow: View {
     private var text: some View {
         HStack(alignment: .center, spacing: 8) {
             VStack(alignment: .leading, spacing: 2) {
-                // **No species lines at all while identification is switched
-                // off** (Niall, 2026-09-06), rather than sixty rows each
-                // reading "Not identified" — the same dead phrase repeated
-                // down a list says less than its absence does, and the launch
-                // notice has already explained why. What is left is what the
-                // app still knows for certain: how long it was, how many
-                // pulses, and when.
+                // **No species lines on a recording that was never
+                // classified** (Niall, 2026-09-06), rather than sixty rows each
+                // reading "Not identified" — the same dead phrase repeated down
+                // a list says less than its absence does, and the launch notice
+                // has already explained why. What is left is what the app still
+                // knows for certain: how long it was, how many pulses, and when.
                 //
-                // Names already stored are hidden too, not just new ones. This
-                // switch exists for a model producing bad identifications, and
-                // in that case the old ones are exactly what should stop being
-                // shown.
-                if !flags.isEnabled(.automaticID) {
+                // It is the RECORDING that decides this, not the switch's
+                // current position. A recording made while identification was
+                // running carries a name that was genuinely computed from its
+                // calls, and hiding it because the feature was later turned off
+                // deletes a night's results from the user's view for a reason
+                // that has nothing to do with that night (Niall, 2026-09-06,
+                // reversing the blanket hide). Recordings made while the switch
+                // is down are marked `UNID` when they are saved — see
+                // `PassRecord.isUnidentified` — so they, and only they, get the
+                // shorter row.
+                if recording.isUnidentified {
                     Text(Self.time(recording.date)).font(.headline)
                     Text("\(Self.durationString(recording.durationSeconds)) · \(recording.pulseCount) pulse\(recording.pulseCount == 1 ? "" : "s")")
                         .font(.caption)

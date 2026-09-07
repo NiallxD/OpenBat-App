@@ -11,26 +11,55 @@
 import SwiftUI
 
 struct AutoIDSettingsView: View {
-    @Environment(FeatureFlagStore.self) private var flags
+    /// Handed in by `SettingsView`, which holds it already, rather than read
+    /// from the environment. A non-optional `@Environment(FeatureFlagStore.self)`
+    /// traps the moment it is read if no ancestor provided one, which is a hard
+    /// crash on the way into a tab rather than a missing switch — and this tab
+    /// now reads it before it draws anything at all.
+    let flags: FeatureFlagStore
     @Bindable var settings: AutoIDSettings
     @Bindable var location: LocationProvider
 
     var body: some View {
+        // **The whole tab, or none of it** (Niall, 2026-09-06). This screen
+        // used to say identification was off in a section at the top and leave
+        // the model list, the location suggestion and the map-pin gates live
+        // underneath, on the reasoning that a model picked while the switch was
+        // down would be waiting when it came back. That was a screenful of
+        // live controls for a feature that is not running, and opening it while
+        // the switch was down crashed the app. Off, this tab is one sentence and
+        // a link: none of the model list, the location fix it asks for, or the
+        // map-pin gates is built at all.
+        if !flags.isEnabled(.automaticID) {
+            disabledNotice
+        } else {
+            settingsForm
+        }
+    }
+
+    /// What the tab is while identification is switched off remotely.
+    ///
+    /// It names the OpenBat team rather than hiding behind the passive voice,
+    /// because somebody whose app has quietly stopped identifying anything is
+    /// owed both the fact that a person decided it and somewhere to read why.
+    /// The reason itself is deliberately NOT here: this ships in a binary, and
+    /// the switch exists precisely for the situations a release cannot answer
+    /// in time. The blog can be written the same afternoon.
+    private var disabledNotice: some View {
+        ContentUnavailableView {
+            Label("AutoID is off", systemImage: "waveform.badge.exclamationmark")
+        } description: {
+            Text("AutoID has been disabled by the OpenBat team. Check our blog for more info.")
+        } actions: {
+            Link("Read the blog", destination: Self.blogURL)
+                .buttonStyle(.borderedProminent)
+        }
+    }
+
+    private static let blogURL = URL(string: "https://openbat.app/blog")!
+
+    private var settingsForm: some View {
         Form {
-            // **Says so at the top, and leaves the controls alone** (Niall,
-            // 2026-09-06). Somebody who opens this screen while identification
-            // is switched off is asking why nothing is being named, so the
-            // answer belongs where they are looking. The model list stays live
-            // underneath: choosing a model is a preference that will take
-            // effect when the switch comes back, and disabling it would lose
-            // that choice for no gain.
-            if flags.isRemotelyDisabled(.automaticID) && !flags.isEnabled(.automaticID) {
-                Section {
-                    Text(Feature.automaticID.unavailableNote)
-                        .font(.callout)
-                    ControlNote("Recording, playback and export are unaffected. Anything you pick here will apply when it comes back.")
-                }
-            }
             locationUnavailableSection
             locationSuggestionSection
 

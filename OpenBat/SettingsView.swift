@@ -104,7 +104,7 @@ struct SettingsView: View {
                 .padding(.bottom, 4)
 
                 switch selectedTab {
-                case "autoID":  AutoIDSettingsView(settings: settings, location: location)
+                case "autoID":  AutoIDSettingsView(flags: flags, settings: settings, location: location)
                 case "audio":   detectingTab
                 default:        generalTab
                 }
@@ -152,6 +152,24 @@ struct SettingsView: View {
     /// Least destructive first, so the bulk deletes stay well below the fold.
     private var generalTab: some View {
         Form {
+            // **First card, and only when there is one** (Niall, 2026-09-06).
+            // The launch alert shows once per message by design — twenty-one
+            // alerts for a three-week outage is an alert nobody reads — and
+            // that design assumed the text stayed findable somewhere
+            // afterwards. It did not: the only other copy was inside the
+            // passcode-locked config menu, so anybody who tapped OK, or who
+            // installed the app mid-outage and got the notice while a sheet was
+            // covering it, had no way back to the explanation for why half the
+            // app was missing.
+            if let message = flags.maintenanceMessage {
+                Section {
+                    Text(message)
+                        .font(.callout)
+                } header: {
+                    CardHeader("Notice", "From the OpenBat team.")
+                }
+            }
+
             Section {
                 // Labelled and bound as "Advanced mode", inverted from
                 // `simplifiedMode` itself: simplified is the app's default, so
