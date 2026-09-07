@@ -429,6 +429,14 @@ struct ContentView: View {
                 }) {
                     AppInfoView(startTour: { tourPending = true },
                                 classStore: classStore, startDemo: startDemo)
+                        // Same reason as the nearby-species sheet above: a
+                        // sheet's default material is translucent, so this one
+                        // was tinted by whatever it was drawn over — on iPad,
+                        // where it sits on the detector rather than filling the
+                        // screen, the spectrogram behind it turned the whole
+                        // page green. Its tiles are the app's own glass and
+                        // need the app's own ground under them.
+                        .presentationBackground(Color.appBackground)
                 }
         // Collects the `.tourTarget` anchors from the controls below and, while the
         // tour is active, resolves them to on-screen rects for the spotlight overlay.

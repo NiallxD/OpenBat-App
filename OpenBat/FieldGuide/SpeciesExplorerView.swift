@@ -61,6 +61,8 @@ struct SpeciesExplorerView: View {
     /// Globe starts invisible and fades in once imagery has had a moment to
     /// load, instead of popping in already fully opaque.
     @State private var globeOpacity: Double = 0
+    /// The width this screen is given, for `searchColumnWidth`.
+    @State private var containerWidth: CGFloat = 0
     /// The opening swoop's repeating Timer — retained so `.onDisappear` can
     /// invalidate it if the user navigates away mid-swoop. Otherwise it keeps
     /// firing and mutating `camera` on an off-screen view for the rest of its
@@ -156,6 +158,29 @@ struct SpeciesExplorerView: View {
                             // place, so it reads as attached to the field.
                             .transition(.move(edge: .top).combined(with: .opacity))
                     }
+                }
+                // **Capped on a landscape iPad, and only there** (Niall,
+                // 2026-09-06). A search field 1300pt wide is a control the
+                // shape of a horizon; held near the width of the tab bar and
+                // the session button beside it, the screen's two pieces of
+                // chrome line up instead of nearly lining up.
+                //
+                // Portrait is left alone deliberately: the bar there already
+                // runs to within a few points of both edges, so the field's own
+                // margins match it as they are, and narrowing it would break an
+                // alignment that was correct.
+                //
+                // Not `PageColumn`: that is the reading measure for a page of
+                // text and a fraction of the window, and this screen opts out
+                // of it — see the note below this overlay. The two frames are
+                // its trick though, and both are needed: the inner one is the
+                // column, the outer one gives it something to be centred in and
+                // keeps the measurement reading the container rather than the
+                // narrowed content.
+                .frame(maxWidth: searchColumnWidth ?? .infinity)
+                .frame(maxWidth: .infinity)
+                .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { measured in
+                    if containerWidth != measured { containerWidth = measured }
                 }
                 .padding(.horizontal)
                 .padding(.top, 8)
@@ -288,6 +313,17 @@ struct SpeciesExplorerView: View {
     }
 
     // MARK: Search
+
+    /// How wide the search field may get, or nil to fill the width as before —
+    /// a phone, and an iPad in portrait.
+    ///
+    /// The number is chosen by eye against the tab bar rather than measured
+    /// from it: the bar is drawn by the system and sized to its own labels, so
+    /// there is nothing to ask. If it sits a shade wide or narrow beside the
+    /// bar, this is the one number to move.
+    private var searchColumnWidth: CGFloat? {
+        containerWidth >= PageColumn.landscapeWidth ? 560 : nil
+    }
 
     /// A Liquid Glass capsule, so it reads as a control floating over the globe
     /// rather than a field sunk into a black band. `interactive: true` for the
