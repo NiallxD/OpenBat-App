@@ -32,6 +32,24 @@
   interrupts everybody, before they reach the detector.
 -->
 
+## v1.1 (Build 201)
+
+### New
+- **Post a recording to iNaturalist** — A recording can become an observation without leaving the app, either posted for you when you sign in or handed over as a set of files to upload yourself. A leaf on a row marks the ones worth posting, gold for the best of a night.
+- **Posting happens in the background** — The sheet closes as soon as you send it and a pill over the tab bar tracks the upload, so you are not held on one screen while a large file goes up.
+- **Spectrogram exports carry real axes** — Frequency and time are labelled on every exported picture, on the same log scale the app draws.
+- **A recording is kept even when nothing named it** — With no model active, or with identification switched off, the calls and the pulse count are still recorded. Those recordings used to read as empty triggers.
+
+### Changed
+- **Echoes count against a recording's score** — A call recorded somewhere reverberant scores lower for posting, and says so.
+- **Sharing no longer asks for your photo library** — Nothing OpenBat exports needs that permission, so it stopped asking for it.
+- **A species in a call's caption is marked as OpenBat's own** — So a reader knows the name came from the app rather than from a person.
+- **Features can be switched off without an update** — If something goes wrong with identification, the maps or posting, we can turn it off and tell you why, rather than leaving it broken until the next release. The notice stays in Settings for as long as it applies.
+
+### Fixed
+- **The sound on an observation matches its pictures** — The audio and the spectrograms were cut from different parts of the recording, so no picture and no sound shared a starting point. Everything now comes from one clip.
+- **An observation names the microphone that actually made the recording** — It was posting whichever detector is selected now, so anyone with two microphones would stamp tonight's onto a recording made last month with the other one.
+
 ## v0.9.5 (Build 193)
 
 ### New
