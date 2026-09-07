@@ -9,5 +9,5 @@
     "configMenu": true
   },
   "maintenance": true,
-  "maintenanceMessage": "Hi. We recently encountered some issues with the [features] and have taken the decision to disable them temporarily while we work to fix the issue. For more informaiton, visit the OpenBat.app blog. Sorry for any incovenience."
+  "maintenanceMessage": "Hi! We recently encountered some issues with the [features] and have taken the decision to disable them temporarily while we work to fix the issue. For more informaiton, visit the OpenBat.app blog. Sorry for any incovenience."
 }
