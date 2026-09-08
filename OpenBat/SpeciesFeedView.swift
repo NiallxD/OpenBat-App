@@ -122,7 +122,6 @@ private struct SpeciesFeedRow: View {
     /// the book button rather than by the row itself, so the two destinations —
     /// "what did the app hear" and "what is this animal" — stay distinct.
     @State private var profile: GuideSpecies?
-    @State private var image: UIImage?
 
     /// nil whenever the guide has no page for this code, which is the common
     /// case: the models name far more bats than the community guide describes.
@@ -189,12 +188,9 @@ private struct SpeciesFeedRow: View {
         .onTapGesture {
             if let page = guidePage { profile = page } else { showDetail = true }
         }
-        .task(id: representativePulse?.id) {
-            // Nothing to decode when the guide photo is what's on screen — the
-            // pulse image is only ever the fallback now.
-            guard guidePage == nil, let pulse = representativePulse else { return }
-            image = await store.loadImage(for: pulse)
-        }
+        // No thumbnail decode here any more: the row shows the guide photo when
+        // there is a species and the app's own mark when there is not, so the
+        // pulse image it used to load was being decoded and then never drawn.
         // The shared modal wrapper rather than a stack of its own: this row and
         // the stats strip were presenting the same page two ways, and the bar
         // treatment only has to be decided once.
@@ -235,14 +231,12 @@ private struct SpeciesFeedRow: View {
         }
     }
 
+    // No NoID line here: `ClassificationStore.speciesFeed` filters those out
+    // before they reach a row, so a case for them would describe a state this
+    // view cannot be in.
     @ViewBuilder private var secondaryLines: some View {
         if pass.isNoise {
             Text("NOISE means it wasn't a bat")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-        }
-        if pass.isNoID {
-            Text("Triggered, but couldn't be classified")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
         }
@@ -338,20 +332,11 @@ private struct SpeciesFeedRow: View {
     @ViewBuilder private var thumbnail: some View {
         if let guidePage {
             GuideSpeciesThumbnail(species: guidePage, size: Self.photoWidth, fillsHeight: true)
-        } else if let image {
-            Image(uiImage: image)
-                .resizable()
-                .interpolation(.high)
-                .aspectRatio(contentMode: .fill)
-                .frame(width: Self.photoWidth)
-                .frame(maxHeight: .infinity)
-                .clipped()
         } else {
-            Rectangle()
-                .fill(.quaternary)
-                .frame(width: Self.photoWidth)
-                .frame(maxHeight: .infinity)
-                .overlay { Image(systemName: "waveform").font(.caption2).foregroundStyle(.secondary) }
+            // No guide page means no species — see `UnknownSpeciesThumbnail` for
+            // why this no longer falls back to the pass's own spectrogram.
+            UnknownSpeciesThumbnail(reason: pass.isNoise ? .notABat : .unidentified,
+                                    size: Self.photoWidth, fillsHeight: true)
         }
     }
 

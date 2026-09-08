@@ -23,53 +23,12 @@ private enum RecordingDateFormatters {
     }()
 }
 
-// MARK: - Thumbnail loading
-
-/// Fills in a Recording's spectrogram image without ever blocking the view it
-/// belongs to.
-///
-/// The awkward part is the reinstall case: the library (recordings.json) syncs
-/// back from iCloud almost immediately, but the spectrogram JPEGs arrive
-/// gradually afterwards, so a first pass over a screenful of rows legitimately
-/// finds nothing to decode. `ClassificationStore.load` reports that as
-/// `awaitingDownload` rather than reading the placeholder (which is what used to
-/// block), and this retries on a backing-off clock so thumbnails trickle in as
-/// their bytes land instead of the list appearing frozen until they all have.
-/// Cancellation is SwiftUI's: `.task(id:)` tears this down when the row goes away,
-/// so an offscreen row stops polling on its own.
-enum RecordingThumbnailLoader {
-    /// Longer edge to decode for a list row's 56 × 40 slot. `.fill` of a 4:1
-    /// spectrogram scales to the slot's HEIGHT, so ~480 px of width is what
-    /// actually gets sampled at @3x — 512 is that, rounded, and ~1/64th the
-    /// pixels of the stored 4096-wide original.
-    static let rowMaxPixelSize: CGFloat = 512
-
-    @MainActor
-    static func load(_ recording: Recording, store: ClassificationStore,
-                     maxPixelSize: CGFloat) async -> UIImage? {
-        var delay = Duration.seconds(1)
-        while !Task.isCancelled {
-            switch await store.loadSpectrogramImage(for: recording, maxPixelSize: maxPixelSize) {
-            case .loaded(let image):
-                return image
-            case .unavailable:
-                return nil
-            case .awaitingDownload:
-                do { try await Task.sleep(for: delay) } catch { return nil }
-                delay = min(delay * 2, .seconds(20))
-            }
-        }
-        return nil
-    }
-}
-
 // MARK: - Row
 
 struct RecordingRow: View {
     let recording: Recording
     let store: ClassificationStore
     let consent: ConsentStore
-    @State private var image: UIImage?
     /// The second-place species line, once it has been worked out — see
     /// `runnerUpLine(in:)`. `nil` until then, and drawn as a blank line rather
     /// than as a claim, so the row's height never changes under the reader.
@@ -108,9 +67,6 @@ struct RecordingRow: View {
                     runnerUp = runnerUpLine(in: passes)
                 }
                 assessForINaturalist(passes)
-                image = await RecordingThumbnailLoader.load(
-                    recording, store: store,
-                    maxPixelSize: RecordingThumbnailLoader.rowMaxPixelSize)
             }
             // Re-scored when something is posted from elsewhere in the app, so
             // a row stops advertising a recording that has just gone up. Guarded
@@ -297,17 +253,21 @@ struct RecordingRow: View {
     /// The species' photo where the guide has one for this code, the recording's
     /// own spectrogram where it does not.
     ///
-    /// **The photo first, and the spectrogram as the fallback** (Niall,
-    /// 2026-09-02): a row is a species sighting before it is a signal, and the
-    /// picture is what makes a list of them scannable — the same reason the guide
-    /// rows lead with one. NoID and NOISE have no guide page by construction, so
-    /// they keep the spectrogram, which is the only thing there is to show for a
-    /// recording that never resolved to a bat.
+    /// **The photo first** (Niall, 2026-09-02): a row is a species sighting before
+    /// it is a signal, and the picture is what makes a list of them scannable —
+    /// the same reason the guide rows lead with one.
+    ///
+    /// NoID and NOISE have no guide page by construction, and as of 2026-09-07
+    /// they get the app's own mark rather than their spectrogram: at thumbnail
+    /// width the spectrogram read as a species photo that happened to be dull,
+    /// which is the opposite of what the row is saying. See
+    /// `UnknownSpeciesThumbnail`.
     @ViewBuilder private var leadingImage: some View {
         if let page = SpeciesInfo.guidePage(forCode: recording.species) {
             GuideSpeciesThumbnail(species: page, size: Self.thumbnailWidth, fillsHeight: true)
         } else {
-            spectrogramThumbnail
+            UnknownSpeciesThumbnail(reason: recording.isNoise ? .notABat : .unidentified,
+                                    size: Self.thumbnailWidth, fillsHeight: true)
         }
     }
 
@@ -380,24 +340,10 @@ struct RecordingRow: View {
         .accessibilityLabel("Upload this recording")
     }
 
-    /// The spectrogram, filling the same leading tile the species photo would.
-    @ViewBuilder private var spectrogramThumbnail: some View {
-        Group {
-            if let image {
-                Image(uiImage: image)
-                    .resizable()
-                    .interpolation(.high)
-                    .aspectRatio(contentMode: .fill)
-            } else {
-                Rectangle()
-                    .fill(.quaternary)
-                    .overlay { Image(systemName: "waveform").font(.caption2).foregroundStyle(.secondary) }
-            }
-        }
-        .frame(width: Self.thumbnailWidth)
-        .frame(maxHeight: .infinity)
-        .clipped()
-    }
+    // The spectrogram no longer appears in this list — a named recording leads
+    // with its species photo and an unnamed one with the app's mark, so nothing
+    // was left for it to fill. Removing it also removed a JPEG decode per row on
+    // every scroll, which was running whether or not the result was drawn.
 
     static func time(_ d: Date) -> String {
         RecordingDateFormatters.timeMedium.string(from: d)

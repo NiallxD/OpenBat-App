@@ -262,6 +262,40 @@ final class PulseDetector {
     private(set) var pulseRateHz: Double = 0          // recent calls per second
     private(set) var lastClassification: ClassificationResult? = nil
 
+    /// Pulses the detector found and the capture pipeline never looked at, because
+    /// a capture was already in flight when they arrived.
+    ///
+    /// **These used to leave no trace at all.** Count and rate come from
+    /// `registerDetection()` and were right; everything downstream — thumbnails,
+    /// species, the demo log — silently held only the pulses that happened to fit.
+    /// Three devices listening to one recording disagreed about what they had
+    /// heard and no log said so. A device dropping a fifth of its calls should be
+    /// able to say it is.
+    private(set) var capturesSkipped: Int = 0
+
+    /// Pulses captured and drawn but never put to the model, because the
+    /// classifier was already `maxPendingClassifications` behind. Counted apart
+    /// from `capturesSkipped`: one means the device cannot draw fast enough, the
+    /// other that it cannot infer fast enough, and the fixes differ.
+    private(set) var classificationsSkipped: Int = 0
+
+    /// Pulses kept with their measurements but no picture, because the pulse view
+    /// already had one to show. Not a loss — nothing about the pulse's evidence is
+    /// missing — but it is the difference between "how many calls did we draw" and
+    /// "how many did we keep", and a run should be able to say so.
+    private(set) var picturesSkipped: Int = 0
+
+    /// Below this quality, a pulse already on the panel can still be replaced by a
+    /// better one inside the same refresh window, so a later pulse is worth
+    /// drawing. Above it, the panel is showing something good and the rest of the
+    /// window can be spent detecting instead of drawing.
+    nonisolated static let displayUpgradeQuality: Float = 0.5
+
+    /// True while the current pass has no pulse carrying an image. Every pass needs
+    /// one — the history picks a pass's thumbnail from its best-scoring pulse, and
+    /// a pass where nothing was drawn would have none at all.
+    private var passHasNoImageYet = true
+
     /// The aggregated ID for the most recently completed pass (multi-pulse).
     /// Updated when silence exceeds `passTimeoutSeconds` after the last detected pulse.
     private(set) var lastPassResult: ClassificationResult? = nil
@@ -404,6 +438,8 @@ final class PulseDetector {
             passAggPulses = []
             passPulseCount = 0
             passPulses = []
+            // The next pass needs its own thumbnail — see `passHasNoImageYet`.
+            passHasNoImageYet = true
             // Let the next pass claim the zoom panel with its first good pulse instead
             // of being blocked by the quality of a pulse from the pass that just ended.
             displayWindowQuality = 0
@@ -448,18 +484,23 @@ final class PulseDetector {
             store?.addPass(species: "UNID", confidence: 0, pulses: passPulses,
                            sessionID: activeSessionID,
                            coordinate: activeSessionID != nil ? coordinateProvider?() : nil)
-            DemoLogger.shared.logUnclassifiedPass(pulseCount: passPulseCount, species: "UNID")
+            DemoLogger.shared.logUnclassifiedPass(pulseCount: passPulseCount, species: "UNID",
+                                                  skippedCapture: capturesSkipped,
+                                                  skippedClassify: classificationsSkipped,
+                                                  skippedPicture: picturesSkipped)
             return
         }
 
         let descriptor = activeClassifier()?.descriptor
-        guard let outcome = PassAggregation.aggregate(
+        let verdict = PassAggregation.aggregate(
             passAggPulses,
             minAdjustedConfidence: autoIDSettings?.minPassConfidence ?? 0.05,
             minPulseCount: autoIDSettings?.minPassPulseCount ?? 1,
             rawConfidenceThreshold: descriptor?.noidRawConfidenceThreshold ?? PassAggregation.noidRawConfidenceThreshold,
-            noiseClassName: descriptor?.noiseClassName
-        ) else {
+            noiseClassName: descriptor?.noiseClassName,
+            minWinningMargin: autoIDSettings?.minWinningMargin ?? 0
+        )
+        guard let outcome = verdict.outcome else {
             // NoID: pulses were captured and classified, but the pass never cleared
             // the confidence gates for a species OR the noise class. Previously this
             // pass just vanished with no trace; recording it as its own "NOID" species
@@ -468,15 +509,22 @@ final class PulseDetector {
             // The raw confidence is recorded even here — especially here. It is
             // the number that failed the gate, so it is the difference between
             // "nothing much happened" and "a strong call the settings rejected".
+            // ...and WHY it failed, which "NOID" alone never said. A pass the
+            // model had no confidence in and a pass it was confident about but
+            // could not choose within are opposite findings wearing one label.
             store?.addPass(species: "NOID", confidence: 0, pulses: passPulses,
                            sessionID: activeSessionID,
                            coordinate: activeSessionID != nil ? coordinateProvider?() : nil,
-                           rawConfidence: PassAggregation.meanRawConfidence(passAggPulses))
+                           rawConfidence: PassAggregation.meanRawConfidence(passAggPulses),
+                           noIDReason: verdict.noIDReason)
             // Logged as its own kind: a pass that WAS classified and came back
             // inconclusive is a different result from one nothing was asked
             // about, and a comparison that conflated them would be reading two
             // failures as one.
-            DemoLogger.shared.logUnclassifiedPass(pulseCount: passPulseCount, species: "NOID")
+            DemoLogger.shared.logUnclassifiedPass(pulseCount: passPulseCount, species: "NOID",
+                                                  skippedCapture: capturesSkipped,
+                                                  skippedClassify: classificationsSkipped,
+                                                  skippedPicture: picturesSkipped)
             return
         }
 
@@ -491,7 +539,10 @@ final class PulseDetector {
         ClassificationLogger.shared.logPass(passResult, pulseCount: passPulseCount,
                                             modelID: autoIDSettings?.effectiveModelID)
         DemoLogger.shared.logPass(passResult, pulseCount: passPulseCount,
-                                  modelID: autoIDSettings?.effectiveModelID)
+                                  modelID: autoIDSettings?.effectiveModelID,
+                                  skippedCapture: capturesSkipped,
+                                  skippedClassify: classificationsSkipped,
+                                  skippedPicture: picturesSkipped)
 
         // Second-place species by mean posterior — surfaced as a runner-up suggestion
         // in the species feed. Not meaningful for a NOISE outcome (its meanScores are
@@ -557,6 +608,10 @@ final class PulseDetector {
         pendingClassifications = 0
         pulseCount = 0
         pulseRateHz = 0
+        capturesSkipped = 0
+        classificationsSkipped = 0
+        picturesSkipped = 0
+        passHasNoImageYet = true
         recentDetections.removeAll()
         lastPulseImage = nil
         lastDetectionDate = nil
@@ -596,6 +651,34 @@ final class PulseDetector {
     private let captureQueue = DispatchQueue(label: "bat.PulseDetector.capture",
                                              qos: .userInitiated)
 
+    /// Inference runs here, not on `captureQueue`.
+    ///
+    /// **Both were one serial queue until 2026-09-07, and that was the whole of
+    /// the detection floor.** A pulse's work is draw-then-classify, and the
+    /// capture gate is released between the two — but the *next* pulse's drawing
+    /// still had to wait behind the *previous* pulse's inference, because they
+    /// shared a queue. So the gate could not reopen until an inference had
+    /// finished, and the detector accepted one pulse per (draw + infer) no matter
+    /// how fast the bat was calling. Measured floors were 0.32 s on an A16, 0.35
+    /// on an A15 and 0.45–0.50 on an A14 — a whole generation apart, which read
+    /// like a compute limit and was not one.
+    ///
+    /// Separating them lets the capture queue return as soon as the image is
+    /// drawn. Inference then runs behind, up to `maxPendingClassifications` deep.
+    /// See `Context.md` §9.
+    private let classifyQueue = DispatchQueue(label: "bat.PulseDetector.classify",
+                                              qos: .userInitiated)
+
+    /// How far the classifier may fall behind before pulses stop being sent to it.
+    ///
+    /// Bounded on purpose. An unbounded backlog does not lose pulses, it defers
+    /// them without limit: a feeding buzz arrives far faster than any device can
+    /// classify, and the queue would still be draining minutes later, attributing
+    /// answers to a bat that had long gone. Past this depth the pulse is still
+    /// counted, drawn, filed and logged — only the species question is skipped,
+    /// and `classificationsSkipped` records it.
+    nonisolated static let maxPendingClassifications = 8
+
     // Deferred capture: when a pulse ends we don't snapshot immediately, because the
     // PCM ring doesn't yet hold the trailing audio the display/classification windows
     // need. We record the onset's ABSOLUTE sample index (from the triggering column's
@@ -608,17 +691,28 @@ final class PulseDetector {
     private var pendingArmAbs = 0       // onset arm time, to bound how long we wait
 
     /// Trailing audio (seconds) held past the onset before a capture fires. Must cover
-    /// every registered model's classification window (the trailing fraction after
-    /// onset, `windowSeconds * (1 - onsetFraction)`) as well as the display window, so
-    /// none of them are truncated — computed as a max over `ModelRegistry.all` (NABat:
-    /// 50 ms @ 30% onset → 35 ms trailing; BatDetect2: 256 ms @ 30% onset → 179.2 ms
-    /// trailing) rather than hardcoded, so adding a model with a longer window doesn't
-    /// silently truncate its captures. ~5 ms slack on top.
+    /// the trailing fraction of the ACTIVE model's classification window
+    /// (`windowSeconds * (1 - onsetFraction)`) as well as the display window, so
+    /// neither is truncated. ~5 ms slack on top.
+    ///
+    /// **This is a hard floor on the detection rate, and it used to be the wrong
+    /// model's floor (fixed 2026-09-07).** Every arriving pulse is skipped while a
+    /// capture is armed and waiting, so this interval sets the closest two
+    /// detections can be, before any work happens at all. It was a max over
+    /// `ModelRegistry.all` — reasoning that a longer window must never be
+    /// truncated — which is right about the requirement and wrong about whose:
+    /// only the model actually running has to be satisfied. BatDetect2 needs
+    /// 179.2 ms, NABat needs 35 ms, and *every* run paid BatDetect2's, so a NABat
+    /// user waited 184 ms per capture to fill a 50 ms window. Measured floors
+    /// were 0.30 / 0.33 / 0.45 s on A16 / A15 / A14, of which 0.184 s was this.
+    ///
+    /// With no active model there is nothing to fill, but a capture is still
+    /// drawn, so this falls back to the display window's own trailing need.
     private var deferTrailSeconds: Double {
-        let maxTrailing = ModelRegistry.all
-            .map { $0.input.windowSeconds * (1 - $0.input.onsetFraction) }
-            .max() ?? 0.055
-        return maxTrailing + 0.005
+        let trailing = activeClassifier().map {
+            $0.descriptor.input.windowSeconds * (1 - $0.descriptor.input.onsetFraction)
+        } ?? (displayWindowMs / 1000)
+        return trailing + 0.005
     }
 
     // Active classifier, lazily built from the active model descriptor and cached
@@ -729,6 +823,12 @@ final class PulseDetector {
                         pendingFireAbs  = pendingOnsetAbs + Int(deferTrailSeconds * sampleRate)
                         pendingArmAbs   = columnEndSample
                         pendingCapture  = true
+                    } else {
+                        // A real call, found and then not looked at. Recorded so the
+                        // gap between "pulses heard" and "pulses filed" is visible
+                        // instead of having to be inferred from two devices
+                        // disagreeing.
+                        capturesSkipped += 1
                     }
                 }
                 inPulseRun = false
@@ -806,6 +906,10 @@ final class PulseDetector {
         // classified pulses from the segment's aggregate. See Context.md §8. Captured
         // once here so every consumer of this pulse's result agrees on when it happened.
         let captureDate = Date()
+        // How long this pulse sat armed waiting for its trailing audio — the fixed
+        // cost that gates the detection rate before any work is done. See
+        // `deferTrailSeconds`.
+        let waitMs = deferTrailSeconds * 1000
 
         let sr  = sampleRate
         let floor = pulseNoiseFloor
@@ -829,7 +933,7 @@ final class PulseDetector {
         // the dashed line (it re-finds the −12 dB onset and crops the fixed span from
         // this buffer). Lead = 1 display span before the onset, trail = 2 spans after —
         // comfortably covers a long call plus the (1−onsetFrac) trailing display.
-        let dispSpanSamples = max(PulseImageRenderer.fftLen + PulseImageRenderer.hop,
+        let dispSpanSamples = max(PulseImageRenderer.fftLen + PulseImageRenderer.displayHop,
                                   Int(dispSpanSec * sr))
         let leadSamples  = dispSpanSamples
         let trailSamples = dispSpanSamples * 2
@@ -854,6 +958,29 @@ final class PulseDetector {
         }
         let gate = autoIDSettings?.qualityGate ?? .disabled
 
+        // Does this pulse need its picture drawn? Decided here, on the main actor,
+        // where the display's state lives — the completion below re-checks against
+        // the same rules before actually showing it.
+        //
+        // The pulse view is an intermittent sample, not a feed: it holds one call
+        // for `displayRefreshIntervalSeconds` so a person can look at it. Drawing
+        // every capture to satisfy a panel that changes every 2 s meant most
+        // renders were discarded on arrival, and since drawing is what holds the
+        // capture queue, each discarded one cost the detections that arrived
+        // while it ran.
+        //
+        // Three reasons to draw:
+        //   · the display window has expired, so this pulse can claim the panel
+        //   · the window is still open but what is on it is poor, so a better
+        //     pulse may still replace it (the existing upgrade path)
+        //   · nothing in this pass has an image yet, so the pass would otherwise
+        //     have no thumbnail to represent it in the history
+        let windowOpen = displayRefreshIntervalSeconds > 0
+            && lastDisplayUpdate.map { Date().timeIntervalSince($0) < displayRefreshIntervalSeconds } ?? false
+        let wantsImage = !windowOpen
+            || displayWindowQuality < Self.displayUpgradeQuality
+            || passHasNoImageYet
+
         // Species ID only runs at the model's native rate — see
         // `ModelInputSpec.nativeSampleRate`. Off-rate audio would be read as if it
         // were 384 kHz and produce a confident species name from a frequency axis
@@ -864,10 +991,28 @@ final class PulseDetector {
         // because a delivered rate isn't guaranteed integral.
         let rateIsNative = abs(sr - inputSpec.nativeSampleRate)
                          <= inputSpec.nativeSampleRate * 0.001
-        let cls = rateIsNative ? active?.classifier : nil
+        let rateReady = rateIsNative ? active?.classifier : nil
+
+        // `pendingClassifications` already counts this pulse (incremented above), so
+        // the comparison is against a backlog that includes it. Past the cap the
+        // pulse keeps everything except its species — it falls through the same
+        // no-result path as a pulse with no model at all, which decrements the
+        // counter and files it as unclassified.
+        let backlogFull = pendingClassifications > Self.maxPendingClassifications
+        if backlogFull, rateReady != nil { classificationsSkipped += 1 }
+        let cls = backlogFull ? nil : rateReady
+        let skippedForBacklog = backlogFull && rateReady != nil
+
+        if !wantsImage { picturesSkipped += 1 } else { passHasNoImageYet = false }
+
+        // Captured as a local so the background block never reaches back through
+        // `self` for it — the queue is a plain value and this stays off the actor.
+        let classifyQueue = self.classifyQueue
 
         captureQueue.async { [weak self] in
             guard let self else { return }
+            let imageStart = DispatchTime.now()
+            let imageCPUStart = ThreadClock.cpuNanoseconds()
             let result = PulseImageRenderer.render(pcm: dispPCM,
                                                    sampleRate: sr,
                                                    noiseFloor: floor,
@@ -875,7 +1020,14 @@ final class PulseDetector {
                                                    displaySpanSeconds: dispSpanSec,
                                                    onsetFraction: onsetFrac,
                                                    expectedOnsetSample: onsetInBuf,
-                                                   palette: palette)
+                                                   palette: palette,
+                                                   makeImage: wantsImage)
+            let imageMs = Double(DispatchTime.now().uptimeNanoseconds
+                                 - imageStart.uptimeNanoseconds) / 1e6
+            // Wall minus CPU is time this thread spent not running. If that gap is
+            // most of `imageMs`, the render is being descheduled rather than being
+            // slow, and tuning the DSP would achieve nothing.
+            let imageCPUMs = ThreadClock.cpuMillisecondsSince(imageCPUStart)
 
             // Release the capture gate as soon as the image is ready so that the next
             // pulse can be armed while classification (which is slow) still runs. Without
@@ -892,7 +1044,12 @@ final class PulseDetector {
                 // releasing the capture gate.
                 let now = Date()
 
-                if let r = result {
+                // A pulse drawn without a picture cannot claim the panel — but it is
+                // still a pulse, and its measurements are filed below exactly as any
+                // other's. `wantsImage` was decided when this capture was scheduled;
+                // by now the window may have turned over, which only means this
+                // pulse misses its turn rather than that anything was lost.
+                if let r = result, let image = r.image {
                     // Display gating: the zoom image and freq stats update only when
                     // both conditions are met:
                     //   1. Quality is high enough (concentrated energy, not broadband noise/echo)
@@ -904,7 +1061,7 @@ final class PulseDetector {
                         || self.lastDisplayUpdate.map { now.timeIntervalSince($0) >= interval } ?? true
                     let betterInWindow = !windowExpired && r.quality > self.displayWindowQuality
                     if r.quality >= 0.35 && (windowExpired || betterInWindow) {
-                        self.lastPulseImage     = r.image
+                        self.lastPulseImage     = image
                         self.lastDetectionDate  = now
                         self.capturedFreqMin    = r.freqMin
                         self.capturedFreqMax    = r.freqMax
@@ -921,100 +1078,135 @@ final class PulseDetector {
                 self.isCapturing = false
             }
 
-            // Classification continues after the gate is released. Posts its result
-            // back to the main thread independently of the image/rate update above.
-            let classification: ClassificationResult? = clsPCM.count >= clsCount
-                ? cls?.classify(pcm: clsPCM, gate: gate, prior: { priorSnapshot[$0] ?? 1.0 })
-                : nil
-            guard let classification else {
-                DispatchQueue.main.async { [weak self] in
-                    guard let self, self.captureGeneration == generation else { return }
-                    defer { self.pendingClassifications -= 1 }
-                    // **A pulse nobody classified is still a pulse** (Niall,
-                    // 2026-09-06). This used to drop it here, which meant a
-                    // recording made with no model active kept its audio and
-                    // none of its measurements — no timestamps, no peak
-                    // frequencies, no durations — and the iNaturalist sheet
-                    // refused it outright with "No calls were detected". The
-                    // detector had found the calls, drawn them, and counted
-                    // them; only the record of them was thrown away.
-                    //
-                    // So the measurements are kept and the species is left
-                    // unfilled. `passAggPulses` is deliberately NOT appended
-                    // to: there are no scores to aggregate, and its emptiness
-                    // is what tells `finalizePass` this pass was never
-                    // classified rather than classified inconclusively.
-                    //
-                    // Only when the render succeeded — without it there is no
-                    // frequency, no duration and no thumbnail, so the pulse
-                    // would be a bare timestamp claiming to be evidence.
-                    guard let r = result else { return }
-                    self.passPulseCount += 1
-                    self.passPulses.append(CapturedPulse(
-                        date: captureDate,
-                        species: "UNID",
-                        confidence: 0,
-                        peakFreqHz: r.peakFreq,
-                        durationMs: r.durationMs,
-                        topScores: [],
-                        image: r.cleanImage ?? r.image,
-                        imageFreqMinHz: r.cleanFreqMinHz,
-                        imageFreqMaxHz: r.cleanFreqMaxHz,
-                        imageSpanMs: r.cleanSpanMs))
-                    self.onPulseDetected?(captureDate)
-                    // The row the field log has no way of writing: a call the
-                    // detector kept and nothing was asked about. Two devices
-                    // differing here differ in what they HEARD, which is a
-                    // different finding from differing in what they named.
-                    DemoLogger.shared.logUnclassifiedPulse(
-                        peakFreqHz: r.peakFreq, durationMs: r.durationMs,
-                        note: self.activeClassifier() == nil ? "no active model"
-                                                             : "not classified",
-                        at: captureDate)
+            // Classification runs on its OWN queue, not the tail of this one. The
+            // gate release above is what lets the next pulse be armed; keeping the
+            // model here meant the next pulse's *drawing* still queued behind this
+            // pulse's inference, so the gate could not actually reopen until the
+            // model had finished. That, not the silicon, was the detection floor —
+            // see `classifyQueue`.
+            classifyQueue.async {
+                // Classification posts its result back to the main thread
+                // independently of the image/rate update above.
+                let classifyStart = DispatchTime.now()
+                let classification: ClassificationResult? = clsPCM.count >= clsCount
+                    ? cls?.classify(pcm: clsPCM, gate: gate, prior: { priorSnapshot[$0] ?? 1.0 })
+                    : nil
+                let classifyMs = cls == nil ? nil
+                    : Double(DispatchTime.now().uptimeNanoseconds
+                             - classifyStart.uptimeNanoseconds) / 1e6
+                guard let classification else {
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self, self.captureGeneration == generation else { return }
+                        defer { self.pendingClassifications -= 1 }
+                        // **A pulse nobody classified is still a pulse** (Niall,
+                        // 2026-09-06). This used to drop it here, which meant a
+                        // recording made with no model active kept its audio and
+                        // none of its measurements — no timestamps, no peak
+                        // frequencies, no durations — and the iNaturalist sheet
+                        // refused it outright with "No calls were detected". The
+                        // detector had found the calls, drawn them, and counted
+                        // them; only the record of them was thrown away.
+                        //
+                        // So the measurements are kept and the species is left
+                        // unfilled. `passAggPulses` is deliberately NOT appended
+                        // to: there are no scores to aggregate, and its emptiness
+                        // is what tells `finalizePass` this pass was never
+                        // classified rather than classified inconclusively.
+                        //
+                        // Only when the render succeeded — without it there is no
+                        // frequency, no duration and no thumbnail, so the pulse
+                        // would be a bare timestamp claiming to be evidence.
+                        guard let r = result else { return }
+                        self.passPulseCount += 1
+                        self.passPulses.append(CapturedPulse(
+                            date: captureDate,
+                            species: "UNID",
+                            confidence: 0,
+                            peakFreqHz: r.peakFreq,
+                            durationMs: r.durationMs,
+                            topScores: [],
+                            image: r.cleanImage ?? r.image,
+                            imageFreqMinHz: r.cleanFreqMinHz,
+                            imageFreqMaxHz: r.cleanFreqMaxHz,
+                            imageSpanMs: r.cleanSpanMs))
+                        self.onPulseDetected?(captureDate)
+                        // The row the field log has no way of writing: a call the
+                        // detector kept and nothing was asked about. Two devices
+                        // differing here differ in what they HEARD, which is a
+                        // different finding from differing in what they named.
+                        // Three different silences, told apart. "classifier behind"
+                        // is the one that means the device could not keep up —
+                        // reading it as "not classified" would hide exactly the
+                        // shortfall these counters exist to expose.
+                        let note: String
+                        if skippedForBacklog                    { note = "classifier behind" }
+                        else if self.activeClassifier() == nil  { note = "no active model" }
+                        else                                    { note = "not classified" }
+                        DemoLogger.shared.logUnclassifiedPulse(
+                            peakFreqHz: r.peakFreq, durationMs: r.durationMs,
+                            note: note,
+                            at: captureDate,
+                            skippedCapture: self.capturesSkipped,
+                            skippedClassify: self.classificationsSkipped,
+                            skippedPicture: self.picturesSkipped,
+                            timings: .init(waitMs: waitMs, imageMs: imageMs,
+                                           stftMs: result?.stftMs,
+                                           classifyMs: classifyMs,
+                                           stftFrames: result?.stftFrames,
+                                           imageCPUMs: imageCPUMs))
+                    }
+                    return
                 }
-                return
-            }
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                // The important one: without this, a classification still running
-                // when the user stops and immediately restarts lands its pulse in
-                // the NEW session's accumulator, attributed to that session's ID
-                // and coordinate. The decrement is inside the guard too —
-                // `resetStats` zeroes `pendingClassifications`, so a stale
-                // decrement would drive it negative and the `== 0` gate in
-                // `feed()` would never let a pass finalize again.
-                guard self.captureGeneration == generation else { return }
-                defer { self.pendingClassifications -= 1 }
-                // A classified pulse joins the pass even when the display render
-                // failed — the ID shouldn't lose evidence over a missing thumbnail.
-                self.lastClassification = classification
-                let top = classification.allScores.sorted { $0.value > $1.value }
-                    .prefix(6)
-                    .map { ScoreEntry(species: $0.key, score: $0.value) }
-                let captured = CapturedPulse(date: captureDate,
-                                             species: classification.species,
-                                             confidence: classification.confidence,
-                                             peakFreqHz: result?.peakFreq ?? 0,
-                                             durationMs: result?.durationMs ?? 0,
-                                             topScores: top,
-                                             // Stored thumbnails use the tight "clean" crop —
-                                             // the wide render stays live-view-only.
-                                             image: result?.cleanImage ?? result?.image,
-                                             imageFreqMinHz: result?.cleanFreqMinHz,
-                                             imageFreqMaxHz: result?.cleanFreqMaxHz,
-                                             imageSpanMs: result?.cleanSpanMs)
-                self.accumulatePulse(captured, raw: classification.rawScores, adjusted: classification.allScores)
-                self.onPulseDetected?(captured.date)
-                self.onPulseClassified?(classification, captured.date)
-                ClassificationLogger.shared.logPulse(classification,
-                                                     modelID: self.autoIDSettings?.activeModelID)
-                // Silent unless a demo is being logged — see `DemoLogger`.
-                DemoLogger.shared.logClassifiedPulse(
-                    classification,
-                    peakFreqHz: result?.peakFreq ?? 0,
-                    durationMs: result?.durationMs ?? 0,
-                    modelID: self.autoIDSettings?.activeModelID,
-                    at: captureDate)
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    // The important one: without this, a classification still running
+                    // when the user stops and immediately restarts lands its pulse in
+                    // the NEW session's accumulator, attributed to that session's ID
+                    // and coordinate. The decrement is inside the guard too —
+                    // `resetStats` zeroes `pendingClassifications`, so a stale
+                    // decrement would drive it negative and the `== 0` gate in
+                    // `feed()` would never let a pass finalize again.
+                    guard self.captureGeneration == generation else { return }
+                    defer { self.pendingClassifications -= 1 }
+                    // A classified pulse joins the pass even when the display render
+                    // failed — the ID shouldn't lose evidence over a missing thumbnail.
+                    self.lastClassification = classification
+                    let top = classification.allScores.sorted { $0.value > $1.value }
+                        .prefix(6)
+                        .map { ScoreEntry(species: $0.key, score: $0.value) }
+                    let captured = CapturedPulse(date: captureDate,
+                                                 species: classification.species,
+                                                 confidence: classification.confidence,
+                                                 peakFreqHz: result?.peakFreq ?? 0,
+                                                 durationMs: result?.durationMs ?? 0,
+                                                 topScores: top,
+                                                 // Stored thumbnails use the tight "clean" crop —
+                                                 // the wide render stays live-view-only.
+                                                 image: result?.cleanImage ?? result?.image,
+                                                 imageFreqMinHz: result?.cleanFreqMinHz,
+                                                 imageFreqMaxHz: result?.cleanFreqMaxHz,
+                                                 imageSpanMs: result?.cleanSpanMs)
+                    self.accumulatePulse(captured, raw: classification.rawScores, adjusted: classification.allScores)
+                    self.onPulseDetected?(captured.date)
+                    self.onPulseClassified?(classification, captured.date)
+                    ClassificationLogger.shared.logPulse(classification,
+                                                         modelID: self.autoIDSettings?.activeModelID)
+                    // Silent unless a demo is being logged — see `DemoLogger`.
+                    DemoLogger.shared.logClassifiedPulse(
+                        classification,
+                        peakFreqHz: result?.peakFreq ?? 0,
+                        durationMs: result?.durationMs ?? 0,
+                        modelID: self.autoIDSettings?.activeModelID,
+                        at: captureDate,
+                        skippedCapture: self.capturesSkipped,
+                        skippedClassify: self.classificationsSkipped,
+                        skippedPicture: self.picturesSkipped,
+                        timings: .init(waitMs: waitMs, imageMs: imageMs,
+                                       stftMs: result?.stftMs,
+                                       classifyMs: classifyMs,
+                                       stftFrames: result?.stftFrames,
+                                       imageCPUMs: imageCPUMs))
+                }
             }
         }
     }

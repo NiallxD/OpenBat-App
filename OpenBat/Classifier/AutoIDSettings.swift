@@ -54,6 +54,10 @@ final class AutoIDSettings {
         var passTimeoutSeconds: Double
         var minPassConfidence: Float           // mean adjusted score to report an ID
         var minPassPulseCount: Int             // minimum pulses to form a pass
+        /// How far clear of the runner-up the winner must be, or the pass goes
+        /// unnamed. See `PassAggregation.aggregate`. Optional in the stored form
+        /// so settings written before this existed decode without loss.
+        var minWinningMargin: Float?
         var qualityGateEnabled: Bool           // per-pulse quality gate (nabat-ml _process_window)
         var qualitySNThreshold: Float
         var qualityAmpThreshold: Float
@@ -387,7 +391,8 @@ final class AutoIDSettings {
                            ampThreshold: m.qualityAmpThreshold)
     }
 
-    var passTimeoutSeconds: Double { activeModel?.passTimeoutSeconds ?? 2.0 }
+    var passTimeoutSeconds: Double { activeModel?.passTimeoutSeconds ?? Self.defaultPassTimeoutSeconds }
+    var minWinningMargin: Float    { activeModel?.minWinningMargin ?? 0.10 }
     var minPassConfidence: Float   { activeModel?.minPassConfidence ?? 0.05 }
     var minPassPulseCount: Int     { activeModel?.minPassPulseCount ?? 1 }
 
@@ -401,15 +406,32 @@ final class AutoIDSettings {
     /// real bar rather than "almost anything wins" — the old 0.05/1 defaults
     /// meant nearly every pulse produced *a* winning species regardless of how
     /// weak the margin over the runner-up actually was.
+    /// Named rather than written twice: the seed below and the migration in
+    /// `load()` have to agree, and a literal in each is how they stop agreeing.
+    static let defaultPassTimeoutSeconds: Double = 0.8
+
     static func defaultSettings(for d: ModelDescriptor) -> ModelSettings {
         var species: [String: SpeciesState] = [:]
         for code in d.classNames {
             species[code] = SpeciesState(enabled: true, prior: 1.0, resolved: false)
         }
         return ModelSettings(species: species,
-                             passTimeoutSeconds: 2.0,
+                             // 0.8 s, not the 2.0 this shipped with. The timeout is
+                             // what separates one bat from the next, and 2 s is
+                             // longer than the quiet between two passes: on the demo
+                             // clip it produced a single 26-second "pass" holding
+                             // four species, whose reported name was decided by
+                             // whichever of them the pipeline had sampled best that
+                             // run — it changed between builds without the audio
+                             // changing. 0.8 sits in a valley in the gap
+                             // distribution: 0.8 and 1.1 segment that clip
+                             // identically, while 0.5 cuts inside a single LANO's
+                             // own call spacing (p95 0.70 s) and shatters one bat
+                             // into five passes.
+                             passTimeoutSeconds: defaultPassTimeoutSeconds,
                              minPassConfidence: 0.15,
                              minPassPulseCount: 2,
+                             minWinningMargin: 0.10,
                              qualityGateEnabled: d.defaultGate.enabled,
                              qualitySNThreshold: d.defaultGate.snThreshold,
                              qualityAmpThreshold: d.defaultGate.ampThreshold)
@@ -429,6 +451,23 @@ final class AutoIDSettings {
     private static let keyV2 = "AutoIDSettings_v2"
     private static let keyV1 = "AutoIDSettings_v1"   // legacy single-model blob
 
+    /// One-time move of the pass timeout off its old shipped default.
+    ///
+    /// **Changing `defaultSettings` does nothing to anyone who already has the
+    /// app** — `load()` overlays the stored per-model payload on top of the
+    /// defaults, so an install carrying the old value keeps it forever. The 2.0 s
+    /// default was not a preference anybody expressed, it was a number that made
+    /// one pass out of a minute of bats and made the reported species depend on
+    /// how much of the audio the device managed to keep, so it is moved rather
+    /// than left.
+    ///
+    /// Only a model still sitting on exactly the old default is touched, and only
+    /// once. Someone who had deliberately chosen 2.0 loses that choice — accepted,
+    /// because it is indistinguishable from never having touched the slider and
+    /// the slider is still right there.
+    private static let keyPassTimeoutMigration = "AutoIDSettings_passTimeout_0.8"
+    private static let supersededPassTimeout: Double = 2.0
+
     private struct StoredV2: Codable {
         var activeModelID: String?
         var perModel: [String: ModelSettings]
@@ -444,6 +483,18 @@ final class AutoIDSettings {
         var qualityGateEnabled: Bool?
         var qualitySNThreshold: Float?
         var qualityAmpThreshold: Float?
+    }
+
+    /// See `keyPassTimeoutMigration`.
+    private func migratePassTimeoutIfNeeded(_ defaults: UserDefaults) {
+        guard !defaults.bool(forKey: Self.keyPassTimeoutMigration) else { return }
+        var changed = false
+        for (id, ms) in perModel where ms.passTimeoutSeconds == Self.supersededPassTimeout {
+            perModel[id]?.passTimeoutSeconds = Self.defaultPassTimeoutSeconds
+            changed = true
+        }
+        defaults.set(true, forKey: Self.keyPassTimeoutMigration)
+        if changed { save() }
     }
 
     func save() {
@@ -462,6 +513,7 @@ final class AutoIDSettings {
             // models absent from the payload (e.g. added in a later build) keep defaults.
             for (id, ms) in stored.perModel { perModel[id] = ms }
             activeModelID = stored.activeModelID
+            migratePassTimeoutIfNeeded(defaults)
             return
         }
 

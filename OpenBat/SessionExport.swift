@@ -69,6 +69,9 @@ nonisolated enum SessionExport {
         let runnerUpConfidence: Float?
         let complexID: String?
         let complexAmbiguous: Bool?
+        /// Why an unnamed pass went unnamed — `PassAggregation.NoIDReason`'s raw
+        /// value, empty for a named one.
+        let noIDReason: String?
         let latitude: Double?
         let longitude: Double?
     }
@@ -284,7 +287,7 @@ nonisolated enum SessionExport {
             "session_id", "session_title", "pass_id", "detected_at",
             "species", "common_name", "confidence", "raw_confidence", "pulse_count",
             "runner_up_species", "runner_up_confidence",
-            "complex_id", "complex_ambiguous", "latitude", "longitude",
+            "complex_id", "complex_ambiguous", "noid_reason", "latitude", "longitude",
         ]
         var lines = [columns.joined(separator: ",")]
         for d in input.detections {
@@ -302,6 +305,7 @@ nonisolated enum SessionExport {
                 d.runnerUpConfidence.map { String(format: "%.4f", $0) } ?? "",
                 d.complexID ?? "",
                 d.complexAmbiguous.map { $0 ? "true" : "false" } ?? "",
+                d.noIDReason ?? "",
                 d.latitude.map { String(format: "%.6f", $0) } ?? "",
                 d.longitude.map { String(format: "%.6f", $0) } ?? "",
             ]
@@ -361,9 +365,18 @@ nonisolated enum SessionExport {
 
     /// Local time with its UTC offset, not plain UTC — when a bat was heard is
     /// read against dusk, and a reader shouldn't have to convert back.
+    ///
+    /// **With milliseconds** (2026-09-07). This was whole seconds, which is finer
+    /// than anyone needs for "when did I hear this" and far too coarse for the
+    /// question the pulse rows actually get asked: how fast was it calling. Every
+    /// inter-pulse gap in a real session quantised to 0 s or 1 s, so a field
+    /// recording could not be used to check the pass timeout — the one thing only
+    /// field data can answer. Applied to every column rather than just the pulses:
+    /// a reader should not have to know which timestamps in one export are
+    /// precise and which are not.
     private static func stamp(_ date: Date) -> String {
         let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime]
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         f.timeZone = .current
         return f.string(from: date)
     }

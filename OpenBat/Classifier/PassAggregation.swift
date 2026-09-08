@@ -39,6 +39,48 @@ nonisolated enum PassAggregation {
         let adjustedScores: [String: Float]
     }
 
+    /// Why a pass came back unnamed.
+    ///
+    /// **"NoID" was one word for five different findings**, and the difference
+    /// matters to whoever reads the record: a pass the model had no confidence in
+    /// is not the same as a pass it was very confident about and could not choose
+    /// within. A Squamish evening of 2026-09-07 recorded 35 NoIDs, of which 9 had
+    /// cleared the evidence gate — one at 0.946 raw over 19 pulses — and nothing
+    /// in the export said what had stopped them.
+    ///
+    /// Raw values are stable: they are persisted on the pass and exported.
+    enum NoIDReason: String, Codable {
+        /// No pulses reached aggregation at all.
+        case noPulses
+        /// Mean per-pulse raw confidence below the model's own NoID threshold —
+        /// the model was not sure this was a classifiable call.
+        case weakEvidence
+        /// Fewer pulses than the user's minimum for naming a pass.
+        case tooFewPulses
+        /// Adjusted confidence in the winner below the user's minimum.
+        case lowConfidence
+        /// Strong evidence, but the top two species were within
+        /// `minWinningMargin`. The interesting one: this is a refusal, not a
+        /// failure, and the runner-up is worth reading.
+        case tooCloseToCall
+    }
+
+    /// What a pass came to. `outcome` and `noIDReason` let a caller that only
+    /// cares about one half keep reading it the way it always did.
+    enum Verdict {
+        case named(Outcome)
+        case noID(NoIDReason)
+
+        var outcome: Outcome? {
+            if case .named(let o) = self { return o }
+            return nil
+        }
+        var noIDReason: NoIDReason? {
+            if case .noID(let r) = self { return r }
+            return nil
+        }
+    }
+
     struct Outcome {
         let species: String   // "NOISE" or a species code — never "No ID"/nil, see aggregate(_:)
         let confidence: Float
@@ -99,31 +141,50 @@ nonisolated enum PassAggregation {
         return pulses.reduce(Float(0)) { $0 + ($1.rawScores.values.max() ?? 0) } / Float(pulses.count)
     }
 
+    /// `minWinningMargin` is how far clear of the runner-up the winner must be
+    /// before the pass is named at all. Below it the pass is a NoID.
+    ///
+    /// **A pass whose top two species are neck and neck is not a weak
+    /// identification, it is an unanswered question**, and reporting the winner
+    /// anyway states as fact something a couple of pulses either way would have
+    /// reversed. Measured on the demo clip: correctly segmented passes separated
+    /// their top two by 0.15 at the tightest, while the blended passes that kept
+    /// flipping species between builds sat at 0.003–0.017. Nothing legitimate was
+    /// observed in between.
+    ///
+    /// The cost is real and was accepted deliberately (Niall, 2026-09-07): two
+    /// species genuinely calling at once will now go unnamed rather than have one
+    /// of them picked. Silence is the honest answer there, and the pulses are
+    /// still recorded — only the pass's verdict is withheld.
+    ///
+    /// Defaults to 0 so callers that have not been taught about it, and the
+    /// tests that predate it, behave exactly as before.
     static func aggregate(_ pulses: [Pulse],
                           minAdjustedConfidence: Float,
                           minPulseCount: Int,
                           rawConfidenceThreshold: Float = noidRawConfidenceThreshold,
-                          noiseClassName: String? = "NOISE") -> Outcome? {
-        guard !pulses.isEmpty else { return nil }
+                          noiseClassName: String? = "NOISE",
+                          minWinningMargin: Float = 0) -> Verdict {
+        guard !pulses.isEmpty else { return .noID(.noPulses) }
         let n = Float(pulses.count)
 
         // NoID gate: mean of each pulse's own top RAW score (its confidence in
         // whatever it predicted, unbiased by priors) — independent of which class
         // actually wins below.
         let rawConfidence = meanRawConfidence(pulses)
-        guard rawConfidence >= rawConfidenceThreshold else { return nil }   // NoID
+        guard rawConfidence >= rawConfidenceThreshold else { return .noID(.weakEvidence) }
 
         // Winning class by raw evidence, aggregated across the pass's pulses.
         var rawSum: [String: Float] = [:]
         for p in pulses { for (k, v) in p.rawScores { rawSum[k, default: 0] += v } }
-        guard let rawBest = rawSum.highestScoring() else { return nil }
+        guard let rawBest = rawSum.highestScoring() else { return .noID(.weakEvidence) }
 
         if let noiseClassName, rawBest.key == noiseClassName {
-            return Outcome(species: noiseClassName,
-                           confidence: rawBest.value / n,
-                           meanScores: rawSum.mapValues { $0 / n },
-                           meanRawConfidence: rawConfidence,
-                           rawSpeciesConfidence: rawBest.value / n)
+            return .named(Outcome(species: noiseClassName,
+                                  confidence: rawBest.value / n,
+                                  meanScores: rawSum.mapValues { $0 / n },
+                                  meanRawConfidence: rawConfidence,
+                                  rawSpeciesConfidence: rawBest.value / n))
         }
 
         // Real bat call by raw evidence — now defer to prior-adjusted posteriors to
@@ -133,15 +194,26 @@ nonisolated enum PassAggregation {
         for p in pulses { for (k, v) in p.adjustedScores { adjSum[k, default: 0] += v } }
         let candidates = adjSum.filter { $0.key != noiseClassName }
         let pool = candidates.isEmpty ? adjSum : candidates
-        guard let best = pool.highestScoring() else { return nil }
+        guard let best = pool.highestScoring() else { return .noID(.weakEvidence) }
 
         let meanConf = best.value / n
-        guard pulses.count >= minPulseCount, meanConf >= minAdjustedConfidence else { return nil }
+        guard pulses.count >= minPulseCount else { return .noID(.tooFewPulses) }
+        guard meanConf >= minAdjustedConfidence else { return .noID(.lowConfidence) }
 
-        return Outcome(species: best.key, confidence: meanConf,
-                       meanScores: adjSum.mapValues { $0 / n },
-                       meanRawConfidence: rawConfidence,
-                       rawSpeciesConfidence: (rawSum[best.key] ?? 0) / n)
+        // Margin gate. Measured against the runner-up among the same candidates the
+        // winner was chosen from, so a suppressed noise class cannot count as the
+        // contender. A pass with only one candidate has nothing to be confused with
+        // and passes trivially.
+        if minWinningMargin > 0 {
+            let runnerUp = pool.filter { $0.key != best.key }.highestScoring()
+            let margin = meanConf - ((runnerUp?.value ?? 0) / n)
+            guard margin >= minWinningMargin else { return .noID(.tooCloseToCall) }
+        }
+
+        return .named(Outcome(species: best.key, confidence: meanConf,
+                              meanScores: adjSum.mapValues { $0 / n },
+                              meanRawConfidence: rawConfidence,
+                              rawSpeciesConfidence: (rawSum[best.key] ?? 0) / n))
     }
 }
 

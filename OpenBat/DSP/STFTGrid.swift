@@ -77,9 +77,20 @@ nonisolated enum STFTGrid {
     /// frequency response (see `MicCalibrationCurve`) — applied directly by
     /// bin index, since this grid's 1024 bins/2048 FFT match what the curve
     /// was measured at.
+    /// `frameHop` defaults to the shared native `hop` (32 samples, 12 000
+    /// columns/second). A caller that does not need that density can pass a
+    /// coarser one and pay proportionally less: the cost of this function is
+    /// linear in the frame count, and the frame count is `pcm.count / frameHop`.
+    ///
+    /// The pulse view does exactly that (see `PulseImageRenderer.displayHop`).
+    /// Nothing about the window, the FFT size or the bin count changes — only how
+    /// often a frame is taken — so the grid this returns stays compatible with
+    /// every consumer, at a coarser time resolution.
     static func compute(pcm: [Float], scratch: inout Scratch,
                         dynamicRangeDB: Float,
-                        calibrationCurve: MicCalibrationCurve? = nil) -> (grid: [Float], nFrames: Int)? {
+                        calibrationCurve: MicCalibrationCurve? = nil,
+                        frameHop: Int = STFTGrid.hop) -> (grid: [Float], nFrames: Int)? {
+        let hop = max(1, frameHop)
         guard pcm.count >= windowLen else {
             WavPlayerDebugLog.log("STFTGrid", "compute: pcm.count=\(pcm.count) < windowLen=\(windowLen), aborting")
             return nil

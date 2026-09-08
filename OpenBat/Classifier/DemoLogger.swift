@@ -137,16 +137,49 @@ final class DemoLogger {
         }
     }
 
+    /// Where a pulse's time actually went, in milliseconds. Empty on rows that
+    /// aren't a single pulse.
+    ///
+    /// **Added because two rounds of reasoning about the detection floor were
+    /// wrong without it** (2026-09-07). The floor was blamed first on the
+    /// classifier and then on the drawing; it was mostly a fixed wait for the
+    /// tail of a call, and neither guess could be checked because nothing was
+    /// timed. `waitMs` is that wait, `imageMs` the drawing, `classifyMs` the
+    /// model. Their sum against the gap to the next detection says which of the
+    /// three, if any, is worth attacking next.
+    struct Timings {
+        var waitMs: Double?
+        var imageMs: Double?
+        /// The transform alone, inside `imageMs`. `imageMs - stftMs` is everything
+        /// after it: the scans, and the pixel buffer when one was built.
+        var stftMs: Double?
+        var stftFrames: Int?
+        /// CPU actually consumed by the render, against `imageMs`'s wall clock.
+        var imageCPUMs: Double?
+        var classifyMs: Double?
+        init(waitMs: Double? = nil, imageMs: Double? = nil,
+             stftMs: Double? = nil, classifyMs: Double? = nil,
+             stftFrames: Int? = nil, imageCPUMs: Double? = nil) {
+            self.waitMs = waitMs; self.imageMs = imageMs
+            self.stftMs = stftMs; self.classifyMs = classifyMs
+            self.stftFrames = stftFrames; self.imageCPUMs = imageCPUMs
+        }
+    }
+
     // MARK: - Rows
 
     /// A pulse the detector kept and the model named.
     func logClassifiedPulse(_ result: ClassificationResult,
                             peakFreqHz: Double, durationMs: Double,
-                            modelID: String?, at date: Date = Date()) {
+                            modelID: String?, at date: Date = Date(),
+                            skippedCapture: Int = 0, skippedClassify: Int = 0, skippedPicture: Int = 0,
+                            timings: Timings = .init()) {
         appendRow(kind: "pulse", date: date, species: result.species,
                   confidence: result.confidence, pulseCount: 1, modelID: modelID,
                   peakFreqHz: peakFreqHz, durationMs: durationMs,
-                  adjusted: result.allScores, raw: result.rawScores, note: "")
+                  adjusted: result.allScores, raw: result.rawScores, note: "",
+                  skippedCapture: skippedCapture, skippedClassify: skippedClassify,
+                  skippedPicture: skippedPicture, timings: timings)
     }
 
     /// A pulse the detector kept that was never put to a model — identification
@@ -154,27 +187,39 @@ final class DemoLogger {
     /// about. **The row that the field log cannot write**, and the one that
     /// answers "did this phone hear fewer calls, or just name fewer".
     func logUnclassifiedPulse(peakFreqHz: Double, durationMs: Double,
-                              note: String, at date: Date = Date()) {
+                              note: String, at date: Date = Date(),
+                              skippedCapture: Int = 0, skippedClassify: Int = 0, skippedPicture: Int = 0,
+                            timings: Timings = .init()) {
         appendRow(kind: "pulse-unclassified", date: date, species: "UNID",
                   confidence: nil, pulseCount: 1, modelID: nil,
                   peakFreqHz: peakFreqHz, durationMs: durationMs,
-                  adjusted: [:], raw: [:], note: note)
+                  adjusted: [:], raw: [:], note: note,
+                  skippedCapture: skippedCapture, skippedClassify: skippedClassify,
+                  skippedPicture: skippedPicture, timings: timings)
     }
 
     /// The aggregate the pass came to, after the silence timeout closed it.
     func logPass(_ result: ClassificationResult, pulseCount: Int,
-                 modelID: String?, at date: Date = Date()) {
+                 modelID: String?, at date: Date = Date(),
+                 skippedCapture: Int = 0, skippedClassify: Int = 0, skippedPicture: Int = 0,
+                            timings: Timings = .init()) {
         appendRow(kind: "pass", date: date, species: result.species,
                   confidence: result.confidence, pulseCount: pulseCount,
                   modelID: modelID, peakFreqHz: nil, durationMs: nil,
-                  adjusted: result.allScores, raw: result.rawScores, note: "")
+                  adjusted: result.allScores, raw: result.rawScores, note: "",
+                  skippedCapture: skippedCapture, skippedClassify: skippedClassify,
+                  skippedPicture: skippedPicture, timings: timings)
     }
 
     /// A pass that closed with nothing classified in it.
-    func logUnclassifiedPass(pulseCount: Int, species: String, at date: Date = Date()) {
+    func logUnclassifiedPass(pulseCount: Int, species: String, at date: Date = Date(),
+                             skippedCapture: Int = 0, skippedClassify: Int = 0, skippedPicture: Int = 0,
+                            timings: Timings = .init()) {
         appendRow(kind: "pass-unclassified", date: date, species: species,
                   confidence: nil, pulseCount: pulseCount, modelID: nil,
-                  peakFreqHz: nil, durationMs: nil, adjusted: [:], raw: [:], note: "")
+                  peakFreqHz: nil, durationMs: nil, adjusted: [:], raw: [:], note: "",
+                  skippedCapture: skippedCapture, skippedClassify: skippedClassify,
+                  skippedPicture: skippedPicture, timings: timings)
     }
 
     // MARK: - Writing
@@ -183,33 +228,53 @@ final class DemoLogger {
     /// `ClassificationLogger.expectedHeader` is.
     var columnHeader: String {
         (["time", "elapsed_s", "kind", "species", "confidence", "pulse_count",
-          "model", "peak_khz", "duration_ms", "note"]
+          "model", "peak_khz", "duration_ms", "note",
+          "skipped_capture", "skipped_classify", "skipped_picture",
+          "t_wait_ms", "t_image_ms", "t_stft_ms", "t_classify_ms", "stft_frames", "t_image_cpu_ms"]
          + classNames.map { "adj_\($0)" }
          + classNames.map { "raw_\($0)" }).joined(separator: ",")
     }
 
+    /// `skippedCapture` / `skippedClassify` are the detector's **running session
+    /// totals** at the moment the row was written, not per-row counts. Cumulative
+    /// on purpose: a reader diffs consecutive rows to find where a device began
+    /// falling behind, and any single row still answers "how much has been lost so
+    /// far" without summing the file. A run where both stay 0 is a run where the
+    /// hardware kept up — which is the thing these were added to be able to prove.
     private func appendRow(kind: String, date: Date, species: String,
                            confidence: Float?, pulseCount: Int, modelID: String?,
                            peakFreqHz: Double?, durationMs: Double?,
                            adjusted: [String: Float], raw: [String: Float],
-                           note: String) {
+                           note: String,
+                           skippedCapture: Int = 0, skippedClassify: Int = 0, skippedPicture: Int = 0,
+                           timings: Timings = .init()) {
         queue.async { [self] in
             guard let fileURL, let runStart else { return }
-            var fields = [
-                Self.timeFormatter.string(from: date),
-                String(format: "%.3f", date.timeIntervalSince(runStart)),
-                kind,
-                species,
-                confidence.map { String(format: "%.4f", $0) } ?? "",
-                String(pulseCount),
-                modelID ?? "",
-                peakFreqHz.map { String(format: "%.2f", $0 / 1000) } ?? "",
-                durationMs.map { String(format: "%.2f", $0) } ?? "",
-                // Commas are the only character a note could plausibly carry
-                // that would break the row, and quoting one field is not worth a
-                // CSV writer.
-                note.replacingOccurrences(of: ",", with: ";"),
-            ]
+            // Built in steps rather than as one literal: at twelve mixed
+            // expressions the type checker gives up on inferring the array.
+            var fields: [String] = []
+            fields.append(Self.timeFormatter.string(from: date))
+            fields.append(String(format: "%.3f", date.timeIntervalSince(runStart)))
+            fields.append(kind)
+            fields.append(species)
+            fields.append(confidence.map { String(format: "%.4f", $0) } ?? "")
+            fields.append(String(pulseCount))
+            fields.append(modelID ?? "")
+            fields.append(peakFreqHz.map { String(format: "%.2f", $0 / 1000) } ?? "")
+            fields.append(durationMs.map { String(format: "%.2f", $0) } ?? "")
+            // Commas are the only character a note could plausibly carry that
+            // would break the row, and quoting one field is not worth a CSV
+            // writer.
+            fields.append(note.replacingOccurrences(of: ",", with: ";"))
+            fields.append(String(skippedCapture))
+            fields.append(String(skippedClassify))
+            fields.append(String(skippedPicture))
+            fields.append(timings.waitMs.map { String(format: "%.1f", $0) } ?? "")
+            fields.append(timings.imageMs.map { String(format: "%.1f", $0) } ?? "")
+            fields.append(timings.stftMs.map { String(format: "%.1f", $0) } ?? "")
+            fields.append(timings.classifyMs.map { String(format: "%.1f", $0) } ?? "")
+            fields.append(timings.stftFrames.map(String.init) ?? "")
+            fields.append(timings.imageCPUMs.map { String(format: "%.1f", $0) } ?? "")
             // "0" and not "0.0000" for a class the row's model does not have —
             // the same economy `ClassificationLogger.makeRow` makes, and on a
             // 48-column double table it is most of the file.

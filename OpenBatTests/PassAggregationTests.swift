@@ -35,12 +35,110 @@ struct PassAggregationTests {
                            minAdjustedConfidence: Float = 0.05,
                            minPulseCount: Int = 1,
                            rawThreshold: Float = PassAggregation.noidRawConfidenceThreshold,
-                           noiseClassName: String? = "NOISE") -> PassAggregation.Outcome? {
+                           noiseClassName: String? = "NOISE",
+                           minWinningMargin: Float = 0) -> PassAggregation.Outcome? {
         PassAggregation.aggregate(pulses,
                                   minAdjustedConfidence: minAdjustedConfidence,
                                   minPulseCount: minPulseCount,
                                   rawConfidenceThreshold: rawThreshold,
-                                  noiseClassName: noiseClassName)
+                                  noiseClassName: noiseClassName,
+                                  minWinningMargin: minWinningMargin).outcome
+    }
+
+    /// Same call, asking the other half: why did it decline?
+    private func reason(_ pulses: [PassAggregation.Pulse],
+                        minAdjustedConfidence: Float = 0.05,
+                        minPulseCount: Int = 1,
+                        rawThreshold: Float = PassAggregation.noidRawConfidenceThreshold,
+                        noiseClassName: String? = "NOISE",
+                        minWinningMargin: Float = 0) -> PassAggregation.NoIDReason? {
+        PassAggregation.aggregate(pulses,
+                                  minAdjustedConfidence: minAdjustedConfidence,
+                                  minPulseCount: minPulseCount,
+                                  rawConfidenceThreshold: rawThreshold,
+                                  noiseClassName: noiseClassName,
+                                  minWinningMargin: minWinningMargin).noIDReason
+    }
+
+    // MARK: Why a pass went unnamed
+
+    /// "NoID" was one word for several findings. A field evening recorded 35 of
+    /// them, 9 of which had cleared the evidence gate — one at 0.946 raw over 19
+    /// pulses — and nothing said what had actually stopped those.
+    @Test func eachWayOfFailingIsToldApart() {
+        // Strong, and split between two species: a refusal, not a failure.
+        #expect(reason([pulse(raw: ["MYLU": 0.90, "LANO": 0.88]),
+                        pulse(raw: ["MYLU": 0.86, "LANO": 0.89])],
+                       minWinningMargin: 0.10) == .tooCloseToCall)
+        // The model itself was unsure.
+        #expect(reason([pulse(raw: ["MYLU": 0.20, "LANO": 0.18])]) == .weakEvidence)
+        // Strong and clear, but not enough of it.
+        #expect(reason([pulse(raw: ["MYLU": 0.95])], minPulseCount: 3) == .tooFewPulses)
+        // Nothing to aggregate.
+        #expect(reason([]) == .noPulses)
+        // And a pass that succeeds reports no reason at all.
+        #expect(reason([pulse(raw: ["MYLU": 0.95]), pulse(raw: ["MYLU": 0.92])]) == nil)
+    }
+
+    // MARK: Defaults that have to reach an existing install
+
+    /// **Changing a default does nothing to anyone who already has the app.**
+    /// Saved per-model settings are overlaid on top of the defaults at load, so an
+    /// install carrying the old 2.0 s pass timeout kept it and the change shipped
+    /// invisibly — one build spent looking for a fault in the segmentation that
+    /// was really a value that had never been applied.
+    @Test func theOldPassTimeoutIsMigratedForward() {
+        #expect(AutoIDSettings.defaultPassTimeoutSeconds == 0.8)
+        let d = try? #require(ModelRegistry.descriptor(id: ModelRegistry.nabatID))
+        let seeded = d.map { AutoIDSettings.defaultSettings(for: $0) }
+        #expect(seeded?.passTimeoutSeconds == AutoIDSettings.defaultPassTimeoutSeconds,
+                "the seed and the named default must not drift apart")
+        #expect(seeded?.minWinningMargin == 0.10)
+    }
+
+    // MARK: The margin gate
+
+    /// The case this exists for. Two species neck and neck is not a weak ID, it is
+    /// an unanswered question — and on the demo clip a pass like this reported a
+    /// different species between builds while the audio never changed.
+    @Test func aPassTooCloseToCallIsNotNamed() {
+        let pulses = [pulse(raw: ["MYLU": 0.90, "LANO": 0.88]),
+                      pulse(raw: ["MYLU": 0.86, "LANO": 0.89])]
+        #expect(aggregate(pulses, minWinningMargin: 0.10) == nil)
+        // ...and without the gate it names one, which is the old behaviour.
+        #expect(aggregate(pulses)?.species != nil)
+    }
+
+    /// A clear winner is unaffected. The gate must not be a general tax on
+    /// confidence — the tightest legitimate margin measured on real passes was
+    /// 0.15, so 0.10 has to leave that alone.
+    @Test func aClearWinnerIsStillNamed() {
+        let pulses = [pulse(raw: ["MYLU": 0.90, "MYYU": 0.60]),
+                      pulse(raw: ["MYLU": 0.88, "MYYU": 0.62])]
+        #expect(aggregate(pulses, minWinningMargin: 0.10)?.species == "MYLU")
+    }
+
+    /// A pass with one candidate has nothing to be confused with, so the runner-up
+    /// is absent rather than zero-scoring. It must not read as a tie against
+    /// nothing and suppress a perfectly good single-species pass.
+    @Test func aSingleCandidateIsNotATie() {
+        let pulses = [pulse(raw: ["MYLU": 0.90]), pulse(raw: ["MYLU": 0.85])]
+        #expect(aggregate(pulses, minWinningMargin: 0.10)?.species == "MYLU")
+    }
+
+    /// The noise class is suppressed before the winner is chosen, so it must not
+    /// come back as the contender and veto a real species.
+    @Test func theNoiseClassIsNotTheRunnerUp() {
+        let pulses = [pulse(raw: ["MYLU": 0.60, "NOISE": 0.58]),
+                      pulse(raw: ["MYLU": 0.62, "NOISE": 0.55])]
+        #expect(aggregate(pulses, minWinningMargin: 0.10)?.species == "MYLU")
+    }
+
+    /// Off by default, so every caller that predates the gate — and the WAV
+    /// tagging path until it is told otherwise — behaves exactly as before.
+    @Test func theGateIsOffUnlessAskedFor() {
+        let pulses = [pulse(raw: ["MYLU": 0.90, "LANO": 0.89])]
+        #expect(aggregate(pulses)?.species == "MYLU")
     }
 
     // MARK: The NoID gate

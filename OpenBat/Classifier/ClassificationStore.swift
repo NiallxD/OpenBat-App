@@ -175,6 +175,11 @@ struct PassRecord: Codable, Identifiable, NoIDFilterable {
     /// pass can be in a complex (`complexID != nil`) without being ambiguous — the
     /// species is confusable in general, but nothing close ran second this time.
     var complexAmbiguous: Bool?
+    /// Why this pass went unnamed, when it did — `PassAggregation.NoIDReason`'s
+    /// raw value. nil on a named pass, and on any NoID recorded before this
+    /// existed. "NoID" covers a model with no confidence and a model with too
+    /// much of it spread across two species, and only this says which.
+    var noIDReason: String?
     /// Mean of each pulse's own top RAW score — the model's confidence before
     /// species priors were applied, and before any of the user's own filtering.
     /// `confidence` above is the prior-adjusted figure for the species actually
@@ -285,6 +290,9 @@ struct Recording: Codable, Identifiable, NoIDFilterable {
     /// classified and inconclusive.
     var isUnidentified: Bool { species == "UNID" }
     var isNoID: Bool { species == "NOID" }
+    /// The model's confident "this wasn't a bat" — see `PassRecord.isNoise`,
+    /// whose meaning this mirrors for a whole recording.
+    var isNoise: Bool { species == "NOISE" }
     var coordinate: CLLocationCoordinate2D? {
         guard let latitude, let longitude else { return nil }
         return .init(latitude: latitude, longitude: longitude)
@@ -498,13 +506,28 @@ final class ClassificationStore {
         guard let since else { return [] }
         let source = (sessionID.map(passes(inSession:)) ?? listeningPasses)
             .filter { $0.date >= since }
-            // A NOID pass built from a single pulse is usually just a missed
-            // partner pulse, not a real "heard something, couldn't tell what" —
-            // it was drowning out genuine multi-pulse NOIDs (species-deduped, so
-            // only the newest NOID can ever occupy the row) with noise on every
-            // run. A real NOID worth surfacing has at least a second pulse
-            // agreeing there was something there.
-            .filter { !($0.isNoID && $0.pulses.count <= 1) }
+            // NoID passes are recorded but never shown here (Niall, 2026-09-07).
+            //
+            // This panel answers one question — what have I heard tonight — and a
+            // row saying "Unidentified" does not answer it. It was already the
+            // case that a single-pulse NoID was excluded as probable noise; what
+            // changed is that a NoID is now also what a deliberate refusal to
+            // guess looks like. Passes whose top two species are within
+            // `minWinningMargin` are declined rather than named, so the stronger
+            // the evidence gets the more of these there can be, and none of them
+            // belongs in a list of species heard.
+            //
+            // They are still filed, still in the session, still carry their
+            // pulses and measurements, and still reachable from the session
+            // detail. Only this feed is silent about them.
+            //
+            // Deliberately NOT gated on the `display.showNoID` toggle that hides
+            // NoID in the recordings and pass lists. That toggle lives on the
+            // Sessions screens, and wiring a live panel to a control the user
+            // cannot see from it would make this list change for reasons nothing
+            // on screen explains. This feed is a list of species; a NoID is the
+            // absence of one, whatever that toggle says.
+            .filter { !$0.isNoID }
         var seen = Set<String>()
         return source.filter { seen.insert($0.species).inserted }
     }
@@ -579,7 +602,8 @@ final class ClassificationStore {
                  runnerUpConfidence: Float? = nil,
                  complexID: String? = nil,
                  complexAmbiguous: Bool? = nil,
-                 rawConfidence: Float? = nil) {
+                 rawConfidence: Float? = nil,
+                 noIDReason: PassAggregation.NoIDReason? = nil) {
         guard !pulses.isEmpty else { return }
         let passID = UUID()
         let isDemo = demoRun
@@ -610,6 +634,7 @@ final class ClassificationStore {
                                   latitude: coordinate?.latitude, longitude: coordinate?.longitude,
                                   runnerUpSpecies: runnerUpSpecies, runnerUpConfidence: runnerUpConfidence,
                                   complexID: complexID, complexAmbiguous: complexAmbiguous,
+                                  noIDReason: noIDReason?.rawValue,
                                   rawConfidence: rawConfidence, isDemo: isDemo ? true : nil)
 
             DispatchQueue.main.async {
@@ -825,9 +850,13 @@ final class ClassificationStore {
 
     /// What an off-main image load actually found. `awaitingDownload` is NOT a
     /// failure: the file exists in the library but its bytes are still in iCloud,
-    /// so the caller should keep its placeholder and ask again later (see
-    /// `RecordingThumbnailLoader` in RecordingViews.swift) rather than treating
-    /// the recording as having no spectrogram.
+    /// so a caller should keep its placeholder and ask again later rather than
+    /// treating the recording as having no spectrogram.
+    ///
+    /// The retrying loader this used to name was removed on 2026-09-07 with the
+    /// spectrogram thumbnails it fed — the recordings list leads with a species
+    /// photo or the app's mark now, neither of which waits on iCloud. Anything
+    /// new that decodes on a list's behalf has to handle this case again.
     enum ImageLoad {
         case loaded(UIImage)
         case awaitingDownload

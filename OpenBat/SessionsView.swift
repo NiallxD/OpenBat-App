@@ -902,6 +902,7 @@ struct SessionDetailView: View {
                     runnerUpConfidence: pass.runnerUpConfidence,
                     complexID: pass.complexID,
                     complexAmbiguous: pass.complexAmbiguous,
+                    noIDReason: pass.noIDReason,
                     latitude: pass.latitude,
                     longitude: pass.longitude
                 )
@@ -1215,7 +1216,15 @@ struct PassRow: View {
     }
 
     @ViewBuilder private var thumbnail: some View {
-        if let image {
+        // A pass that never resolved to a species says so, rather than showing a
+        // picture of the call that reads as a photograph at this size — see
+        // `UnknownSpeciesThumbnail`. A named pass keeps its spectrogram: there the
+        // picture is evidence for a claim the row is already making.
+        if pass.isNoID || pass.isNoise || pass.isUnidentified {
+            UnknownSpeciesThumbnail(reason: pass.isNoise ? .notABat : .unidentified,
+                                    cornerRadius: 6,
+                                    explicitSize: CGSize(width: 56, height: 40))
+        } else if let image {
             Image(uiImage: image)
                 .resizable()
                 .interpolation(.high)
@@ -1223,10 +1232,7 @@ struct PassRow: View {
                 .frame(width: 56, height: 40)
                 .clipShape(RoundedRectangle(cornerRadius: 6))
         } else {
-            RoundedRectangle(cornerRadius: 6)
-                .fill(.quaternary)
-                .frame(width: 56, height: 40)
-                .overlay { Image(systemName: "waveform").font(.caption2).foregroundStyle(.secondary) }
+            UnknownSpeciesThumbnail(cornerRadius: 6, explicitSize: CGSize(width: 56, height: 40))
         }
     }
 

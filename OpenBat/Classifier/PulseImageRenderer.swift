@@ -14,8 +14,11 @@
 //      is zero-padded to a 2048-point FFT, quadrupling the frequency bins to
 //      187 Hz each without sacrificing time resolution (interpolated, sharper
 //      display).
-//    • A 32-sample hop → 12 000 columns/sec, so even a 10 ms window is ~120
-//      columns wide before the display upscales it.
+//    • A 128-sample hop → 3 000 columns/sec, so a 10 ms window is ~30 columns
+//      wide before the display upscales it. This was 32 samples (12 000/sec)
+//      until 2026-09-07: four times the columns, four times the cost, and that
+//      cost is what stopped the detector keeping up with a calling bat. See
+//      `displayHop` for what the coarser spacing does and does not affect.
 //
 //  It also LOCKS the pulse's energy onset (−12 dB envelope start) to a fixed
 //  fraction from the left, so successive captures pin the call to the same spot
@@ -40,6 +43,34 @@ nonisolated enum PulseImageRenderer {
     static let windowLen = STFTGrid.windowLen
     static let fftLen    = STFTGrid.fftLen
     static let hop       = STFTGrid.hop
+
+    /// Frame spacing used for the pulse view's own spectrogram, coarser than the
+    /// shared native `hop`.
+    ///
+    /// The transform's cost is linear in the frame count, and this was the single
+    /// biggest cost in the capture pipeline: 345 frames per pulse, measured at
+    /// 129 ms uncontended on an iPad Air 4 (2026-09-07), against a capture queue
+    /// that has ~230 ms per pulse to keep up with a real bat. At 128 samples the
+    /// frame count drops four-fold.
+    ///
+    /// **What it costs is time resolution on two numbers, and nothing else.** A
+    /// call's measured start and end land on a frame boundary, so duration
+    /// quantises to 0.33 ms instead of 0.083 ms — against calls of 2–16 ms, and
+    /// against displays that round it to 0.1 ms anyway. The recording itself is
+    /// untouched by any of this: the WAV is written straight from the audio
+    /// stream and carries the full detail for anyone who wants to measure
+    /// properly. Frequency resolution is set by the window and the FFT size, and
+    /// neither changes here.
+    ///
+    /// **128 was arrived at by looking, not by arithmetic.** The column count
+    /// falls with the hop and the columns are the picture: a 10 ms view is 30
+    /// columns here, about 12 points per column on screen, which the numbers say
+    /// should look blocky. It was shipped at 64 first for exactly that reason,
+    /// and Niall's answer on seeing 128 was that the images look fine — the
+    /// display's own interpolation covers it. Do not "restore" this from the
+    /// pixel count alone; if it needs to come back it should be because a person
+    /// looked at a call and could not read its shape.
+    static let displayHop = 128
     static var binCount: Int { STFTGrid.binCount }
 
     /// Dynamic range (dB below the window peak) mapped onto the colormap. 48 dB
@@ -47,7 +78,11 @@ nonisolated enum PulseImageRenderer {
     private static let dynamicRangeDB: Float = 48
 
     struct Result {
-        let image: UIImage
+        /// `nil` when the caller asked for measurements only (`makeImage: false`).
+        /// Everything else in this type is still filled: the analysis that produces
+        /// peak frequency, duration, band and quality runs either way, and it is
+        /// the pixel buffer — ~490 000 pixels, ~2 MB — that is skipped.
+        let image: UIImage?
         let freqMin: Double      // Hz — low edge of the call band (the DEFAULT view's crop)
         let freqMax: Double      // Hz — high edge of the call band (the DEFAULT view's crop)
         /// Hz bounds of the actually-rendered image, which covers the full allowed
@@ -77,6 +112,15 @@ nonisolated enum PulseImageRenderer {
         /// above the mean — high (>0.5) for a clean concentrated bat call, low
         /// (<0.2) for broadband noise or echo where all columns are elevated.
         let quality: Float
+        /// Milliseconds spent in `STFTGrid.compute` alone, so a caller timing the
+        /// whole render can say how much of it was the transform and how much was
+        /// everything after. Added because the render's cost turned out to be
+        /// identical in Debug and Release — which rules out the Swift scans and
+        /// leaves the transform, but only measurement can say so.
+        let stftMs: Double
+        /// Frames the transform produced — the render's actual workload, which
+        /// scales with the display span and was otherwise unknowable from a log.
+        let stftFrames: Int
     }
 
     // ── Scratch buffers reused across captures ───────────────────────────────
@@ -109,6 +153,31 @@ nonisolated enum PulseImageRenderer {
     /// - `expectedOnsetSample` is the onset's approximate index in `pcm` (from the
     ///   detector); the envelope search is confined near it so a neighbouring call or
     ///   echo elsewhere in the wide buffer can't capture the lock.
+    /// Runs one render on synthetic audio of the size the detector actually
+    /// captures, and reports what it cost with nothing else competing.
+    ///
+    /// The point is the comparison, not the number. A live render's wall clock
+    /// includes whatever else the device was doing; this one is measured on a
+    /// quiet queue before capture starts. If the live figure is several times
+    /// this, the render is being descheduled and the DSP is not the problem —
+    /// which is the question two rounds of per-pulse timing could not answer,
+    /// because every one of those measurements was taken under load.
+    static func benchmark(sampleRate: Double = 384_000,
+                          displaySpanSeconds: Double) -> (wallMs: Double, cpuMs: Double, frames: Int) {
+        let span = max(fftLen + displayHop, Int(displaySpanSeconds * sampleRate))
+        let count = span * 3                       // lead + display + trail, as captured
+        var rng = SystemRandomNumberGenerator()
+        // Noise, not silence: a flat buffer can be optimised through and would
+        // flatter the transform.
+        let pcm = (0..<count).map { _ in Float.random(in: -0.5...0.5, using: &rng) }
+        let m = ThreadClock.measure {
+            render(pcm: pcm, sampleRate: sampleRate, noiseFloor: 0.35,
+                   minFrequencyHz: 15_000, displaySpanSeconds: displaySpanSeconds,
+                   onsetFraction: 0.30, expectedOnsetSample: span, makeImage: false)
+        }
+        return (m.wallMs, m.cpuMs, m.value?.stftFrames ?? 0)
+    }
+
     static func render(pcm: [Float],
                        sampleRate: Double,
                        noiseFloor: Float,
@@ -116,16 +185,21 @@ nonisolated enum PulseImageRenderer {
                        displaySpanSeconds: Double,
                        onsetFraction: Double,
                        expectedOnsetSample: Int,
-                       palette: Palette = .inferno) -> Result? {
+                       palette: Palette = .inferno,
+                       makeImage: Bool = true) -> Result? {
         let bins = binCount
 
         // ── 1-2. STFT → magnitude → dB, peak-normalized to [0,1], row-major
         //  [bin * nFrames + frame] — now shared with WavSpectrogramEngine via
         //  STFTGrid.compute (a `windowLen` Hann window zero-padded to `fftLen`,
         //  so the FFT interpolates to `bins` frequency points at full time res).
+        let stftStart = DispatchTime.now()
         guard let (norm, nFrames) = STFTGrid.compute(pcm: pcm, scratch: &Self.sttfScratch,
-                                                      dynamicRangeDB: dynamicRangeDB)
+                                                      dynamicRangeDB: dynamicRangeDB,
+                                                      frameHop: displayHop)
         else { return nil }
+        let stftMs = Double(DispatchTime.now().uptimeNanoseconds
+                            - stftStart.uptimeNanoseconds) / 1e6
 
         let hzPerBin = (sampleRate / 2) / Double(bins)
         let minBinAllowed = max(1, Int(minFrequencyHz / hzPerBin))
@@ -135,27 +209,22 @@ nonisolated enum PulseImageRenderer {
         //  around the detector's expected onset (so a neighbouring call/echo elsewhere
         //  in the wide capture can't hijack the lock), then crop that span with the
         //  call's onset placed at `onsetFraction`.
-        let outFrames   = max(8, Int(displaySpanSeconds * sampleRate / Double(hop)))
+        let outFrames   = max(8, Int(displaySpanSeconds * sampleRate / Double(displayHop)))
         let onsetOutCol = min(max(Int(onsetFraction * Double(outFrames)), 0), outFrames - 1)
-        let expectedFrame = min(max(expectedOnsetSample / hop, 0), nFrames - 1)
+        let expectedFrame = min(max(expectedOnsetSample / displayHop, 0), nFrames - 1)
         let searchLo = max(0, expectedFrame - outFrames / 2)
         let searchHi = min(nFrames, expectedFrame + outFrames + outFrames / 2)
 
-        // Column energy envelope (loudest in-band bin per column).
-        func columnPeak(_ col: Int) -> Float {
-            var m: Float = 0
-            for bin in minBinAllowed..<bins {
-                let v = norm[bin * nFrames + col]
-                if v > m { m = v }
-            }
-            return m
-        }
+
 
         // ── 3. Peak (dominant freq + loudest column) within the search region ──
+        //  Column peaks are kept rather than recomputed: the duration walk below and
+        //  the background mean both want them, and each `columnPeak` call is a scan
+        //  over every bin.
         var peakValue: Float = 0
         var peakBin = minBinAllowed
         var peakCol = searchLo, peakColVal: Float = 0
-        var totalColPeak: Float = 0
+        var colPeaks = [Float](repeating: 0, count: max(0, searchHi - searchLo))
         for col in searchLo..<searchHi {
             var colMax: Float = 0
             for bin in minBinAllowed..<bins {
@@ -163,7 +232,7 @@ nonisolated enum PulseImageRenderer {
                 if v > colMax { colMax = v }
                 if v > peakValue { peakValue = v; peakBin = bin }
             }
-            totalColPeak += colMax
+            colPeaks[col - searchLo] = colMax
             if colMax > peakColVal { peakColVal = colMax; peakCol = col }
         }
 
@@ -173,12 +242,17 @@ nonisolated enum PulseImageRenderer {
         func gate(_ t: Float) -> Float { max(0, (t - floor) * invSpan) }
 
         // ── 5. Duration from the −12 dB energy envelope around the loudest col ──
+        // Loudest in-band bin per column, from the scan above.
+        func columnPeak(_ col: Int) -> Float {
+            let i = col - searchLo
+            return (i >= 0 && i < colPeaks.count) ? colPeaks[i] : 0
+        }
         let durThreshold = max(floor, peakColVal - 12.0 / dynamicRangeDB)
         var durStart = peakCol, durEnd = peakCol
         while durStart - 1 >= searchLo,     columnPeak(durStart - 1) >= durThreshold { durStart -= 1 }
         while durEnd + 1 < searchHi,        columnPeak(durEnd + 1)   >= durThreshold { durEnd += 1 }
         let durationCols = durEnd - durStart + 1
-        let secondsPerCol = Double(hop) / sampleRate
+        let secondsPerCol = Double(displayHop) / sampleRate
 
         // ── 6. Frequency extent of the call, over its active columns only ────
         //  Scanning just [durStart, durEnd] keeps quiet inter-call frames from
@@ -195,10 +269,30 @@ nonisolated enum PulseImageRenderer {
         }
         if minBin > maxBin { minBin = minBinAllowed; maxBin = bins - 1 }
 
-        // Quality: how much the peak column stands above the region's background mean.
-        let regionCols = max(1, searchHi - searchLo)
-        let meanColPeak = totalColPeak / Float(regionCols)
-        let quality: Float = peakColVal > 0 ? 1.0 - (meanColPeak / peakColVal) : 0
+        // Quality: how far the loudest column stands above the BACKGROUND — the
+        // columns of the search region the call does not occupy.
+        //
+        // **It used to average the whole region, the call included, and that made
+        // it a measure of brevity rather than of cleanliness** (2026-09-07). A long
+        // call fills more of the fixed ~20 ms region, which lifts the mean, which
+        // pushes quality down: measured on the demo clip, MYYU at 2.1 ms scored
+        // 0.90 and LANO at 13.3 ms scored 0.33 — under the 0.35 the pulse view
+        // requires before it will show a call at all. The species it silently
+        // refused to draw were the long, low-frequency ones (LACI, LANO, EPFU),
+        // which is to say it hid whichever bats it was least able to describe.
+        // Excluding the call's own columns makes the score independent of how long
+        // the call is, which is what it was always supposed to mean.
+        var bgSum: Float = 0
+        var bgCols = 0
+        for col in searchLo..<searchHi where col < durStart || col > durEnd {
+            bgSum += colPeaks[col - searchLo]
+            bgCols += 1
+        }
+        // A call filling the entire region leaves no background to compare against.
+        // Nothing here can tell a very long call from a region of continuous noise,
+        // so this stays deliberately unconfident rather than guessing either way.
+        let meanBackground = bgCols > 0 ? bgSum / Float(bgCols) : peakColVal * 0.5
+        let quality: Float = peakColVal > 0 ? 1.0 - (meanBackground / peakColVal) : 0
 
         // ── 7. Tight crop (for the DEFAULT view + stats) vs. the wider RENDERED
         //  image (for pinch-zoom-out + pan headroom) ──────────────────────────
@@ -243,12 +337,65 @@ nonisolated enum PulseImageRenderer {
         let wideOutFrames = padLeft + outFrames + padRight
         let wideSrcStart = srcStart - padLeft
 
+        // ── 7b. How much of the wide image the DEFAULT view shows ────────────
+        //  The default view used to be exactly `outFrames` wide whatever the call
+        //  did, with the onset pinned at `onsetFraction` from its left edge. That
+        //  leaves only `(1 - onsetFraction)` of the window — 7 ms of a 10 ms
+        //  setting — for the call itself, so anything longer ran off the right
+        //  edge. Bats do not oblige: LANO averages 13 ms on the demo clip and LACI
+        //  is longer still, so the species with the most structure to look at were
+        //  the ones shown cut in half.
+        //
+        //  The audio was never missing — the rendered image is four windows wide
+        //  for pan headroom — so this widens the *crop* rather than the capture,
+        //  and costs nothing: no extra transform, no extra pixels. A call that
+        //  already fits gets exactly the window it got before, so the familiar
+        //  fixed scale is unchanged for most pulses; only a call that would have
+        //  been clipped opens the view up, and only as far as it needs.
+        let marginCols = max(2, Int(0.001 / secondsPerCol))       // ~1 ms of air each side
+        let wantFrames = durationCols + 2 * marginCols
+        // Keep the onset where the eye expects it, then take whatever width the
+        // call needs, bounded by what was actually rendered.
+        let tightFrames = min(wideOutFrames, max(outFrames, wantFrames))
+        let tightOnsetCol = Int(onsetFraction * Double(tightFrames))
+        let tightLeftCol = min(max(0, (durStart - tightOnsetCol) - wideSrcStart),
+                               max(0, wideOutFrames - tightFrames))
+        let tightRightCol = min(wideOutFrames, tightLeftCol + tightFrames)
+
         // One malloc handed straight to CoreGraphics, rather than filling a reused
         // scratch array and then copying the whole thing into a `Data` for the
         // provider. At ~490 000 pixels that copy was ~2 MB memcpy per captured
         // pulse, on the capture queue, several times a second during a busy pass —
         // and the allocation it was avoiding is one malloc. `releaseData` below
         // hands ownership to the provider, so this is not leaked.
+        // The pulse view is a sample, not a running film: it refreshes on
+        // `displayRefreshIntervalSeconds` (2 s) so a person can study one call, and
+        // most captures were being drawn only to be discarded on arrival. Drawing
+        // is also the slowest thing on the capture queue, and the queue gates
+        // whether the NEXT pulse is looked at, so those discarded renders were
+        // costing real detections. Everything above this point — peak frequency,
+        // duration, band, quality — is already computed and is what the pulse
+        // record actually needs; only the picture is optional.
+        guard makeImage else {
+            return Result(
+                image: nil,
+                freqMin: Double(tightMin) * hzPerBin,
+                freqMax: Double(tightMax) * hzPerBin,
+                wideFreqMin: Double(renderMin) * hzPerBin,
+                wideFreqMax: Double(renderMax) * hzPerBin,
+                timeTightLeftFrac: Double(tightLeftCol) / Double(wideOutFrames),
+                timeTightRightFrac: Double(tightRightCol) / Double(wideOutFrames),
+                peakFreq: Double(peakBin) * hzPerBin,
+                durationMs: Double(durationCols) * secondsPerCol * 1000,
+                cleanImage: nil,
+                cleanFreqMinHz: Double(tightMin) * hzPerBin,
+                cleanFreqMaxHz: Double(tightMax) * hzPerBin,
+                cleanSpanMs: 0,
+                quality: quality,
+                stftMs: stftMs,
+                stftFrames: nFrames)
+        }
+
         let pixelCount = wideOutFrames * renderBins
         let words = UnsafeMutablePointer<UInt32>.allocate(capacity: pixelCount)
         // 256-entry table built once, O(1) lookup per pixel, instead of the
@@ -328,15 +475,17 @@ nonisolated enum PulseImageRenderer {
             freqMax: Double(tightMax) * hzPerBin,
             wideFreqMin: Double(renderMin) * hzPerBin,
             wideFreqMax: Double(renderMax) * hzPerBin,
-            timeTightLeftFrac: Double(padLeft) / Double(wideOutFrames),
-            timeTightRightFrac: Double(padLeft + outFrames) / Double(wideOutFrames),
+            timeTightLeftFrac: Double(tightLeftCol) / Double(wideOutFrames),
+            timeTightRightFrac: Double(tightRightCol) / Double(wideOutFrames),
             peakFreq: Double(peakBin) * hzPerBin,
             durationMs: Double(durationCols) * secondsPerCol * 1000,
             cleanImage: cleanCG.map { UIImage(cgImage: $0) },
             cleanFreqMinHz: Double(tightMin) * hzPerBin,
             cleanFreqMaxHz: Double(tightMax) * hzPerBin,
             cleanSpanMs: Double(cleanX1 - cleanX0 + 1) * secondsPerCol * 1000,
-            quality: quality
+            quality: quality,
+            stftMs: stftMs,
+            stftFrames: nFrames
         )
     }
 }

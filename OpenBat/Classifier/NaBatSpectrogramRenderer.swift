@@ -25,10 +25,18 @@
 import Foundation
 
 /// `nonisolated`: same reasoning as `Biquad`/`AudioLevel`/`STFTGrid` — stateless
-/// DSP called only from `PulseDetector`'s capture queue, never the main actor, but
-/// it carried no isolation annotation and so inherited
-/// `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`. The single-caller, single-queue
-/// invariant its scratch state relies on is now stated rather than assumed.
+/// DSP called from a background queue, never the main actor, but it carried no
+/// isolation annotation and so inherited `SWIFT_DEFAULT_ACTOR_ISOLATION =
+/// MainActor`. The single-caller, single-queue invariant its scratch state relies
+/// on is stated rather than assumed.
+///
+/// **That queue is `PulseDetector.classifyQueue`, not the capture queue**
+/// (changed 2026-09-07, when classification moved off the capture path). The
+/// invariant still holds — every route here runs through a classifier's
+/// `classify`, and those are called only from that one serial queue — but it is
+/// no longer the queue this comment used to name, and the shared setup cache in
+/// `ClassifierSpectrogramEngine` is what depends on there being exactly one.
+/// Calling a classifier from anywhere else would race it.
 nonisolated enum NaBatSpectrogramRenderer {
 
     static let nFFT = 384                        // = int(0.001 * 384000)

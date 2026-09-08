@@ -2796,6 +2796,318 @@ with no sheet and no path surgery.
   non-commercial) — that constraint is why the app currently has no IAP or
   subscription of any kind.
 
+### The detection floor was one serial queue, not the silicon (2026-09-07)
+
+Three devices played the same 200 s demo clip and disagreed about which bat they
+had heard. The disagreement was real and reproducible across two sessions, and
+the cause was not the classifier.
+
+**What was measured.** Each device had a hard floor on how close together two
+detections could be: 0.32 s on an A16 (iPhone 14 Pro Max), 0.35 s on an A15
+(13 Pro Max), 0.45 s on an A14 (iPad Air 4), the last drifting to exactly 0.50 s
+by the fourth loop and never recovering. The A14 logged 19% fewer pulses than
+the A16 — but not uniformly: **LANO −10%, MYYU −22%, MYCA −24%, MYLU −28%,
+EPFU −100%.** Losses track *call rate*, not species. Within the clip LANO calls
+every 0.73 s and clears any floor; MYLU calls every 0.42 s and MYYU every
+0.35 s, and both fall under the A14's. Every EPFU call in the clip arrives
+0.38–0.40 s after its predecessor, so the A14 scored zero EPFU in all seven
+loops.
+
+The floors line up almost exactly with Neural Engine throughput (17 / 15.8 / 11
+TOPS), which is what made this look like a compute limit for two sessions. It
+was not. **`captureQueue` was serial and ran draw-then-classify for every
+pulse.** The capture gate is released between the two, but the *next* pulse's
+drawing still queued behind the *previous* pulse's inference — so the gate could
+not reopen until a model run had finished, and the detector accepted one pulse
+per (draw + infer). It scaled with device speed because inference does.
+
+Classification now has its own queue (`classifyQueue`), bounded at
+`maxPendingClassifications = 8`. Bounded rather than unbounded on purpose: a
+feeding buzz arrives far faster than any device classifies, and an unbounded
+backlog does not lose pulses so much as answer minutes late, about a bat that
+has gone. Past the cap the pulse is still counted, drawn, filed and logged —
+only the species question is skipped.
+
+**The losses used to leave no trace.** `pulseCount` and `pulseRateHz` come from
+`registerDetection()` and were always right; everything downstream held only the
+pulses that fit, and nothing said so. `capturesSkipped` and
+`classificationsSkipped` now count the two failures separately — one means the
+device cannot draw fast enough, the other that it cannot infer fast enough — and
+both are written on every demo row as running totals. A demo row noted
+`classifier behind` is a pulse the cap refused, distinct from `not classified`.
+
+**What is still open.** The A14's drift from 0.449 to a pinned 0.500 s is not
+explained by fixed hardware and was not addressed here; re-measure it now that
+the queues are split. And the demo clip this was all measured on is
+unrepresentative — its fastest species calls at 2.9/s against 5–17/s for real
+search-phase echolocation and 100–200/s in a feeding buzz — so every number
+above is a floor on the problem, not a measure of it.
+
+### The floor was a fixed wait for the wrong model's window (2026-09-07)
+
+Splitting classification onto its own queue (above) changed **nothing**: filed
+pulses per second went 1.346→1.337 on the A14, 1.598→1.556 on the A15,
+1.658→1.689 on the A16, and the minimum gaps did not move. The counters added
+alongside it are what found the real cause, and they were worth more than the
+change they shipped with.
+
+**All three devices file about a third of what they hear.** 308/312/294 pulses
+detected, 98/115/110 filed — 68% / 63% / 63% discarded, and **zero** discarded
+by the classifier on any of them. The classifier was never the bottleneck; the
+first fix was aimed at the wrong stage. Note also that the three agree the clip
+triggers ~4.3 times a second, so the per-species "call rates" read out of
+earlier logs (1.4–2.9/s) were each device's throughput, not the recording.
+
+What actually gates the rate is the capture arming window. A pulse is armed and
+then waits `deferTrailSeconds` for its trailing audio, and every pulse arriving
+during that wait is discarded. That interval was a max over `ModelRegistry.all`
+— BatDetect2's 179.2 ms — so a NABat run waited 184 ms to fill a 50 ms window.
+Subtracting it from the measured floors leaves the drawing: 116 ms on A16,
+149 ms on A15, 266 ms on A14.
+
+Two changes followed. The wait is now the **active** model's (35 ms for NABat,
+so 40 ms with slack). And the pulse image is drawn only when it will be used:
+the pulse view is an intermittent sample on a 2 s refresh, so most captures were
+building a 480×1023 pixel buffer (~2 MB, scalar loop) that was discarded on
+arrival — while holding the queue that decides whether the next pulse is looked
+at. The analysis those pulses need (peak frequency, duration, band, quality)
+runs either way; only the picture is conditional, and a pass always draws at
+least one so it has a thumbnail.
+
+**Every stage is now timed in the demo log** (`t_wait_ms`, `t_image_ms`,
+`t_classify_ms`). Two rounds of reasoning about this floor were wrong, and
+neither could be checked because nothing was measured. Do not diagnose this path
+again without reading those columns first.
+
+### Pulse "quality" measured brevity, so low bats were never drawn (2026-09-07)
+
+Niall noticed LACI pulses were never appearing in the pulse view. They were
+being detected, classified and filed — just never shown.
+
+The pulse view refuses to draw a call scoring below 0.35 on `quality`, which was
+`1 - (mean column peak over the search region / peak column)`. The search region
+is a fixed ~20 ms window, so a **longer** call fills more of it, lifts its own
+denominator, and scores itself down. The metric meant "how brief and isolated is
+this", not "how clean is this".
+
+Duration tracks frequency, so the penalty fell entirely on the low species.
+Measured on the demo clip: MYYU 2.1 ms → 0.90, MYLU 6.3 ms → 0.69, EPFU 7.3 ms →
+0.63, LANO 13.3 ms → **0.33**. LACI calls are longer still. The view was hiding
+whichever bats it was least able to describe, and had been since the metric was
+written.
+
+Quality is now measured against the **background** — the columns of the search
+region outside `durStart...durEnd` — which makes it independent of call length.
+A call filling the whole region leaves no background to compare against and
+deliberately scores 0.5 rather than guessing, because nothing at that point can
+separate a very long call from continuous noise.
+
+Two things made this worse in passing and are worth remembering. The same-day
+change that draws a picture only when the pulse view will use it added
+`displayUpgradeQuality = 0.5`: once a short Myotis at 0.90 held the panel,
+nothing else in the 2 s window was drawn at all, so a long call had even less
+chance. And `PulseQualityTests` now pins the behaviour — it was checked in both
+directions, and the duration-independence guard does fail against the old
+metric. The first version of that test did NOT fail against it: a fully tapered
+synthetic burst only clears the noise gate near its middle, so it reads as a much
+shorter call than it is. Test calls need flat tops and short ramps to behave like
+the real thing.
+
+### The pulse spectrogram is drawn at half the column density (2026-09-07)
+
+Measured, not assumed: the pulse render costs **129 ms uncontended** on an iPad
+Air 4 over 345 frames, and the live figure is 96% on-CPU — so it is real work,
+not a starved thread, which is what two earlier rounds of wall-clock timing
+could not establish. The capture queue has about 230 ms per pulse to keep up
+with a bat calling at 4.3/s, and was spending most of it here.
+
+The transform's cost is linear in the frame count, so `PulseImageRenderer`
+now asks `STFTGrid.compute` for a 64-sample hop rather than the shared native 32.
+Half the frames, half the cost. Nothing else about the transform changes — same
+window, same FFT size, same bins — so the grid stays compatible with every
+consumer and frequency resolution is untouched.
+
+**What it costs, and what it does not.** Duration quantises to 0.17 ms instead
+of 0.083 ms; calls are 2–16 ms and every display rounds duration to 0.1 ms or
+whole milliseconds, so this is invisible. Peak frequency is unaffected — that is
+set by the window and FFT size. **The raw recording is untouched by any of
+this**: the WAV is written straight from the audio stream with no dependency on
+the render, so the full detail is always there to re-measure. The iNaturalist
+notes now say the parameters are rounded and point at the recording.
+
+**Shipped at 64 first, then 128 after someone looked.** The columns are the
+picture: at 128 a 10 ms view is 30 columns, ~12 points per column on screen,
+which the pixel count says should be blocky. It is not — the display's own
+interpolation covers it, and Niall's verdict on seeing it was that the images
+look fine. So the arithmetic was right about the pixels and wrong about the
+outcome, in both directions on the same day: it would have taken 128 blind (bad
+reason, right answer), and 64 was chosen from a number rather than from looking.
+If this ever needs to go back, let it be because a person could not read a
+call's shape, not because the column count looks low.
+
+Measured after the change (build 210, hop 64, iPad Air 4): 2.961 pulses/s
+against 1.346 at baseline, floor 0.100 s against 0.450, capture loss 31% against
+68%. Per 100 s the fastest callers gained the most — MYYU +208%, MYLU +141%,
+LANO +92% — which is the species bias running backwards, and the A14 now files
+more of every species than the A16 managed before any of this work.
+
+**It also broke the pass ties, which was not expected.** All four passes cleared
+with a minimum margin of 0.0745, against two ties at 0.017 and 0.009 the run
+before. The tie was being fed by the bias: averaging over a sample that had
+dropped the fast callers disproportionately is what pushed LANO and MYLU
+together. The segmentation problem below is still real, but it was never
+independent of throughput the way this document previously implied.
+
+### The pulse view cut long calls in half (2026-09-07)
+
+The default view was a fixed window with the call's onset pinned at
+`onsetFraction` (30%) from its left edge, so only the remaining 70% was
+available for the call — 7 ms of the 10 ms default. Anything longer ran off the
+right edge. LANO averages 13 ms on the demo clip and LACI is longer, so the
+species with the most structure worth looking at were the ones shown clipped.
+
+The audio was never missing: the rendered image is four windows wide, for pan
+headroom. Only the *crop* was fixed. So the default crop now takes whatever
+width the call needs, bounded by what was rendered, with the old fixed span as a
+floor — a call that already fitted gets exactly the window it had before, which
+keeps the constant scale that makes two pulses comparable by eye. Nothing is
+captured or transformed that was not already; the change is free.
+
+Note this is the second thing the same day that was hiding long calls, and they
+were independent: `quality` refusing to draw them at all, and the crop clipping
+the ones it did draw. Both were found by looking at the app rather than at the
+logs, and neither would have shown up in any log column — worth remembering next
+time the instinct is to add another one.
+
+### First field evening, and the two things it could not answer (2026-09-07)
+
+A 20-minute Squamish session, the first real audio through any of the day's
+changes. 63 passes: 19 MYLU, 6 LACI, 1 MYVO, 35 NoID, 2 UNID.
+
+**The margin gate holds up on real bats.** Every named pass cleared it with
+room — minimum margin 0.193, median 0.666, against a gate of 0.10 — so it is not
+over-suppressing. And the five tightest margins were all MYLU against MYVO, both
+*Myotis*, which is where the confusion was predicted to be. It has still never
+actually fired.
+
+**LACI is being named at 0.95**, peak 21.2 kHz, 6.7 ms calls. That is the
+species the old `quality` metric refused to draw at all, found in the field the
+same evening it was fixed.
+
+Two things the export could not answer, both now fixed.
+
+**A NoID did not say why it was a NoID.** 26 of the 35 were honest — mean raw
+confidence below the model's own threshold. But 9 had cleared it, one at 0.946
+raw over 19 pulses, and nothing recorded what stopped them: the confidence
+floor, the pulse-count minimum, or the margin gate. Those are opposite findings
+sharing a label — "no evidence" against "good evidence, two species too close".
+`PassAggregation.NoIDReason` now names which, persisted on the pass and exported
+as `noid_reason`.
+
+**Session exports timestamped pulses to the second.** Every inter-pulse gap in a
+real session therefore quantised to 0 s or 1 s, so the field data could not be
+used to check the pass timeout — the one question only field data can answer.
+Now milliseconds, on every column rather than just the pulses, so a reader does
+not have to know which timestamps in an export are precise.
+
+**Still open: LACI passes ran 2–3 pulses each.** Hoary bats call slowly, often
+0.5–1.5 s apart, which straddles the 0.8 s timeout, so their sequences are
+probably being cut into fragments — and `minPassPulseCount` discards a fragment
+of one. This is the failure predicted for 0.5 s, arriving at 0.8 s for the
+slowest-calling species. **A per-model timeout cannot fix it: the right gap is
+per-species.** Unmeasurable until an export with sub-second timestamps exists,
+which is now the case.
+
+### A pass was 26 seconds of four species, averaged (2026-09-07)
+
+`finalizePass` averages the adjusted posteriors of every pulse in a pass, and a
+pass closed only after `passTimeoutSeconds` of silence — which shipped at 2.0 s.
+Nothing on the demo clip goes quiet for two seconds inside a loop, so one pass
+held MYYU, LANO, MYLU and MYCA together and reported whichever of them had been
+sampled best. **That made the species name a function of throughput rather than
+of the audio**: across 19 loops of identical sound the LANO/MYLU margin never
+exceeded 0.048 and was under 0.02 eight times, and the reported species changed
+between builds while the recording never did. It read LANO while the fast
+callers were being starved by the capture pipeline, and flipped to MYYU once
+they were not — which was reported as a regression, reasonably, and was not one.
+
+Two changes, both per-model and both adjustable in the model detail screen.
+
+**The pass now closes after 0.8 s of quiet.** 0.5 was asked for first and the
+gap data argued it down: within-species gaps reach 0.68 s at p90 for LANO, so
+0.5 cuts inside a single slow bat's own call spacing and shatters one pass into
+five. 0.8 and 1.1 segment this clip identically — there is a valley in the gap
+distribution and both sit in it — so 0.8 was taken as the shorter of two equal
+answers. Below ~0.75 is measurably wrong; above ~1.5 starts merging bats again.
+
+**A pass whose top two species are within 0.10 is not named at all.** Deliberate
+trade, made by Niall: two species genuinely calling at once now go unreported
+rather than one of them being picked. Silence is the honest answer and the
+pulses are still recorded — only the verdict is withheld. The number sits in an
+empty band: correctly segmented passes separated their top two by 0.15 at the
+tightest, the blended passes that kept flipping sat at 0.003–0.017, and nothing
+was observed in between. Expect to loosen it for genuinely confusable species —
+this clip's four are acoustically well separated, real *Myotis* are not.
+
+**What the two together do, checked against three builds offline.** Builds 209,
+210 and 211 — 53%, 69% and 93% pulse capture respectively — resegment to the
+same species in the same places, with margins of 0.15–0.88 and nothing
+suppressed by the gate. That agreement is the point: the label no longer moves
+when throughput does.
+
+The margin gate is off by default in `PassAggregation.aggregate` so callers that
+predate it are unchanged, and it is passed explicitly by both the live detector
+and the WAV tagging path — those two must agree, or a file's GUANO tag and the
+pass in the history would name the same audio differently.
+
+**An unnamed row shows the app's bat mark, not a spectrogram (2026-09-07).**
+Every list that leads with a picture is scanned rather than read, and what a row
+with no species had in that slot was whatever happened to exist: its own
+spectrogram in two places, a grey tile with a waveform glyph in a third. At
+thumbnail width a spectrogram reads as a species photo that happens to be dull,
+which is the opposite of what the row is saying. All three now show one thing —
+a dark tile with `batIcon` in orange, the colour the app already uses for an
+unresolved ID on the "or MYYU" pill. `UnknownSpeciesThumbnail`.
+
+NOISE gets the same tile with the mark struck through: "this wasn't a bat" is a
+result the app is asserting, not a question it is declining to answer, and the
+two must not look alike.
+
+This reverses the 2026-09-02 decision to keep the spectrogram on those rows as
+"the only thing there is to show". Still true, still not worth showing at 44
+points; the full spectrogram is on the pass detail at a size where it can be
+read. Two things fell out of it: the recordings list and the species feed were
+each decoding a thumbnail per row that is now never drawn, so both decodes are
+gone, and `RecordingThumbnailLoader` went with them. That type existed for the
+reinstall case — a library that syncs back from iCloud before its JPEGs do, so a
+first pass over a screenful of rows legitimately finds nothing and has to retry
+on a backing-off clock. **Anything new that decodes on a list's behalf has to
+handle that again**; the note survives on `ClassificationStore.ImageLoad`, whose
+`awaitingDownload` case is the half of it that remains.
+
+**NoID is recorded but no longer shown in the species feed.** The feed answers
+one question — what have I heard tonight — and a row reading "Unidentified" does
+not answer it. That was arguable before; the margin gate settles it, because a
+NoID is now also what a deliberate refusal to guess looks like, so the better
+the evidence gets the more of them there can be. They stay filed, keep their
+pulses and measurements, and remain reachable from the session detail; only this
+one panel is silent. Not gated on the `display.showNoID` toggle that hides NoID
+in the recordings and pass lists — that control lives on the Sessions screens,
+and a live panel changing for reasons nothing on it explains is worse than a
+consistent rule. NOISE rows stay: "it wasn't a bat" is a positive finding and
+the feed says so in as many words.
+
+**Changing the default did nothing, and it took a build to notice.** `load()`
+overlays the stored per-model payload on top of the descriptor defaults, so
+every existing install kept its saved 2.0 s and the new value only ever reached
+a fresh one. The run that followed looked exactly like the runs before it —
+still four 26-second passes, 26.5 s apart — and read as the change having failed
+rather than as never having been applied. There is now a one-time migration for
+anyone still on the old default, and the pass timeout and margin are both
+written into the demo header. **A setting that changes the output belongs in
+that header**: the two that had just been changed were the two that were not
+logged, and the log looked identical either way.
+
 ### The quality gate is hidden for a model that ignores it (2026-08-18)
 
 `BatDetect2Classifier.classify` takes a quality gate and documents that it

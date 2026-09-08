@@ -131,8 +131,37 @@ struct DemoLoggerTests {
         for model in ModelRegistry.all { for code in model.classNames { codes.insert(code) } }
 
         #expect(header.starts(with: ["time", "elapsed_s", "kind", "species", "confidence",
-                                     "pulse_count", "model", "peak_khz", "duration_ms", "note"]))
+                                     "pulse_count", "model", "peak_khz", "duration_ms", "note",
+                                     "skipped_capture", "skipped_classify", "skipped_picture"]))
         #expect(header.filter { $0.hasPrefix("adj_") }.count == codes.count)
         #expect(header.filter { $0.hasPrefix("raw_") }.count == codes.count)
+    }
+
+    /// A row carries the detector's running loss totals, so a file says whether
+    /// the device kept up. Without these the only evidence that a phone dropped
+    /// calls is a second phone disagreeing with it.
+    @Test func aRowCarriesTheSkipCounters() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        DemoLogger.shared.begin(clip: "clip", context: [],
+                                defaults: makeDefaults(enabled: true), directory: dir)
+        DemoLogger.shared.flush()
+        DemoLogger.shared.logPass(result("MYLU", 0.8), pulseCount: 3, modelID: "nabat",
+                                  skippedCapture: 12, skippedClassify: 5)
+        DemoLogger.shared.flush()
+        let url = try #require(DemoLogger.shared.currentLogURL)
+        DemoLogger.shared.end()
+
+        let header = DemoLogger.shared.columnHeader.split(separator: ",").map(String.init)
+        let row = try #require(String(contentsOf: url, encoding: .utf8)
+            .split(separator: "\n")
+            .first { !$0.hasPrefix("#") && !$0.hasPrefix("time,") })
+            .split(separator: ",", omittingEmptySubsequences: false).map(String.init)
+
+        #expect(row[try #require(header.firstIndex(of: "skipped_capture"))] == "12")
+        #expect(row[try #require(header.firstIndex(of: "skipped_classify"))] == "5")
     }
 }

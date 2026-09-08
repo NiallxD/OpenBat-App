@@ -354,7 +354,8 @@ struct ContentView: View {
                     // minPassConfidence/minPassPulseCount are per-model and editable
                     // in this sheet — repush in case they changed.
                     recorder.setPassGates(minConfidence: autoIDSettings.minPassConfidence,
-                                          minPulseCount: autoIDSettings.minPassPulseCount)
+                                          minPulseCount: autoIDSettings.minPassPulseCount,
+                                          minWinningMargin: autoIDSettings.minWinningMargin)
                 }) {
                     SettingsView(settings: autoIDSettings,
                                  pulseDetector: pulseDetector, recorder: recorder,
@@ -629,7 +630,8 @@ struct ContentView: View {
             pulseDetector.store = classStore
             recorder.setActiveModel(id: autoIDSettings.effectiveModelID)
             recorder.setPassGates(minConfidence: autoIDSettings.minPassConfidence,
-                                  minPulseCount: autoIDSettings.minPassPulseCount)
+                                  minPulseCount: autoIDSettings.minPassPulseCount,
+                                  minWinningMargin: autoIDSettings.minWinningMargin)
             pulseDetector.coordinateProvider = { [location] in location.currentCoordinate }
             // Lock-screen card. `endOrphanedActivities` clears any card left behind by a
             // crash or force-quit in a previous run — those survive in the system and
@@ -791,7 +793,8 @@ struct ContentView: View {
             // minPassConfidence/minPassPulseCount are per-model — switching models
             // switches which values apply.
             recorder.setPassGates(minConfidence: autoIDSettings.minPassConfidence,
-                                  minPulseCount: autoIDSettings.minPassPulseCount)
+                                  minPulseCount: autoIDSettings.minPassPulseCount,
+                                  minWinningMargin: autoIDSettings.minWinningMargin)
         }
         .onChange(of: audio.isRunning) { _, running in
             UIApplication.shared.isIdleTimerDisabled = running
@@ -2921,9 +2924,36 @@ struct ContentView: View {
         // gathered here rather than inside the logger because this is where the
         // settings in force are known — see `DemoLogger`, whose header is half
         // the point of the file.
+        // Measured before capture starts, on a quiet device — see
+        // `PulseImageRenderer.benchmark`. Only when a demo log is actually being
+        // written, since it costs one render.
+        var benchWall = "", benchCPU = "", benchFrames = ""
+        if UserDefaults.standard.bool(forKey: DemoLogger.enabledKey) {
+            let b = PulseImageRenderer.benchmark(displaySpanSeconds: pulseDetector.displayWindowMs / 1000)
+            benchWall = String(format: "%.1f", b.wallMs)
+            benchCPU = String(format: "%.1f", b.cpuMs)
+            benchFrames = String(b.frames)
+        }
         DemoLogger.shared.begin(clip: name, context: [
             ("clip", name),
+            // `model` is the settings key, which carries a version suffix that is
+            // NOT the model's version — `nabat-ml-v1` is the key for NABat ML
+            // 1.0.1, and would stay that key across an upstream bump. Two runs
+            // logged months apart can differ in what the model actually was and
+            // agree on this line, so the descriptor's own version goes beside it.
             ("model", autoIDSettings.effectiveModelID ?? "none"),
+            ("model_version", ModelRegistry.descriptor(id: autoIDSettings.effectiveModelID)?.version ?? "none"),
+            ("max_pending_classifications", String(PulseDetector.maxPendingClassifications)),
+            // These size the pulse render, and their absence made its cost
+            // impossible to reason about from a log: the captured window is three
+            // display spans wide, so the STFT's frame count — and the pixel buffer
+            // — scale directly with `display_window_ms`.
+            ("display_window_ms", String(format: "%.1f", pulseDetector.displayWindowMs)),
+            ("display_refresh_seconds", String(format: "%.2f", pulseDetector.displayRefreshIntervalSeconds)),
+            ("pulse_noise_floor", String(format: "%.2f", pulseDetector.pulseNoiseFloor)),
+            ("render_benchmark_wall_ms", benchWall),
+            ("render_benchmark_cpu_ms", benchCPU),
+            ("render_benchmark_frames", benchFrames),
             ("identification_disabled", String(autoIDSettings.remotelyDisabled)),
             ("location_weighting_disabled", String(autoIDSettings.locationWeightingDisabled)),
             ("trigger_mode", pulseDetector.triggerMode.rawValue),
@@ -2932,6 +2962,13 @@ struct ContentView: View {
             ("min_consecutive_columns", String(pulseDetector.minConsecutiveColumns)),
             ("hold_off_seconds", String(format: "%.3f", pulseDetector.holdOffSeconds)),
             ("max_gap_ms", String(format: "%.0f", pulseDetector.maxGapMs)),
+            // The two gates that decide what a pass IS and whether it gets named.
+            // Both were changed on 2026-09-07 and neither was in the header, so a
+            // run where one of them had not actually taken effect looked identical
+            // to one where it had — which is exactly what happened, and cost a
+            // build to work out. A setting that changes the output belongs here.
+            ("pass_timeout_seconds", String(format: "%.2f", autoIDSettings.passTimeoutSeconds)),
+            ("min_winning_margin", String(format: "%.3f", autoIDSettings.minWinningMargin)),
             ("min_pass_confidence", String(format: "%.3f", autoIDSettings.minPassConfidence)),
             ("min_pass_pulse_count", String(autoIDSettings.minPassPulseCount)),
             ("quality_gate_enabled", String(autoIDSettings.qualityGate.enabled)),

@@ -125,8 +125,8 @@ struct ModelDetailView: View {
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
             }
-            ControlNote("Quiet this long and the bat has gone.")
-            Slider(value: bind(\.passTimeoutSeconds), in: 0.5...10, step: 0.5)
+            ControlNote("Quiet this long and the bat has gone. Too long and two bats become one entry, named for whichever called more.")
+            Slider(value: bind(\.passTimeoutSeconds), in: 0.5...10, step: 0.1)
                 .accessibilityLabel("Ends a pass after")
 
             ControlNote("How many calls an ID is based on.")
@@ -141,6 +141,15 @@ struct ModelDetailView: View {
             ControlNote("Below this, no species is named.")
             Slider(value: bind(\.minPassConfidence), in: 0...0.5, step: 0.01)
                 .accessibilityLabel("Minimum confidence")
+
+            LabeledContent("Clear of the runner-up by") {
+                Text(String(format: "%.0f%%", (ms.minWinningMargin ?? 0.10) * 100))
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
+            ControlNote("When two species score almost the same, name neither.")
+            Slider(value: bindOptional(\.minWinningMargin, default: 0.10), in: 0...0.5, step: 0.01)
+                .accessibilityLabel("Clear of the runner-up by")
         } header: {
             CardHeader("Making an ID", "Before OpenBat will name a species.")
         }
@@ -235,6 +244,16 @@ struct ModelDetailView: View {
     private func bind<T>(_ keyPath: WritableKeyPath<AutoIDSettings.ModelSettings, T>) -> Binding<T> {
         Binding(
             get: { ms[keyPath: keyPath] },
+            set: { settings.perModel[model.id]?[keyPath: keyPath] = $0 }
+        )
+    }
+
+    /// Same, for a field stored as optional so older settings decode — the
+    /// binding hands the caller a plain value and writes one back.
+    private func bindOptional<T>(_ keyPath: WritableKeyPath<AutoIDSettings.ModelSettings, T?>,
+                                 default fallback: T) -> Binding<T> {
+        Binding(
+            get: { ms[keyPath: keyPath] ?? fallback },
             set: { settings.perModel[model.id]?[keyPath: keyPath] = $0 }
         )
     }

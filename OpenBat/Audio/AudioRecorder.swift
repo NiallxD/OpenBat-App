@@ -160,6 +160,10 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
     // (PulseDetector.finalizePass) already applies.
     private var minPassConfidenceQ: Float = 0.05
     private var minPassPulseCountQ: Int = 1
+    /// Kept in step with the live detector's own gate — the two must agree about
+    /// whether a burst of pulses is nameable, or a WAV's GUANO tag and the pass in
+    /// the history would disagree about the same audio.
+    private var minWinningMarginQ: Float = 0
     // Classified pulses land here (from PulseDetector.onPulseClassified) tagged with
     // their capture date, carrying both raw and prior-adjusted scores so
     // `speciesAutoID` can run the same `PassAggregation` rule PulseDetector uses for
@@ -410,10 +414,11 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
     /// and again whenever they might have changed (active model switch, or the
     /// Settings sheet closing, since minPassConfidence/minPassPulseCount are
     /// per-model and user-editable there).
-    func setPassGates(minConfidence: Float, minPulseCount: Int) {
+    func setPassGates(minConfidence: Float, minPulseCount: Int, minWinningMargin: Float = 0) {
         queue.async { [weak self] in
             self?.minPassConfidenceQ = minConfidence
             self?.minPassPulseCountQ = minPulseCount
+            self?.minWinningMarginQ = minWinningMargin
         }
     }
 
@@ -903,13 +908,17 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
         // "descriptor found, and it has no noise class".
         let noiseClassName: String? = descriptor.map { $0.noiseClassName } ?? "NOISE"
         let pulses = inSegment.map { PassAggregation.Pulse(rawScores: $0.raw, adjustedScores: $0.adjusted) }
+        // `.outcome` because a WAV's GUANO tag either names a species or does not;
+        // the reason a pass went unnamed is recorded on the pass, which is where
+        // anyone asking the question will be looking.
         guard let outcome = PassAggregation.aggregate(
             pulses,
             minAdjustedConfidence: minPassConfidenceQ,
             minPulseCount: minPassPulseCountQ,
             rawConfidenceThreshold: descriptor?.noidRawConfidenceThreshold ?? PassAggregation.noidRawConfidenceThreshold,
-            noiseClassName: noiseClassName
-        ) else {
+            noiseClassName: noiseClassName,
+            minWinningMargin: minWinningMarginQ
+        ).outcome else {
             // Real evidence exists (inSegment isn't empty) — either the raw-confidence
             // gate wasn't cleared, or it was but the user's own minPassConfidence/
             // minPassPulseCount gate wasn't (e.g. a single pulse when min pulses = 2).
