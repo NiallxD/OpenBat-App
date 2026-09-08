@@ -552,7 +552,7 @@ struct AppInfoView: View {
                         .resizable()
                         .scaledToFill()
                         .scaleEffect(1.2)
-                        .blur(radius: 12)
+                        .blur(radius: 6)
                 }
             }
             .clipped()

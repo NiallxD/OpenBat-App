@@ -32,7 +32,7 @@
   interrupts everybody, before they reach the detector.
 -->
 
-## v1.1 (Build 201)
+## v1.1 (Build 218)
 
 ### New
 - **Post a recording to iNaturalist** — A recording can become an observation without leaving the app, either posted for you when you sign in or handed over as a set of files to upload yourself. A leaf on a row marks the ones worth posting, gold for the best of a night.
@@ -41,6 +41,12 @@
 - **A recording is kept even when nothing named it** — With no model active, or with identification switched off, the calls and the pulse count are still recorded. Those recordings used to read as empty triggers.
 
 ### Changed
+- **The detector hears about three times as many calls** — It was quietly throwing most of them away while it drew the last one, and it threw away the fast-calling bats worst of all: the quicker a bat called, the less of it survived. On a 2020 iPad that has gone from keeping a third of what it heard to keeping over ninety percent, and an old iPad now keeps up with a recent iPhone.
+- **An identification belongs to one bat, not to a minute of them** — A pass used to run until things had been quiet for two seconds, which on a busy night meant several bats blended into one entry named after whichever of them called most. A pass now ends after eight tenths of a second of quiet, so each bat gets its own.
+- **No name when two species are too close to separate** — If the top two are neck and neck, OpenBat says nothing rather than picking one. The calls and their measurements are still recorded; only the verdict is withheld. Two species overhead at once will sometimes go unnamed, which is the honest answer.
+- **An entry with no species shows the app's own mark** — Rather than a spectrogram shrunk to thumbnail size, which read as a species photo that happened to be dull. Where OpenBat is sure it was not a bat, the mark is struck through.
+- **Unidentified passes stay out of the species list** — The recently-heard panel answers what you have heard tonight, and "unidentified" is not an answer to that. They are still filed under the session.
+- **An exported session says why a pass went unnamed** — There is a difference between hearing too little to tell and hearing plenty of two species at once, and the export now names which. Its timestamps are also fine enough to measure how fast a bat was calling.
 - **Echoes count against a recording's score** — A call recorded somewhere reverberant scores lower for posting, and says so.
 - **Sharing no longer asks for your photo library** — Nothing OpenBat exports needs that permission, so it stopped asking for it.
 - **A species in a call's caption is marked as OpenBat's own** — So a reader knows the name came from the app rather than from a person.
@@ -49,6 +55,9 @@
 ### Fixed
 - **The sound on an observation matches its pictures** — The audio and the spectrograms were cut from different parts of the recording, so no picture and no sound shared a starting point. Everything now comes from one clip.
 - **An observation names the microphone that actually made the recording** — It was posting whichever detector is selected now, so anyone with two microphones would stamp tonight's onto a recording made last month with the other one.
+- **Hoary and silver-haired bats were never drawn** — The pulse view would not show a call unless it scored well on a measure that quietly counted long calls as poor ones. Since the low, slow species call longest, the view was hiding exactly the bats it was least able to describe.
+- **A long call no longer runs off the edge of the pulse view** — The window was a fixed width with the start pinned near the left, leaving only a few milliseconds for the call itself. It now opens up to hold whatever it is showing.
+- **Call measurements posted to iNaturalist say they are rounded** — They are a quick reference rather than a measurement, and the recording that goes with them carries the full detail.
 
 ## v0.9.5 (Build 193)
 
