@@ -562,26 +562,29 @@ struct SpeciesExplorerView: View {
     /// back to the original wording — plain text, not a link — whenever
     /// there's no fix yet or nothing resolves nearby, so nothing here is ever
     /// a tap that goes nowhere.
-    /// Shares its row with the export pill (`SessionExportBanner`) rather than
-    /// being displaced by it: the two sit side by side, centred as a pair. While
-    /// an export runs this footer drops to a bat icon and "near you" — still
-    /// tappable, still saying what it opens — so the pair fits without either
-    /// one being pushed off-centre. Full text again the moment it finishes.
+    /// Shares its row with the export pill (`SessionExportBanner`) and the
+    /// iNaturalist upload pill (`INatUploadBanner`) rather than being displaced
+    /// by either: they sit side by side, centred as a group. While one of them
+    /// runs this footer drops to a bat icon and "near you" — still tappable,
+    /// still saying what it opens — so the row fits without anything being
+    /// pushed off-centre. Full text again the moment both finish.
     ///
-    /// The pill is drawn HERE, not by the app-wide chrome in ContentView, for
-    /// the length of time this footer is on screen — that is what
-    /// `addInlineHost`/`removeInlineHost` announce, and it is the only way the
-    /// two can be laid out as one centred row rather than as two overlays
-    /// anchored by different hosts at different heights.
+    /// Both pills are drawn HERE, not by the app-wide chrome in ContentView,
+    /// for the length of time this footer is on screen — that is what
+    /// `addInlineHost`/`removeInlineHost` announce, and it is the only way all
+    /// three can be laid out as one centred row rather than as separate
+    /// overlays anchored by different hosts at different heights.
     private var isExporting: Bool { SessionExportManager.shared.job != nil }
+    private var isPostingToINat: Bool { INatUploadManager.shared.job != nil }
 
     @ViewBuilder
     private var globeFooter: some View {
+        let isBusy = isExporting || isPostingToINat
         HStack(spacing: 8) {
             if !nearbySpecies.isEmpty {
                 NavigationLink(value: SpeciesGuideDestination.nearby) {
                     Group {
-                        if isExporting {
+                        if isBusy {
                             HStack(spacing: 6) {
                                 Image("batIcon")
                                     .resizable()
@@ -599,7 +602,7 @@ struct SpeciesExplorerView: View {
                     .liquidGlass(in: Capsule())
                 }
                 .accessibilityLabel("See bats near you")
-            } else if !isExporting {
+            } else if !isBusy {
                 // No collapsed form for this one: it's a hint, not an offer, and
                 // a hint is the thing to drop when something real needs the row.
                 Text("Tap a region to explore its species")
@@ -609,12 +612,19 @@ struct SpeciesExplorerView: View {
                     .liquidGlass(in: Capsule())
             }
             SessionExportBanner(manager: SessionExportManager.shared)
+            INatUploadBanner(manager: INatUploadManager.shared)
         }
         .padding(.horizontal, SessionButtonMetrics.horizontalPadding)
         .padding(.bottom, 12)
-        .animation(.easeInOut(duration: 0.25), value: isExporting)
-        .onAppear { SessionExportManager.shared.addInlineHost() }
-        .onDisappear { SessionExportManager.shared.removeInlineHost() }
+        .animation(.easeInOut(duration: 0.25), value: isBusy)
+        .onAppear {
+            SessionExportManager.shared.addInlineHost()
+            INatUploadManager.shared.addInlineHost()
+        }
+        .onDisappear {
+            SessionExportManager.shared.removeInlineHost()
+            INatUploadManager.shared.removeInlineHost()
+        }
     }
 
     private var sourcesSheet: some View {
