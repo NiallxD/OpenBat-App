@@ -123,6 +123,50 @@ struct DemoLoggerTests {
         #expect(rows.isEmpty)
     }
 
+    /// A finished run says so. Without a footer, a run somebody stopped early and
+    /// a run where the device stopped detecting look identical — the rows just
+    /// stop — and that is a guess nobody should have to make about a file
+    /// somebody else recorded.
+    @Test func aFinishedRunRecordsHowItEnded() throws {
+        let dir = makeDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        DemoLogger.shared.begin(clip: "clip", context: [],
+                                defaults: makeDefaults(enabled: true), directory: dir)
+        DemoLogger.shared.flush()
+        let url = try #require(DemoLogger.shared.currentLogURL)
+        DemoLogger.shared.logPass(result("MYLU", 0.8), pulseCount: 3, modelID: "nabat")
+        DemoLogger.shared.end()
+        DemoLogger.shared.flush()
+
+        let text = try String(contentsOf: url, encoding: .utf8)
+        #expect(text.contains("# ended: "))
+        #expect(text.contains("# elapsed_s: "))
+        #expect(text.contains("# thermal_state_at_end: "))
+        // The header's own thermal reading is taken before any work happens, so
+        // the end-of-run one is the only one that can differ from "nominal".
+        #expect(text.contains("# low_power_mode_at_end: "))
+    }
+
+    /// Conditions that change what the numbers mean, recorded so a reader does
+    /// not have to assume them. Low Power Mode throttles the CPU, so a run made
+    /// in it is indistinguishable from a run on slower hardware without this.
+    @Test func theHeaderRecordsWhatWouldSkewThePerformance() throws {
+        let dir = makeDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        DemoLogger.shared.begin(clip: "clip", context: [],
+                                defaults: makeDefaults(enabled: true), directory: dir)
+        let url = try #require(DemoLogger.shared.currentLogURL)
+        DemoLogger.shared.end()
+        DemoLogger.shared.flush()
+
+        let text = try String(contentsOf: url, encoding: .utf8)
+        #expect(text.contains("# low_power_mode: "))
+        #expect(text.contains("# memory_gb: "))
+        #expect(text.contains("# processors: "))
+    }
+
     /// One column per class per score kind, so the table is rectangular and a
     /// diff of two files lines up column for column.
     @Test func theColumnsAreTheUnionOfEveryModelsClasses() {

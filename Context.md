@@ -2979,6 +2979,38 @@ the ones it did draw. Both were found by looking at the app rather than at the
 logs, and neither would have shown up in any log column — worth remembering next
 time the instinct is to add another one.
 
+### The demo log became something other people send us (2026-09-07)
+
+The demo plays one fixed clip, so it is the only input two devices can be given
+identically — which makes it a benchmark, and the intention now is to ask other
+people to run it and send the file back. That changes what the log has to carry:
+a file you read yourself can rely on you remembering the circumstances, and a
+file from a stranger cannot.
+
+Three additions, each for a question a reader would otherwise have to guess at.
+
+**`low_power_mode`.** It throttles the CPU, so a run made in it is
+indistinguishable afterwards from a run on slower hardware — and the people most
+likely to have it on are exactly the ones with no reason to think it matters.
+
+**A footer** — `ended`, `elapsed_s`, and the thermal state and Low Power Mode as
+they were at the end. Without it a run someone stopped after twenty seconds and
+a run where the device stopped detecting look identical, because the rows simply
+stop. The header's thermal reading is taken before any work happens and can only
+ever say "nominal"; the end-of-run one is the one worth having.
+
+**`memory_gb`**, for cohorting devices that share a chip but not a memory size.
+
+`batbench report` reads all three and says so at the top of a file: a throttled
+run, a device that got hot, or a log with no end marker are all called out before
+any of its numbers are shown, because each makes those numbers mean something
+different.
+
+**Known limit, unfixed:** the filename carries the hardware model, not a unique
+device id, so two devices of the same model produce the same filename. Harmless
+when each person sends their own file, and the reason a third device went
+missing from an export earlier today.
+
 ### First field evening, and the two things it could not answer (2026-09-07)
 
 A 20-minute Squamish session, the first real audio through any of the day's

@@ -32,7 +32,7 @@
   interrupts everybody, before they reach the detector.
 -->
 
-## v1.1 (Build 218)
+## v0.9.6 (Build 220)
 
 ### New
 - **Post a recording to iNaturalist** — A recording can become an observation without leaving the app, either posted for you when you sign in or handed over as a set of files to upload yourself. A leaf on a row marks the ones worth posting, gold for the best of a night.
@@ -42,7 +42,7 @@
 
 ### Changed
 - **The detector hears about three times as many calls** — It was quietly throwing most of them away while it drew the last one, and it threw away the fast-calling bats worst of all: the quicker a bat called, the less of it survived. On a 2020 iPad that has gone from keeping a third of what it heard to keeping over ninety percent, and an old iPad now keeps up with a recent iPhone.
-- **An identification belongs to one bat, not to a minute of them** — A pass used to run until things had been quiet for two seconds, which on a busy night meant several bats blended into one entry named after whichever of them called most. A pass now ends after eight tenths of a second of quiet, so each bat gets its own.
+- **An identification belongs to one bat, not to a minute of them** — A pass used to run until things had been quiet for two seconds, which on a busy night meant several bats blended into one entry named after whichever of them called most. A pass now ends after about a second of quiet, so each bat gets its own.
 - **No name when two species are too close to separate** — If the top two are neck and neck, OpenBat says nothing rather than picking one. The calls and their measurements are still recorded; only the verdict is withheld. Two species overhead at once will sometimes go unnamed, which is the honest answer.
 - **An entry with no species shows the app's own mark** — Rather than a spectrogram shrunk to thumbnail size, which read as a species photo that happened to be dull. Where OpenBat is sure it was not a bat, the mark is struck through.
 - **Unidentified passes stay out of the species list** — The recently-heard panel answers what you have heard tonight, and "unidentified" is not an answer to that. They are still filed under the session.

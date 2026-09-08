@@ -132,6 +132,29 @@ final class DemoLogger {
     /// config menu.
     func end() {
         queue.async { [self] in
+            // A footer, so a log says how it finished.
+            //
+            // Without one, a run someone stopped after twenty seconds and a run
+            // where the device stopped detecting look identical — the rows simply
+            // stop. That is a guess a reader should not have to make, least of all
+            // about a file somebody else recorded. The thermal state is repeated
+            // here because the header's copy is read before any work has happened,
+            // so it can only ever say "nominal"; the interesting one is this.
+            if let fileURL, let runStart {
+                let end = Date()
+                var footer = "# ended: \(Self.timeFormatter.string(from: end))\n"
+                footer += "# elapsed_s: \(String(format: "%.3f", end.timeIntervalSince(runStart)))\n"
+                footer += "# thermal_state_at_end: "
+                       + "\(String(describing: ProcessInfo.processInfo.thermalState))\n"
+                footer += "# low_power_mode_at_end: "
+                       + "\(ProcessInfo.processInfo.isLowPowerModeEnabled)\n"
+                if let data = footer.data(using: .utf8),
+                   let handle = try? FileHandle(forWritingTo: fileURL) {
+                    defer { try? handle.close() }
+                    _ = try? handle.seekToEnd()
+                    try? handle.write(contentsOf: data)
+                }
+            }
             fileURL = nil
             runStart = nil
         }
@@ -325,6 +348,14 @@ final class DemoLogger {
             ("app", "\(bundle?["CFBundleShortVersionString"] as? String ?? "?")"
                   + " (\(bundle?["CFBundleVersion"] as? String ?? "?"))"),
             ("processors", String(ProcessInfo.processInfo.processorCount)),
+            ("memory_gb", String(format: "%.1f",
+                                 Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824)),
+            // **Low Power Mode throttles the CPU**, so a run made in it looks
+            // exactly like a run on slower hardware — and there is no way to tell
+            // the two apart afterwards without this line. It matters most in the
+            // logs that come from other people, who have no reason to think it is
+            // relevant and every reason to be running with it on.
+            ("low_power_mode", String(ProcessInfo.processInfo.isLowPowerModeEnabled)),
             ("thermal_state", String(describing: ProcessInfo.processInfo.thermalState)),
         ]
     }

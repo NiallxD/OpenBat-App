@@ -88,7 +88,7 @@ struct PassAggregationTests {
     /// invisibly — one build spent looking for a fault in the segmentation that
     /// was really a value that had never been applied.
     @Test func theOldPassTimeoutIsMigratedForward() {
-        #expect(AutoIDSettings.defaultPassTimeoutSeconds == 0.8)
+        #expect(AutoIDSettings.defaultPassTimeoutSeconds == 1.1)
         let d = try? #require(ModelRegistry.descriptor(id: ModelRegistry.nabatID))
         let seeded = d.map { AutoIDSettings.defaultSettings(for: $0) }
         #expect(seeded?.passTimeoutSeconds == AutoIDSettings.defaultPassTimeoutSeconds,

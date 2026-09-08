@@ -408,7 +408,7 @@ final class AutoIDSettings {
     /// weak the margin over the runner-up actually was.
     /// Named rather than written twice: the seed below and the migration in
     /// `load()` have to agree, and a literal in each is how they stop agreeing.
-    static let defaultPassTimeoutSeconds: Double = 0.8
+    static let defaultPassTimeoutSeconds: Double = 1.1
 
     static func defaultSettings(for d: ModelDescriptor) -> ModelSettings {
         var species: [String: SpeciesState] = [:]
@@ -461,12 +461,17 @@ final class AutoIDSettings {
     /// how much of the audio the device managed to keep, so it is moved rather
     /// than left.
     ///
-    /// Only a model still sitting on exactly the old default is touched, and only
-    /// once. Someone who had deliberately chosen 2.0 loses that choice — accepted,
-    /// because it is indistinguishable from never having touched the slider and
-    /// the slider is still right there.
-    private static let keyPassTimeoutMigration = "AutoIDSettings_passTimeout_0.8"
-    private static let supersededPassTimeout: Double = 2.0
+    /// Only a model still sitting on exactly a superseded default is touched, and
+    /// only once. Someone who had deliberately chosen one of those values loses
+    /// that choice — accepted, because it is indistinguishable from never having
+    /// touched the slider, and the slider is still right there.
+    /// Bump the key when the default moves again — an install that has already
+    /// run one migration will not run it a second time, so a later change to
+    /// `defaultPassTimeoutSeconds` reaches nobody without a new key here. Both
+    /// superseded values are listed: 2.0 shipped for a long time, and 0.8 was
+    /// the default for a single day's builds before field data argued it up.
+    private static let keyPassTimeoutMigration = "AutoIDSettings_passTimeout_1.1"
+    private static let supersededPassTimeouts: Set<Double> = [2.0, 0.8]
 
     private struct StoredV2: Codable {
         var activeModelID: String?
@@ -489,7 +494,7 @@ final class AutoIDSettings {
     private func migratePassTimeoutIfNeeded(_ defaults: UserDefaults) {
         guard !defaults.bool(forKey: Self.keyPassTimeoutMigration) else { return }
         var changed = false
-        for (id, ms) in perModel where ms.passTimeoutSeconds == Self.supersededPassTimeout {
+        for (id, ms) in perModel where Self.supersededPassTimeouts.contains(ms.passTimeoutSeconds) {
             perModel[id]?.passTimeoutSeconds = Self.defaultPassTimeoutSeconds
             changed = true
         }
