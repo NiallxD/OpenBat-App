@@ -8,6 +8,6 @@
     "locationWeighting": true,
     "configMenu": true
   },
-  "maintenance": true,
-  "maintenanceMessage": "Hi! We are aware of a bug in which tapping a species on the 'Bats Near You' tab accessed from the Detector pages causes a crash. We are working to fix it. In the meantime, you can view bats near you from the Field Guide Page. Sorry!"
+  "maintenance": false,
+  "maintenanceMessage": ""
 }
