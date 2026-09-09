@@ -24,6 +24,19 @@
 //  2. The caveat about identifications is said before the app has a chance to
 //     make one. That is the one claim the app makes that a user could be misled
 //     by, so it does not get to be optional reading.
+//  3. The user finds out they need a microphone *before* meeting a silent
+//     detector. The welcome step's footer polls for one (`UltrasonicMicProbe`)
+//     and says whether it can see it, which is a far stronger message than a
+//     standing warning that a user with a microphone already plugged in reads
+//     as not applying to them.
+//
+//  **Every step is meant to fit on screen without scrolling.** The ScrollView
+//  underneath is for large Dynamic Type, not for ordinary reading — a step
+//  whose last card is below the fold has a last card nobody reads. Two things
+//  keep that true: the copy is kept to a header plus at most three short cards
+//  (the "About the IDs" step lost its two label cards on 2026-09-08 for this
+//  reason — see there), and `OnboardingMetrics` tightens the spacing on the
+//  short screens where even that would not fit.
 //
 //  `OpenBatApp` mounts this instead of `ContentView` until
 //  `hasCompletedOnboarding` is set, which also means `ContentView`'s own
@@ -56,6 +69,9 @@ struct OnboardingView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     private var isCenteredCard: Bool { horizontalSizeClass == .regular }
 
+    /// Resolved once per view, not per frame — see `OnboardingMetrics`.
+    private let metrics = OnboardingMetrics.forCurrentScreen()
+
     @State private var step: Step = .welcome
     @State private var showPrivacyDetail = false
     // True while a permission request is in flight (soft-ask screen showing,
@@ -66,6 +82,7 @@ struct OnboardingView: View {
     // so the permissions step's status row reads this instead, refreshed after
     // the request resolves.
     @State private var micStatus = AVAudioApplication.shared.recordPermission
+    @Environment(\.scenePhase) private var scenePhase
     /// The same key as Settings › Storage and the default registered in
     /// `OpenBatApp.init` — this screen is just the first place it gets asked.
     /// Nothing needs migrating when it changes here (there are no recordings
@@ -79,6 +96,11 @@ struct OnboardingView: View {
     // authorization is process-global, so requesting here doesn't cause a second
     // prompt later — by the time ContentView appears the status is already decided.
     @State private var location = LocationProvider()
+    /// `nil` until the first probe answers, which is the state the welcome
+    /// footer must also be able to speak in: claiming "no microphone" in the
+    /// half-second before anything has been checked would be a lie shown to
+    /// every user, including the ones holding a connected microphone.
+    @State private var usbMicConnected: Bool?
 
     // The interface mode is no longer asked here — the view-mode step moved to
     // `AboutAppTour`. Nothing has to be written on the way out for that to be
@@ -90,8 +112,10 @@ struct OnboardingView: View {
     // hardware most first-run users have not plugged in yet, and it lives under
     // Microphone in Settings, which is where someone who plugs one in later has
     // to go anyway. `AudioEngineController` and `MicCalibrationSettings` are no
-    // longer constructed here as a result — onboarding now touches no audio at
-    // all before ContentView does.
+    // longer constructed here as a result. The only audio onboarding touches is
+    // `UltrasonicMicProbe`, which sets a session category and reads the input
+    // list — it never activates the session, so it starts no capture, prompts
+    // for nothing and interrupts no other app.
 
     // Deliberately NOT wrapped in a `NavigationStack`. The only thing it ever
     // hosted was a toolbar Back button, which existed on every step except the
@@ -127,6 +151,44 @@ struct OnboardingView: View {
         // moves, and the feedback makes it feel like one.
         .sensoryFeedback(.selection, trigger: step)
         .interactiveDismissDisabled()
+        // The shared components (`OnboardingStepView`, `OnboardingCard`,
+        // `PermissionRow`) size themselves from this rather than being handed
+        // it at every call site.
+        .environment(\.onboardingMetrics, metrics)
+        .task { await watchForMicrophone() }
+        // Both statuses are read once, into state, and then only updated by the
+        // dialogs this flow puts up — so a status that changed outside the app
+        // (Settings, or a previous run's refusal) has to be picked up here or
+        // the permission rows describe a device that no longer exists. See
+        // `LocationProvider.refreshAuthorization`.
+        .onAppear(perform: refreshPermissionStatuses)
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { refreshPermissionStatuses() }
+        }
+    }
+
+    /// Jumps to OpenBat's own page in the Settings app, which is where a
+    /// refused permission is turned back on. The statuses are re-read when the
+    /// app becomes active again, so the rows are right on the way back.
+    private func openAppSettings() {
+        if let url = URL(string: UIApplication.openSettingsURLString) {
+            UIApplication.shared.open(url)
+        }
+    }
+
+    private func refreshPermissionStatuses() {
+        micStatus = AVAudioApplication.shared.recordPermission
+        location.refreshAuthorization()
+    }
+
+    /// Keeps `usbMicConnected` current for as long as onboarding is on screen.
+    /// The loop ends with the view — `.task` cancels it — so nothing polls on
+    /// into the app's life.
+    private func watchForMicrophone() async {
+        while !Task.isCancelled {
+            usbMicConnected = await UltrasonicMicProbe.isConnected()
+            try? await Task.sleep(for: UltrasonicMicProbe.pollInterval)
+        }
     }
 
     /// The flow itself — progress bar, scrolling step content, pinned footer
@@ -159,13 +221,12 @@ struct OnboardingView: View {
                     .id(step)
                     .transition(stepTransition)
                     .padding(.horizontal, 24)
-                    .padding(.top, 24)
+                    .padding(.top, metrics.contentPadding)
                     // Clearance above the pinned footer and button bar. Without
                     // it the scrolled column ends flush against them, so the
-                    // last row of a long step — the final species complex on
-                    // "About the IDs" — reads as clipped underneath the buttons
-                    // rather than as the end of a list.
-                    .padding(.bottom, 24)
+                    // last row of a step reads as clipped underneath the
+                    // buttons rather than as the end of a list.
+                    .padding(.bottom, metrics.contentPadding)
             }
 
             // Also outside the ScrollView, for the same reason — a step's
@@ -204,53 +265,69 @@ struct OnboardingView: View {
     private var content: some View {
         switch step {
         case .welcome:
-            VStack(spacing: 20) {
+            // Three cards, roughly a line of detail each. The longer versions
+            // read well on paper and pushed the third card off the bottom of a
+            // 667pt screen — see this file's header on why that is a failure
+            // rather than a scroll.
+            VStack(spacing: metrics.sectionSpacing) {
                 OnboardingStepView(
-                    hero: { SonarPulseHero { OnboardingBranding.logo } },
+                    hero: { SonarPulseHero(size: metrics.heroSize) { OnboardingBranding.logo(size: metrics.logoSize) } },
                     title: "Welcome to OpenBat",
-                    message: "A community driven initiative based in Squamish, BC, with a mission to make bat detecting and appreciation accessible and affordable to as many people as possible.")
+                    message: "Bat detecting made affordable, from a community project in Squamish, BC.")
 
-                VStack(spacing: 10) {
+                VStack(spacing: metrics.cardSpacing) {
                     // The same two drawn glyphs the tab bar wears for Detector
                     // and Species, so the three things promised here are already
                     // recognisable as the tabs they land on.
                     OnboardingCard(
                         glyph: .asset("batCall"),
                         title: "Detect",
-                        detail: "Every call is drawn on a live spectrogram the moment it arrives, and recorded at full ultrasonic quality if you want to keep it.")
+                        detail: "Calls drawn live as they arrive, and recorded in full ultrasonic quality.")
                     OnboardingCard(
                         systemImage: "sparkle.magnifyingglass",
                         title: "Identify",
-                        detail: "Open-source machine learning names the species on-device as bats pass — nothing is sent anywhere to do it.")
+                        detail: "Machine learning names the species here on your phone. Nothing is sent away.")
                     OnboardingCard(
                         glyph: .asset("batBook"),
                         title: "Learn",
-                        detail: "A built-in, community-maintained field guide covers the species in your region, with range maps, call measurements and photos.")
+                        detail: "A field guide to the bats near you — range maps, calls and photos.")
                 }
             }
 
         case .permissions:
-            VStack(spacing: 20) {
+            VStack(spacing: metrics.sectionSpacing) {
                 OnboardingStepView(
                     systemImage: "checkmark.shield.fill",
                     title: "Two things to allow",
-                    message: "OpenBat needs both to record a pass and tell you what it was. One choice to make, too.")
+                    message: "And one choice about where your recordings live.")
 
-                VStack(spacing: 10) {
+                VStack(spacing: metrics.cardSpacing) {
                     PermissionRow(
                         systemImage: "mic.fill",
                         title: "Microphone",
                         detail: "Records calls above human hearing.",
-                        state: micRowState)
+                        // Denial is survivable for location and fatal for the
+                        // microphone, so the two rows must not say the same
+                        // mild thing about it. With no mic access the detector
+                        // shows a permanently empty spectrogram, which reads as
+                        // a broken app rather than as a choice the user made.
+                        // Where to fix it is the footer's job now, and saying it
+                        // in both places says it twice on one screen.
+                        deniedNote: "Without this OpenBat can't hear anything.",
+                        state: micRowState,
+                        openSettings: openAppSettings)
                     PermissionRow(
                         systemImage: "location.fill",
                         title: "Location",
                         // NO mention of a track: GPS courses were removed on
                         // 2026-08-16 along with the background location mode,
-                        // and this line still promised one. Location is now four
-                        // one-shot uses, all of them listed here.
-                        detail: "Shows tonight's sunset and sunrise times so you know when to head out, tags where each call was heard, picks the right species model for your region and weights the identification by what lives near you.",
-                        state: locationRowState)
+                        // and this line still promised one. Four one-shot uses,
+                        // grouped rather than enumerated — the original spelled
+                        // all four out in one 40-word sentence.
+                        detail: "Tonight's sunset and sunrise, where each call was heard, and which species to expect nearby.",
+                        deniedNote: "Sunset times and nearby-species hints will be off.",
+                        state: locationRowState,
+                        openSettings: openAppSettings)
                     StorageChoiceRow(keepInICloud: $keepInICloud)
                 }
 
@@ -263,7 +340,7 @@ struct OnboardingView: View {
                     // will have been told the opposite. This wording stays true
                     // either way, and promises the thing that actually matters —
                     // that it never happens without being asked.
-                    Text("Recordings stay yours — on this device, and in your own iCloud if you leave that on above. Nothing leaves your device unless you choose to contribute it, and you'll be asked first, every time.")
+                    Text("Recordings stay yours. Nothing leaves this device unless you choose to contribute it, and you'll be asked first, every time.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
@@ -274,39 +351,44 @@ struct OnboardingView: View {
             }
 
         case .autoID:
-            VStack(spacing: 20) {
+            VStack(spacing: metrics.sectionSpacing) {
                 OnboardingStepView(
                     systemImage: "sparkle.magnifyingglass",
                     title: "About the IDs",
-                    message: "OpenBat offers ID on the bats it detects with on-device machine learning. While it tries its best to offer an accurate ID, some species simply cannot be told apart by sound.")
+                    message: "OpenBat names the bats it hears with machine learning, on this device. Some species simply cannot be told apart by sound.")
 
-                // The two labels these cards teach are real, and the wording
-                // here must track them exactly: see `ComplexIndicator.text` in
-                // SessionsView, and `SpeciesComplex` / `PassAggregation` for
-                // when each is shown. They say different things — one is a
-                // standing caution about the species, the other is about this
-                // one pass — and the cards exist because that distinction is
-                // invisible from the pills alone.
-                VStack(spacing: 10) {
+                // **This step used to teach two labels here** — the
+                // "sounds alike" and "or SPECIES" pills, one card each, worded
+                // to stay in step with `ComplexIndicator.text` in SessionsView.
+                // Cut on 2026-09-08, for the same reason the eight-screen flow
+                // was cut in the first place: they taught vocabulary for a
+                // screen the user has not reached, about a pass they have not
+                // heard. Both pills explain themselves on the pass they appear
+                // on, which is the moment that distinction is worth anything,
+                // so the teaching was moved rather than lost.
+                //
+                // **The cards on a step have to be about the step** (Niall,
+                // 2026-09-09). Under a heading that says "About the IDs", the
+                // one card here talked about where the app's settings live —
+                // true, useful, and about a different subject, which made the
+                // heading read as a mistake. It has swapped places with the
+                // footer: the caveat that was pinned at the bottom is the first
+                // card, because it IS the thing this step exists to say, and the
+                // promise that nothing is a one-way door is now the closing note.
+                VStack(spacing: metrics.cardSpacing) {
                     OnboardingCard(
-                        systemImage: "questionmark.circle.fill",
-                        title: "\u{201C}sounds alike\u{201D}",
-                        detail: "This species belongs to a group that overlaps too much to tell apart by sound alone. It's a standing caution about the species, not about this particular call — the ID is being honest about the group rather than guessing a name within it.")
+                        systemImage: "exclamationmark.triangle.fill",
+                        title: "Every ID is a suggestion",
+                        detail: "Calls change with the environment, other bats and insects, so confirming a species takes further analysis.")
+                    // The honest answer to "then how do I ever know?", and the
+                    // only one the app can offer: other people. Not gated on
+                    // the iNaturalist feature switch — onboarding runs before
+                    // `ContentView`, which is where the flag store lives, and
+                    // the promise is about the app rather than about tonight.
                     OnboardingCard(
-                        systemImage: "questionmark.diamond.fill",
-                        title: "\u{201C}or SPECIES\u{201D}",
-                        detail: "On this call, a second species scored almost as highly as the winner. Read it as “probably the first one, but don't bank on it” — tap the pass to see both scores and judge for yourself.")
-                    // The last thing said before the app opens, and the only
-                    // thing left of the five screens that used to follow this
-                    // one: none of what they asked about is being asked any
-                    // more, so the promise that it is all still reachable is
-                    // the part that has to survive. It names the two places by
-                    // name — a vague "in Settings somewhere" is not a findable
-                    // promise.
-                    OnboardingCard(
-                        systemImage: "gearshape.fill",
-                        title: "You can change all these settings in the app",
-                        detail: "Listening mode, haptics, microphone calibration and how much of the detector you see all live in Settings, and nothing here is permanent. Info & Tour, in the same top-right menu, has a guided tour of the screen and a longer walk through how bat detecting works.")
+                        systemImage: "person.2.fill",
+                        title: "Get a second opinion",
+                        detail: "OpenBat can post a recording to iNaturalist, where other people can check it — the surest route to an identification a person has confirmed.")
                 }
             }
         }
@@ -324,29 +406,68 @@ struct OnboardingView: View {
             // plainly and early. Leaving it to the Settings help page means a
             // user can finish onboarding, reach a silent detector screen, and
             // conclude the app is broken.
-            cautionFooter {
-                PlugInAnimation(tint: .primary)
-                    .frame(width: 76, height: 76)
+            //
+            // It reports what is actually plugged in rather than warning in the
+            // abstract (`UltrasonicMicProbe`, polled while this view is up).
+            // A generic "you will need a microphone" is read as not applying by
+            // the user who already has one and skimmed past by the one who
+            // doesn't; "no microphone connected", checked and stated, is neither.
+            if usbMicConnected == true {
+                cautionFooter(spacing: 14, tint: .green) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: metrics.footerGlyph * 0.5))
+                        .foregroundStyle(.green)
+                } text: {
+                    "Ultrasonic microphone connected. You're ready to hear bats."
+                }
+            } else {
+                cautionFooter {
+                    PlugInAnimation(tint: .primary)
+                        .frame(width: metrics.footerGlyph, height: metrics.footerGlyph)
+                } text: {
+                    // `nil` (not yet probed) gets the neutral wording: stating
+                    // "no microphone" before anything has been checked would be
+                    // a claim shown briefly to every user, connected or not.
+                    usbMicConnected == false
+                        ? "No ultrasonic microphone connected. OpenBat needs one to hear bats — see Help in the top-right menu."
+                        : "OpenBat needs a USB microphone that can hear ultrasound — see Help in the top-right menu."
+                }
+            }
+
+        case .permissions:
+            // The same grey note the last step ends on, and it answers the same
+            // worry one step earlier: neither of these is a door that closes.
+            // Deliberately not a fourth card in the column above — the cards
+            // there are the three things being asked for, and a fourth that
+            // asks for nothing would dilute that.
+            cautionFooter(spacing: 14, tint: .secondary) {
+                Image(systemName: "gearshape.fill")
+                    .font(.system(size: metrics.footerGlyph * 0.5))
+                    .foregroundStyle(.secondary)
             } text: {
-                "Our app works with USB microphones designed to be able to hear the ultra-high pitch calls which bats produce as they navigate the world. Visit the Help page in the top-right options menu to learn more."
+                "Refusing either is fine, and it isn't final — Microphone and Location can be switched on whenever you like, in the Settings app under OpenBat."
             }
 
         case .autoID:
-            // A warning triangle rather than the plug animation this reused at
-            // first: the animation says "connect your microphone", which is a
-            // different message from the one the paragraph beside it is making,
-            // and a footer whose picture and words disagree is worse than one
-            // with no picture at all.
+            // Grey rather than orange, and a gear rather than a warning
+            // triangle: this is the last thing said before the app opens and it
+            // is a reassurance, not a caution. An orange wash here would teach a
+            // user that the colour means nothing, which costs the welcome step's
+            // microphone warning its force.
+            //
             // No fixed frame, and a tighter gap than the welcome step's. The
             // 76×76 slot is sized for `PlugInAnimation`, which fills it; a
             // symbol does not, so the box added ~19pt of dead space on each side
-            // on top of the 25pt gap and left the triangle marooned.
-            cautionFooter(spacing: 14) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: 40))
-                    .foregroundStyle(.orange)
+            // on top of the 25pt gap and left the glyph marooned.
+            //
+            // It names its two destinations — a vague "in Settings somewhere" is
+            // not a findable promise.
+            cautionFooter(spacing: 14, tint: .secondary) {
+                Image(systemName: "gearshape.fill")
+                    .font(.system(size: metrics.footerGlyph * 0.5))
+                    .foregroundStyle(.secondary)
             } text: {
-                "Identifying bats with acoustics alone is very difficult. The calls can change depending on the environment, sound pollution, other bats, insects, and more. Identifications are suggestions, and will usually get you somewhere near, but further analysis is needed to confirm. Consider submitting to community science platforms."
+                "Nothing here is permanent. Settings holds the rest of the app's controls, and Info & Tour, in the same menu, walks you round the screen when you're ready."
             }
 
         // The echolocation step's diagram footer went to `AboutAppTour` with the
@@ -368,8 +489,14 @@ struct OnboardingView: View {
     ///
     /// `spacing` is the one thing callers vary: a glyph that fills its own box
     /// needs less room beside it than one carrying optical padding.
+    ///
+    /// `tint` exists for one case: the welcome footer turns green once a
+    /// microphone is actually detected. Orange there would be a warning about a
+    /// condition that has been satisfied, which is how users learn to stop
+    /// reading a colour.
     private func cautionFooter(
         spacing: CGFloat = 25,
+        tint: Color = .orange,
         @ViewBuilder leading: () -> some View,
         text: () -> String
     ) -> some View {
@@ -382,15 +509,15 @@ struct OnboardingView: View {
                 .foregroundStyle(.primary)
                 .multilineTextAlignment(.leading)
         }
-        .padding(12)
+        .padding(metrics.cardPadding)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.orange.opacity(0.2), in: RoundedRectangle(cornerRadius: 12))
+        .background(tint.opacity(0.2), in: RoundedRectangle(cornerRadius: 12))
         .padding(.horizontal, 24)
         .padding(.top, 12)
         // The gap down to the buttons. Larger than the top gap on purpose: this
         // footer is a note about the app, and it shouldn't read as being
         // attached to the primary action.
-        .padding(.bottom, 28)
+        .padding(.bottom, metrics.footerBottomPadding)
     }
 
     // MARK: - Controls
@@ -428,7 +555,7 @@ struct OnboardingView: View {
                 // `.frame(maxWidth: .infinity)` on the button itself only
                 // stretches an invisible hit area and leaves the capsule
                 // hugging the word — which is what left this sitting off
-                // centre. Same reason `SuggestedModelSheet` expands its label.
+                // centre. Same reason `AreaChangeSheet` expands its label.
                 Button { advance() } label: {
                     Text(primaryLabel)
                         .frame(maxWidth: .infinity)
@@ -467,12 +594,17 @@ struct OnboardingView: View {
     private var primaryLabel: String {
         switch step {
         case .welcome:     return "Continue"
-        // "Continue" either way, deliberately. It used to read "Allow Access"
-        // until both dialogs had been answered, which described the button
-        // honestly but made the flow look like it had a gate in it — and the
-        // step advances on the second tap regardless. Whether a tap opens a
-        // system dialog or moves on is `advance()`'s business, not the label's.
-        case .permissions: return "Continue"
+        // **"Next" once both have been answered** (Niall, 2026-09-09). It was
+        // "Continue" either way, on the reasoning that whether a tap opens a
+        // system dialog or moves on is `advance()`'s business and not the
+        // label's. That holds right up until the dialogs are done, when the
+        // same word on the same button does a different thing — and a button
+        // that looked like it had already been pressed, with no dialog
+        // appearing, reads as an app that has frozen rather than one waiting to
+        // be told to move on. It is NOT the old "Allow Access", which described
+        // the button honestly but made the flow look like it had a gate in it:
+        // this changes at the end, not the beginning.
+        case .permissions: return allPermissionsDecided ? "Next" : "Continue"
         // The last step, so this is the button that opens the app.
         case .autoID:      return "Let's go!"
         }
@@ -525,14 +657,13 @@ struct OnboardingView: View {
                 requestPermissions()
             }
         case .autoID:
-            // Consumed once by ContentView's .onAppear, which clears it right back
-            // to false — see OnboardingState.justFinishedOnboarding's doc comment.
-            // It does not open the tour: dropping someone straight out of
-            // onboarding into another guided thing, on a detector that has
-            // nothing on it yet, is more onboarding at exactly the point they
-            // were promised it had ended. Both tours are under Info & Tour,
-            // which is where the card above points.
-            OnboardingState.shared.justFinishedOnboarding = true
+            // Straight into the app, with nothing handed forward. It does not open
+            // the tour: dropping someone straight out of onboarding into another
+            // guided thing, on a detector that has nothing on it yet, is more
+            // onboarding at exactly the point they were promised it had ended.
+            // Both tours are under Info & Tour, which is where the card above
+            // points. It no longer arranges a model suggestion either — the model
+            // is picked from the first location fix (`AutoIDSettings.applyCoverage`).
             onComplete()
         }
     }
@@ -541,21 +672,27 @@ struct OnboardingView: View {
     /// this screen when they're done rather than advancing automatically — the
     /// rows have just filled in with ticks, and skipping past that instantly
     /// hides the only confirmation they get that it worked.
+    ///
+    /// **Both are asked unconditionally** (Niall, 2026-09-09). They used to be
+    /// asked only when this screen believed the status was undetermined, which
+    /// meant one stale reading was enough to skip a dialog iOS would have shown
+    /// — and the user watched Continue do nothing. Asking when the answer is
+    /// already in costs nothing: iOS returns the existing answer without
+    /// putting anything on screen. The status is re-read from the system after
+    /// each, so what the rows show is what iOS says rather than what we
+    /// predicted it would say.
     private func requestPermissions() {
         isAwaitingPermission = true
         Task {
-            if micStatus == .undetermined {
-                _ = await AVAudioApplication.requestRecordPermission()
-                micStatus = AVAudioApplication.shared.recordPermission
-            }
+            _ = await AVAudioApplication.requestRecordPermission()
+            micStatus = AVAudioApplication.shared.recordPermission
             // Waits for the real OS dialog to actually be resolved (granted, denied,
             // or restricted) before continuing — requestRegionFix() alone doesn't
             // await that decision, it only fires the request. Denial here just means
             // the app runs without location tagging; nothing to branch on
             // synchronously.
-            if location.authorization == .notDetermined {
-                _ = await location.requestAuthorizationDecision()
-            }
+            _ = await location.requestAuthorizationDecision()
+            location.refreshAuthorization()
             location.requestRegionFix()
             isAwaitingPermission = false
         }
@@ -630,6 +767,8 @@ struct OnboardingCard: View {
     let title: String
     let detail: String
 
+    @Environment(\.onboardingMetrics) private var metrics
+
     init(systemImage: String, title: String, detail: String) {
         self.init(glyph: .symbol(systemImage), title: title, detail: detail)
     }
@@ -655,7 +794,7 @@ struct OnboardingCard: View {
             }
             Spacer(minLength: 0)
         }
-        .padding(12)
+        .padding(metrics.cardPadding)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
     }
@@ -690,9 +829,32 @@ private struct PermissionRow: View {
     let systemImage: String
     let title: String
     let detail: String
+    /// What is lost by refusing, appended to `detail` once the answer is no.
+    /// Per-row rather than one shared sentence, because the two permissions do
+    /// not cost the same: without location the app is slightly less helpful,
+    /// without the microphone it does nothing at all.
+    let deniedNote: String
     let state: State
+    /// Opens OpenBat's page in the Settings app. Shown only on a refused row,
+    /// because that is the only state where anything can be done from here:
+    /// **iOS never puts its dialog up twice**, so once a permission has been
+    /// refused there is nothing left for Continue to ask — the switch in
+    /// Settings is the whole of "ask again", and a row that says what was lost
+    /// without offering the one way back is a dead end.
+    let openSettings: () -> Void
+
+    @Environment(\.onboardingMetrics) private var metrics
 
     var body: some View {
+        if state == .denied {
+            Button(action: openSettings) { card }
+                .buttonStyle(.plain)
+        } else {
+            card
+        }
+    }
+
+    private var card: some View {
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: systemImage)
                 .font(.system(size: 20))
@@ -701,29 +863,60 @@ private struct PermissionRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                     .font(.subheadline.weight(.semibold))
-                Text(state == .denied ? "\(detail) You can turn this on later in the Settings app." : detail)
+                Text(state == .denied ? deniedNote : detail)
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(state == .denied ? .primary : .secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 8)
+            // The slot is kept even when it draws nothing, so the answer
+            // appearing doesn't re-wrap the paragraph beside it.
             statusGlyph
                 .font(.system(size: 18))
+                // A minimum rather than a fixed width: the slot is reserved so
+                // an answer arriving doesn't re-wrap the paragraph beside it,
+                // and a refused row needs more of it than a tick does.
+                .frame(minWidth: 22, alignment: .trailing)
         }
-        .padding(12)
+        .padding(metrics.cardPadding)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
+        // Makes the glyph's own transition actually play: the answer arrives
+        // from an OS dialog, outside any `withAnimation`, so without this the
+        // tick appeared instantly and the transition below was dead code.
+        .animation(.snappy(duration: 0.25), value: state)
     }
 
+    /// An answer, or nothing — and when the answer is no, a way out of it.
+    ///
+    /// **Nothing while the answer is still to come** (2026-09-09, from a
+    /// tester). The dotted empty circle this drew was the shape of a checkbox,
+    /// so the rows read as three things to tick — and one of them, the iCloud
+    /// row, genuinely is a control, which made the wrong reading look confirmed.
+    ///
+    /// **A cross AND a chevron once it is refused** (Niall, same day). The two
+    /// say different things and both are needed: the cross is the answer, which
+    /// is the same thing the tick is on the row above it, and the chevron is the
+    /// way to change it. iOS shows its dialog once per install, so without the
+    /// second half a refusal is a statement with no reply — which is the loop
+    /// this closes.
     @ViewBuilder private var statusGlyph: some View {
         switch state {
         case .pending:
-            Image(systemName: "circle.dotted").foregroundStyle(.tertiary)
+            EmptyView()
         case .granted:
             Image(systemName: "checkmark.circle.fill")
                 .foregroundStyle(.green)
                 .transition(.scale.combined(with: .opacity))
         case .denied:
-            Image(systemName: "slash.circle").foregroundStyle(.secondary)
+            HStack(spacing: 6) {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(.red)
+                Image(systemName: "chevron.right")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .transition(.scale.combined(with: .opacity))
         }
     }
 }
@@ -741,6 +934,8 @@ private struct PermissionRow: View {
 private struct StorageChoiceRow: View {
     @Binding var keepInICloud: Bool
 
+    @Environment(\.onboardingMetrics) private var metrics
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Toggle(isOn: $keepInICloud) {
@@ -755,8 +950,8 @@ private struct StorageChoiceRow: View {
                         // Both halves of the trade, the cost included — same
                         // reasoning as the Settings footer this mirrors.
                         Text(keepInICloud
-                             ? "They survive deleting the app and follow you to a new device, in your own iCloud. Bat audio is large: a busy night can use several GB of your iCloud storage."
-                             : "They stay on this device only, and are lost for good if you delete OpenBat.")
+                             ? "They follow you to a new device. Bat audio is large — a busy night can use several GB."
+                             : "They stay on this phone, and are lost if you delete OpenBat.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -765,7 +960,7 @@ private struct StorageChoiceRow: View {
             }
             .tint(.batAccent)
         }
-        .padding(12)
+        .padding(metrics.cardPadding)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
     }
@@ -784,8 +979,10 @@ struct OnboardingStepView<Hero: View>: View {
     let title: String
     let message: String
 
+    @Environment(\.onboardingMetrics) private var metrics
+
     var body: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: metrics.headerSpacing) {
             icon
             Text(title)
                 .font(.title2.bold())
@@ -806,10 +1003,10 @@ struct OnboardingStepView<Hero: View>: View {
         if Hero.self != EmptyView.self {
             hero()
         } else if showAppLogo {
-            OnboardingBranding.logo
+            OnboardingBranding.logo(size: metrics.logoSize)
         } else if let systemImage {
             Image(systemName: systemImage)
-                .font(.system(size: 56))
+                .font(.system(size: metrics.symbolSize))
                 .foregroundStyle(Color.batAccent)
                 // A one-shot bounce as each step arrives, so the header reads
                 // as having landed rather than having always been there.
@@ -838,7 +1035,7 @@ extension OnboardingStepView {
 enum OnboardingBranding {
     /// The real app icon, squircle-masked the way iOS presents it — falls back to the
     /// bat glyph if it can't be resolved. Mirrors `AppInfoView.appIcon`.
-    @ViewBuilder static var logo: some View {
+    @ViewBuilder static func logo(size: CGFloat = 64) -> some View {
         Group {
             if let icon = appIconImage {
                 Image(uiImage: icon)
@@ -851,8 +1048,8 @@ enum OnboardingBranding {
                     .foregroundStyle(Color.batAccent)
             }
         }
-        .frame(width: 64, height: 64)
-        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .frame(width: size, height: size)
+        .clipShape(RoundedRectangle(cornerRadius: size * 0.22, style: .continuous))
     }
 
     /// The primary app icon from the bundle, resolved from the Info.plist icon-files

@@ -104,22 +104,119 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
     /// `SettingsView`'s slider range.
     static let maxPreRollSeconds = 5.0
 
+    /// **These three are persisted, and were not until 2026-09-09.** They are
+    /// bound to Settings sliders like every other tunable in that sheet, but
+    /// they lived only in memory, so each one silently returned to the number
+    /// below at the next launch — a setting that forgets, which is worse than
+    /// no setting, because it looks like it worked. Found while auditing what
+    /// could be moved to a remote config; see `AUDIT-2026-09-09-parameters.md`.
+    ///
+    /// Written only from `didSet`, i.e. only when something actually assigns a
+    /// new value, so an install that has never touched a slider has no stored
+    /// value at all. That absence is the record of "the user never chose this",
+    /// which is what a remotely-set default needs in order to know whose value
+    /// it may replace — do not "helpfully" write these anywhere else.
+    private enum Key {
+        static let preRoll     = "recording.preRollSeconds"
+        static let postRoll    = "recording.postRollSeconds"
+        static let maxSegment  = "recording.maxSegmentSeconds"
+    }
+
+    static var defaultPreRollSeconds: Double { Tunable.recordingPreRoll.value(3.0) }
+    static var defaultPostRollSeconds: Double { Tunable.recordingPostRoll.value(3.0) }
+    static var defaultMaxSegmentSeconds: Double { Tunable.recordingMaxSegment.value(600.0) }
+
     /// Pre-trigger buffer kept rolling while idle, so a segment can start with audio
     /// from BEFORE the triggering pulse instead of clipping its onset.
-    var preRollSeconds = 3.0 {
-        didSet { let v = preRollSeconds; queue.async { [weak self] in self?.preRollSecondsQ = v } }
+    var preRollSeconds = AudioRecorder.defaultPreRollSeconds {
+        didSet {
+            persist(preRollSeconds, Key.preRoll)
+            let v = preRollSeconds; queue.async { [weak self] in self?.preRollSecondsQ = v }
+        }
     }
     /// How long to keep a segment open after the last detected pulse before closing
     /// it off — i.e. the silence gap that ends one activity "bout". Reset on every
     /// new pulse while the segment is open, so a bat giving several passes with
     /// gaps shorter than this all land in ONE file instead of fragmenting into many.
     /// User-configurable in Settings (the Detecting tab, "Length of a recording").
-    var postRollSeconds = 3.0 {
-        didSet { let v = postRollSeconds; queue.async { [weak self] in self?.postRollSecondsQ = v } }
+    var postRollSeconds = AudioRecorder.defaultPostRollSeconds {
+        didSet {
+            persist(postRollSeconds, Key.postRoll)
+            let v = postRollSeconds; queue.async { [weak self] in self?.postRollSecondsQ = v }
+        }
     }
     /// Safety cap so a very long continuous bout can't make one unbounded file.
-    var maxSegmentSeconds = 600.0 {
-        didSet { let v = maxSegmentSeconds; queue.async { [weak self] in self?.maxSegmentSecondsQ = v } }
+    var maxSegmentSeconds = AudioRecorder.defaultMaxSegmentSeconds {
+        didSet {
+            persist(maxSegmentSeconds, Key.maxSegment)
+            let v = maxSegmentSeconds; queue.async { [weak self] in self?.maxSegmentSecondsQ = v }
+        }
+    }
+
+    /// Nothing here may have a cost or a side effect: this type is built as a
+    /// SwiftUI `@State` default expression, which SwiftUI may evaluate several
+    /// times per view identity and then discard all but one — the same rule
+    /// `PulseHaptics.init` spells out. Reading defaults is free; starting
+    /// anything is not.
+    init() {
+        let d = UserDefaults.standard
+        func stored(_ key: String, _ fallback: Double) -> Double {
+            d.object(forKey: key) != nil ? d.double(forKey: key) : fallback
+        }
+        // Clamped to the ring's size, which is allocated for `maxPreRollSeconds`
+        // — a longer value stored by some future slider range would otherwise
+        // ask for pre-roll that was never captured.
+        preRollSeconds = min(stored(Key.preRoll, Self.defaultPreRollSeconds), Self.maxPreRollSeconds)
+        postRollSeconds = stored(Key.postRoll, Self.defaultPostRollSeconds)
+        maxSegmentSeconds = stored(Key.maxSegment, Self.defaultMaxSegmentSeconds)
+        // `didSet` does not fire for assignments made inside `init`, so the
+        // queue-local mirrors are seeded here by hand. Missing this is how a
+        // restored setting would look right in Settings and change nothing at
+        // all about what gets recorded.
+        preRollSecondsQ = preRollSeconds
+        postRollSecondsQ = postRollSeconds
+        maxSegmentSecondsQ = maxSegmentSeconds
+    }
+
+    /// Suppresses the persisting `didSet`s while a re-seed assigns — see
+    /// `RemoteDefaultsReseed.swift`.
+    var isSeeding = false
+
+    private func persist(_ value: Any, _ key: String) {
+        guard !isSeeding else { return }
+        UserDefaults.standard.set(value, forKey: key)
+    }
+
+    /// Deliberately NOT `Reseedable`: this class is `nonisolated` (the capture
+    /// thread appends to it) and that protocol is main-actor isolated like
+    /// everything else in the project. The two members are the same; only the
+    /// conformance is absent, so `ContentView` calls this one by hand.
+    private func seeding(_ body: () -> Void) {
+        isSeeding = true
+        defer { isSeeding = false }
+        body()
+    }
+
+    /// See `RemoteDefaultsReseed.swift`. The queue mirrors still update — only
+    /// the write to storage is suppressed — so a re-seeded timing is in force
+    /// for the next segment, not merely displayed.
+    func reseedRemoteDefaults() {
+        let d = UserDefaults.standard
+        seeding {
+            if d.object(forKey: Key.preRoll) == nil { preRollSeconds = Self.defaultPreRollSeconds }
+            if d.object(forKey: Key.postRoll) == nil { postRollSeconds = Self.defaultPostRollSeconds }
+            if d.object(forKey: Key.maxSegment) == nil { maxSegmentSeconds = Self.defaultMaxSegmentSeconds }
+        }
+    }
+
+    /// Back to a fresh install's timings. Called by Settings' "Reset all
+    /// settings", which erases the stored keys — without this the running
+    /// recorder would keep the old values in memory and write them straight
+    /// back out at the next slider move.
+    func resetToDefaults() {
+        preRollSeconds = Self.defaultPreRollSeconds
+        postRollSeconds = Self.defaultPostRollSeconds
+        maxSegmentSeconds = Self.defaultMaxSegmentSeconds
     }
 
     // MARK: Queue-local state (recorder queue only)
@@ -131,11 +228,12 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
     /// of short segments renders one at a time rather than spawning a thread each.
     private let reportQueue = DispatchQueue(label: "bat.AudioRecorder.report", qos: .utility)
     private var sampleRate: Double = 384_000
-    /// Queue-local mirrors of the three Settings-bound timings above. Defaults
-    /// must match theirs — nothing writes them until the user first moves a slider.
-    private var preRollSecondsQ = 3.0
-    private var postRollSecondsQ = 3.0
-    private var maxSegmentSecondsQ = 600.0
+    /// Queue-local mirrors of the three Settings-bound timings above. Seeded in
+    /// `init` from the stored values and updated by their `didSet`s; these
+    /// initialisers only cover the window before `init`'s body runs.
+    private var preRollSecondsQ = AudioRecorder.defaultPreRollSeconds
+    private var postRollSecondsQ = AudioRecorder.defaultPostRollSeconds
+    private var maxSegmentSecondsQ = AudioRecorder.defaultMaxSegmentSeconds
     private var armedQ = false
     private var activeQ = false
     private var blockedQ = false

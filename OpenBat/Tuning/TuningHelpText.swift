@@ -25,14 +25,14 @@ enum TuningHelp {
         """
 
     static let heterodyneDenoise = """
-        What happens to the background on the LIVE channel. Reduce measures the \
-        hiss in each frequency band and subtracts it; Scrub keeps only what is \
-        plainly a call and silences the rest.
+        What happens to the background on the LIVE channel. Normal measures the \
+        hiss in each frequency band and subtracts it.
 
-        Off by default here, unlike the slow replay. This is the channel you \
-        use to notice a bat is around at all, and on Scrub it says nothing \
-        whenever nothing clears the gate — cleaner to listen to, but a quiet \
-        detector and a broken one sound alike.
+        Off by default here, unlike time expansion, and there is no High on this \
+        channel at all. This is the channel you use to notice a bat is around at \
+        all, and the High setting says nothing whenever nothing clears the gate \
+        — cleaner to listen to, but a quiet detector and a broken one sound \
+        alike.
 
         Cleaning happens before the sound is mixed down, and only on the way to \
         the speaker: the spectrogram, the detector and anything recorded still \
@@ -46,7 +46,7 @@ enum TuningHelp {
         whistly. It changes only how calls sound, not which ones are found.
         """
 
-    // MARK: Slow replay
+    // MARK: Time expansion
 
     // `snippetExpansion` was here. Speed moved to Settings → Detecting
     // (2026-08-28) and carries its own ControlNote there — two copies of the

@@ -5,7 +5,7 @@
 //  Sizes a compact sheet to what it actually says, instead of to a height
 //  guessed when it was written.
 //
-//  The app's small custom sheets (StartDetectingSheet, SuggestedModelSheet,
+//  The app's small custom sheets (StartDetectingSheet, AreaChangeSheet,
 //  MicCalibrationView) each pinned themselves to a hand-fitted
 //  `.presentationDetents([.height(N)])`. That number was correct for the copy
 //  present on the day, and silently wrong afterwards: an acceptance review found

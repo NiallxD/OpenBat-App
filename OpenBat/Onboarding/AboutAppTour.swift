@@ -138,7 +138,7 @@ struct AboutAppTour: View {
                     OnboardingCard(
                         systemImage: "tortoise.fill",
                         title: "Slow it down",
-                        detail: "Slow replay grabs a short snippet of a call and plays it back at a fraction of its speed, which brings out detail the shifted-down version glosses over. The detector is deaf while a snippet replays — a trade you choose in Settings.")
+                        detail: "Time expansion grabs a short snippet of a call and plays it back at a fraction of its speed, which brings out detail the shifted-down version glosses over. The detector is deaf while a snippet replays — a trade you choose in Settings.")
                     OnboardingCard(
                         systemImage: "hand.tap.fill",
                         title: "Feel it",

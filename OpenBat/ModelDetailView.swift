@@ -101,14 +101,23 @@ struct ModelDetailView: View {
         }
     }
 
+    /// A read-out, not a switch (Niall, 2026-09-08). The toggle that was here
+    /// wrote `activeModelID` directly, which the next location fix would have
+    /// written straight back over — see `AutoIDSettings.applyCoverage`.
     private var activeSection: some View {
         Section {
-            Toggle("Use this model", isOn: Binding(
-                get: { settings.activeModelID == model.id },
-                set: { settings.activeModelID = $0 ? model.id : nil }
-            ))
+            if settings.activeModelID == model.id {
+                Label("Identifying now", systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(Color.accentColor)
+            } else {
+                Label("Not in range", systemImage: "circle")
+                    .foregroundStyle(.secondary)
+            }
         } header: {
-            CardHeader("Identifying", "Only one model identifies at a time.")
+            // The rule this card exists to state is short enough to be the
+            // card's own description, now that the note under the status line
+            // is gone: one model runs, and where you are is what picks it.
+            CardHeader("Identifying", "Whichever model covers where you are.")
         }
     }
 
@@ -120,34 +129,36 @@ struct ModelDetailView: View {
     /// thumb wide and gave the note nowhere to go.
     private var passSection: some View {
         Section {
-            LabeledContent("Ends a pass after") {
-                Text(String(format: "%.1f s", ms.passTimeoutSeconds))
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-            }
-            ControlNote("Quiet this long and the bat has gone. Too long and two bats become one entry, named for whichever called more.")
+            SettingValue("Ends a pass after",
+                         "Quiet this long and the bat has gone. Too long and two bats become one entry, "
+                       + "named for whichever of them called more.",
+                         value: String(format: "%.1f s", ms.passTimeoutSeconds))
             Slider(value: bind(\.passTimeoutSeconds), in: 0.5...10, step: 0.1)
                 .accessibilityLabel("Ends a pass after")
 
-            ControlNote("How many calls an ID is based on.")
-            Stepper("Calls needed: \(ms.minPassPulseCount)",
-                    value: bind(\.minPassPulseCount), in: 1...10)
-
-            LabeledContent("Minimum confidence") {
-                Text(String(format: "%.0f%%", ms.minPassConfidence * 100))
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
+            SettingRow("Calls needed",
+                       "How many calls an identification is based on. One call is a guess; several "
+                     + "agreeing is a species.") {
+                Stepper(value: bind(\.minPassPulseCount), in: 1...10) {
+                    Text("\(ms.minPassPulseCount)")
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                }
+                .fixedSize()
+                .accessibilityLabel("Calls needed")
             }
-            ControlNote("Below this, no species is named.")
+
+            SettingValue("Minimum confidence",
+                         "Below this, no species is named at all — the pass is kept and shown, without "
+                       + "a name on it.",
+                         value: String(format: "%.0f%%", ms.minPassConfidence * 100))
             Slider(value: bind(\.minPassConfidence), in: 0...0.5, step: 0.01)
                 .accessibilityLabel("Minimum confidence")
 
-            LabeledContent("Clear of the runner-up by") {
-                Text(String(format: "%.0f%%", (ms.minWinningMargin ?? 0.10) * 100))
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-            }
-            ControlNote("When two species score almost the same, name neither.")
+            SettingValue("Clear of the runner-up by",
+                         "When two species score almost the same, name neither. Raising this trades "
+                       + "identifications for certainty about the ones you get.",
+                         value: String(format: "%.0f%%", (ms.minWinningMargin ?? 0.10) * 100))
             Slider(value: bindOptional(\.minWinningMargin, default: 0.10), in: 0...0.5, step: 0.01)
                 .accessibilityLabel("Clear of the runner-up by")
         } header: {
@@ -163,23 +174,21 @@ struct ModelDetailView: View {
     /// the two controls they belong to.
     private var qualityGateSection: some View {
         Section {
-            Toggle("Skip faint calls", isOn: bind(\.qualityGateEnabled))
+            SettingToggle("Skip faint calls",
+                          "A call too faint or too muddy to identify is still shown on screen — it is "
+                        + "just not sent to the model, where it would only produce a confident-looking "
+                        + "guess from nothing.",
+                          isOn: bind(\.qualityGateEnabled))
             if ms.qualityGateEnabled {
-                LabeledContent("Minimum clarity") {
-                    Text(String(format: "%.0f×", ms.qualitySNThreshold))
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                }
-                ControlNote("How far above the noise. NABat uses 7×.")
+                SettingValue("Minimum clarity",
+                             "How far above the background a call has to sit. NABat uses 7×.",
+                             value: String(format: "%.0f×", ms.qualitySNThreshold))
                 Slider(value: bind(\.qualitySNThreshold), in: 1...20, step: 1)
                     .accessibilityLabel("Minimum clarity")
 
-                LabeledContent("Minimum loudness") {
-                    Text(String(format: "%.0f dB", ms.qualityAmpThreshold))
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                }
-                ControlNote("NABat uses 21 dB.")
+                SettingValue("Minimum loudness",
+                             "How loud a call has to be before it is worth identifying. NABat uses 21 dB.",
+                             value: String(format: "%.0f dB", ms.qualityAmpThreshold))
                 Slider(value: bind(\.qualityAmpThreshold), in: 5...40, step: 1)
                     .accessibilityLabel("Minimum loudness")
             }

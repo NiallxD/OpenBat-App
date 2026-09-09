@@ -2,9 +2,30 @@
 //  DiagnosticsView.swift
 //  OpenBat
 //
-//  The capture diagnostics panel, presented as a sheet from the main screen's
-//  toolbar. Confirms the Griff stream is live at its native rate and shows the
-//  input level meter.
+//  The configuration menu, reached from Settings once the passcode has been
+//  entered (`ConfigMenu`). Says what is switched off, what the microphone is
+//  actually doing, and holds the three tools that get a tuning session or a
+//  comparison off a phone.
+//
+//  **Built like a settings page, because it is one** (Niall, 2026-09-09). It
+//  used to be hand-rolled `VStack` cards on a `.quaternary` rounded rectangle,
+//  which is a settings form drawn worse: no Dynamic Type behaviour, no grouped
+//  insets, and a description above AND a paragraph below every control. It is
+//  now `Form`/`Section` under the same three-part card rule as `SettingsView`
+//  — name, one-line description, control — see that file's header.
+//
+//  THINGS THAT WERE HERE AND ARE NOT
+//  ---------------------------------
+//  * **Demo mode.** It is a real feature now: started from the app-info sheet,
+//    ended from the mic pill. A second entry behind a passcode was the last
+//    trace of the days when it was a debug tool.
+//  * **The session button card.** It existed to settle whether the button was
+//    being found in the view hierarchy; it was, and the glow/menu/tap-catcher
+//    story it was built for is closed (see `SessionButtonLocator`).
+//  * **The iNaturalist posting-limit overrides.** Not gone — they are two of
+//    the Overrides card's rules-lifted-for-testing switches.
+//  * **The classifier log**, which went to Settings → General in 2026-08-26,
+//    where a user reporting a wrong identification can find it.
 //
 
 import SwiftUI
@@ -12,11 +33,6 @@ import SwiftUI
 struct DiagnosticsView: View {
     let audio: AudioEngineController
     let recorder: AudioRecorder
-    let classStore: ClassificationStore
-    /// Start a demo feed with the chosen file. Owned by ContentView, which also
-    /// has to stop detection and clear the session — see `startDemo` there.
-    let onStartDemo: (URL, String) -> Void
-    let onEndDemo: () -> Void
     /// Opens the floating live tuning card over the detector screen. Dismisses
     /// this sheet on the way — the card is useless behind a sheet, which also
     /// pauses the render loop it needs running.
@@ -26,15 +42,13 @@ struct DiagnosticsView: View {
     /// all the processors and the AutoID settings at once — see `dumpSettings`
     /// there.
     let onDumpSettings: () -> URL?
-    /// Locates the session button for the glow, the transport menu and the tap
-    /// catcher. Read here only for its failure dump — this panel is how that
-    /// dump gets off a device, which is the only place the failure happens.
-    let sessionButtonLocator: SessionButtonLocator
     /// The remote kill switches, listed at the top so the first thing this
     /// screen answers is "what is currently switched off".
     let flags: FeatureFlagStore
     @Environment(\.dismiss) private var dismiss
-    @State private var showDemoPicker = false
+    /// For the jump to OpenBat's page in the Settings app — see
+    /// `overridesSection`.
+    @Environment(\.openURL) private var openURL
     /// Last file written by the dump button, so it can be shared without
     /// re-capturing (a second capture would be a different moment in time).
     @State private var dumpedFile: URL?
@@ -42,6 +56,13 @@ struct DiagnosticsView: View {
     /// See `demoLogSection`. The switch is read by `DemoLogger` at the start of
     /// a run, not by anything here.
     @AppStorage(DemoLogger.enabledKey) private var demoLogEnabled = false
+    /// See `overridesSection`. Read at launch by `OnboardingState`, not here.
+    @AppStorage(OnboardingState.forceEveryLaunchKey) private var forceOnboarding = false
+    /// Read by `INatUploadAssessment.overrideLimits`, and cleared along with
+    /// everything else if the config file ever locks this menu — which is why
+    /// the key is named in `FeatureFlagStore`.
+    @AppStorage(FeatureFlagStore.postingCapOverrideKey) private var inatIgnoreLimits = false
+    @State private var inatLedgerCleared = false
     @State private var demoLogShare: DemoLogShare?
     @State private var demoLogsCleared = false
 
@@ -49,28 +70,26 @@ struct DiagnosticsView: View {
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                // Diagnostics/level meter read `audio.diagnostics`, which updates at
-                // ~15 Hz — pulled into their own leaf views (below) rather than read
-                // directly here, so that churn doesn't force this whole body (and the
-                // Share/Clear/Done buttons/toolbar it contains) to re-render on every
-                // update. Same @Observable-churn fix as ContentView's RecordButton —
-                // see Context.md §13.
-                VStack(spacing: 20) {
-                    ConfigFeatureSection(flags: flags)
-                    DiagnosticsStatusLine(audio: audio)
-                    DiagnosticsCard(audio: audio, recorder: recorder)
-                    DiagnosticsLevelMeter(audio: audio)
-                    DiagnosticsMicQualityCard(audio: audio)
-                    demoSection
-                    demoLogSection
-                    iNaturalistSection
-                    tuningSection
-                    settingsDumpSection
-                    sessionButtonSection
-                }
-                .padding()
+            Form {
+                ConfigFeatureSection(flags: flags)
+                overridesSection
+                microphoneSection
+                demoLogSection
+                tuningSection
+                settingsDumpSection
             }
+            // On the Form, not on the card that owns it: a `.sheet` written on
+            // a `Section` is handed down to each of the section's rows, so one
+            // binding ends up with several presenters racing and the share
+            // sheet animates straight back out. Same trap as the classifier
+            // log's share sheet — see the note in `SettingsView`.
+            .sheet(item: $demoLogShare) { item in
+                ShareSheet(items: [item.url])
+            }
+            // The form paints its own grouped page; the sheet's default ground
+            // is the plain one, and the seam shows at the top — same fix, and
+            // the same reason, as `SettingsView.body`.
+            .background(Color(.systemGroupedBackground))
             .navigationTitle("Configuration")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -78,123 +97,147 @@ struct DiagnosticsView: View {
                     Button("Done") { dismiss() }
                 }
             }
-            .navigationDestination(isPresented: $showDemoPicker) {
-                DemoModeView(classStore: classStore) { url, name in
-                    // Close the whole sheet, not just this pushed page — the
-                    // demo runs on the main screen behind it. `dismiss` here is
-                    // the one from DiagnosticsView (the stack's root), so it
-                    // takes the sheet down rather than popping the picker.
-                    showDemoPicker = false
-                    dismiss()
-                    onStartDemo(url, name)
-                }
-            }
         }
         .presentationDetents([.medium, .large])
     }
 
-    /// Demo mode entry/exit. A single button that swaps to "End Demo" while a
-    /// demo is running — the only in-app way out (short of quitting), which is
-    /// deliberate: demo mode should never end by itself and leave someone
-    /// believing they're looking at live audio.
-    @ViewBuilder
-    private var demoSection: some View {
-        VStack(spacing: 12) {
-            HStack {
-                Text("Demo Mode")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                if let name = audio.demoFileName {
-                    Text(name)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-            }
+    /// Rules the app normally enforces on itself, lifted for testing.
+    ///
+    /// **Not with the feature switches above** (Niall, 2026-09-09). Those say
+    /// whether a feature exists on this device; these change how one behaves
+    /// while it does, which is a different question — and the iNaturalist pair
+    /// sitting under the posting switch read as part of that feature's own
+    /// definition rather than as a rule being suspended.
+    ///
+    /// Onboarding is here for the same reason: it happens on the first launch
+    /// and no other, so the only way to look at a change to it was to delete the
+    /// app and reinstall, taking the recordings, the sessions and the
+    /// iNaturalist sign-in along with it. That flag is read at launch
+    /// (`OnboardingState.applyEveryLaunchOverrideOnce`), so it takes effect the
+    /// next time the app starts, not now.
+    ///
+    /// The two iNaturalist controls are deliberately not in Settings. They lift
+    /// the rules that protect iNaturalist's records from a stream of near
+    /// duplicates, and that protection is worth nothing if any user can switch
+    /// it off — there is no user-facing "post anyway", and there should not be.
+    /// Testing the posting path against the live API means posting a known
+    /// recording, deleting it there, and posting it again, which the
+    /// already-posted blocker otherwise makes impossible.
+    private var overridesSection: some View {
+        Section {
+            SettingToggle("Always show onboarding",
+                          "Starts at the welcome flow on the next launch and every one after it, so a "
+                        + "change to onboarding can be looked at without deleting the app — which would "
+                        + "take the recordings, the sessions and the iNaturalist sign-in with it.",
+                          isOn: $forceOnboarding)
 
-            if audio.isDemoMode {
-                Button(role: .destructive) {
-                    onEndDemo()
-                } label: {
-                    Label("End Demo", systemImage: "stop.circle")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-                Text("The microphone is not in use. Ending the demo returns to live capture; it does not restart detection.")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            } else {
+            SettingToggle("Ignore iNaturalist posting limits",
+                          "Posts anyway when a recording is already posted, over the nightly cap, too "
+                        + "big, or has no location. The blockers stay on screen and the score is still "
+                        + "worked out honestly, so a test post looks like a real one.",
+                          isOn: $inatIgnoreLimits)
+
+            HStack {
                 Button {
-                    showDemoPicker = true
+                    INatPostLedger.forgetEverythingPosted()
+                    inatLedgerCleared = true
                 } label: {
-                    Label("Demo", systemImage: "play.rectangle")
-                        .frame(maxWidth: .infinity)
+                    Label(inatLedgerCleared ? "Forgotten" : "Forget what's been posted",
+                          systemImage: inatLedgerCleared ? "checkmark" : "arrow.counterclockwise")
                 }
-                .buttonStyle(.bordered)
-                Text("Feed a recording through the detector instead of the microphone.")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                Spacer(minLength: 12)
+                SettingInfo(title: "Forget what's been posted",
+                            note: "Clears this phone's record of what it has posted, so the nightly cap "
+                                + "and the already-posted check start again. Nothing on iNaturalist is "
+                                + "touched — delete those there.")
             }
+            .buttonStyle(.borderless)
+
+            HStack {
+                Button {
+                    if let url = URL(string: UIApplication.openSettingsURLString) {
+                        openURL(url)
+                    }
+                } label: {
+                    Label("Revoke microphone & location", systemImage: "hand.raised")
+                }
+                Spacer(minLength: 12)
+                SettingInfo(title: "Revoke microphone & location",
+                            note: "iOS gives an app no way to withdraw its own permissions, so this "
+                                + "opens OpenBat's page in the Settings app — switch Microphone and "
+                                + "Location off there.\n\niOS quits OpenBat the moment you do, so the "
+                                + "next launch is a fresh one: with \"Always show onboarding\" on, it "
+                                + "starts at the welcome flow with both rows showing as refused.\n\n"
+                                + "That is the refused path, not the first-run one. The permission "
+                                + "dialogs themselves only come back on a device that has never been "
+                                + "asked — a fresh install, or `xcrun simctl privacy <device> reset all "
+                                + "Niall.OpenBat` on a simulator.")
+            }
+            .buttonStyle(.borderless)
+        } header: {
+            CardHeader("Overrides", "Rules lifted, for testing.")
         }
-        .padding()
-        .background(.quaternary, in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    /// Everything measured about the input, in one card: what is attached, what
+    /// rate it is really delivering, how loud it is right now, and the QA
+    /// numbers that let two microphones be compared.
+    ///
+    /// **One card, not four** (Niall, 2026-09-09). The stream, the level meter
+    /// and the "Mic QA" panel were three cards plus a loose status line, and a
+    /// reader had to know which of them to believe about the same microphone.
+    ///
+    /// Its rows live in `MicrophoneRows`, which is the churn fix the old cards
+    /// had for the same reason: `audio.diagnostics` updates at ~15 Hz, and read
+    /// from this body it would re-render the sheet's whole form — toolbar,
+    /// share buttons and all — fifteen times a second. Reading it one level
+    /// down keeps the invalidation there. Same pattern as ContentView's
+    /// RecordButton; see Context.md §13.
+    private var microphoneSection: some View {
+        Section {
+            MicrophoneRows(audio: audio, recorder: recorder)
+        } header: {
+            CardHeader("Microphone", "What the input is really doing.")
+        }
     }
 
     /// The switch that makes a demo run write a file, and the way to get the
     /// files off the phone.
     ///
-    /// **Its own card, under Demo Mode, because it is not a demo control** — it
-    /// changes nothing about how the demo runs, and a run with it on and a run
+    /// It changes nothing about how the demo runs — a run with it on and a run
     /// with it off must produce the same detections or the log is worthless.
-    ///
-    /// Why this exists at all: the demo is the one input two phones can be given
+    /// Why it exists: the demo is the one input two phones can be given
     /// identically, so it is the only fair way to ask whether they behave the
     /// same. See `DemoLogger` for what a file holds and why it is not the
     /// classifier log.
     private var demoLogSection: some View {
-        VStack(spacing: 12) {
-            HStack {
-                Text("Demo log")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                if DemoLogger.shared.isLogging {
-                    Text("recording")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                }
-            }
-            Toggle("Log demo runs", isOn: $demoLogEnabled)
-                .font(.callout)
-            Text("Writes one CSV per demo run: every pulse the detector kept, every "
-               + "pulse nothing was asked to name, every score the model produced, and "
-               + "every pass they were aggregated into. The file's header carries the "
-               + "device, the OS, the build and every threshold in force, so two "
-               + "phones' runs of the same clip can be compared line for line.")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            Text("Switched on or off, a demo detects exactly the same things. Live "
-               + "capture never writes here.")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
+        Section {
+            SettingToggle("Log demo runs",
+                          "Writes one CSV per demo run: every pulse the detector kept, every pulse "
+                        + "nothing was asked to name, every score the model produced, and every pass they "
+                        + "were aggregated into. The header carries the device, the OS, the build and "
+                        + "every threshold in force.\n\nSwitched on or off, a demo detects exactly the "
+                        + "same things. Live capture never writes here.",
+                          isOn: $demoLogEnabled)
 
             let logs = DemoLogger.shared.existingLogs()
-            Button {
-                if let url = DemoLogger.shared.makeShareItem() {
-                    demoLogShare = DemoLogShare(url: url)
+            HStack {
+                Button {
+                    if let url = DemoLogger.shared.makeShareItem() {
+                        demoLogShare = DemoLogShare(url: url)
+                    }
+                } label: {
+                    Label(logs.isEmpty ? "No demo logs yet" : "Share \(logs.count) demo log\(logs.count == 1 ? "" : "s")",
+                          systemImage: "square.and.arrow.up")
                 }
-            } label: {
-                Label(logs.isEmpty ? "No demo logs yet" : "Share \(logs.count) demo log\(logs.count == 1 ? "" : "s")",
-                      systemImage: "square.and.arrow.up")
-                    .frame(maxWidth: .infinity)
+                .disabled(logs.isEmpty)
+                Spacer(minLength: 12)
+                SettingInfo(title: "Demo logs",
+                            note: "Files are named demo_<clip>_<device>_<time>.csv and sit alongside your "
+                                + "recordings, so the Files app or a Mac reaches them without going "
+                                + "through the share sheet at all.")
             }
-            .buttonStyle(.bordered)
-            .disabled(logs.isEmpty)
+            .buttonStyle(.borderless)
 
             Button(role: .destructive) {
                 DemoLogger.shared.deleteAllLogs()
@@ -202,100 +245,35 @@ struct DiagnosticsView: View {
             } label: {
                 Label(demoLogsCleared ? "Deleted" : "Delete demo logs",
                       systemImage: demoLogsCleared ? "checkmark" : "trash")
-                    .frame(maxWidth: .infinity)
             }
-            .buttonStyle(.bordered)
             .disabled(logs.isEmpty && !demoLogsCleared)
-
-            // They are in Documents, so a Mac or the Files app reaches them
-            // without going through the share sheet at all — worth saying, since
-            // that is the easier route when the phone is already plugged in.
-            Text("Files are named demo_<clip>_<device>_<time>.csv and sit alongside "
-               + "your recordings, so the Files app reaches them too.")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .padding()
-        .background(.quaternary, in: RoundedRectangle(cornerRadius: 16))
-        .sheet(item: $demoLogShare) { item in
-            ShareSheet(items: [item.url])
+        } header: {
+            CardHeader("Demo log", "Two phones, one clip, compared line by line.")
         }
     }
 
     /// Entry point for the live tuning card. Available during a demo and during
     /// live capture — tuning against real bats matters as much as tuning against
     /// the demo clip; the demo is just the repeatable case.
-    @AppStorage("openbat.inat.debugIgnoreLimits") private var inatIgnoreLimits = false
-    @State private var inatLedgerCleared = false
-
-    /// Testing the posting path against the live API means posting the same
-    /// known recording, deleting it on iNaturalist, and posting it again — and
-    /// the "you've already posted this recording" blocker makes the second
-    /// attempt impossible.
-    ///
-    /// **Both of these are here and not in Settings on purpose.** They lift the
-    /// rules that protect iNaturalist's identifiers from a stream of near-
-    /// duplicate records, and that protection is worth nothing if any user can
-    /// switch it off. There is deliberately no user-facing "post anyway"; this
-    /// is behind fifteen taps on the version footer.
-    @ViewBuilder
-    private var iNaturalistSection: some View {
-        VStack(spacing: 12) {
-            HStack {
-                Text("iNaturalist")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-            }
-            Toggle("Ignore posting limits", isOn: $inatIgnoreLimits)
-                .font(.callout)
-            Text("Posts anyway when a recording is already posted, over the nightly cap, too big, or has no location. The blockers stay on screen and the score is still worked out honestly, so a test post looks like a real one.")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-            Button {
-                INatPostLedger.forgetEverythingPosted()
-                inatLedgerCleared = true
-            } label: {
-                Label(inatLedgerCleared ? "Forgotten" : "Forget what's been posted",
-                      systemImage: inatLedgerCleared ? "checkmark" : "arrow.counterclockwise")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.bordered)
-            Text("Clears this phone's record of what it has posted, so the nightly cap and the already-posted check start again. Nothing on iNaturalist is touched — delete those there.")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .padding()
-        .background(.quaternary, in: RoundedRectangle(cornerRadius: 16))
-    }
-
     private var tuningSection: some View {
-        VStack(spacing: 12) {
+        Section {
             HStack {
-                Text("Live Tuning")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
+                Button {
+                    dismiss()
+                    onOpenTuning()
+                } label: {
+                    Label("Open tuning panel", systemImage: "slider.horizontal.3")
+                }
+                Spacer(minLength: 12)
+                SettingInfo(title: "Live tuning",
+                            note: "A floating panel of live controls over the detector. The spectrogram "
+                                + "and the audio keep running, so changes are heard and seen as you make "
+                                + "them. Drag it out of the way; close it from its own ✕.")
             }
-            Button {
-                dismiss()
-                onOpenTuning()
-            } label: {
-                Label("Open Tuning Panel", systemImage: "slider.horizontal.3")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.bordered)
-            Text("A floating panel of live controls over the detector. The spectrogram and audio keep running, so changes are heard and seen as you make them. Drag it out of the way; close it from its own ✕.")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            .buttonStyle(.borderless)
+        } header: {
+            CardHeader("Live tuning", "A floating panel over the detector.")
         }
-        .padding()
-        .background(.quaternary, in: RoundedRectangle(cornerRadius: 16))
     }
 
     /// Writes the current value of every slider, toggle and per-species prior to
@@ -304,194 +282,133 @@ struct DiagnosticsView: View {
     /// than continuously — the file is meant to be a dated record of one
     /// configuration, not a live mirror.
     private var settingsDumpSection: some View {
-        VStack(spacing: 12) {
+        Section {
             HStack {
-                Text("Settings Snapshot")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-            }
-
-            Button {
-                dumpFailed = false
-                if let url = onDumpSettings() {
-                    dumpedFile = url
-                } else {
-                    dumpedFile = nil
-                    dumpFailed = true
+                Button {
+                    dumpFailed = false
+                    if let url = onDumpSettings() {
+                        dumpedFile = url
+                    } else {
+                        dumpedFile = nil
+                        dumpFailed = true
+                    }
+                } label: {
+                    Label("Dump settings to file", systemImage: "square.and.arrow.down.on.square")
                 }
-            } label: {
-                Label("Dump Settings to File", systemImage: "square.and.arrow.down.on.square")
-                    .frame(maxWidth: .infinity)
+                Spacer(minLength: 12)
+                SettingInfo(title: "Settings snapshot",
+                            note: "Every tuning slider, display preference and per-species prior, as JSON "
+                                + "in Documents. Captured on tap rather than continuously — it is a dated "
+                                + "record of one configuration. Tap again for a fresh, separately "
+                                + "timestamped capture.")
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(.borderless)
+
+            if dumpFailed {
+                Label("Couldn't write the file.", systemImage: "exclamationmark.triangle")
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+            }
 
             if let dumpedFile {
                 ShareLink(item: dumpedFile) {
                     Label(dumpedFile.lastPathComponent, systemImage: "square.and.arrow.up")
                         .lineLimit(1)
                         .truncationMode(.middle)
-                        .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.bordered)
             }
-
-            Text(dumpFailed
-                 ? "Couldn't write the file."
-                 : "Every tuning slider, display preference and per-species prior, as JSON in Documents. Tap again for a fresh, separately-timestamped capture.")
-                .font(.caption2)
-                .foregroundStyle(dumpFailed ? .red : .secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
+        } header: {
+            CardHeader("Settings snapshot", "Every setting and prior, as JSON.")
         }
-        .padding()
-        .background(.quaternary, in: RoundedRectangle(cornerRadius: 16))
-    }
-
-    /// Says whether the session button has been located, and lets the view
-    /// hierarchy be shared off the device.
-    ///
-    /// **Why it reports success as loudly as failure.** Three things draw
-    /// nothing at all until the button is found: the recording glow, the
-    /// transport menu, and the invisible disc that takes the button's taps. All
-    /// three have been missing on a real iPad and present on every simulator,
-    /// and there are two quite different explanations — the button not being
-    /// found, or the button being found in a place nothing draws at. A card that
-    /// only appeared on failure could not tell them apart. This one states the
-    /// measured frame, which settles it in a glance.
-    ///
-    /// The dump is taken on demand rather than only after a failure, because on
-    /// hardware there is no console to read.
-    private var sessionButtonSection: some View {
-        VStack(spacing: 12) {
-            HStack {
-                Text("Session Button")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-            }
-
-            if let frame = sessionButtonLocator.frameInWindow {
-                Text(String(format: "Found at %.0f, %.0f — %.0f × %.0f",
-                            frame.minX, frame.minY, frame.width, frame.height))
-                    .font(.caption.monospaced())
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                // The tour's spotlight for the session button is this frame
-                // rebased through the overlay's own frame, so both numbers have
-                // to be right for the ring to land on the button. A tour host
-                // that isn't at 0,0 is the whole story when a ring is offset.
-                Text(sessionButtonLocator.tourHostFrameInGlobal.map {
-                    String(format: "Tour overlay at %.0f, %.0f — %.0f × %.0f",
-                           $0.minX, $0.minY, $0.width, $0.height)
-                } ?? "Tour overlay geometry not seen yet")
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                Text("The glow, the transport menu and the button's tap area are all placed on this frame. If they aren't appearing, the search is not the problem.")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            } else {
-                Text("Not found")
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.orange)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                Text("The glow, the transport menu and the button's tap area all draw nothing until the button is found in the view hierarchy.")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-
-            ShareLink(item: hierarchyDump) {
-                Label("Share View Hierarchy", systemImage: "square.and.arrow.up")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.bordered)
-        }
-        .padding()
-        .background(.quaternary, in: RoundedRectangle(cornerRadius: 16))
-    }
-
-    /// Captured when the card is built, so it describes the hierarchy with this
-    /// sheet already up — which is the same hierarchy plus one sheet, and the
-    /// bar we care about is still in it.
-    private var hierarchyDump: String {
-        var text = SessionButtonLocator.searchCriteria + "\n"
-        if let frame = sessionButtonLocator.frameInWindow {
-            text += "FOUND at \(frame).\n\n"
-        } else {
-            text += "NOT FOUND.\n\n"
-        }
-        if let failure = sessionButtonLocator.failureDump {
-            text += "── Dump taken when the retries gave up ──\n\(failure)\n\n"
-        }
-        return text + "── Dump taken now ──\n" + SessionButtonLocator.hierarchyDump()
-    }
-
-    // The classifier-log card lived here until 2026-08-26. It moved to
-    // Settings → General, where a user reporting a wrong identification can
-    // actually find it — see `SettingsView.classifierLogSections`.
-
-}
-
-/// Leaf view isolating `audio.status` reads — see the churn note in `DiagnosticsView.body`.
-private struct DiagnosticsStatusLine: View {
-    let audio: AudioEngineController
-
-    var body: some View {
-        Text(audio.status)
-            .font(.footnote)
-            .foregroundStyle(.secondary)
-            .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
-/// Leaf view isolating `audio.diagnostics`/`recorder.lastWrittenSampleRate` reads — see
-/// the churn note in `DiagnosticsView.body`.
-private struct DiagnosticsCard: View {
+/// The microphone card's rows. A view of its own so `audio.diagnostics`'s ~15 Hz
+/// churn invalidates this and nothing above it — see `microphoneSection`.
+private struct MicrophoneRows: View {
     let audio: AudioEngineController
     let recorder: AudioRecorder
 
     var body: some View {
         let d = audio.diagnostics
-        return VStack(spacing: 12) {
-            row("Input", d.inputName, badge: d.isUSBInput ? "USB" : nil)
-            Divider()
+        Group {
+            Text(audio.status)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+
             // Both shown raw, unsanitized, so the values a real microphone
             // reports can be inspected directly — the only reliable way to
             // confirm a given mic doesn't put a serial in its product string.
             // Neither is ever contributed in this form (see
             // AnonymizedUploadBuilder.sanitizedHardwareName); the UID is never
             // contributed at all.
-            row("Input contributed as", AnonymizedUploadBuilder.sanitizedHardwareName(d.inputName))
-            Divider()
+            row("Input", d.inputName, badge: d.isUSBInput ? "USB" : nil)
+            row("Contributed as", AnonymizedUploadBuilder.sanitizedHardwareName(d.inputName))
             row("Input UID (local only)", d.inputUID)
-            Divider()
-            row(
-                "Session rate",
+            row("Session rate",
                 d.sessionSampleRate > 0 ? "\(Int(d.sessionSampleRate)) Hz" : "—",
-                emphasis: d.sessionSampleRate >= 60_000 ? .green : (d.sessionSampleRate > 0 ? .orange : .secondary)
-            )
-            Divider()
-            row(
-                "Capture rate",
+                emphasis: d.sessionSampleRate >= 60_000 ? .green : (d.sessionSampleRate > 0 ? .orange : .secondary))
+            row("Capture rate",
                 d.actualSampleRate > 0 ? "\(Int(d.actualSampleRate)) Hz" : "—",
-                emphasis: d.isNativeRate ? .green : (d.actualSampleRate > 0 ? .orange : .secondary)
-            )
-            Divider()
+                emphasis: d.isNativeRate ? .green : (d.actualSampleRate > 0 ? .orange : .secondary))
             row("Channels", d.channelCount > 0 ? "\(d.channelCount)" : "—")
-            Divider()
             row("Buffers", "\(d.bufferCount)")
             if recorder.lastWrittenSampleRate > 0 {
-                Divider()
-                row(
-                    "Written rate",
-                    "\(Int(recorder.lastWrittenSampleRate)) Hz",
-                    emphasis: recorder.lastWrittenSampleRate >= 192_000 ? .green : .orange
-                )
+                row("Written rate", "\(Int(recorder.lastWrittenSampleRate)) Hz",
+                    emphasis: recorder.lastWrittenSampleRate >= 192_000 ? .green : .orange)
             }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Input level")
+                    .foregroundStyle(.secondary)
+                ProgressView(value: AudioLevel.normalized(d.currentLevelDB))
+                    .tint(.green)
+                Text(String(format: "%.0f dBFS", d.currentLevelDB))
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+
+            // The QA numbers. They only mean something over a fixed, repeatable
+            // test — so many seconds quiet, then so many seconds of a known
+            // source — which is what the button below is for. The demo case
+            // stays on screen: it says the numbers are about something else
+            // entirely, which is not a thing to hide behind a tap.
+            if audio.isDemoMode {
+                Label("A demo file is playing: these describe the file, not the mic.",
+                      systemImage: "play.rectangle")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            row("Noise floor",
+                d.hasNoiseFloor ? String(format: "%.0f dBFS", d.noiseFloorDB) : "—",
+                emphasis: !d.hasNoiseFloor ? .secondary : (d.noiseFloorDB <= -50 ? .green : .orange))
+            row("Peak level",
+                d.totalSampleCount > 0 ? String(format: "%.0f dBFS", d.peakLevelDB) : "—",
+                emphasis: d.totalSampleCount == 0 ? .secondary : (d.peakLevelDB < -3 ? .green : .orange))
+            row("DC offset",
+                d.totalSampleCount > 0 ? String(format: "%.2f%%", d.dcOffsetPercent) : "—",
+                emphasis: d.totalSampleCount == 0 ? .secondary : (abs(d.dcOffsetPercent) < 1 ? .green : .red))
+            row("Clipped samples",
+                d.totalSampleCount > 0
+                    ? "\(d.clippedSampleCount) (\(String(format: "%.3f%%", d.clipRate * 100)))"
+                    : "—",
+                emphasis: d.clippedSampleCount == 0 ? .green : .red)
+
+            HStack {
+                Button {
+                    audio.resetMicQA()
+                } label: {
+                    Label("Start measuring again", systemImage: "arrow.counterclockwise")
+                }
+                Spacer(minLength: 12)
+                SettingInfo(title: "Start measuring again",
+                            note: "The four numbers above accumulate from the moment measuring started. "
+                                + "They only compare two microphones if both were asked the same "
+                                + "question, so start again here and run a fixed test on each — so many "
+                                + "seconds quiet, then so many seconds of a known loud source.")
+            }
+            .buttonStyle(.borderless)
         }
-        .padding()
-        .background(.quaternary, in: RoundedRectangle(cornerRadius: 16))
     }
 
     private func row(
@@ -500,99 +417,22 @@ private struct DiagnosticsCard: View {
         badge: String? = nil,
         emphasis: Color = .primary
     ) -> some View {
-        HStack {
+        LabeledContent {
+            HStack(spacing: 6) {
+                if let badge {
+                    Text(badge)
+                        .font(.caption2.bold())
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(.tint.opacity(0.2), in: Capsule())
+                }
+                Text(value)
+                    .font(.body.monospacedDigit())
+                    .foregroundStyle(emphasis)
+            }
+        } label: {
             Text(label)
                 .foregroundStyle(.secondary)
-            Spacer()
-            if let badge {
-                Text(badge)
-                    .font(.caption2.bold())
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(.tint.opacity(0.2), in: Capsule())
-            }
-            Text(value)
-                .font(.body.monospacedDigit())
-                .foregroundStyle(emphasis)
         }
     }
 }
-
-/// Leaf view isolating the mic-QA fields of `audio.diagnostics` — see the churn
-/// note in `DiagnosticsView.body`. Numbers accumulate since the current
-/// capture started (`AudioEngineController.resetSessionStats()`), so run a
-/// fixed, repeatable test (e.g. N seconds quiet, then N seconds of a known
-/// loud source) per unit to keep readings comparable across microphones.
-private struct DiagnosticsMicQualityCard: View {
-    let audio: AudioEngineController
-
-    var body: some View {
-        let d = audio.diagnostics
-        return VStack(spacing: 12) {
-            HStack {
-                Text("Mic QA (this session)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-            }
-            row(
-                "Noise floor",
-                d.totalSampleCount > 0 ? String(format: "%.0f dBFS", d.noiseFloorDB) : "—",
-                emphasis: d.totalSampleCount == 0 ? .secondary : (d.noiseFloorDB <= -50 ? .green : .orange)
-            )
-            Divider()
-            row(
-                "Peak level",
-                d.totalSampleCount > 0 ? String(format: "%.0f dBFS", d.peakLevelDB) : "—",
-                emphasis: d.totalSampleCount == 0 ? .secondary : (d.peakLevelDB < -3 ? .green : .orange)
-            )
-            Divider()
-            row(
-                "DC offset",
-                d.totalSampleCount > 0 ? String(format: "%.2f%%", d.dcOffsetPercent) : "—",
-                emphasis: d.totalSampleCount == 0 ? .secondary : (abs(d.dcOffsetPercent) < 1 ? .green : .red)
-            )
-            Divider()
-            row(
-                "Clipped samples",
-                d.totalSampleCount > 0
-                    ? "\(d.clippedSampleCount) (\(String(format: "%.3f%%", d.clipRate * 100)))"
-                    : "—",
-                emphasis: d.clippedSampleCount == 0 ? .green : .red
-            )
-        }
-        .padding()
-        .background(.quaternary, in: RoundedRectangle(cornerRadius: 16))
-    }
-
-    private func row(_ label: String, _ value: String, emphasis: Color = .primary) -> some View {
-        HStack {
-            Text(label)
-                .foregroundStyle(.secondary)
-            Spacer()
-            Text(value)
-                .font(.body.monospacedDigit())
-                .foregroundStyle(emphasis)
-        }
-    }
-}
-
-/// Leaf view isolating `audio.diagnostics.currentLevelDB` reads — see the churn note
-/// in `DiagnosticsView.body`.
-private struct DiagnosticsLevelMeter: View {
-    let audio: AudioEngineController
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Input level")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            ProgressView(value: AudioLevel.normalized(audio.diagnostics.currentLevelDB))
-                .tint(.green)
-            Text(String(format: "%.0f dBFS", audio.diagnostics.currentLevelDB))
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(.secondary)
-        }
-    }
-}
-

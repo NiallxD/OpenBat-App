@@ -6,28 +6,27 @@
 //  segmented control rather than a `TabView`, so only the active tab's `Form`
 //  exists at a time.
 //
-//  **Every card here follows one shape, and it has exactly three parts**
-//  (2026-09-02, Niall's call — the cards had grown a description above the
-//  control AND a paragraph below it, so the same idea was explained twice at
-//  two sizes and the sheet read as a wall of text):
+//  **Every card here is a name, one line of description, and rows** (Niall,
+//  2026-09-02, amended 2026-09-09):
 //
 //    1. a short NAME, in ordinary words — what a person would call this thing;
 //    2. one line of DESCRIPTION under it — **at most ten words, and it must
 //       still be one line on the narrowest iPhone**, which in practice means
 //       about forty characters;
-//    3. the control. A control that needs saying more than its label says gets
-//       a `ControlNote`, which is that control's own description and therefore
-//       sits ABOVE it, under the same ten-word rule.
+//    3. rows. **A row is the option's name and the thing you touch, and
+//       nothing else** — a toggle, a button, a picker, a slider's readout.
 //
-//  **There is no fourth part.** Nothing goes below the control — no section
-//  footer, no trailing paragraph. Whatever a footer was carrying either matters
-//  enough to be compressed into the description, or it doesn't matter. The
-//  exceptions are the status `Label`s (a failed iCloud move, haptics off in Low
-//  Power Mode), which report a condition rather than explain a control, and
-//  alert messages, which are read before a decision rather than alongside one.
+//  Anything more to say about a control goes behind the ⓘ on its own name
+//  (`SettingName`/`SettingInfo`), not in grey type beside it. The old shape put
+//  a line above every control, so a card with four controls carried four
+//  explanations and a page of cards read as a wall of small type — "it makes
+//  the settings menus look so messy", which is exactly what it did. The rule
+//  the notes lived under (ten words, one line) goes with them: a popover can
+//  say the whole thing, and several of those notes had been cut to the point of
+//  saying nothing.
 //
-//  Use `CardHeader` for 1 and 2 and `ControlNote` for 3, so a card added later
-//  can't quietly reintroduce the old shape.
+//  Use `CardHeader` for 1 and 2, and `SettingRow`/`SettingToggle`/`SettingValue`
+//  for 3, so a card added later can't quietly reintroduce the old shape.
 //
 //  **Plain, not simple.** The reader is an adult using an ultrasonic bat
 //  detector, so ordinary technical words are fine — frequency, kHz, calibration,
@@ -62,6 +61,7 @@ struct SettingsView: View {
     @Bindable var micCalSettings: MicCalibrationSettings
     @Bindable var haptics: PulseHaptics
     @Bindable var snippetExpansion: SnippetExpansionSettings
+    @Bindable var heterodyne: HeterodyneSettings
     /// Remote kill switches, so the configuration card can show and override
     /// them — see `FeatureFlags.swift`.
     let flags: FeatureFlagStore
@@ -183,6 +183,21 @@ struct SettingsView: View {
                     Text(message)
                         .font(.callout)
                 } header: {
+                    CardHeader("Maintenance", "Why something is unavailable.")
+                }
+            }
+
+            // The quiet counterpart to the maintenance message: same reach,
+            // none of the interruption. A maintenance notice explains why part
+            // of the app is missing and has earned a launch alert; this one is
+            // for everything worth telling everybody that is not worth stopping
+            // them to say — a known issue, a release note, a thank-you — so it
+            // simply stands here while the config file says something.
+            if let notice = flags.notice {
+                Section {
+                    Text(notice)
+                        .font(.callout)
+                } header: {
                     CardHeader("Notice", "From the OpenBat team.")
                 }
             }
@@ -193,12 +208,18 @@ struct SettingsView: View {
                 // off is the state the toggle rests in until someone opts into
                 // more. `simplifiedMode` elsewhere in the codebase keeps its own
                 // polarity — only this control's presentation is flipped.
-                Toggle("Advanced mode", isOn: Binding(
+                SettingToggle("Advanced mode",
+                              "Shows every control OpenBat has. Simplified is the default: it hides the "
+                            + "tuning controls and picks sensible values for them. Nothing is lost either "
+                            + "way — a setting you changed in advanced mode is still there when you come back.",
+                              isOn: Binding(
                     get: { !simplifiedMode },
                     set: { simplifiedMode = !$0 }
                 ))
 
-                ControlNote("Or follow the phone, which is the default.")
+                // The picker is the full width of the row, so its name sits
+                // above it rather than beside it — the same shape as a slider's.
+                SettingName("Appearance", "Light or dark, or follow the phone, which is the default.")
                 AppearancePicker()
             } header: {
                 // "Nothing is lost" earns its place in ten words: someone who
@@ -212,8 +233,12 @@ struct SettingsView: View {
             classifierLogSections
             resetSection
             configurationSection
+            configFetchFooter
         }
-        .onAppear { logBytes = ClassificationLogger.shared.totalBytesOnDisk() }
+        // `.task`, not `.onAppear`: reading the log size touches the logger's
+        // own queue, and doing that synchronously here stalled the sheet's
+        // presentation — see `ClassificationLogger.totalBytesOnDisk`.
+        .task { logBytes = await ClassificationLogger.shared.totalBytesOnDisk() }
         // The share sheet is deliberately behind a confirmation. The log is a
         // dated diary of every night you were out listening — on its own that
         // says a good deal about where somebody was and when, and roosts are
@@ -272,10 +297,15 @@ struct SettingsView: View {
     /// answer — nothing you have recorded — is worth more than any warning.
     private var resetSection: some View {
         Section {
-            Button("Reset all settings", role: .destructive) { confirmingReset = true }
-            ControlNote("Puts every setting back to the value a new install has. "
-                      + "Your recordings, sessions and log are untouched, and so are "
-                      + "your iNaturalist sign-in and your microphone calibration.")
+            HStack {
+                Button("Reset all settings", role: .destructive) { confirmingReset = true }
+                Spacer(minLength: 12)
+                SettingInfo(title: "Reset all settings",
+                            note: "Puts every setting back to the value a new install has. "
+                                + "Your recordings, sessions and log are untouched, and so are "
+                                + "your iNaturalist sign-in and your microphone calibration.")
+            }
+            .buttonStyle(.borderless)
         } header: {
             CardHeader("Reset", "Back to the settings a new install has.")
         }
@@ -311,6 +341,8 @@ struct SettingsView: View {
         settings.loadPersisted()
         haptics.resetToDefaults()
         snippetExpansion.reset()
+        heterodyne.reset()
+        recorder.resetToDefaults()
         resetDone = true
     }
 
@@ -356,6 +388,45 @@ struct SettingsView: View {
                 CardHeader("Configuration", ConfigMenu.explanation)
             }
         }
+    }
+
+    /// When the app last managed to download the config file — the kill
+    /// switches, the two messages and the remotely-set defaults all arrive in
+    /// it (`FeatureFlagStore`).
+    ///
+    /// **Unadorned text at the foot of the form, not a card.** It answers a
+    /// question rather than offering a control, and the question is one only
+    /// this line can answer: a remote switch that has silently stopped arriving
+    /// looks exactly like a switch nobody ever threw. A date here says which.
+    ///
+    /// Deliberately outside the passcode-locked configuration card, and phrased
+    /// without naming any of the machinery: to a user this is "is my app in
+    /// touch", which is worth knowing whether or not they know what a feature
+    /// flag is.
+    @ViewBuilder
+    private var configFetchFooter: some View {
+        Section {
+            Text(configFetchText)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .listRowBackground(Color.clear)
+                .listRowSeparator(.hidden)
+        }
+    }
+
+    private var configFetchText: String {
+        guard let fetched = flags.lastFetch else {
+            // Not an error, and not phrased as one: a phone that has never had
+            // signal since installing is running the app exactly as it shipped,
+            // which is the safe state and needs no alarm.
+            return "OpenBat hasn't checked for updated settings yet. It's running the settings it shipped with."
+        }
+        let stamp = fetched.formatted(date: .abbreviated, time: .shortened)
+        if flags.lastRefreshError != nil {
+            return "Settings last updated \(stamp). Today's check didn't get through, so these are the last ones received."
+        }
+        return "Settings last updated \(stamp)."
     }
 
     private func unlockConfig() {
@@ -417,15 +488,28 @@ struct SettingsView: View {
             // One card now rather than two, since they are the same job at two
             // sizes; ordered least destructive first, per this tab's rule.
             Section {
-                Button("Delete NoID Recordings", role: .destructive) {
-                    showDeleteNoIDConfirm = true
+                HStack {
+                    Button("Delete NoID Recordings", role: .destructive) {
+                        showDeleteNoIDConfirm = true
+                    }
+                    Spacer(minLength: 12)
+                    SettingInfo(title: "Delete NoID Recordings",
+                                note: "Deletes the recordings nothing was identified in — triggers that "
+                                    + "turned out to be noise. The pass log is kept, so your record of "
+                                    + "what was heard survives even where the audio doesn't.")
                 }
-                ControlNote("Unidentified triggers, usually noise.")
+                .buttonStyle(.borderless)
 
-                Button("Delete All Sessions", role: .destructive) {
-                    showDeleteAllSessionsConfirmation = true
+                HStack {
+                    Button("Delete All Sessions", role: .destructive) {
+                        showDeleteAllSessionsConfirmation = true
+                    }
+                    Spacer(minLength: 12)
+                    SettingInfo(title: "Delete All Sessions",
+                                note: "Deletes every session and the recordings inside them. Recordings "
+                                    + "that are not part of a session are left alone.")
                 }
-                ControlNote("Sessions, with the recordings inside them.")
+                .buttonStyle(.borderless)
             } header: {
                 CardHeader("Deleting in bulk", "Neither of these can be undone.")
             }
@@ -477,22 +561,37 @@ struct SettingsView: View {
     private var iNaturalistSection: some View {
         if inatAuth.isSignedIn {
             Section {
-                // Sits with the account rather than with the classifier log
-                // because the two answer different questions: that one is "why
-                // did OpenBat call it that", this one is "why wouldn't it post".
-                ControlNote("What was sent and what came back. No tokens, locations rounded.")
-                Button {
-                    UIPasteboard.general.string = INatLog.shared.text
-                    inatLogCopied = true
-                } label: {
-                    Label(inatLogCopied ? "Copied" : "Copy the iNaturalist log",
-                          systemImage: inatLogCopied ? "checkmark" : "doc.on.doc")
+                HStack {
+                    Button {
+                        UIPasteboard.general.string = INatLog.shared.text
+                        inatLogCopied = true
+                    } label: {
+                        Label(inatLogCopied ? "Copied" : "Copy the iNaturalist log",
+                              systemImage: inatLogCopied ? "checkmark" : "doc.on.doc")
+                    }
+                    Spacer(minLength: 12)
+                    // Sits with the account rather than with the classifier log
+                    // because the two answer different questions: that one is
+                    // "why did OpenBat call it that", this one is "why wouldn't
+                    // it post".
+                    SettingInfo(title: "The iNaturalist log",
+                                note: "What was sent to iNaturalist and what came back, so a post that "
+                                    + "was refused can be explained. No tokens, and locations are rounded.")
                 }
+                .buttonStyle(.borderless)
 
-                Button("Sign out of iNaturalist", role: .destructive) {
-                    inatAuth.signOut()
+                HStack {
+                    Button("Sign out of iNaturalist", role: .destructive) {
+                        inatAuth.signOut()
+                    }
+                    Spacer(minLength: 12)
+                    SettingInfo(title: "Sign out of iNaturalist",
+                                note: "Observations you've already posted stay on iNaturalist — this only "
+                                    + "forgets the credential on this phone. You can also revoke OpenBat "
+                                    + "from your iNaturalist account settings, which stops it working even "
+                                    + "if the phone is lost.")
                 }
-                ControlNote("Observations you've already posted stay on iNaturalist — this only forgets the credential on this phone. You can also revoke OpenBat from your iNaturalist account settings, which stops it working even if the phone is lost.")
+                .buttonStyle(.borderless)
             } header: {
                 // **The card stays when posting is switched off, and only its
                 // description changes** (Niall, 2026-09-06). Everything in it
@@ -526,29 +625,42 @@ struct SettingsView: View {
     @ViewBuilder
     private var classifierLogSections: some View {
         Section {
-            LabeledContent("Size on this device", value: logSizeText)
-                .font(.callout)
+            SettingValue("Size on this device", value: logSizeText)
 
-            Button {
-                showShareLogConfirm = true
-            } label: {
-                Label("Share Log", systemImage: "square.and.arrow.up")
-            }
-            ControlNote("Send a copy when an ID looks wrong.")
-
-            Button(role: .destructive) {
-                ClassificationLogger.shared.clearLog()
-                logCleared = true
-                // The clear runs on the logger's own queue, so re-read a beat
-                // later or the size still shows the old file.
-                Task { @MainActor in
-                    try? await Task.sleep(for: .milliseconds(300))
-                    logBytes = ClassificationLogger.shared.totalBytesOnDisk()
+            HStack {
+                Button {
+                    showShareLogConfirm = true
+                } label: {
+                    Label("Share Log", systemImage: "square.and.arrow.up")
                 }
-            } label: {
-                Label(logCleared ? "Cleared" : "Clear Log", systemImage: "trash")
+                Spacer(minLength: 12)
+                SettingInfo(title: "Share Log",
+                            note: "Send a copy when an identification looks wrong — it is what OpenBat "
+                                + "heard and what it decided, which is the only way the model can be "
+                                + "checked against a bat you know. Read the warning before you share it.")
             }
-            ControlNote("The log only. Recordings are untouched.")
+            .buttonStyle(.borderless)
+
+            HStack {
+                Button(role: .destructive) {
+                    ClassificationLogger.shared.clearLog()
+                    logCleared = true
+                    // The clear runs on the logger's own queue, so re-read a beat
+                    // later or the size still shows the old file.
+                    Task { @MainActor in
+                        try? await Task.sleep(for: .milliseconds(300))
+                        logBytes = await ClassificationLogger.shared.totalBytesOnDisk()
+                    }
+                } label: {
+                    Label(logCleared ? "Cleared" : "Clear Log", systemImage: "trash")
+                }
+                Spacer(minLength: 12)
+                SettingInfo(title: "Clear Log",
+                            note: "Deletes the log only. Your recordings, sessions and identifications "
+                                + "are untouched — this is the diary of what the classifier did, not the "
+                                + "record of what you heard.")
+            }
+            .buttonStyle(.borderless)
         } header: {
             CardHeader("Classifier log", "What OpenBat heard, and when.")
         }
@@ -593,7 +705,7 @@ struct SettingsView: View {
             microphoneSection
             hapticSections
             triggerSections
-            slowReplaySection
+            liveListeningSection
             recordingSections
         }
         .sheet(isPresented: $showMicCalibration) {
@@ -603,23 +715,25 @@ struct SettingsView: View {
 
     // MARK: Microphone
 
-    /// Why the calibration button is or isn't available, in that order of
-    /// precedence — "no mic attached" is the more fundamental blocker, and
-    /// telling someone to stop detecting when they have nothing to detect with
-    /// would send them round in a circle.
+    /// Why the calibration button is unavailable, in order of precedence — "no
+    /// mic attached" is the more fundamental blocker, and telling someone to
+    /// stop detecting when they have nothing to detect with would send them
+    /// round in a circle. `nil` when the button works.
     ///
-    /// A blocked button is the one case where the reason has to be right there,
-    /// so this is the button's `ControlNote` rather than the description: the
-    /// card's description can't change with the mic, and a greyed-out button
-    /// with no reason beside it reads as a bug.
-    private var calibrationNote: String {
+    /// **A blocked button is the one case where the reason stays on screen**,
+    /// so this is a status line under the button rather than something behind
+    /// its ⓘ: a greyed-out button with no reason beside it reads as a bug, and
+    /// nobody taps an ⓘ to ask why nothing happened. Same exception as the
+    /// haptics card's Low Power Mode line — it reports a condition rather than
+    /// explaining a control.
+    private var calibrationBlockedReason: String? {
         if !audio.diagnostics.canCalibrate {
             return "Plug in your ultrasonic mic to calibrate."
         }
         if audio.isRunning {
             return "Stop detecting first, then calibrate."
         }
-        return "Corrects the pitches your mic hears unevenly."
+        return nil
     }
 
     @AppStorage("detector.model") private var detectorChoice = ""
@@ -634,12 +748,17 @@ struct SettingsView: View {
     /// See `DetectorModel`.
     private var detectorSection: some View {
         Section {
-            ControlNote("Written into your recordings and any iNaturalist post.")
-            Picker("Detector", selection: $detectorChoice) {
-                Text("Not set").tag("")
-                ForEach(DetectorModel.known, id: \.self) { name in
-                    Text(name).tag(name)
+            SettingRow("Detector",
+                       "Written into your recordings' metadata and into any iNaturalist post, so somebody "
+                     + "reading them knows what heard the bat. It is a fixed list because the value is "
+                     + "published — there is no free-text box to type something into by accident.") {
+                Picker("Detector", selection: $detectorChoice) {
+                    Text("Not set").tag("")
+                    ForEach(DetectorModel.known, id: \.self) { name in
+                        Text(name).tag(name)
+                    }
                 }
+                .labelsHidden()
             }
         } header: {
             CardHeader("What detector do you use?", "The microphone, not the phone.")
@@ -650,17 +769,35 @@ struct SettingsView: View {
     private var microphoneSection: some View {
         Section {
             if let curve = micCalSettings.curve {
-                Toggle("Apply calibration", isOn: $micCalSettings.isEnabled)
-                LabeledContent("Measured for", value: curve.micName)
-                LabeledContent("Measured on", value: curve.capturedAt.formatted(date: .abbreviated, time: .shortened))
+                SettingToggle("Apply calibration",
+                              "Corrects the pitches your microphone hears unevenly, using the curve "
+                            + "measured below. Off, you hear the mic exactly as it is.",
+                              isOn: $micCalSettings.isEnabled)
+                SettingValue("Measured for", value: curve.micName)
+                SettingValue("Measured on",
+                             value: curve.capturedAt.formatted(date: .abbreviated, time: .shortened))
             }
-            ControlNote(calibrationNote)
-            Button {
-                showMicCalibration = true
-            } label: {
-                Text(micCalSettings.curve == nil ? "Calibrate Microphone" : "Recalibrate Microphone")
+            HStack {
+                Button {
+                    showMicCalibration = true
+                } label: {
+                    Text(micCalSettings.curve == nil ? "Calibrate Microphone" : "Recalibrate Microphone")
+                }
+                .disabled(audio.isRunning || !audio.diagnostics.canCalibrate)
+                Spacer(minLength: 12)
+                SettingInfo(title: "Calibration",
+                            note: "An affordable ultrasonic microphone hears some pitches louder than "
+                                + "others. Calibration measures that unevenness against a known sound and "
+                                + "corrects for it, so a call's loudness means the same thing wherever it "
+                                + "sits in the band.")
             }
-            .disabled(audio.isRunning || !audio.diagnostics.canCalibrate)
+            .buttonStyle(.borderless)
+
+            if let reason = calibrationBlockedReason {
+                Label(reason, systemImage: "exclamationmark.triangle")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
         } header: {
             CardHeader("Microphone", "The mic you're listening through.")
         }
@@ -676,15 +813,17 @@ struct SettingsView: View {
         // No Taptic Engine (iPad) — offer nothing rather than a dead switch.
         if haptics.isSupported {
             Section {
-                Toggle("Tap for every call", isOn: $haptics.isEnabled)
+                SettingToggle("Tap for every call",
+                              "A tap you feel for each call OpenBat hears — stronger for a closer bat, "
+                            + "sharper for a higher-pitched one, running together into a hum through a "
+                            + "feeding buzz. For a user who can't hear the listening modes it is the only "
+                            + "live output the app has.",
+                              isOn: $haptics.isEnabled)
 
                 if haptics.isEnabled {
-                    LabeledContent("Strength") {
-                        Text(String(format: "%.0f%%", haptics.strength * 100))
-                            .monospacedDigit()
-                            .foregroundStyle(.secondary)
-                    }
-                    ControlNote("Raise it for gloves, or a pocket.")
+                    SettingValue("Strength",
+                                 "Raise it for gloves, or for a phone in a pocket.",
+                                 value: String(format: "%.0f%%", haptics.strength * 100))
                     Slider(value: $haptics.strength, in: 0.25...1.5, step: 0.05)
                         .accessibilityLabel("Vibration strength")
 
@@ -737,29 +876,27 @@ struct SettingsView: View {
     private var triggerSections: some View {
         Group {
             Section {
+                // The mode's own description is what the ⓘ says, so it changes
+                // with the selection — it is the one note here that isn't fixed.
+                SettingName("Mode", pulseDetector.triggerMode.description)
                 Picker("Mode", selection: $pulseDetector.triggerMode) {
                     ForEach(PulseDetector.TriggerMode.allCases) { mode in
                         Text(mode.label).tag(mode)
                     }
                 }
                 .pickerStyle(.segmented)
-                ControlNote(pulseDetector.triggerMode.description)
 
-                LabeledContent("Loudness") {
-                    Text(String(format: "%.2f", pulseDetector.amplitudeThreshold))
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                }
-                ControlNote("Lower it for faint bats, and more noise.")
+                SettingValue("Loudness",
+                             "How loud something has to be before OpenBat calls it a call. Lower it for "
+                           + "faint or distant bats, and you will also catch more noise.",
+                             value: String(format: "%.2f", pulseDetector.amplitudeThreshold))
                 Slider(value: $pulseDetector.amplitudeThreshold, in: 0.1...0.95, step: 0.05)
 
                 if pulseDetector.triggerMode == .ultrasonic {
-                    LabeledContent("Lowest pitch") {
-                        Text(String(format: "%.0f kHz", pulseDetector.minFrequencyHz / 1000))
-                            .monospacedDigit()
-                            .foregroundStyle(.secondary)
-                    }
-                    ControlNote("Ignored below this. 15–20 kHz clears wind.")
+                    SettingValue("Lowest pitch",
+                                 "Anything below this pitch is ignored. 15–20 kHz clears wind, rustling "
+                               + "and most of what a phone's own microphone picks up.",
+                                 value: String(format: "%.0f kHz", pulseDetector.minFrequencyHz / 1000))
                     Slider(value: pulseMinFreqKHz, in: 5...150, step: 5)
                 }
             } header: {
@@ -768,12 +905,10 @@ struct SettingsView: View {
             }
 
             Section {
-                LabeledContent("Shortest call") {
-                    Text(shortestCallLabel)
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                }
-                ControlNote("Raise it to reject clicks and pops.")
+                SettingValue("Shortest call",
+                             "Anything briefer than this isn't a call. Raise it to reject clicks and pops, "
+                           + "which are loud but over almost instantly.",
+                             value: shortestCallLabel)
                 // The detector counts whole analysis columns, but nobody thinks
                 // in columns, so the slider moves in columns (step 1, the only
                 // values that exist) while the readout is milliseconds. That
@@ -786,20 +921,16 @@ struct SettingsView: View {
                     .accessibilityLabel("Shortest call")
                     .accessibilityValue(shortestCallLabel)
 
-                LabeledContent("Join gaps up to") {
-                    Text(String(format: "%.0f ms", pulseDetector.maxGapMs))
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                }
-                ControlNote("Shorter quiet patches stay one call.")
+                SettingValue("Join gaps up to",
+                             "A quiet patch shorter than this doesn't split a call in two — it stays one "
+                           + "call with a dip in the middle.",
+                             value: String(format: "%.0f ms", pulseDetector.maxGapMs))
                 Slider(value: $pulseDetector.maxGapMs, in: 0...30, step: 1)
 
-                LabeledContent("Wait after a call") {
-                    Text(String(format: "%.0f ms", pulseDetector.holdOffSeconds * 1000))
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                }
-                ControlNote("Shortest gap between two separate calls.")
+                SettingValue("Wait after a call",
+                             "The shortest gap there can be between two separate calls. Nothing is "
+                           + "counted as a new call until this much quiet has passed.",
+                             value: String(format: "%.0f ms", pulseDetector.holdOffSeconds * 1000))
                 Slider(value: $pulseDetector.holdOffSeconds, in: 0.02...1.0, step: 0.01)
             } header: {
                 CardHeader("Telling calls apart",
@@ -809,13 +940,38 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: Slow replay
+    // MARK: Live listening
+
+    /// Which half of the live listening card is showing. Not persisted — it is
+    /// a place in a sheet, not a preference, and the sheet opens fresh.
+    private enum LiveChannel: String, CaseIterable {
+        case expansion, heterodyne
+
+        /// The glyphs the transport menu already uses for these two modes, so
+        /// the pill and the listen-mode button name the same thing the same way
+        /// — see `ContentView.listenIcon`.
+        var symbol: String {
+            switch self {
+            case .expansion:  "tortoise"
+            case .heterodyne: "antenna.radiowaves.left.and.right"
+            }
+        }
+
+        var label: String {
+            switch self {
+            case .expansion:  "Time expansion"
+            case .heterodyne: "Heterodyne"
+            }
+        }
+    }
+
+    @State private var liveChannel: LiveChannel = .expansion
 
     /// Replay speed for the live slow-replay mode, and only the speed. Buffer
-    /// length, hiss reduction, fade and gain stay in the live tuning overlay:
-    /// those are judged by ear against a pass that is happening right now,
-    /// which is what the overlay is for. Speed is decided once and left, so it
-    /// belongs where a user goes looking for a setting.
+    /// length, fade and re-arm stay in the live tuning overlay: those are
+    /// judged by ear against a pass that is happening right now, which is what
+    /// the overlay is for. Speed is decided once and left, so it belongs where
+    /// a user goes looking for a setting.
     ///
     /// Three snapped steps, not the overlay's old 4–20 continuum (Niall,
     /// 2026-08-28). The snapping lives in `SnippetExpansionSettings.expansion`
@@ -849,62 +1005,128 @@ struct SettingsView: View {
         String(format: "%.0f× slower", snippetExpansion.expansion)
     }
 
+    /// **One card for both channels, because they are one decision** (Niall,
+    /// 2026-09-09). Time expansion had a card and heterodyne had nothing — its
+    /// level and its background reduction existed only in the live tuning
+    /// overlay, behind the config menu's passcode, and were not persisted, so
+    /// anyone who found them lost them at the next launch. But a listener is
+    /// not tuning two unrelated things: under `.both` routing they are the two
+    /// halves of what comes out of the speaker, set against each other.
+    ///
+    /// The pill carries the transport menu's own glyphs (`LiveChannel.symbol`),
+    /// so the tortoise and the antenna mean the same thing here as they do on
+    /// the listen-mode button.
     @ViewBuilder
-    private var slowReplaySection: some View {
+    private var liveListeningSection: some View {
         Section {
-            LabeledContent("Speed") {
-                Text(slowReplaySpeedLabel)
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-            }
-            ControlNote("Stops listening for about \(Int(snippetExpansion.replaySeconds.rounded())) s each time.")
-            Slider(value: slowReplayIndex,
-                   in: 0...Double(slowReplaySteps.count - 1),
-                   step: 1)
-                .accessibilityLabel("Slow replay speed")
-                .accessibilityValue(slowReplaySpeedLabel)
-
-            // Volume had no setting at all outside the tuning overlay, and was
-            // a fixed multiplier applied to every snippet regardless of how
-            // loud the pass was (Niall, 2026-09-01).
-            LabeledContent("Volume") {
-                Text(String(format: "%+.0f dB", snippetExpansion.trimDB))
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-            }
-            ControlNote("Replays are levelled; this shifts them all.")
-            Slider(value: Binding(
-                get: { snippetExpansion.trimDB },
-                set: {
-                    snippetExpansion.trimDB = $0
-                    // Settings are pushed into the processor at start(), so a
-                    // change made mid-session would otherwise not be heard
-                    // until the next run — same reasoning as the speed slider.
-                    audio.snippetExpansion.trimDB = $0
+            Picker("Channel", selection: $liveChannel) {
+                ForEach(LiveChannel.allCases, id: \.self) { channel in
+                    // Interpolated into the `Text` rather than passed as a
+                    // `Label`: a segmented picker renders a Label as its icon
+                    // alone, and the whole point of the pill is that the glyph
+                    // and the name arrive together.
+                    Text("\(Image(systemName: channel.symbol)) \(channel.label)")
+                        .tag(channel)
                 }
-            ), in: -18...18, step: 1)
-                .accessibilityLabel("Replay volume trim")
-
-            Picker("Background", selection: Binding(
-                get: { snippetExpansion.denoiseMode },
-                set: {
-                    snippetExpansion.denoiseMode = $0
-                    audio.snippetExpansion.denoiseMode = $0
-                }
-            )) {
-                ForEach(SnippetDenoiseMode.allCases) { Text($0.label).tag($0) }
             }
             .pickerStyle(.segmented)
-            ControlNote("Reduce cuts hiss. Scrub keeps only calls.")
+            .accessibilityLabel("Listening channel")
+
+            switch liveChannel {
+            case .expansion:  slowReplayRows
+            case .heterodyne: heterodyneRows
+            }
         } header: {
-            // The cost of a higher speed is deafness, and from Settings — with
-            // no live readout beside it — that is invisible. It used to be a
-            // footer; it now rides on the speed slider's own note, which is the
-            // only control that changes it and the place a person is looking
-            // when they do.
-            CardHeader("Slow replay",
-                       "How far a call is slowed to hear it.")
+            CardHeader("Live listening", "What you hear when listening to bats.")
         }
+    }
+
+    @ViewBuilder
+    private var slowReplayRows: some View {
+        // The cost of a higher speed is deafness, and from Settings — with no
+        // live readout beside it — that is invisible. It used to be a footer;
+        // it now rides on the speed slider's own note, which is the only
+        // control that changes it and the place a person is looking when they
+        // do.
+        SettingValue("Speed",
+                     "How far a call is slowed down so you can hear it. The cost is deafness: while "
+                   + "a call is replaying, OpenBat is not listening — about "
+                   + "\(Int(snippetExpansion.replaySeconds.rounded())) s each time at this speed.",
+                     value: slowReplaySpeedLabel)
+        Slider(value: slowReplayIndex,
+               in: 0...Double(slowReplaySteps.count - 1),
+               step: 1)
+            .accessibilityLabel("Time expansion speed")
+            .accessibilityValue(slowReplaySpeedLabel)
+
+        // Volume had no setting at all outside the tuning overlay, and was
+        // a fixed multiplier applied to every snippet regardless of how
+        // loud the pass was (Niall, 2026-09-01).
+        SettingValue("Volume",
+                     "Replays are already levelled, so a faint bat and a close one come back at "
+                   + "similar loudness. This shifts all of them up or down together.",
+                     value: String(format: "%+.0f dB", snippetExpansion.trimDB))
+        Slider(value: Binding(
+            get: { snippetExpansion.trimDB },
+            set: {
+                snippetExpansion.trimDB = $0
+                // Settings are pushed into the processor at start(), so a
+                // change made mid-session would otherwise not be heard
+                // until the next run — same reasoning as the speed slider.
+                audio.snippetExpansion.trimDB = $0
+            }
+        ), in: -18...18, step: 1)
+            .accessibilityLabel("Replay volume trim")
+
+        SettingName("Background",
+                    "What to do with the hiss behind a replayed call. Normal cuts the steady "
+                  + "background; High keeps only the call itself and silences everything else.")
+        Picker("Background", selection: Binding(
+            get: { snippetExpansion.denoiseMode },
+            set: {
+                snippetExpansion.denoiseMode = $0
+                audio.snippetExpansion.denoiseMode = $0
+            }
+        )) {
+            ForEach(SnippetDenoiseMode.allCases) { Text($0.label).tag($0) }
+        }
+        .pickerStyle(.segmented)
+    }
+
+    @ViewBuilder
+    private var heterodyneRows: some View {
+        SettingValue("Volume",
+                     "Shifts the live channel up or down. Set it against the replay volume — under "
+                   + "Time expansion with heterodyne you hear both, and this is the one underneath.",
+                     value: String(format: "%+.0f dB", heterodyne.trimDB))
+        Slider(value: Binding(
+            get: { heterodyne.trimDB },
+            set: {
+                heterodyne.trimDB = $0
+                // Straight through to the running processor, so it is heard
+                // now rather than at the next capture — the whole reason to
+                // set this is that a bat is overhead. `apply` is what makes
+                // it survive a launch; this is what makes it audible.
+                heterodyne.apply(to: audio.heterodyne)
+            }
+        ), in: -18...18, step: 1)
+            .accessibilityLabel("Heterodyne volume trim")
+
+        SettingName("Background",
+                    "What to do with the hiss on the live channel. Normal measures the steady "
+                  + "background and subtracts it. There is no High here: silencing everything that "
+                  + "isn't plainly a call would make a missed bat sound like a quiet night.")
+        Picker("Background", selection: Binding(
+            get: { heterodyne.denoiseMode },
+            set: {
+                heterodyne.denoiseMode = $0
+                heterodyne.apply(to: audio.heterodyne)
+            }
+        )) {
+            // `liveChoices`, not `allCases` — see `SnippetDenoiseMode`.
+            ForEach(SnippetDenoiseMode.liveChoices) { Text($0.label).tag($0) }
+        }
+        .pickerStyle(.segmented)
     }
 
     // MARK: Recording
@@ -913,30 +1135,28 @@ struct SettingsView: View {
     private var recordingSections: some View {
         Group {
             Section {
-                Toggle("Record automatically", isOn: $autoRecordOnSessionStart)
-                ControlNote("Starting detection also arms the recorder.")
+                SettingToggle("Record automatically",
+                              "Starting detection also arms the recorder, so a pass is saved without you "
+                            + "having to think about it. Off, recording is a separate tap.",
+                              isOn: $autoRecordOnSessionStart)
             } header: {
                 CardHeader("Recording", "When OpenBat saves audio to a file.")
             }
 
             Section {
-                LabeledContent("Keep before a call") {
-                    Text(String(format: "%.1f s", recorder.preRollSeconds))
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                }
-                ControlNote("Starts this far before the first call.")
+                SettingValue("Keep before a call",
+                             "A recording starts this far back, so the first call is inside the file "
+                           + "rather than at its very edge.",
+                             value: String(format: "%.1f s", recorder.preRollSeconds))
                 // Upper bound from the recorder, which sizes its pre-roll ring for
                 // exactly this — a wider slider here than there would silently cap.
                 Slider(value: $recorder.preRollSeconds,
                        in: 0.5...AudioRecorder.maxPreRollSeconds, step: 0.5)
 
-                LabeledContent("Stop after quiet for") {
-                    Text(String(format: "%.1f s", recorder.postRollSeconds))
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                }
-                ControlNote("Each new call extends the recording.")
+                SettingValue("Stop after quiet for",
+                             "Recording stops once it has been this quiet. Each new call extends the "
+                           + "recording, so one pass is one file rather than a dozen.",
+                             value: String(format: "%.1f s", recorder.postRollSeconds))
                 Slider(value: $recorder.postRollSeconds, in: 1.0...10.0, step: 0.5)
             } header: {
                 CardHeader("Length of a recording",
@@ -1004,14 +1224,161 @@ extension CardHeader where Accessory == EmptyView {
     }
 }
 
-/// One short line ABOVE a control, saying what moving it does for the reader —
-/// the same thing `CardHeader`'s description is for the card, under the same
-/// ten-word, one-line rule.
+/// The ⓘ beside a setting's name, opening what used to be the grey line above
+/// the control.
 ///
-/// Above, not below, and inside the card rather than in a section footer: read
-/// top to bottom you get the name, what it does, then the thing you touch. A
-/// card with three sliders can't explain them all in one footer either, which
-/// is how the old sections ended up as paragraphs.
+/// **A tap, not a caption** (Niall, 2026-09-09). A card carrying three or four
+/// controls carried three or four explanations with them, and a page of those
+/// reads as a wall of small grey type — the cards "look so messy" was the note.
+/// A card is now its name, its one-line description, and rows of *just* the
+/// option and the thing you touch; everything else is a tap away on the option's
+/// own name, which is where somebody who wants it will look.
+///
+/// The explanation is not shortened on the way in. Freed from having to fit one
+/// line under a control, a note can say the whole thing — which several of them
+/// could not.
+struct SettingInfo: View {
+    let title: String
+    let note: String
+
+    @State private var showNote = false
+
+    var body: some View {
+        Button { showNote = true } label: {
+            Image(systemName: "info.circle")
+                .font(.footnote)
+        }
+        // `.borderless` rather than `.plain`: a row can hold this and a real
+        // button (Share Log, Delete NoID), and a List makes two plain buttons in
+        // one row ambiguous — tapping either fires both.
+        .buttonStyle(.borderless)
+        .foregroundStyle(.secondary)
+        .accessibilityLabel("About \(title)")
+        .popover(isPresented: $showNote) {
+            SettingExplainer(title: title, note: note)
+                .presentationCompactAdaptation(.popover)
+        }
+    }
+}
+
+private struct SettingExplainer: View {
+    let title: String
+    let note: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+            Text(note)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                // A compact popover otherwise sizes to the text's intrinsic
+                // single-line width and overflows — same fix as TuningExplainer.
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(14)
+        .frame(width: 280, alignment: .leading)
+    }
+}
+
+/// A setting's name, with its explanation behind the ⓘ when it has one.
+struct SettingName: View {
+    let title: String
+    let note: String?
+
+    init(_ title: String, _ note: String? = nil) {
+        self.title = title
+        self.note = note
+    }
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Text(title)
+            if let note, !note.isEmpty {
+                SettingInfo(title: title, note: note)
+            }
+        }
+    }
+}
+
+/// One row of a settings card: the option's name on the left, the thing you
+/// touch on the right, and nothing else.
+///
+/// Not `LabeledContent`, which greys and shrinks whatever it is given as a label
+/// — the name here has a live control in it and has to stay legible and
+/// tappable.
+struct SettingRow<Control: View>: View {
+    let title: String
+    let note: String?
+    let control: Control
+
+    init(_ title: String, _ note: String? = nil, @ViewBuilder control: () -> Control) {
+        self.title = title
+        self.note = note
+        self.control = control()
+    }
+
+    var body: some View {
+        HStack {
+            SettingName(title, note)
+            Spacer(minLength: 12)
+            control
+        }
+    }
+}
+
+/// A `SettingRow` whose control is a switch.
+///
+/// The title is handed to the `Toggle` as well as to the row and then hidden:
+/// `.labelsHidden()` takes it off the screen but leaves it to VoiceOver, so the
+/// switch still announces itself as the thing it turns on.
+struct SettingToggle: View {
+    let title: String
+    let note: String?
+    let isOn: Binding<Bool>
+
+    init(_ title: String, _ note: String? = nil, isOn: Binding<Bool>) {
+        self.title = title
+        self.note = note
+        self.isOn = isOn
+    }
+
+    var body: some View {
+        SettingRow(title, note) {
+            Toggle(title, isOn: isOn)
+                .labelsHidden()
+        }
+    }
+}
+
+/// A number a card reports rather than a control — "Size on this device", a
+/// slider's live readout. Same row shape, right-hand side is text.
+struct SettingValue: View {
+    let title: String
+    let note: String?
+    let value: String
+
+    init(_ title: String, _ note: String? = nil, value: String) {
+        self.title = title
+        self.note = note
+        self.value = value
+    }
+
+    var body: some View {
+        SettingRow(title, note) {
+            Text(value)
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// One short line ABOVE a control, saying what moving it does for the reader.
+///
+/// **Superseded in Settings and the configuration menu by `SettingInfo`** — see
+/// there for why. It survives for the two screens that are not settings cards
+/// and read as prose: the model detail page and the iNaturalist observation
+/// sheet.
 struct ControlNote: View {
     let text: String
 

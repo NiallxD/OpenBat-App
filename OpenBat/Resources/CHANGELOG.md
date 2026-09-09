@@ -32,6 +32,19 @@
   interrupts everybody, before they reach the detector.
 -->
 
+## v0.9.7 (Build 223)
+
+### Fixed
+- **Bats Near You** - Fixed a bug on the detector page which made tapping a bat species in the 'Bats Near You' view cause a hard crash.
+- **Species Guide** - Some species with lots of text in one of the ID fields would have a horizontal scroll to the page.
+
+### Changed
+- **Onboarding** - Updated the text in the onboarding and made some general tweaks.
+- **Onboarding tells you if your microphone is missing** — The welcome screen now checks for a connected ultrasonic microphone and says whether it can see one, instead of warning in general terms. Without one the detector stays silent, which is easy to mistake for a broken app.
+- **Every onboarding screen fits without scrolling** — Including on the smallest iPhones, where the last card used to sit below the fold.
+- **Turning down the microphone now says what it costs** — It was given the same mild note as location, when in fact the app cannot hear anything at all without it.
+
+
 ## v0.9.6 (Build 220)
 
 ### New

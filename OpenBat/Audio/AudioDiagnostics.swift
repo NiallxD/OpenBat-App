@@ -54,23 +54,42 @@ struct AudioDiagnostics: Equatable {
     // then N seconds of a known loud source) so numbers are comparable across
     // units.
 
-    /// Quietest buffer RMS seen this session, in dBFS — the mic's self-noise
-    /// floor. Capture in a quiet enclosure; lower (more negative) is better.
-    /// Starts at 0 dBFS (loudest possible), so the very first real buffer
-    /// always lowers it to an actual reading.
+    /// The mic's own noise floor: the level 90% of this session was louder
+    /// than, in dBFS. Capture in a quiet enclosure; lower is better.
+    ///
+    /// **A tenth percentile, not the quietest buffer seen** (2026-09-09). The
+    /// running minimum this used to be measured one buffer out of hundreds of
+    /// thousands, so it reported whatever the single quietest instant of the
+    /// whole capture was — and since a capture's first buffers are routinely
+    /// digital silence, that was the -80 dBFS floor, every time, on every
+    /// microphone. A percentile over the whole capture is the number the label
+    /// always claimed: what this mic sounds like when nothing is happening.
     var noiseFloorDB: Float = 0
+    /// Whether `noiseFloorDB` holds a reading yet. False until enough of the
+    /// capture is past the settling window — and false for a capture that is
+    /// nothing but digital silence, which is a broken input rather than a very
+    /// good one and must not be reported as -80 dBFS.
+    var hasNoiseFloor: Bool = false
     /// Loudest buffer RMS seen this session, in dBFS — headroom/overload check.
     /// Close to 0 dBFS indicates clipping risk on loud calls.
     var peakLevelDB: Float = AudioLevel.minDB
-    /// DC offset of the most recent buffer, as a percentage of full scale.
-    /// A healthy capsule/ADC should center near 0%; a persistent nonzero
+    /// Mean DC offset ACROSS the session, as a percentage of full scale.
+    /// A healthy capsule/ADC should centre near 0%; a persistent nonzero
     /// offset points at a hardware fault (bad bias, faulty ADC channel).
+    ///
+    /// Was the latest buffer's own mean until 2026-09-09, which is a different
+    /// measurement entirely: a single ~10 ms window of real audio has a nonzero
+    /// mean whether or not the hardware has any offset at all, so the number
+    /// flickered at 15 Hz and said nothing. Averaged over a session, honest
+    /// audio cancels and only a real offset survives.
     var dcOffsetPercent: Float = 0
     /// Samples at or above `AudioLevel.clipThreshold` this session — counts
     /// actual overload events, not just a level reading close to 0 dBFS.
     var clippedSampleCount: Int = 0
-    /// Total samples processed this session, for turning `clippedSampleCount`
-    /// into a rate.
+    /// Samples measured this session, for turning `clippedSampleCount` into a
+    /// rate. Excludes the settling window (see
+    /// `AudioLevel.micQASettleSeconds`), so it is a little short of the samples
+    /// actually captured — the QA numbers are all quoted over the same span.
     var totalSampleCount: Int64 = 0
     /// Fraction of samples this session that clipped, 0...1.
     var clipRate: Double {
@@ -119,6 +138,37 @@ nonisolated enum AudioLevel {
     /// pinned at the rail for a few samples below true full scale still gets
     /// caught, not just mathematically exact clipping.
     static let clipThreshold: Float = 0.98
+
+    /// Audio ignored at the start of a capture before the QA numbers begin.
+    ///
+    /// An input unit's first moments are not the microphone: buffers of exact
+    /// zeroes while the graph settles, and often one transient as it opens.
+    /// Both landed in the old numbers — the zeroes pinned the noise floor to
+    /// the meter's floor and the transient set the session peak — so both are
+    /// measuring the start of a capture rather than a microphone.
+    static let micQASettleSeconds = 0.25
+
+    /// 1 dB bins from `minDB` up to 0 dBFS, for the noise-floor percentile.
+    static let noiseHistogramBins = Int(-minDB) + 1
+
+    /// Bin index for a buffer level, clamped into the histogram.
+    static func noiseHistogramBin(_ db: Float) -> Int {
+        min(max(Int((db - minDB).rounded(.down)), 0), noiseHistogramBins - 1)
+    }
+
+    /// The level `fraction` of the histogram's buffers sit at or below, taken
+    /// at each bin's centre. `nil` when nothing has been counted.
+    static func noisePercentileDB(_ histogram: [Int], fraction: Float) -> Float? {
+        let total = histogram.reduce(0, +)
+        guard total > 0 else { return nil }
+        let target = max(1, Int((Float(total) * fraction).rounded()))
+        var seen = 0
+        for (bin, count) in histogram.enumerated() {
+            seen += count
+            if seen >= target { return minDB + Float(bin) + 0.5 }
+        }
+        return minDB + Float(histogram.count - 1) + 0.5
+    }
 
     /// Root-mean-square level of the first channel of `buffer`, in dBFS.
     ///

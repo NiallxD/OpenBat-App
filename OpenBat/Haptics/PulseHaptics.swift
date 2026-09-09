@@ -59,7 +59,7 @@ import UIKit   // UIApplication.didBecomeActiveNotification — see `activate()`
 
 @MainActor
 @Observable
-final class PulseHaptics {
+final class PulseHaptics: Reseedable {
 
     // MARK: Settings (persisted)
 
@@ -69,7 +69,7 @@ final class PulseHaptics {
     var isEnabled: Bool {
         didSet {
             guard isEnabled != oldValue else { return }
-            UserDefaults.standard.set(isEnabled, forKey: Key.enabled)
+            persist(isEnabled, Key.enabled)
             isEnabled ? startEngine() : stopEngine()
         }
     }
@@ -77,7 +77,7 @@ final class PulseHaptics {
     /// Global strength trim, 0.25–1.5. Applied on top of the energy mapping, so
     /// it scales what the bat is doing rather than flattening it.
     var strength: Double {
-        didSet { UserDefaults.standard.set(strength, forKey: Key.strength) }
+        didSet { persist(strength, Key.strength) }
     }
 
     private enum Key {
@@ -141,18 +141,18 @@ final class PulseHaptics {
     /// brightness). Raise it if distant calls feel too strong; lower it if they
     /// vanish. The most likely of these to be wrong.
     var levelFloor: Float {
-        didSet { UserDefaults.standard.set(levelFloor, forKey: Key.levelFloor) }
+        didSet { persist(levelFloor, Key.levelFloor) }
     }
     /// Peak level that maps to a full-strength tap. Lower it if everything pins
     /// to maximum and close and distant bats feel identical.
     var levelCeiling: Float {
-        didSet { UserDefaults.standard.set(levelCeiling, forKey: Key.levelCeiling) }
+        didSet { persist(levelCeiling, Key.levelCeiling) }
     }
     /// Intensity given to a call sitting right on `levelFloor`. Not zero: a
     /// barely-detected bat still has to be felt, or a distant one reads as no
     /// bat at all.
     var minIntensity: Float {
-        didSet { UserDefaults.standard.set(minIntensity, forKey: Key.minIntensity) }
+        didSet { persist(minIntensity, Key.minIntensity) }
     }
 
     /// Peak frequency mapping onto sharpness. The default 18–65 kHz spans the
@@ -161,24 +161,24 @@ final class PulseHaptics {
     /// the difference between species; widen it to calm it down. Clamped, so
     /// nothing outside ever falls silent.
     var freqFloorHz: Double {
-        didSet { UserDefaults.standard.set(freqFloorHz, forKey: Key.freqFloor) }
+        didSet { persist(freqFloorHz, Key.freqFloor) }
     }
     var freqCeilingHz: Double {
-        didSet { UserDefaults.standard.set(freqCeilingHz, forKey: Key.freqCeiling) }
+        didSet { persist(freqCeilingHz, Key.freqCeiling) }
     }
 
     // MARK: Rate gate — the call/buzz transition
 
     /// A buzz ends when the pulses stop, not when the rate calculation decays.
     var buzzHangover: TimeInterval {
-        didSet { UserDefaults.standard.set(buzzHangover, forKey: Key.buzzHangover) }
+        didSet { persist(buzzHangover, Key.buzzHangover) }
     }
 
     /// Minimum spacing between discrete taps. Below roughly 30–50 ms the
     /// actuator cannot resolve two events, so extra taps only smear the
     /// envelope — a hardware limit being respected, not a preference.
     var minTapInterval: TimeInterval {
-        didSet { UserDefaults.standard.set(minTapInterval, forKey: Key.minTapInterval) }
+        didSet { persist(minTapInterval, Key.minTapInterval) }
     }
 
     /// Pulse rate at which taps collapse into one continuous buzz.
@@ -189,7 +189,7 @@ final class PulseHaptics {
     /// arrives as a rattle of taps the actuator cannot separate anyway.
     var buzzEnterHz: Double {
         didSet {
-            UserDefaults.standard.set(buzzEnterHz, forKey: Key.buzzEnter)
+            persist(buzzEnterHz, Key.buzzEnter)
             if buzzExitHz >= buzzEnterHz { buzzExitHz = max(1, buzzEnterHz - 1) }
         }
     }
@@ -199,14 +199,14 @@ final class PulseHaptics {
     var buzzExitHz: Double {
         didSet {
             if buzzExitHz >= buzzEnterHz { buzzExitHz = max(1, buzzEnterHz - 1) }
-            UserDefaults.standard.set(buzzExitHz, forKey: Key.buzzExit)
+            persist(buzzExitHz, Key.buzzExit)
         }
     }
 
     /// How long pulse rate is averaged over before comparing to the thresholds.
     /// Short reacts fast and jitters; long is steady but late.
     var rateWindow: TimeInterval {
-        didSet { UserDefaults.standard.set(rateWindow, forKey: Key.rateWindow) }
+        didSet { persist(rateWindow, Key.rateWindow) }
     }
 
     /// Core Haptics caps a continuous event at 30 s; a buzz never approaches
@@ -215,17 +215,47 @@ final class PulseHaptics {
 
     // MARK: Defaults
 
-    static let defaultLevelFloor: Float = 0.45
-    static let defaultLevelCeiling: Float = 0.95
-    static let defaultMinIntensity: Float = 0.35
-    static let defaultFreqFloorHz: Double = 18_000
-    static let defaultFreqCeilingHz: Double = 65_000
-    static let defaultBuzzEnterHz: Double = 12
-    static let defaultBuzzExitHz: Double = 8
-    static let defaultRateWindow: TimeInterval = 0.4
-    static let defaultBuzzHangover: TimeInterval = 0.25
-    static let defaultMinTapInterval: TimeInterval = 0.045
-    static let defaultStrength: Double = 1.0
+    static var defaultLevelFloor: Float { Tunable.hapticLevelFloor.value(Float(0.45)) }
+    static var defaultLevelCeiling: Float { Tunable.hapticLevelCeiling.value(Float(0.95)) }
+    static var defaultMinIntensity: Float { Tunable.hapticMinIntensity.value(Float(0.35)) }
+    static var defaultFreqFloorHz: Double { Tunable.hapticFreqFloorHz.value(18_000.0) }
+    static var defaultFreqCeilingHz: Double { Tunable.hapticFreqCeilingHz.value(65_000.0) }
+    static var defaultBuzzEnterHz: Double { Tunable.hapticBuzzEnterHz.value(12.0) }
+    static var defaultBuzzExitHz: Double { Tunable.hapticBuzzExitHz.value(8.0) }
+    static var defaultRateWindow: TimeInterval { Tunable.hapticRateWindow.value(0.4) }
+    static var defaultBuzzHangover: TimeInterval { Tunable.hapticBuzzHangover.value(0.25) }
+    static var defaultMinTapInterval: TimeInterval { Tunable.hapticMinTapInterval.value(0.045) }
+    static var defaultStrength: Double { Tunable.hapticStrength.value(1.0) }
+
+    /// Suppresses the persisting `didSet`s while a re-seed assigns — see
+    /// `RemoteDefaultsReseed.swift`. Only the write is suppressed: starting and
+    /// stopping the engine on `isEnabled` still happens.
+    var isSeeding = false
+
+    private func persist(_ value: Any, _ key: String) {
+        guard !isSeeding else { return }
+        UserDefaults.standard.set(value, forKey: key)
+    }
+
+    /// See `RemoteDefaultsReseed.swift`. `isEnabled` is deliberately absent:
+    /// whether the phone buzzes in somebody's pocket is not ours to set
+    /// remotely, in either direction.
+    func reseedRemoteDefaults() {
+        let d = UserDefaults.standard
+        seeding {
+            if d.object(forKey: Key.strength) == nil { strength = Self.defaultStrength }
+            if d.object(forKey: Key.levelFloor) == nil { levelFloor = Self.defaultLevelFloor }
+            if d.object(forKey: Key.levelCeiling) == nil { levelCeiling = Self.defaultLevelCeiling }
+            if d.object(forKey: Key.minIntensity) == nil { minIntensity = Self.defaultMinIntensity }
+            if d.object(forKey: Key.freqFloor) == nil { freqFloorHz = Self.defaultFreqFloorHz }
+            if d.object(forKey: Key.freqCeiling) == nil { freqCeilingHz = Self.defaultFreqCeilingHz }
+            if d.object(forKey: Key.buzzEnter) == nil { buzzEnterHz = Self.defaultBuzzEnterHz }
+            if d.object(forKey: Key.buzzExit) == nil { buzzExitHz = Self.defaultBuzzExitHz }
+            if d.object(forKey: Key.rateWindow) == nil { rateWindow = Self.defaultRateWindow }
+            if d.object(forKey: Key.buzzHangover) == nil { buzzHangover = Self.defaultBuzzHangover }
+            if d.object(forKey: Key.minTapInterval) == nil { minTapInterval = Self.defaultMinTapInterval }
+        }
+    }
 
     func resetToDefaults() {
         strength = Self.defaultStrength
@@ -274,7 +304,10 @@ final class PulseHaptics {
     init() {
         isSupported = CHHapticEngine.capabilitiesForHardware().supportsHaptics
         let d = UserDefaults.standard
-        isEnabled = d.bool(forKey: Key.enabled)
+        // Presence, not `bool(forKey:)`, which answers false for an absent key
+        // and so made "off by default" and "the user turned it off" the same
+        // state — see `RemoteDefaults`, which needs absence to mean untouched.
+        isEnabled = d.object(forKey: Key.enabled) != nil ? d.bool(forKey: Key.enabled) : false
         func f(_ k: String, _ fallback: Float) -> Float {
             d.object(forKey: k) != nil ? d.float(forKey: k) : fallback
         }

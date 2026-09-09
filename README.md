@@ -38,9 +38,9 @@ connection with bats, and a bit more respect for them too.
 - **Species ID** — an on-device classifier names the species, with runner-up and
   confidence.
 - **Listening** — two live modes: heterodyne tunes the ultrasound down to
-  something audible, and slow replay captures a short snippet of a call and
+  something audible, and time expansion captures a short snippet of a call and
   replays it at a fraction of speed (going deaf while it does). Recordings can
-  also be played back slowed for time expansion, at 4×, 8× or 16×.
+  also be played back slowed the same way, at 4×, 8× or 16×.
 - **Sessions & map** — every outing is logged automatically, with each pass mapped where it was heard.
 - **Sun clock** — bats are busiest in the hours after sunset and before sunrise,
   so the detector screen always shows where in that night you are: time to

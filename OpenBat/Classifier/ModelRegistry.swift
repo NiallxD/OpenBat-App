@@ -17,8 +17,15 @@
 import CoreLocation
 import Foundation
 
-/// A rough lat/lon box a model's training region covers, used only to suggest a
-/// model for the user's current location — not an authoritative range boundary.
+/// The lat/lon box a model's training region covers.
+///
+/// **This decides whether a model runs at all** (2026-09-08). It was a hint behind
+/// a "Suggested Model" card until then, and the boxes were drawn loosely because
+/// nothing turned on them; `AutoIDSettings.applyCoverage` now activates the model
+/// containing the user and switches identification off outside every box. Widening
+/// one hands a region to a classifier that was not trained on its bats — which does
+/// not fail visibly, it names local species after the ones the model does know.
+/// Known too generous, and awaiting a pass from Niall: see each box below.
 struct ModelCoverage {
     let minLatitude: Double
     let maxLatitude: Double
@@ -193,9 +200,13 @@ nonisolated enum ModelRegistry {
         return all.first { $0.id == id }
     }
 
-    /// The model whose coverage contains `coordinate`, if any — used to suggest a
-    /// model for the user's current location. First match wins; coverage boxes aren't
-    /// expected to overlap in practice.
+    /// The model whose coverage contains `coordinate`, if any — the sole input to
+    /// which model identifies (`AutoIDSettings.applyCoverage`); nil means none does
+    /// and identification is off.
+    ///
+    /// First match wins, which is only safe while the boxes are disjoint — as the two
+    /// shipped today are. A third model overlapping either needs a real rule here,
+    /// not registration order.
     static func suggestedModel(for coordinate: CLLocationCoordinate2D) -> ModelDescriptor? {
         all.first { $0.coverage?.contains(coordinate) ?? false }
     }
@@ -217,8 +228,10 @@ nonisolated enum ModelRegistry {
         id: nabatID,
         displayName: "NABat ML",
         region: "North America",
-        // Continental North America + Central America/Caribbean, generously padded —
-        // approximate on purpose, this only drives a suggestion, not model eligibility.
+        // ⚠️ Too generous, and it now decides eligibility — see `ModelCoverage`. The
+        // south-east corner is the problem: Panama, Belize, Guatemala and the
+        // Venezuelan coast all fall inside a box for a US/Canada/Mexico classifier.
+        // NABat's own program area stops around 14 N.
         coverage: ModelCoverage(minLatitude: 5, maxLatitude: 75,
                                 minLongitude: -170, maxLongitude: -50),
         version: "1.0",
@@ -296,6 +309,8 @@ nonisolated enum ModelRegistry {
         id: batDetect2ID,
         displayName: "BatDetect2",
         region: "United Kingdom",
+        // ⚠️ The eastern edge is a rectangle artifact, not a range: Calais (1.85 E)
+        // is inside this and Lille (3.06 E) is not. See `ModelCoverage`.
         coverage: ModelCoverage(minLatitude: 49, maxLatitude: 61,
                                 minLongitude: -11, maxLongitude: 2),
         version: "2.0.0b2",

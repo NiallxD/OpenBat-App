@@ -1613,6 +1613,8 @@ private struct StatsTable: View {
                         .foregroundStyle(.secondary)
                     Text(row.value)
                         .font(.subheadline.weight(.medium))
+                        .multilineTextAlignment(.trailing)
+                        .fixedSize(horizontal: false, vertical: true)
                         .gridColumnAlignment(.trailing)
                 }
                 if index < rows.count - 1 {

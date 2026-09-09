@@ -37,6 +37,15 @@
 //      hardware rather than a choice about it, and onboarding/What's New stamps
 //      record something that happened. Wiping those would re-run the intro over
 //      an app full of recordings.
+//    • What the config file said — `config.remoteDefaults` and the feature
+//      overrides are not this user's choices at all, and clearing them would
+//      quietly return the app to compiled values until the next successful
+//      fetch. "Reset all settings" means the user's settings.
+//
+//  Note the interaction with `RemoteDefaults`: a reset removes every stored
+//  value, which is precisely what makes a remotely-set default apply again. A
+//  reset therefore lands on the config file's numbers, not the compiled ones,
+//  which is the correct meaning of "the value a fresh install would have".
 //
 //  Consent needs no entry here: it lives in the Keychain, not in defaults.
 //
@@ -61,9 +70,12 @@ enum SettingsReset {
         "openbat.inat.posted",
         "storage.usesUbiquityContainer",
         "onboarding.hasCompletedWelcome",
-        "onboarding.justFinishedOnboarding",
         "release.lastSeenBuild",
         "release.reonboardedBuild",
+        "config.remoteDefaults",
+        "config.localFeatureOverrides",
+        "config.lastSeenMaintenanceMessage",
+        "config.lastFetchDate",
     ]
 
     static let preservedPrefixes: [String] = ["MicCal."]

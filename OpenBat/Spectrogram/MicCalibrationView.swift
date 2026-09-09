@@ -58,7 +58,7 @@ struct MicCalibrationView: View {
     /// floor isn't known until it's been observed.
     @State private var baselineDB: Float?
 
-    // Same compact-sheet language as `SuggestedModelSheet` in ContentView: no NavigationStack, no title bar,
+    // Same compact-sheet language as `AreaChangeSheet` in ContentView: no NavigationStack, no title bar,
     // an accent circle for the glyph, centred title/subtitle, one prominent
     // action tinted `.batAccent`, and a plain text button out. The old
     // navigation chrome existed only to host a Cancel button, and every stage

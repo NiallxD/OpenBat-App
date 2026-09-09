@@ -26,8 +26,17 @@ enum SettingsDump {
 
     /// Builds the JSON text. Pure — takes an already-captured tuning snapshot so
     /// it has no opinion about threading or about where the processors live.
+    /// - Parameters:
+    ///   - recorder: for the three recording timings and the heterodyne trim.
+    ///     Added 2026-09-09, and the reason is worth recording: two dumps were
+    ///     compared across the change that made those values persist at all,
+    ///     and the comparison could say nothing about them because they were
+    ///     the one group this file had never enumerated. A dump's whole job is
+    ///     to be the thing two builds are compared through.
     static func makeJSON(tuning: LiveTuningSnapshot,
                          autoID: AutoIDSettings,
+                         recorder: AudioRecorder,
+                         heterodyne: HeterodyneSettings,
                          appVersion: String) -> String {
         var root: [String: Any] = [:]
 
@@ -37,11 +46,32 @@ enum SettingsDump {
             "note": "Live values at dump time. Keys mirror the property paths they came from.",
         ]
 
+        // Which values the config file is currently setting, and to what.
+        //
+        // Here because a dump is what two builds get compared through, and
+        // without this a difference between two dumps has two possible causes —
+        // the code changed, or the config file did — with nothing in either
+        // file to tell them apart. Empty means every value below is either the
+        // user's own or compiled in. See `RemoteDefaults`.
+        root["remoteDefaults"] = Dictionary(uniqueKeysWithValues:
+            RemoteDefaults.active().map { ($0.0.rawValue, $0.1) })
+
         // MARK: Live tuning overlay (mirrors LiveTuningSnapshot field-for-field)
 
         root["heterodyne"] = [
             "audio.heterodyne.gain": tuning.heterodyneGain,
             "audio.audibleOffsetHz": tuning.audibleOffsetHz,
+            // The persisted half of the live channel, which the tuning snapshot
+            // does not carry: the overlay writes the processor directly, these
+            // are what survive a launch. See `HeterodyneSettings`.
+            "heterodyne.trimDB": heterodyne.trimDB,
+            "heterodyne.denoiseMode": heterodyne.denoiseMode.label,
+        ]
+
+        root["recording"] = [
+            "recording.preRollSeconds": recorder.preRollSeconds,
+            "recording.postRollSeconds": recorder.postRollSeconds,
+            "recording.maxSegmentSeconds": recorder.maxSegmentSeconds,
         ]
 
         root["haptics"] = [

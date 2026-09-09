@@ -174,8 +174,8 @@ enum TourScript {
                  detail: "Peak frequency, bandwidth, duration, pulse rate and count for the most recent pulse, plus the input level. They clear when activity goes stale."),
         // Left-to-right along the stats header, matching statsStrip's own order.
         TourStep(target: .slowReplayStatus, symbol: "ear",
-                 title: "Slow replay status",
-                 detail: "Only appears while the slow-replay listen mode is running. An ear means it's ready and waiting for a call, red means it's capturing one, and a tortoise means it's replaying — while that ring fills, no new call can be captured. (Shown here for the tour.)"),
+                 title: "Time expansion status",
+                 detail: "Only appears while the time expansion listen mode is running. An ear means it's ready and waiting for a call, red means it's capturing one, and a tortoise means it's replaying — while that ring fills, no new call can be captured. (Shown here for the tour.)"),
         TourStep(target: .feedbackWarning, symbol: "exclamationmark.triangle.fill",
                  title: "Feedback warning",
                  detail: "Appears only while heterodyne or other captured audio is playing out of the phone's speaker — the mic hears that playback and shows it as a spurious second call. Wear headphones to clear it. (Shown here for the tour.)"),
@@ -229,9 +229,9 @@ enum TourScript {
                  detail: "Arms WAV recording — each detected pass is saved as its own file, with the species ID in its metadata. It arms itself when a session starts unless you've turned that off in Settings."),
         TourStep(target: .listen, symbol: "headphones", opensTransportMenu: true,
                  title: "Listen",
-                 detail: "One button, four steps: off, heterodyne (tuned-down clicks and chirps), slow replay (a snippet around each call played back 8× slower, so its real shape is audible), then slow replay with heterodyne underneath it. The glyph shows which you're on — headphones, antenna, tortoise, filled tortoise."),
+                 detail: "One button, four steps: off, heterodyne (tuned-down clicks and chirps), time expansion (a snippet around each call played back 8× slower, so its real shape is audible), then time expansion with heterodyne underneath it. The glyph shows which you're on — headphones, antenna, tortoise, filled tortoise."),
         TourStep(target: .listen, symbol: "tortoise.fill", opensTransportMenu: true,
-                 title: "Slow replay, and going deaf",
+                 title: "Time expansion, and going deaf",
                  detail: "While a snippet is replaying, no new call is being captured — that's the trade-off, and it's why the fourth step exists: heterodyne keeps playing underneath, so you can still hear the bat overhead while the last call is replayed. The status pill up in the stats header shows which of the two it's doing."),
 
         // Was one card claiming a Playback tab that no longer exists — playback
@@ -495,7 +495,7 @@ struct AppInfoView: View {
             feature("waveform.badge.magnifyingglass", "Real-time spectrogram with scrollable history")
             feature("waveform.path.ecg", "Per-pulse detection and onset-aligned zoom")
             feature("sparkle.magnifyingglass", "On-device species ID, with runner-up and confidence")
-            feature("headphones", "Heterodyne and 8× slow replay — live")
+            feature("headphones", "Heterodyne and 8× time expansion — live")
             feature("square.stack.3d.up", "Sessions logged and mapped automatically")
         }
     }

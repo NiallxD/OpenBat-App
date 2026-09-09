@@ -72,6 +72,10 @@ struct ContentView: View {
     /// tuning overlay) because the processor has to be seeded with them at
     /// capture start, not only when the overlay happens to be open.
     @State private var snippetSettings = SnippetExpansionSettings()
+    /// The persisted half of the live heterodyne channel — see
+    /// `HeterodyneSettings`. Seeded into the processor alongside the snippet
+    /// settings, for the same reason and at the same moment.
+    @State private var heterodyneSettings = HeterodyneSettings()
     @State private var micCalSettings = MicCalibrationSettings()
     @State private var classStore = ClassificationStore()
     @State private var liveActivity = LiveActivityController()
@@ -118,6 +122,12 @@ struct ContentView: View {
     @State private var showTourOffer = false
     /// One self-opening attempt per launch — see `nudgeTourAfterDelay`.
     @State private var tourNudgeScheduled = false
+    /// Whether the maintenance alert is on screen right now, mirrored out of
+    /// `MaintenanceNoticeModifier` — the one presentation `presentationIsBusy`
+    /// can't see, because the modifier owns it. Read by `nudgeTourAfterDelay`;
+    /// deliberately NOT part of `presentationIsBusy`, which is that alert's own
+    /// gate and would then be gating itself.
+    @State private var maintenanceNoticeShowing = false
     /// How long after the detector first appears the tour offers itself, and how
     /// long it keeps waiting for a clear moment before giving up.
     private static let tourNudgeDelay: TimeInterval = 5
@@ -125,21 +135,6 @@ struct ContentView: View {
     /// What's New, once per build. Copied out of `ReleaseState` in `.onAppear`
     /// rather than read from it live — see the sheet modifier for why.
     @State private var showWhatsNew = false
-    /// Set once, on the first arrival here after onboarding, when the user's
-    /// location suggests a model that isn't already active — drives
-    /// `SuggestedModelSheet`. Standalone: dismissing it does NOT chain into
-    /// anything else (see that sheet's own modifier below). It used to be raised
-    /// at the end of the onboarding tour instead, which no longer auto-launches.
-    @State private var suggestedModelToOffer: ModelDescriptor?
-    /// Set in `.onAppear` when onboarding just finished but no location fix had
-    /// landed yet to base a suggestion on — consumed by the `onChange` below the
-    /// moment one arrives. See that flag's own history: checking
-    /// `location.currentCoordinate` synchronously, immediately after firing
-    /// `requestRegionFix()` in the same `.onAppear`, meant the fix essentially
-    /// never existed yet, since it's a real CoreLocation round trip — so the
-    /// suggestion silently never appeared after onboarding on the most common
-    /// path, a cold first launch.
-    @State private var pendingOnboardingModelOffer = false
     /// The first-connection calibration offer, and the capture it leads to. Two
     /// flags because they are two presentations: the offer is a compact sheet,
     /// and accepting it opens the real calibration sheet *after* the offer has
@@ -216,7 +211,13 @@ struct ContentView: View {
     /// already reads calls — see `SimplifiedView` for the list and for why some
     /// of what it changes is an override and some a one-time default.
     @AppStorage(SimplifiedView.key) private var simplifiedMode = true
-    @AppStorage(SimplifiedView.defaultsAppliedKey) private var simplifiedDefaultsApplied = false
+    /// The band simplified view last applied — see `SimplifiedView.bandStamp`.
+    /// Empty means "not set up for this stint". Migrates itself from the Bool
+    /// this key used to hold: `string(forKey:)` returns nil for a stored Bool,
+    /// which reads as empty, which re-applies once. That is exactly right — an
+    /// install carrying the old flag gets the current band applied one more
+    /// time, and is stamped from then on.
+    @AppStorage(SimplifiedView.defaultsAppliedKey) private var simplifiedDefaultsApplied = ""
 
     /// Which view each panel shows, once simplified view has had its say. In
     /// simplified view the toggles that would change these are hidden, so the
@@ -312,11 +313,9 @@ struct ContentView: View {
                 Text(exportManager.failure ?? "")
             }
                 .sheet(isPresented: $showDiagnostics) {
-                    DiagnosticsView(audio: audio, recorder: recorder, classStore: classStore,
-                                    onStartDemo: startDemo, onEndDemo: endDemo,
+                    DiagnosticsView(audio: audio, recorder: recorder,
                                     onOpenTuning: { showTuningOverlay = true },
                                     onDumpSettings: dumpSettings,
-                                    sessionButtonLocator: sessionButtonLocator,
                                     flags: featureFlags)
                 }
                 .sheet(isPresented: $showHelp) {
@@ -325,6 +324,15 @@ struct ContentView: View {
                 .sheet(isPresented: $showNearbySpecies) {
                     NearbySpeciesSheet(guide: speciesGuide, presenceStore: speciesPresence,
                                        coordinate: location.currentCoordinate)
+                        // A sheet's own root does NOT pick up `.environment(_:)`
+                        // set on the presenting view the way an in-stack push
+                        // does — `SpeciesDetailView`'s `@Environment(FeatureFlagStore.self)`
+                        // crashed with "No Observable object of type
+                        // FeatureFlagStore found" for exactly this reason: this
+                        // sheet is the one place a species page is reached
+                        // without also being a descendant of `tabHost`, where
+                        // the flag store is injected once for everything else.
+                        .environment(featureFlags)
                         // The sheet's own card material defaults to a
                         // translucent fill — the page's own ground instead,
                         // matching the guide's push destination of the same
@@ -340,12 +348,25 @@ struct ContentView: View {
                 // matters if this was a stray tap mid-pass. Session deletion
                 // already gets its own confirmation (see SessionsView); this is
                 // the same pattern for the one step upstream of it.
-                .confirmationDialog("End this session?",
+                //
+                // **A demo ends as a demo** (Niall, 2026-09-09). This used to
+                // call `stopDetecting()` whatever was running, which for a demo
+                // stopped the audio and left everything else standing: still in
+                // demo mode, the Demo pill still up, the recorder still blocked,
+                // and the next Start silently replaying the file instead of
+                // opening the microphone. The wording changes with it, because
+                // the session version's promise is untrue of a demo — its IDs
+                // are held in memory and dropped, never saved.
+                .confirmationDialog(Text(endingDemo ? "End this demo?" : "End this session?"),
                                     isPresented: $showEndSessionConfirm, titleVisibility: .visible) {
-                    Button("End Session", role: .destructive) { stopDetecting() }
+                    Button(endingDemo ? "End Demo" : "End Session", role: .destructive) {
+                        if endingDemo { endDemo() } else { stopDetecting() }
+                    }
                     Button("Cancel", role: .cancel) { }
                 } message: {
-                    Text("Listening and recording will stop. Anything already logged stays saved.")
+                    Text(endingDemo
+                         ? "The demo stops and the pipeline goes back to the microphone. The identifications it made are discarded — the same as tapping the Demo pill."
+                         : "Listening and recording will stop. Anything already logged stays saved.")
                 }
                 // onDismiss (not just the Done button) so per-model AutoID edits
                 // survive a swipe-down dismissal of the sheet too.
@@ -362,6 +383,7 @@ struct ContentView: View {
                                  location: location, consent: consent, classStore: classStore,
                                  audio: audio, micCalSettings: micCalSettings,
                                  haptics: haptics, snippetExpansion: snippetSettings,
+                                 heterodyne: heterodyneSettings,
                                  flags: featureFlags,
                                  onOpenConfig: {
                                      showSettings = false
@@ -404,13 +426,9 @@ struct ContentView: View {
             set: { if !$0 { autoIDSettings.acknowledgeChangeSummary() } }
         )) {
             if let summary = autoIDSettings.pendingChangeSummary {
-                // The same card the post-onboarding suggestion uses, deliberately:
-                // this is the same offer, arriving for the same reason, and it used
-                // to be a full `Form` sheet in its own visual language
-                // (`LocationChangeSummaryView`, deleted 2026-08-17).
-                SuggestedModelSheet(model: summary.recommendedModel,
-                                    speciesChanged: summary.speciesChanged,
-                                    onUse: { model in autoIDSettings.activeModelID = model.id })
+                // Tells, never asks — the model has already changed by the time this
+                // is on screen. See `AutoIDSettings.applyCoverage`.
+                AreaChangeSheet(summary: summary)
             }
         }
         .sheet(isPresented: $showInfo, onDismiss: {
@@ -452,10 +470,9 @@ struct ContentView: View {
                                 // Info & Tour — so finishing it just puts the screen
                                 // back. It used to chain into a model suggestion and
                                 // Start Detecting when it had been auto-launched by
-                                // onboarding; the suggestion now happens on arrival
-                                // instead (see the `justFinishedOnboarding` handoff in
-                                // `.onAppear`), and starting a session was never ours to
-                                // do unasked.
+                                // onboarding; there is no model suggestion any more
+                                // (`AutoIDSettings.applyCoverage` decides it), and
+                                // starting a session was never ours to do unasked.
                                 finish: { completed in
                                     withAnimation(.easeInOut(duration: 0.25)) { tourActive = false }
                                     // Only a tour seen to its last step retires the
@@ -537,7 +554,8 @@ struct ContentView: View {
         }
         // The launch notice — alert, queue and release in one modifier, the
         // same shape (and for the same reason) as `.inatUploadAlerts` above.
-        .maintenanceNotice(flags: featureFlags, isBusy: presentationIsBusy)
+        .maintenanceNotice(flags: featureFlags, isBusy: presentationIsBusy,
+                           showing: $maintenanceNoticeShowing)
         .onAppear {
             // First, before anything below reads a persisted setting: the stores
             // are constructed EMPTY on purpose (see each type's `init()` doc
@@ -653,54 +671,19 @@ struct ContentView: View {
             // opened. It was a live GBIF query until 2026-08-16.
             location.requestRegionFix()
 
-            // Onboarding's last step sets this right before handing off to
-            // ContentView — consumed once here, immediately, so a later
-            // .onAppear re-fire (e.g. returning from the background) can't
-            // repeat the offer.
-            //
-            // This used to auto-launch the guided tour; it now only makes the
-            // one-off recommended-model offer, and only if the region fix
-            // requested just above has already landed. It usually hasn't on a
-            // cold first launch, in which case nothing is shown here and the
-            // suggestion still reaches the user the way it always did — from
-            // AutoID settings.
             // Decided back in `RootView.init`, acted on here — the detector is
             // the first thing that exists to present a sheet over.
+            //
+            // Nothing else is raised on a first arrival any more. The
+            // recommended-model card that used to be handed off from onboarding
+            // is gone: the model is picked from the fix requested just above,
+            // silently, by `AutoIDSettings.applyCoverage`.
             if ReleaseState.shared.shouldShowWhatsNew {
                 showWhatsNew = true
             }
 
-            if OnboardingState.shared.justFinishedOnboarding {
-                OnboardingState.shared.justFinishedOnboarding = false
-                // Not when What's New is about to present: that happens when an
-                // update re-ran onboarding, and two sheets racing for the same
-                // moment means one of them is silently dropped. The changelog
-                // wins — it is the thing that explains why the intro reappeared
-                // — and the model suggestion is still reachable from AutoID
-                // settings, which is where it lived before this shortcut existed.
-                if !ReleaseState.shared.shouldShowWhatsNew {
-                    // `requestRegionFix()` just above is a real CoreLocation round
-                    // trip — on a cold first launch (the common case) nothing has
-                    // come back yet, so checking `location.currentCoordinate`
-                    // right here found it nil essentially every time. Offer now
-                    // if a fix already happened to land; otherwise flag it and
-                    // let the `onChange(of: location.currentCoordinate)` below
-                    // pick it up the moment one does.
-                    if let coordinate = location.currentCoordinate {
-                        offerSuggestedModelIfNeeded(at: coordinate)
-                    } else {
-                        pendingOnboardingModelOffer = true
-                    }
-                }
-            }
-
             nudgeTourAfterDelay()
         }
-        // Shown once, on the first arrival here after onboarding, if the user's
-        // location suggests a model that isn't already active — see the
-        // handoff in `.onAppear`. Standalone: dismissing it (either "Use" or "Not Now")
-        // just closes it — it does NOT chain into Start Detecting, which stays a
-        // separate, deliberate action from the transport bar.
         // Once per build, for someone who already had the app — see
         // `ReleaseState`. Presented from here rather than from `RootView` so it
         // arrives over the detector, with the app fully up, rather than over a
@@ -716,10 +699,6 @@ struct ContentView: View {
         }) {
             WhatsNewSheet()
                 .presentationDragIndicator(.visible)
-        }
-        .sheet(item: $suggestedModelToOffer) { model in
-            SuggestedModelSheet(model: model, speciesChanged: 0,
-                                onUse: { autoIDSettings.activeModelID = $0.id })
         }
         // The first-connection calibration offer — see
         // `offerCalibrationIfAppropriate`. The capture it leads to is raised
@@ -862,10 +841,6 @@ struct ContentView: View {
                     // re-weights everything classified from here on. The store
                     // drops it if nothing actually changed.
                     recordPriorSnapshot()
-                }
-                if pendingOnboardingModelOffer {
-                    pendingOnboardingModelOffer = false
-                    offerSuggestedModelIfNeeded(at: coordinate)
                 }
             }
         }
@@ -1025,10 +1000,29 @@ struct ContentView: View {
     /// Real system tab bar on iOS 26, hand-built floating one below it. See
     /// AppTabBar.swift for why both exist and what each gives up.
     @ViewBuilder private var tabHost: some View {
-        if #available(iOS 26.0, *) {
-            systemTabs
-        } else {
-            legacyTabs
+        Group {
+            if #available(iOS 26.0, *) {
+                systemTabs
+            } else {
+                legacyTabs
+            }
+        }
+        // **Here, and not on `body`'s own chain, for a mechanical reason.**
+        // That chain is already at the compiler's type-check budget: adding a
+        // single `onChange` to it fails the build outright with "unable to
+        // type-check this expression in reasonable time". This property is its
+        // own unit, so a modifier costs nothing there. Anywhere in the
+        // hierarchy works for `onChange`, and this view is always mounted.
+        //
+        // ONE `onChange` over a combined key rather than two, for the same
+        // budget reason — hence `lastSeenDefaultsGeneration`, since a combined
+        // key cannot say which half of it moved. See `applyRemoteDefaultsIfSafe`.
+        .onChange(of: remoteDefaultsTrigger) { _, _ in
+            if featureFlags.defaultsGeneration != lastSeenDefaultsGeneration {
+                lastSeenDefaultsGeneration = featureFlags.defaultsGeneration
+                remoteDefaultsPending = true
+            }
+            applyRemoteDefaultsIfSafe()
         }
     }
 
@@ -1556,6 +1550,11 @@ struct ContentView: View {
     /// whether the recorder arms itself is still the auto-record setting's call.
     /// Once one is running, the button is how you reach the controls that used to
     /// sit in the control bar.
+    /// Whether the End button in the transport menu is ending a demo rather
+    /// than a live session. Read by the confirmation, which is the same control
+    /// for both and has to say which one it is about.
+    private var endingDemo: Bool { audio.isDemoMode }
+
     private func handleSessionButtonTap() {
         // `isActive`, not `isRunning` — a listen-mode change that crosses "off"
         // stops and restarts the engine, so `isRunning` flickers false for a
@@ -1944,7 +1943,7 @@ struct ContentView: View {
         // much still in progress across that dip.
         guard audio.ultrasonicMicAttached, !audio.isRunning, !audio.isActive else { return }
         guard !tourActive, !showWhatsNew, !showCalibrationOffer, !showMicCalibration,
-              suggestedModelToOffer == nil, !menuIsOpen else { return }
+              !menuIsOpen else { return }
 
         let name = audio.activeInputName
         guard micCalSettings.shouldOfferCalibration(forMicName: name) else { return }
@@ -1981,18 +1980,6 @@ struct ContentView: View {
         } else {
             detectionPump.stop()
         }
-    }
-
-    /// Raises `suggestedModelToOffer` if `coordinate` suggests a model that
-    /// isn't already active. Shared by the `.onAppear` handoff from onboarding
-    /// and, when that handoff finds no fix ready yet, by the
-    /// `pendingOnboardingModelOffer` follow-up in the coordinate `onChange` —
-    /// see that flag's doc comment for why a single synchronous check wasn't
-    /// enough.
-    private func offerSuggestedModelIfNeeded(at coordinate: CLLocationCoordinate2D) {
-        guard let suggested = ModelRegistry.suggestedModel(for: coordinate),
-              suggested.id != autoIDSettings.activeModelID else { return }
-        suggestedModelToOffer = suggested
     }
 
     /// Opens the tour's popover by itself, once per install, `tourNudgeDelay`
@@ -2032,7 +2019,14 @@ struct ContentView: View {
             let deadline = Date().addingTimeInterval(Self.tourNudgeWindow)
             while Date() < deadline {
                 if OnboardingState.shared.hasNudgedTour { return }
-                if section == .detector, !tourActive, !menuIsOpen, !showTourOffer,
+                // `presentationIsBusy` rather than the three flags this used to
+                // test: the popover is dropped by anything already presented,
+                // and `hasNudgedTour` is set in the same breath, so losing that
+                // race spent the one nudge this install ever gets on a popover
+                // nobody saw. The maintenance alert — which lands a second or
+                // two into the same launch — is checked separately because
+                // `presentationIsBusy` is that alert's own gate.
+                if section == .detector, !presentationIsBusy, !maintenanceNoticeShowing,
                    OnboardingState.shared.shouldOfferTour(simplified: simplifiedMode) {
                     OnboardingState.shared.hasNudgedTour = true
                     showTourOffer = true
@@ -2264,16 +2258,14 @@ struct ContentView: View {
                             logFrequency: spectrogramLogFrequency,
                             scrollEnabled: !simplifiedMode)
                 .overlay(alignment: .topTrailing) { tunedPillOverlay }
-                .overlay(alignment: .bottomTrailing) {
-                    // Recording state only. `SnippetStatusPill` used to sit here
-                    // beside it and now lives with the other status indicators in
-                    // the STATS card header (`statsStrip`) — it reports which
-                    // listening mode is doing what, which is a status, not a
-                    // recording fact, and next to "Not recording" its idle ear
-                    // read as a claim about the recorder.
-                    RecordingStatusBadge(recorder: recorder, tourDemo: tourActive)
-                        .padding(8)
-                }
+                // Nothing in this corner any more (Niall, 2026-09-09). It held
+                // the "Recording" / "Not recording" badge, whose whole job was
+                // catching the case it named second — and the one-shot nudge
+                // (`checkNotRecordingNudge`) now says that outright, in words,
+                // at the moment it matters. A permanent pill restating it every
+                // second was the weaker half of the same answer, and it spent
+                // most of its life covering the spectrogram to say "no".
+                // `SnippetStatusPill` had already left for `statsStrip`.
                 .opacity(effectiveSpectrogramShowsSpeciesID ? 0 : 1)
                 .allowsHitTesting(!effectiveSpectrogramShowsSpeciesID)
 
@@ -2379,8 +2371,8 @@ struct ContentView: View {
     /// while that listen mode is running — it renders nothing otherwise, so it
     /// simply isn't there in heterodyne or with listening off. Lives with the
     /// other status pills rather than in the spectrogram's corner, where sitting
-    /// beside the "Not recording" badge made its idle ear look like a statement
-    /// about the recorder.
+    /// beside the "Not recording" badge (since removed) made its idle ear look
+    /// like a statement about the recorder.
     ///
     /// It drives a 0.25 s `TimelineView`, so it is the one pill in these rows
     /// that re-evaluates on a clock. That is only safe because its frame is fixed
@@ -2475,10 +2467,13 @@ struct ContentView: View {
     /// Wider than `menuIsOpen`, which only asks whether the detector is
     /// covered: a sheet the detector is happy to keep rendering behind still
     /// takes the one presentation slot an alert needs.
+    /// `showTourOffer` counts even though it is only a popover: it takes the
+    /// same presentation slot, so an alert raised under it is dropped, and
+    /// listing it here is also what re-runs `showIfClear` when it goes away.
     private var presentationIsBusy: Bool {
         menuIsOpen || tourActive || showNearbySpecies || showReconsentPrompt
-            || showCalibrationOffer || showMicCalibration
-            || suggestedModelToOffer != nil || exportManager.ready != nil
+            || showCalibrationOffer || showMicCalibration || showTourOffer
+            || exportManager.ready != nil
     }
 
 
@@ -2498,13 +2493,63 @@ struct ContentView: View {
     /// `onChange` at all. `simplifiedDefaultsApplied` is what stops it running
     /// twice, and clearing it on the way out is what lets a later return to
     /// simplified view set the band up again.
+    /// Whether a downloaded set of defaults is still waiting to be applied.
+    @State private var remoteDefaultsPending = false
+    /// Which generation this view has already reacted to — see the combined
+    /// `onChange` above, which cannot tell which half of its key moved.
+    @State private var lastSeenDefaultsGeneration = 0
+
+    /// The two things that can make a re-seed due: a new config, or the end of
+    /// the session that was blocking one.
+    private var remoteDefaultsTrigger: String {
+        "\(featureFlags.defaultsGeneration)|\(audio.isActive)"
+    }
+
+    /// Push newly-arrived remote defaults into the settings stores.
+    ///
+    /// **The reason this exists rather than an alert asking for a restart**
+    /// (Niall, 2026-09-09): somebody who opens the app at dusk and listens till
+    /// midnight would otherwise spend the whole night on the previous values,
+    /// and reaching people who are out working is the entire point of being
+    /// able to change a number remotely. iOS also has no supported way for an
+    /// app to relaunch itself — `exit(0)` reads as a crash to a user and to App
+    /// Review — so the restart that alert would ask for is one the user has to
+    /// perform by hand, which is precisely the failure mode being avoided.
+    ///
+    /// **Never during a session.** What counts as a call has to hold still for
+    /// the length of a recording, or the spectrogram, the detector and the file
+    /// disagree about which second used which number. Held, not dropped: the
+    /// `audio.isActive` observer above brings it back the moment the session
+    /// ends.
+    ///
+    /// Only values the user has never set are touched — each store checks that
+    /// for itself, and none of them persists what it writes here. See
+    /// `RemoteDefaultsReseed.swift`.
+    private func applyRemoteDefaultsIfSafe() {
+        guard remoteDefaultsPending, !audio.isActive else { return }
+        remoteDefaultsPending = false
+        pulseDetector.reseedRemoteDefaults()
+        snippetSettings.reseedRemoteDefaults()
+        heterodyneSettings.reseedRemoteDefaults()
+        recorder.reseedRemoteDefaults()
+        haptics.reseedRemoteDefaults()
+        autoIDSettings.reseedRemoteDefaults()
+        // The band is applied rather than stored, and its stamp is what decides
+        // whether a changed default is new — see `SimplifiedView.bandStamp`.
+        applySimplifiedDefaultsIfNeeded()
+        // Straight into the running processors, so a value that arrived while
+        // the detector was idle is in force at the next Start without a second
+        // trip through `startDetecting`.
+        seedSnippetProcessor()
+    }
+
     private func applySimplifiedDefaultsIfNeeded() {
         guard simplifiedMode else {
-            simplifiedDefaultsApplied = false
+            simplifiedDefaultsApplied = ""
             return
         }
-        guard !simplifiedDefaultsApplied else { return }
-        simplifiedDefaultsApplied = true
+        guard simplifiedDefaultsApplied != SimplifiedView.bandStamp else { return }
+        simplifiedDefaultsApplied = SimplifiedView.bandStamp
         // Fractions of Nyquist, which is what bandLow/bandHigh store. `nyquist`
         // falls back to 192 kHz before the engine has reported a rate, which is
         // the Griff's own — and applyBand runs again on every rate change
@@ -2780,10 +2825,23 @@ struct ContentView: View {
     /// from the app's Info.plist (CFBundleShortVersionString / CFBundleVersion), which
     /// Xcode stamps from the target's Marketing Version / Current Project Version at
     /// build time — no manual syncing needed.
+    ///
+    /// A Debug build says so, after the build number. Not a diagnostic nicety:
+    /// Debug is `-Onone`, which costs the DSP 30–45× on the scalar per-bin loops
+    /// (Context.md §13), so "is this the slow build?" is the first question to
+    /// ask of anything that looks like a performance problem — and there is
+    /// otherwise nothing on screen that answers it. `#if DEBUG` rather than a
+    /// setting, so it cannot be switched on for a release build or off for a
+    /// Debug one, and cannot reach a shipped binary at all.
     private var appFooter: some View {
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—"
         let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "—"
-        return Text("Created by Niall Bell · v\(version) (\(build))")
+        #if DEBUG
+        let configuration = " [DEBUG]"
+        #else
+        let configuration = ""
+        #endif
+        return Text("Created by Niall Bell · v\(version) (\(build))\(configuration)")
             .font(.caption2)
             .foregroundStyle(.tertiary)
             .padding(.bottom, 4)
@@ -2872,6 +2930,8 @@ struct ContentView: View {
         let build = info?["CFBundleVersion"] as? String ?? "?"
         let json = SettingsDump.makeJSON(tuning: snapshot,
                                          autoID: autoIDSettings,
+                                         recorder: recorder,
+                                         heterodyne: heterodyneSettings,
                                          appVersion: "\(short) (\(build))")
         return SettingsDump.write(json)
     }
@@ -2992,6 +3052,11 @@ struct ContentView: View {
     private func seedSnippetProcessor() {
         snippetSettings.apply(to: audio.snippetExpansion)
         audio.setSnippetRouting(snippetSettings.routing)
+        // The live channel has persisted settings of its own now, and they
+        // reach the processor here for the same reason the snippet's do: the
+        // processor is reset at every capture start, so anything not re-applied
+        // silently reverts to its built-in default.
+        heterodyneSettings.apply(to: audio.heterodyne)
     }
 
     /// Leave demo mode and hand the pipeline back to the microphone. Detection
@@ -3188,8 +3253,11 @@ struct ContentView: View {
         case .off:              "Off"
         case .heterodyne:       "Heterodyne"
         case .snippetExpansion: snippetSettings.routing == .expansionOnly
-                                    ? "Slow replay"
-                                    : "Slow replay with heterodyne"
+                                    ? "Time expansion"
+                                    : "Time expansion with heterodyne"
+        // "(file)" earns its place now that the live mode above owns the plain
+        // name: this one is playback-only and never reachable from the listen
+        // cycle, so the only way it can appear is beside a recording.
         case .timeExpansion:    "Time expansion (file)"
         }
     }
@@ -3213,10 +3281,12 @@ struct ContentView: View {
 
 }
 
-/// The app's one "a model suits where you are" card. Two things present it:
-/// the first arrival at the detector after onboarding (the
-/// `justFinishedOnboarding` handoff in ContentView), and a location move far
-/// enough to re-derive priors (`AutoIDSettings.pendingChangeSummary`).
+/// What changed because the user moved — shown after the fact, never before it.
+///
+/// **It was an offer until 2026-09-08** ("Suggested Model", with Use and Not
+/// Now). The model is chosen from the location fix now — see
+/// `AutoIDSettings.applyCoverage` — so by the time this appears the switch has
+/// already happened and there is nothing left to agree to. One button.
 ///
 /// **It used to be two unrelated screens** — this card, and a full `Form` sheet
 /// with a navigation bar and per-species sections
@@ -3224,29 +3294,56 @@ struct ContentView: View {
 /// the same offer in two visual languages, and the `Form` one was the one that
 /// turned up on a clean install.
 ///
-/// `model` is optional because a move can change the species list without
-/// changing which model covers the area. With no model there is nothing to
-/// activate, so the card becomes a notice with one button.
-private struct SuggestedModelSheet: View {
-    let model: ModelDescriptor?
-    /// How many species the refresh switched on or off, 0 when this is the
-    /// post-onboarding offer (nothing has changed yet — it is the first
-    /// derivation). Only ever shown as a count: the list itself is AutoID
-    /// settings, and a card is the wrong place to reproduce it.
-    let speciesChanged: Int
-    let onUse: (ModelDescriptor) -> Void
+/// Never shown on a first fix: `pendingChangeSummary` is only set on a move, so
+/// the automatic first activation is silent. Somebody who has just finished
+/// onboarding is not owed a sheet about a decision they were never asked to make.
+private struct AreaChangeSheet: View {
+    let summary: AutoIDSettings.PriorRefreshSummary
     @Environment(\.dismiss) private var dismiss
+
+    private var isOff: Bool {
+        if case .turnedOff = summary.modelChange { return true }
+        return false
+    }
+
+    private var title: String {
+        switch summary.modelChange {
+        case .switchedTo:  return "New Area"
+        case .turnedOff:   return "Out of Range"
+        case nil:          return "New Area"
+        }
+    }
+
+    /// The glyph carries the difference between "you're covered" and "you're
+    /// not" before a word of it is read, so the two cases can't be skimmed as
+    /// the same notice.
+    private var glyph: String {
+        isOff ? "mappin.slash" : "sparkle.magnifyingglass"
+    }
+
+    private var tint: Color { isOff ? .orange : .accentColor }
 
     private var message: String {
         var lines: [String] = []
-        if let model {
-            lines.append("\(model.displayName) covers your area (\(model.region)). "
-                       + "Activate it to start identifying species here.")
+        switch summary.modelChange {
+        case .switchedTo(let model):
+            lines.append("OpenBat is now identifying with \(model.displayName), "
+                       + "which covers \(model.region).")
+        case .turnedOff(let previous):
+            // Says what still works, because the alternative reading of "off" is
+            // "the app has stopped", and someone who drove somewhere to record
+            // bats needs to know the recording half is untouched.
+            lines.append("\(previous.displayName) doesn't cover where you are now, "
+                       + "so identification is off — naming bats with a "
+                       + "wrong-region model would invent species that aren't here. "
+                       + "Detecting and recording carry on as normal.")
+        case nil:
+            break
         }
-        if speciesChanged > 0 {
-            lines.append(speciesChanged == 1
+        if summary.speciesChanged > 0 {
+            lines.append(summary.speciesChanged == 1
                 ? "One species has been switched on or off for your new area."
-                : "\(speciesChanged) species have been switched on or off for your new area.")
+                : "\(summary.speciesChanged) species have been switched on or off for your new area.")
         }
         return lines.joined(separator: "\n\n")
     }
@@ -3254,12 +3351,12 @@ private struct SuggestedModelSheet: View {
     var body: some View {
         VStack(spacing: 24) {
             VStack(spacing: 10) {
-                Image(systemName: "sparkle.magnifyingglass")
+                Image(systemName: glyph)
                     .font(.system(size: 26, weight: .semibold))
-                    .foregroundStyle(Color.accentColor)
+                    .foregroundStyle(tint)
                     .frame(width: 72, height: 72)
-                    .background(Color.accentColor.opacity(0.15), in: Circle())
-                Text(model == nil ? "New Area" : "Suggested Model")
+                    .background(tint.opacity(0.15), in: Circle())
+                Text(title)
                     .font(.title2.weight(.semibold))
                 Text(message)
                     .font(.subheadline)
@@ -3269,33 +3366,16 @@ private struct SuggestedModelSheet: View {
             }
             .frame(maxWidth: .infinity)
 
-            if let model {
-                Button {
-                    onUse(model)
-                    dismiss()
-                } label: {
-                    Text("Use \(model.displayName)")
-                        .font(.headline)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 6)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.batAccent)
-
-                Button("Not Now", role: .cancel) { dismiss() }
-                    .padding(.top, 4)
-            } else {
-                Button {
-                    dismiss()
-                } label: {
-                    Text("OK")
-                        .font(.headline)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 6)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.batAccent)
+            Button {
+                dismiss()
+            } label: {
+                Text("OK")
+                    .font(.headline)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 6)
             }
+            .buttonStyle(.borderedProminent)
+            .tint(.batAccent)
         }
         .padding(.horizontal, 24)
         .padding(.top, 28)
@@ -3309,7 +3389,7 @@ private struct SuggestedModelSheet: View {
 /// Shown the first time a given ultrasonic microphone is attached, offering to
 /// calibrate it — see `ContentView.offerCalibrationIfAppropriate`.
 ///
-/// Same compact-sheet visual language as `SuggestedModelSheet`, deliberately:
+/// Same compact-sheet visual language as `AreaChangeSheet`, deliberately:
 /// the two are the same kind of thing, a one-off contextual offer that arrives
 /// because the app noticed something, and they should be recognisable as such.
 ///
@@ -3445,6 +3525,11 @@ private struct MaintenanceNoticeModifier: ViewModifier {
     /// Whether something else is presented. An alert raised over a sheet is not
     /// queued by SwiftUI, it is dropped — see `isBusy`'s caller.
     let isBusy: Bool
+    /// Mirrors `showing` back out, so the things `isBusy` is made of can defer
+    /// to this alert the way it defers to them. Written from `onChange`, never
+    /// from `body` — the alert is presented from in here, so nothing above can
+    /// otherwise tell it is up.
+    @Binding var isShowing: Bool
 
     /// Set once the remote answer has landed and cleared as soon as it is shown.
     @State private var queued: String?
@@ -3460,6 +3545,7 @@ private struct MaintenanceNoticeModifier: ViewModifier {
                 showIfClear()
             }
             .onChange(of: isBusy) { _, busy in if !busy { showIfClear() } }
+            .onChange(of: showing != nil) { _, up in isShowing = up }
             // And once on the way in, for a `ContentView` created after the
             // answer had already landed: `onChange` says nothing about a value
             // that was set before this modifier existed.
@@ -3492,7 +3578,8 @@ private struct MaintenanceNoticeModifier: ViewModifier {
 }
 
 extension View {
-    func maintenanceNotice(flags: FeatureFlagStore, isBusy: Bool) -> some View {
-        modifier(MaintenanceNoticeModifier(flags: flags, isBusy: isBusy))
+    func maintenanceNotice(flags: FeatureFlagStore, isBusy: Bool,
+                           showing: Binding<Bool>) -> some View {
+        modifier(MaintenanceNoticeModifier(flags: flags, isBusy: isBusy, isShowing: showing))
     }
 }

@@ -1492,7 +1492,13 @@ struct ConfidenceBadge: View {
 /// everyone else: "complex" is a term of art that a newcomer reads as the ordinary
 /// adjective, and "cf." is an abbreviation of Latin *confer*. Neither appears in
 /// GUANO metadata or the upload path, so they were only ever teaching a vocabulary,
-/// not carrying data — see the onboarding cards, which explain both jobs.
+/// not carrying data.
+///
+/// **`ComplexCallout` is where both pills are explained** — on the pass detail
+/// screen, on the pass they appear on. Onboarding used to teach them instead, a
+/// card each, which meant explaining a distinction between two pills to someone
+/// who had not yet seen a single pass; those cards were cut on 2026-09-08. If
+/// the wording here changes, the callout is what has to change with it.
 struct ComplexIndicator: View {
     let pass: PassRecord
 

@@ -48,6 +48,20 @@ final class LocationProvider: NSObject, CLLocationManagerDelegate {
         authorization = manager.authorizationStatus
     }
 
+    /// Re-reads the live authorization status into the published one.
+    ///
+    /// **Because the published copy can be stale, and onboarding believes it**
+    /// (2026-09-09). It is set in `init` and then only by the delegate, and a
+    /// manager read the instant it is created can answer `.notDetermined` before
+    /// its connection to the location daemon is up — so a device that has
+    /// refused location can arrive at the permission step looking undecided,
+    /// with a row that promises features it will not get and a Continue button
+    /// that asks the system for a decision it already has. Call this wherever a
+    /// screen is about to show or act on the status.
+    func refreshAuthorization() {
+        authorization = manager.authorizationStatus
+    }
+
     /// Requests when-in-use authorization and suspends until the OS dialog has actually
     /// been resolved (granted/denied/restricted) — used by onboarding so the soft-ask
     /// screen stays on screen behind the real system alert instead of advancing the

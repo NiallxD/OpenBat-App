@@ -28,6 +28,10 @@ import SwiftUI
 /// visual shorthand for "this thing is listening". Used behind the app icon on
 /// the welcome step and behind the tick on the final step.
 struct SonarPulseHero<Center: View>: View {
+    /// Edge length of the ring box. Sized by the caller rather than fixed at
+    /// 128 so the welcome step can give up some height on short screens — see
+    /// `OnboardingMetrics`.
+    var size: CGFloat = 128
     var ringCount: Int = 3
     /// Seconds for one ring to travel from the centre to fully faded.
     var period: Double = 2.6
@@ -62,7 +66,7 @@ struct SonarPulseHero<Center: View>: View {
             }
             center()
         }
-        .frame(width: 128, height: 128)
+        .frame(width: size, height: size)
         .accessibilityHidden(true)
     }
 }

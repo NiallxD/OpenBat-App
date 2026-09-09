@@ -5,7 +5,7 @@
 //  Lets the user correct the species assigned to a recording, from the pencil
 //  button on WavFileInfoCard's GUANO Metadata card. Same bottom-sheet chrome
 //  (centered header, drag indicator, rounded presentation) as ContentView's
-//  StartDetectingSheet/SuggestedModelSheet, but with a searchable list rather
+//  StartDetectingSheet/AreaChangeSheet, but with a searchable list rather
 //  than a couple of big buttons — there are dozens of species to choose from,
 //  pooled across every registered model (see `options`) rather than just the
 //  one that produced the original auto-ID, since a manual correction may

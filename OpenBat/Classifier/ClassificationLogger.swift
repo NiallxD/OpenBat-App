@@ -124,11 +124,25 @@ final class ClassificationLogger {
 
     /// Bytes on disk for the active file and every archive together — what the
     /// log actually costs, which is what the settings row reports.
-    func totalBytesOnDisk() -> Int {
-        queue.sync {
-            ([fileURL] + archiveURLs()).reduce(0) { total, url in
-                let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
-                return total + ((attrs?[.size] as? Int) ?? 0)
+    ///
+    /// **`async`, and never `queue.sync`** (2026-09-09). This is called from the
+    /// Settings sheet, and the sync version was the reason tapping Settings
+    /// sometimes hung for two or three seconds with the menu already dismissed
+    /// and the gear button mid-transition. `queue` is a background-QoS serial
+    /// queue that every logged pulse posts an append to, and those appends write
+    /// to a file in the iCloud container — so a `sync` from the main thread
+    /// waited out the whole backlog of iCloud file I/O before it ran, which is
+    /// exactly why it only happened after a busy session and never reproduced
+    /// on demand. The work itself is unchanged and still runs on `queue`, so it
+    /// still can't catch a half-written row; only the waiting moved off main.
+    func totalBytesOnDisk() async -> Int {
+        await withCheckedContinuation { continuation in
+            queue.async { [self] in
+                let total = ([fileURL] + archiveURLs()).reduce(0) { total, url in
+                    let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+                    return total + ((attrs?[.size] as? Int) ?? 0)
+                }
+                continuation.resume(returning: total)
             }
         }
     }

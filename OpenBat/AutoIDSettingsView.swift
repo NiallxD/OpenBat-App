@@ -2,10 +2,15 @@
 //  AutoIDSettingsView.swift
 //  OpenBat
 //
-//  AutoID tab of SettingsView. Lists the available classifier models with a
-//  single-select activation control; tapping a model pushes ModelDetailView,
-//  where its species, priors, and detection thresholds are configured.
-//  Only one model classifies at a time (AutoIDSettings.activeModelID).
+//  AutoID tab of SettingsView. Lists the available classifier models and shows
+//  which one is identifying; tapping a model pushes ModelDetailView, where its
+//  species, priors, and detection thresholds are configured.
+//
+//  **The activation control is gone** (Niall, 2026-09-08). Which model runs is
+//  decided by where the phone is — `AutoIDSettings.applyCoverage` — so the
+//  radio buttons that used to be here, and the "Suggested for your location"
+//  card with its Use button, were offering a choice the next location fix would
+//  have overridden anyway. What is left states the answer and why.
 //
 
 import SwiftUI
@@ -61,19 +66,18 @@ struct AutoIDSettingsView: View {
     private var settingsForm: some View {
         Form {
             locationUnavailableSection
-            locationSuggestionSection
+            noCoverageSection
 
             Section {
                 ForEach(ModelRegistry.all) { model in
                     modelRow(model)
                 }
             } header: {
-                // "One model at a time" is the card's whole rule, and it is what
-                // the single-select circles already show. Where each tap goes —
-                // circle to switch, name for the species list — is learned in one
-                // tap and doesn't earn a paragraph. See `SettingsView`'s header
-                // for the three-part shape every settings card now follows.
-                CardHeader("Models", "Which species OpenBat tries to recognise.")
+                // The subtitle carries the rule now that nothing on the card is
+                // tappable except the model names: one model runs, and where you
+                // are is what picks it. See `SettingsView`'s header for the
+                // three-part shape every settings card now follows.
+                CardHeader("Models", "Chosen for you from where you are.")
             }
 
             // Moved here from General (2026-08-18). It lived under a "Location"
@@ -82,24 +86,25 @@ struct AutoIDSettingsView: View {
             // are good enough to become a pin, so they belong beside the thing
             // making the identifications.
             Section {
-                // Both notes sit ABOVE their control, which is where a control's
-                // description belongs — they were below, which made them read as
-                // an afterthought about the thing you had already moved.
-                VStack(alignment: .leading) {
-                    HStack {
-                        Text("Minimum confidence")
-                        Spacer()
-                        Text("\(Int(settings.mapPinMinConfidence * 100))%").monospacedDigit()
+                SettingValue("Minimum confidence",
+                             "How certain the identification has to be before it earns a pin. The map "
+                           + "shows the best of what a session heard, so it will usually hold fewer pins "
+                           + "than the session holds identifications.",
+                             value: "\(Int(settings.mapPinMinConfidence * 100))%")
+                Slider(value: Binding(get: { Double(settings.mapPinMinConfidence) },
+                                      set: { settings.mapPinMinConfidence = Float($0) }),
+                       in: 0.3...0.95, step: 0.05)
+
+                SettingRow("Minimum calls",
+                           "How many calls the pass has to hold, so one chance detection isn't a pin.") {
+                    Stepper(value: $settings.mapPinMinPulseCount, in: 1...20) {
+                        Text("\(settings.mapPinMinPulseCount)")
+                            .monospacedDigit()
                             .foregroundStyle(.secondary)
                     }
-                    ControlNote("How certain the identification has to be.")
-                    Slider(value: Binding(get: { Double(settings.mapPinMinConfidence) },
-                                          set: { settings.mapPinMinConfidence = Float($0) }),
-                           in: 0.3...0.95, step: 0.05)
+                    .fixedSize()
+                    .accessibilityLabel("Minimum calls")
                 }
-                ControlNote("So one chance detection isn't a pin.")
-                Stepper("Minimum calls: \(settings.mapPinMinPulseCount)",
-                        value: $settings.mapPinMinPulseCount, in: 1...20)
             } header: {
                 CardHeader("Map pins", "Which identifications end up on the map.")
             }
@@ -107,19 +112,22 @@ struct AutoIDSettingsView: View {
         .onAppear { location.requestRegionFix() }
     }
 
-    /// Warns that AutoID species priors are neutral (every species enabled, equal
-    /// weight — see `AutoIDSettings.defaultSettings`) until a location fix lets GBIF
-    /// refine them. Shown for both "denied/restricted" (permanent until the user
-    /// changes it in Settings) and "not yet determined/no fix yet" (transient), since
-    /// either way the user is currently getting unfiltered results.
+    /// Warns that nothing is being identified yet, because with no fix there is
+    /// nothing to pick a model from — and that the species priors are still neutral
+    /// (every species enabled, equal weight — see `AutoIDSettings.defaultSettings`).
+    ///
+    /// Shown for both "denied/restricted" (permanent until the user changes it in
+    /// Settings) and "not yet determined/no fix yet" (transient): either way the
+    /// answer to "why is nothing being named" is the same one.
     @ViewBuilder
     private var locationUnavailableSection: some View {
         if location.currentCoordinate == nil {
             Section {
                 Label {
-                    Text("Location isn't available, so species priors haven't been "
-                       + "narrowed to your area — AutoID may be less accurate than "
-                       + "with location enabled.")
+                    Text("Location isn't available, so OpenBat can't tell which "
+                       + "model suits where you are. Identification stays off, and "
+                       + "species priors haven't been narrowed to your area, until "
+                       + "a location fix comes through.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } icon: {
@@ -130,37 +138,28 @@ struct AutoIDSettingsView: View {
         }
     }
 
-    /// Suggests activating a model that covers the user's current location, or notes
-    /// that none does yet. Silent (no section at all) until a fix comes back or the
-    /// user has denied location — there's nothing useful to say either way.
+    /// Says so when the user is somewhere no model covers — which, now that
+    /// coverage decides the model, is the same as saying identification is off.
+    ///
+    /// Only shown with a fix in hand. Without one the section above is already
+    /// explaining the same silence, and two notices about one absence is one too
+    /// many.
     @ViewBuilder
-    private var locationSuggestionSection: some View {
+    private var noCoverageSection: some View {
         if let coordinate = location.currentCoordinate {
-            let suggested = ModelRegistry.suggestedModel(for: coordinate)
-            if let suggested, settings.activeModelID != suggested.id {
+            if ModelRegistry.suggestedModel(for: coordinate) == nil {
                 Section {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("\(suggested.displayName) covers your area").font(.subheadline)
-                            Text(suggested.region)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Button("Use") { settings.activeModelID = suggested.id }
-                            .buttonStyle(.borderedProminent)
+                    Label {
+                        Text("No model covers where you are, so identification is "
+                           + "off. Detecting and recording work as normal, and a "
+                           + "model switches itself on if you travel into one's "
+                           + "range.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } icon: {
+                        Image(systemName: "mappin.slash")
+                            .foregroundStyle(.secondary)
                     }
-                } header: {
-                    Text("Suggested for your location")
-                }
-            } else if suggested == nil {
-                Section {
-                    Text("No AutoID model currently covers your location. "
-                       + "You can still activate any model below manually.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } header: {
-                    Text("Suggested for your location")
                 }
             }
         }
@@ -169,16 +168,14 @@ struct AutoIDSettingsView: View {
     private func modelRow(_ model: ModelDescriptor) -> some View {
         let isActive = settings.activeModelID == model.id
         return HStack(spacing: 12) {
-            // Leading radio: single-select activation. Tapping the active one turns it off.
-            Button {
-                settings.activeModelID = isActive ? nil : model.id
-            } label: {
-                Image(systemName: isActive ? "checkmark.circle.fill" : "circle")
-                    .imageScale(.large)
-                    .foregroundStyle(isActive ? Color.accentColor : .secondary)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(isActive ? "Active model" : "Activate \(model.displayName)")
+            // A statement, not a control. It reads as one too — no button shape,
+            // and the inactive rows carry an empty circle rather than nothing, so
+            // the active one is picked out by contrast rather than by being the
+            // only row with a glyph.
+            Image(systemName: isActive ? "checkmark.circle.fill" : "circle")
+                .imageScale(.large)
+                .foregroundStyle(isActive ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.tertiary))
+                .accessibilityLabel(isActive ? "Identifying" : "Not in range")
 
             NavigationLink {
                 ModelDetailView(settings: settings, model: model)

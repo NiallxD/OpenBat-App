@@ -11,7 +11,7 @@
 //  changes) — a small seek+read, but file IO nonetheless, kept out of `body`.
 //
 //  The pencil button opens `SpeciesEditSheet` (same bottom-sheet chrome as
-//  ContentView's StartDetectingSheet/SuggestedModelSheet) to correct the
+//  ContentView's StartDetectingSheet/AreaChangeSheet) to correct the
 //  species. A correction writes BOTH the in-app `Recording` (what every
 //  list/feed/map reads) via `ClassificationStore.setManualSpecies` AND the
 //  WAV's own `Species Manual ID` GUANO field via

@@ -139,7 +139,7 @@ nonisolated final class SnippetExpansionProcessor: @unchecked Sendable {
     /// A little under the knee, because a snippet can be summed with the live
     /// heterodyne bed under `.both` routing and the two should not add their way
     /// into the clipper.
-    private static let targetPeak: Float = ListenOutputStage.peakBeforeMakeup * 0.8
+    private static var targetPeak: Float { ListenOutputStage.peakBeforeMakeup * 0.8 }
 
     /// **The background is capped as well as the peak, and that is the whole
     /// fix for "some replays are all hiss".** Matching every snippet to the
@@ -166,7 +166,7 @@ nonisolated final class SnippetExpansionProcessor: @unchecked Sendable {
     /// at −6 dBFS and the quietest at −22, both comfortably audible. Going
     /// lower keeps tightening the spread but starts making calls themselves
     /// quiet, which is the wrong thing to trade for it.
-    private static let maxBackground: Float = 0.0025 / ListenOutputStage.makeupGain
+    private static var maxBackground: Float { Tunable.snippetMaxBackground.value(Float(0.0025)) / ListenOutputStage.makeupGain }
 
     /// Ceiling on the automatic match, so nothing gets lifted absurdly far.
     private static let maxAutoGain: Float = 32
@@ -181,7 +181,13 @@ nonisolated final class SnippetExpansionProcessor: @unchecked Sendable {
     /// noise-only windows sit at 15–19 dB, windows holding a call at 32 dB and
     /// up. 24 is in the empty gap between them, and the exact value barely
     /// matters — 20 dB keeps 68% of windows, 24 keeps 66%, 30 keeps 62%.
-    private static let minCallCrestDB: Float = 24
+    private static var minCallCrestDB: Float { Tunable.snippetMinCallCrestDB.value(Float(24)) }
+
+    /// Capture-thread mirrors of the three level constants above, refreshed by
+    /// `reset(inputSampleRate:)`. See there for why they are not read directly.
+    private var crestGateDB: Float = 24
+    private var levelTargetPeak: Float = 0.14
+    private var levelMaxBackground: Float = 0.000625
 
     /// At most this many samples are sorted to find a snippet's background
     /// level. A median needs a representative sample, not every sample, and
@@ -465,7 +471,7 @@ nonisolated final class SnippetExpansionProcessor: @unchecked Sendable {
         // Nothing worth hearing in this window — drop it and get back to
         // listening. Caller sees the phase go straight back to recording.
         let crestDB = 20 * log10(peak / background)
-        guard crestDB >= Self.minCallCrestDB else {
+        guard crestDB >= crestGateDB else {
             accepted = false
             return
         }
@@ -474,8 +480,8 @@ nonisolated final class SnippetExpansionProcessor: @unchecked Sendable {
         // Match every snippet to the same output level, so a bat at 40 m and a
         // bat overhead replay equally loud — but never at the cost of lifting
         // the background, which is what `maxBackground` bounds.
-        let byPeak = Self.targetPeak / max(peak, 1e-9)
-        let byBackground = Self.maxBackground / background
+        let byPeak = levelTargetPeak / max(peak, 1e-9)
+        let byBackground = levelMaxBackground / background
         let auto = min(min(byPeak, byBackground), Self.maxAutoGain)
         replayGain = auto * Float(pow(10, trimDB / 20))
         replayPos = 0
@@ -486,6 +492,15 @@ nonisolated final class SnippetExpansionProcessor: @unchecked Sendable {
     /// installing the tap — no concurrent `process`/`render` at this point.
     func reset(inputSampleRate fs: Double) {
         inputSampleRate = fs
+        // **Snapshot the `Tunable`-backed levels here, at capture start.**
+        // `prepareReplay` runs on the capture thread, and a `Tunable` read takes
+        // a lock (`RemoteDefaults`) — not something to do per snippet on a
+        // realtime thread. Capture start is also when a remotely-set value is
+        // meant to become audible, so this is where it belongs rather than an
+        // accident of where the read was cheap.
+        crestGateDB = Self.minCallCrestDB
+        levelTargetPeak = Self.targetPeak
+        levelMaxBackground = Self.maxBackground
         let needed = Int(Self.maxMemorySeconds * fs)
         if needed > ringCapacity {
             ring.deallocate()

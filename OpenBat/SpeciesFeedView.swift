@@ -86,25 +86,45 @@ struct SpeciesFeedView: View {
                     .font(.title3)
                     .foregroundStyle(.secondary)
             }
-            Text(emptyMessage)
+            emptyMessage
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
+                .accessibilityLabel(emptyMessageAccessibilityLabel)
         }
         .padding(.horizontal, 12)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private var emptyMessage: String {
+    /// `Text`, not `String`, so the pre-session message can carry the start
+    /// button's own glyph inline (Niall, 2026-09-09). "Start detecting to see
+    /// species here" named an action without saying where it is; the card is
+    /// the first thing a new user looks at in simplified view, and the button
+    /// it means is in the tab bar. `play.fill` is the glyph that button
+    /// actually shows when idle — see `sessionButtonSymbol`.
+    private var emptyMessage: Text {
         if identificationDisabled {
             // No instruction, because there is nothing the user can do — and no
             // reason either, because the launch notice already gave one.
-            return "Identification is switched off."
+            return Text("Identification is switched off.")
         }
         if !autoIDActive {
-            return "No AutoID model is active. Turn one on in Settings ▸ AutoID to identify species."
+            return Text("No AutoID model is active. Turn one on in Settings ▸ AutoID to identify species.")
         }
-        return sessionStart == nil ? "Start detecting to see species here" : "No species detected yet"
+        guard sessionStart == nil else { return Text("No species detected yet") }
+        return Text("Tap the play button (\(Image(systemName: "play.fill"))) to start detecting, species detected will appear here")
+    }
+
+    /// VoiceOver reads an `Image` interpolated into a `Text` as nothing at all,
+    /// so the glyph is spelled out here rather than leaving a sentence with a
+    /// hole in the middle of it.
+    private var emptyMessageAccessibilityLabel: String {
+        if identificationDisabled { return "Identification is switched off." }
+        if !autoIDActive {
+            return "No AutoID model is active. Turn one on in Settings, AutoID, to identify species."
+        }
+        guard sessionStart == nil else { return "No species detected yet" }
+        return "Tap the play button to start detecting, species detected will appear here"
     }
 }
 

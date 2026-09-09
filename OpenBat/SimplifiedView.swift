@@ -54,20 +54,32 @@ enum SimplifiedView {
     /// call, 2026-08-16) rather than being grandfathered into advanced.
     static let key = "ui.simplifiedMode"
 
-    /// Set once `applyDefaults` has run for the current stint in simplified
-    /// view, and cleared on the way out so re-entering re-applies. Without it,
-    /// the band would either never be applied (a fresh install that leaves the
-    /// onboarding toggle untouched fires no `onChange`) or be re-applied on
-    /// every launch, reverting the user's own tweak from the one settings
-    /// button simplified view still shows.
+    /// Which band `applyDefaults` last applied, and empty on the way out of
+    /// simplified view so re-entering re-applies. Without it, the band would
+    /// either never be applied (a fresh install that leaves the onboarding
+    /// toggle untouched fires no `onChange`) or be re-applied on every launch,
+    /// reverting the user's own tweak from the one settings button simplified
+    /// view still shows.
+    ///
+    /// **The band it applied, not a bare "done" flag** (2026-09-09). The two
+    /// numbers below can now be set remotely, and a flag could not tell "this
+    /// stint has been set up" from "set up with the band we no longer use" — so
+    /// a changed default would have reached only installs that had never
+    /// entered simplified view, which is almost none of them. Storing what was
+    /// applied makes the question answerable: same band, leave the user's
+    /// tweak alone; different band, apply the new one.
     static let defaultsAppliedKey = "ui.simplifiedDefaultsApplied"
+
+    /// The stamp written to `defaultsAppliedKey`, and the thing compared
+    /// against it.
+    static var bandStamp: String { "\(Int(bandLowHz)),\(Int(bandHighHz))" }
 
     /// Most bat calls fall in this band, and it is what the bat-range button
     /// sets in advanced mode — that button is hidden here, so simplified view
     /// starts there instead of at the full 0–192 kHz, where a phone's own
     /// low-frequency noise dominates the picture.
-    static let bandLowHz: Double = 15_000
-    static let bandHighHz: Double = 90_000
+    static var bandLowHz: Double { Tunable.simplifiedBandLowHz.value(15_000) }
+    static var bandHighHz: Double { Tunable.simplifiedBandHighHz.value(90_000) }
 }
 
 extension View {

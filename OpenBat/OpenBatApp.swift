@@ -108,6 +108,10 @@ private struct RootView: View {
         if decision == .runOnboardingAgain {
             OnboardingState.shared.hasCompletedWelcome = false
         }
+        // After the release decision, not instead of it: the changelog still
+        // gets to say what changed, and this only decides which screen the
+        // launch starts on. See `OnboardingState.forceEveryLaunchKey`.
+        OnboardingState.applyEveryLaunchOverrideOnce()
     }
 
     var body: some View {

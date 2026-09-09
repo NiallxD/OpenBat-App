@@ -198,10 +198,10 @@ final class AudioEngineController {
     /// How far heterodyne drops while a snippet is sounding. −6 dB: enough to put
     /// the replay in front without losing the live channel, which is the whole
     /// reason both are audible at once.
-    private static let snippetHeterodyneDuck: Float = 0.5
+    private static var snippetHeterodyneDuck: Float { Tunable.snippetDuckLevel.value(Float(0.5)) }
     /// Per-sample slew for that duck — ~40 ms at 48 kHz, so the live channel
     /// steps back and returns smoothly around a replay instead of clicking.
-    private static let snippetDuckSlew: Float = 1.0 / (48_000 * 0.04)
+    private static var snippetDuckSlew: Float { 1.0 / Float(48_000 * Tunable.snippetDuckSeconds.value(0.04)) }
 
     /// Makeup gain applied to EVERYTHING leaving the listen output node, on top
     /// of each processor's own gain.
@@ -234,9 +234,9 @@ final class AudioEngineController {
     /// so a processor gain of 6 is really 24. The replay path now derives its
     /// target from `ListenOutputStage` instead of naming a number, and the
     /// heterodyne default came down from 6 to 1 for the same reason.
-    private static let listenOutputMakeupGain = ListenOutputStage.makeupGain
+    private static var listenOutputMakeupGain: Float { ListenOutputStage.makeupGain }
     /// Where the soft clip starts. Below this the makeup gain is exactly linear.
-    private static let listenSoftClipThreshold = ListenOutputStage.softClipKnee
+    private static var listenSoftClipThreshold: Float { ListenOutputStage.softClipKnee }
 
     /// Output-thread-only duck level, boxed so the render closure can carry it
     /// across callbacks without capturing `self` (main-actor) or allocating.
@@ -293,11 +293,19 @@ final class AudioEngineController {
     // Mic-QA running stats — accumulated since the current capture's start(),
     // reset by `resetSessionStats()`. See `AudioDiagnostics`'s doc comments for
     // what each one is for.
-    private nonisolated(unsafe) var sessionNoiseFloorDB: Float = 0
+    /// 1 dB bins of buffer RMS, for the noise-floor percentile. A histogram
+    /// rather than a running minimum because the minimum was always the meter's
+    /// own floor — see `AudioDiagnostics.noiseFloorDB`.
+    private nonisolated(unsafe) var sessionNoiseHistogram = [Int](repeating: 0, count: AudioLevel.noiseHistogramBins)
     private nonisolated(unsafe) var sessionPeakDB: Float = AudioLevel.minDB
-    private nonisolated(unsafe) var latestDCOffset: Float = 0
+    /// Sum of each buffer's mean, weighted by its length, so the published
+    /// offset is the session's mean rather than the last buffer's.
+    private nonisolated(unsafe) var sessionDCSum: Double = 0
     private nonisolated(unsafe) var sessionClippedCount = 0
     private nonisolated(unsafe) var sessionTotalSamples: Int64 = 0
+    /// Frames still to be thrown away before the QA numbers start, sized from
+    /// the first buffer's rate — see `AudioLevel.micQASettleSeconds`.
+    private nonisolated(unsafe) var micQASettleFrames: Int64 = -1
     private var statsTimer: Timer?
     private let statsFlushRate = 15.0 // Hz
 
@@ -502,10 +510,11 @@ final class AudioEngineController {
         statsTimer = nil
         demoSource?.stop()
         demoSource = nil
-        // Never touch `inputNode` on the demo path: it was never tapped, and
-        // merely accessing it instantiates the input unit — which under the
-        // `.playback` category demo mode uses (and on a device with no input at
-        // all, e.g. the simulator) is a needless way to fail.
+        // Never touch `inputNode` on the demo path: it was never tapped, so
+        // there is nothing to remove, and merely accessing it instantiates the
+        // input unit — a needless way to fail on a device with no input at all
+        // (the simulator), which is also the case demo mode falls back to
+        // `.playback` for.
         if !isDemoMode { engine.inputNode.removeTap(onBus: 0) }
         if engine.isRunning { engine.stop() }
         sourceNode = nil
@@ -556,9 +565,13 @@ final class AudioEngineController {
     }
 
     /// The demo counterpart to `startEngine()`. Deliberately never touches
-    /// `engine.inputNode`: with no tap and no input unit, this path needs no
-    /// microphone permission and no record-capable session, which is what lets
-    /// the whole pipeline run in the simulator.
+    /// `engine.inputNode`: the file is the input, so there is no tap and no
+    /// input unit to instantiate. That is the one difference from a live
+    /// capture that cannot be removed — everything downstream, the session
+    /// category included, is now the same (`configureSessionForDemo`), so a
+    /// demo can be trusted for level and distortion judgements. Where no
+    /// record-capable session can be opened at all the pipeline still runs, on
+    /// `.playback`, which is what keeps it working in the simulator.
     private func startDemoCapture(url: URL) async {
         do {
             resetSessionStats()
@@ -566,9 +579,14 @@ final class AudioEngineController {
             let rate = source.sampleRate
 
             // The engine only exists here to carry the listening source node to
-            // the speaker. With listening off there is no graph to build at all.
+            // the speaker. With listening off there is no graph to build at all
+            // — and, deliberately, no session either: demo mode with listening
+            // off touches the audio session not at all, which is why the app
+            // suspends on lock in that state (expected, and documented). The
+            // session is configured exactly as a live capture configures it
+            // whenever there IS something to hear; see `configureSessionForDemo`.
             if isListening {
-                try await configureSession(playbackOnly: true)
+                try await configureSessionForDemo()
                 engine = AVAudioEngine()
                 sourceNode = nil
                 attachListenOutput()
@@ -634,22 +652,33 @@ final class AudioEngineController {
     /// to be read/copied after the test finishes.
     private func resetSessionStats() {
         statsLock.lock()
-        sessionNoiseFloorDB = 0
+        for i in sessionNoiseHistogram.indices { sessionNoiseHistogram[i] = 0 }
         sessionPeakDB = AudioLevel.minDB
-        latestDCOffset = 0
+        sessionDCSum = 0
         sessionClippedCount = 0
         sessionTotalSamples = 0
+        micQASettleFrames = -1
         statsLock.unlock()
         // A half-counted rate change from the previous capture must not carry
         // into this one — the next flush would adopt it a tick or two later.
         pendingRate = 0
         pendingRateTicks = 0
         diagnostics.noiseFloorDB = 0
+        diagnostics.hasNoiseFloor = false
         diagnostics.peakLevelDB = AudioLevel.minDB
         diagnostics.dcOffsetPercent = 0
         diagnostics.clippedSampleCount = 0
         diagnostics.totalSampleCount = 0
     }
+
+    /// Start the microphone QA numbers again without restarting the capture.
+    ///
+    /// The numbers are only comparable between two microphones if both were
+    /// asked the same question, and the question is a fixed test run (so many
+    /// seconds quiet, so many seconds of a known source). Before this existed
+    /// the only way to begin one was to stop and start the detector, which on
+    /// a real night means ending the session you were in the middle of.
+    func resetMicQA() { resetSessionStats() }
 
     private func startStatsTimer() {
         statsTimer?.invalidate()
@@ -667,9 +696,9 @@ final class AudioEngineController {
         let level = latestLevelDB
         let rate = latestBufferSampleRate
         let channels = latestBufferChannels
-        let noiseFloor = sessionNoiseFloorDB
+        let noiseFloor = AudioLevel.noisePercentileDB(sessionNoiseHistogram, fraction: 0.1)
         let peak = sessionPeakDB
-        let dcOffset = latestDCOffset
+        let dcSum = sessionDCSum
         let clipped = sessionClippedCount
         let totalSamples = sessionTotalSamples
         statsLock.unlock()
@@ -680,9 +709,10 @@ final class AudioEngineController {
         // — but only once it has held, see the debounce fields' comment.
         if rate > 0 { publishDeliveredRate(rate) }
         if channels > 0 { diagnostics.channelCount = channels }
-        diagnostics.noiseFloorDB = noiseFloor
+        diagnostics.noiseFloorDB = noiseFloor ?? 0
+        diagnostics.hasNoiseFloor = noiseFloor != nil
         diagnostics.peakLevelDB = peak
-        diagnostics.dcOffsetPercent = dcOffset * 100
+        diagnostics.dcOffsetPercent = totalSamples > 0 ? Float(dcSum / Double(totalSamples)) * 100 : 0
         diagnostics.clippedSampleCount = clipped
         diagnostics.totalSampleCount = totalSamples
         syncSlowDiagnostics()
@@ -757,10 +787,13 @@ final class AudioEngineController {
     /// category a listen-mode switch engages. So the actual session calls run on
     /// a detached task, never the main actor; only the quick `@Observable`
     /// diagnostics update happens back on main. See Context.md §6.
-    /// - Parameter playbackOnly: demo mode with listening on — the engine needs
-    ///   an active session to reach the speaker, but no input. `.playback`
-    ///   keeps demo mode entirely off the record path: no permission prompt, no
-    ///   input route negotiation, nothing to go wrong where there's no mic.
+    /// - Parameter playbackOnly: the demo fallback for a device that cannot open
+    ///   a record-capable session at all (the simulator, or a refused
+    ///   microphone). The engine needs an active session to reach the speaker,
+    ///   but no input, and `.playback` keeps that case entirely off the record
+    ///   path. **Not the normal demo path** — see `configureSessionForDemo`:
+    ///   `.playback` is louder than the `.measurement` session live listening
+    ///   runs under, so a demo heard through it misrepresents field levels.
     private func configureSession(playbackOnly: Bool = false) async throws {
         // Let a just-fired stop() finish deactivating before we reactivate —
         // otherwise setActive(true) here can race setActive(false) still in
@@ -802,6 +835,43 @@ final class AudioEngineController {
         }.value
         isConfigured = true
         updateInputDiagnostics()
+    }
+
+    /// Configure the session for a demo feed the same way a microphone capture
+    /// configures it.
+    ///
+    /// **A demo should sound exactly like the thing it is standing in for**
+    /// (Niall, 2026-09-09). It did not: demo mode used `.playback`/`.default`
+    /// while live listening uses `.playAndRecord`/`.measurement`, and
+    /// measurement mode attenuates the output path substantially — that is the
+    /// whole reason `listenOutputMakeupGain` exists. So every level judgement
+    /// made against the demo was made several dB louder than the field, which
+    /// is exactly the judgement the demo is most used for.
+    ///
+    /// The old category was chosen to keep demo mode off the record path
+    /// entirely: no permission prompt, no input negotiation, nothing to fail
+    /// where there is no microphone. That is still worth having when it is all
+    /// that is available, so it becomes the fallback rather than the rule — a
+    /// simulator, or a device that has refused the microphone, still plays the
+    /// demo. On anything that can open a record-capable session, the demo now
+    /// hears itself through the same session, the same makeup gain and the same
+    /// soft clipper as a live pass.
+    ///
+    /// Permission is requested rather than assumed, for the same reason
+    /// `start()` requests it: `.undetermined` is not a refusal, and prompting is
+    /// what turns it into an answer.
+    private func configureSessionForDemo() async throws {
+        if await requestPermission() {
+            do {
+                try await configureSession()
+                return
+            } catch {
+                // Fall through — a record-capable session isn't available on
+                // this device right now, and a demo that plays is worth more
+                // than one that matches.
+            }
+        }
+        try await configureSession(playbackOnly: true)
     }
 
     private func updateInputDiagnostics() {
@@ -908,11 +978,26 @@ final class AudioEngineController {
         // The buffer's own format is the ground truth for the delivered rate.
         latestBufferSampleRate = buffer.format.sampleRate
         latestBufferChannels = Int(buffer.format.channelCount)
-        sessionNoiseFloorDB = min(sessionNoiseFloorDB, level)
-        sessionPeakDB = max(sessionPeakDB, analysis.peakDB)
-        latestDCOffset = analysis.dcOffset
-        sessionClippedCount += analysis.clipped
-        sessionTotalSamples += Int64(analysis.sampleCount)
+        // Everything below this line is the mic-QA set, and none of it counts
+        // until the input has settled: see `AudioLevel.micQASettleSeconds`.
+        if micQASettleFrames < 0 {
+            micQASettleFrames = Int64(buffer.format.sampleRate * AudioLevel.micQASettleSeconds)
+        }
+        if micQASettleFrames > 0 {
+            micQASettleFrames -= Int64(analysis.sampleCount)
+        } else {
+            sessionPeakDB = max(sessionPeakDB, analysis.peakDB)
+            sessionDCSum += Double(analysis.dcOffset) * Double(analysis.sampleCount)
+            sessionClippedCount += analysis.clipped
+            sessionTotalSamples += Int64(analysis.sampleCount)
+            // Buffers of exact digital silence are not a quiet microphone, they
+            // are no microphone, so they are left out of the floor rather than
+            // dragged into it — a capture that is all silence reports no floor
+            // at all (`hasNoiseFloor`).
+            if level > AudioLevel.minDB {
+                sessionNoiseHistogram[AudioLevel.noiseHistogramBin(level)] += 1
+            }
+        }
         statsLock.unlock()
     }
 
@@ -930,6 +1015,18 @@ final class AudioEngineController {
         // thread at attach time — the render block below runs on the realtime
         // output thread and must not allocate. Sized well past any plausible
         // frameCount; the block clamps rather than trusting that.
+        // **Read here, at attach time, and never inside the render block.**
+        // These four are `Tunable`-backed, and a `Tunable` read takes a lock
+        // (`RemoteDefaults`) — which on the realtime output thread is exactly
+        // the kind of unbounded wait that produces a glitch. Captured into the
+        // closure as plain values instead, so the render path does arithmetic
+        // and nothing else. Capture start is also the right moment for them to
+        // change: a level that moved mid-buffer would step audibly.
+        let makeup = Self.listenOutputMakeupGain
+        let knee = Self.listenSoftClipThreshold
+        let duckTarget = Self.snippetHeterodyneDuck
+        let duckSlew = Self.snippetDuckSlew
+
         let mixCapacity = 4096
         let mixBuffer = UnsafeMutableBufferPointer<Float>.allocate(capacity: mixCapacity)
         mixBuffer.initialize(repeating: 0)
@@ -1003,9 +1100,9 @@ final class AudioEngineController {
                     // buffer of every replay — a step on the live channel, i.e.
                     // an audible click at exactly the moment the replay is
                     // supposed to fade in.
-                    let target: Float = sounding ? Self.snippetHeterodyneDuck : 1.0
+                    let target: Float = sounding ? duckTarget : 1.0
                     var d = duckBox.level
-                    let slew = Self.snippetDuckSlew
+                    let slew = duckSlew
                     for i in 0..<n {
                         if d < target { d = min(d + slew, target) }
                         else if d > target { d = max(d - slew, target) }
@@ -1021,8 +1118,6 @@ final class AudioEngineController {
             // and the mix of the two are corrected identically — see
             // `listenOutputMakeupGain`. `.off` returns above rather than
             // multiplying a buffer of zeroes.
-            let makeup = Self.listenOutputMakeupGain
-            let knee = Self.listenSoftClipThreshold
             for i in 0..<n {
                 let x = out[i] * makeup
                 let mag = abs(x)

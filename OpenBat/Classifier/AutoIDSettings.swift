@@ -12,7 +12,7 @@ import CoreLocation
 import Foundation
 
 @Observable
-final class AutoIDSettings {
+final class AutoIDSettings: Reseedable {
 
     struct SpeciesState: Codable {
         var enabled: Bool
@@ -95,10 +95,10 @@ final class AutoIDSettings {
     /// A session pass drops a species pin only when its confidence and pulse count both
     /// clear these gates ("best of the best"). Persisted independently of the model blob.
     var mapPinMinConfidence: Float {
-        didSet { UserDefaults.standard.set(mapPinMinConfidence, forKey: Self.keyMapConf) }
+        didSet { persist(mapPinMinConfidence, Self.keyMapConf) }
     }
     var mapPinMinPulseCount: Int {
-        didSet { UserDefaults.standard.set(mapPinMinPulseCount, forKey: Self.keyMapPulses) }
+        didSet { persist(mapPinMinPulseCount, Self.keyMapPulses) }
     }
     private static let keyMapConf = "MapPinMinConfidence"
     private static let keyMapPulses = "MapPinMinPulseCount"
@@ -118,11 +118,12 @@ final class AutoIDSettings {
 
     /// What changed the last time a location *move* triggered a refresh — surfaced once
     /// so the app can tell the user "we updated X for your new location" instead of
-    /// silently rewriting priors underneath them. `recommendedModel` is set only when
-    /// it differs from the model that was active at refresh time (never re-suggests
-    /// the model already in use). `speciesChanged` counts codes for the *active* model
-    /// only — a refresh touches every model's priors, but only the active one affects
-    /// what the user sees classified right now. Cleared via `acknowledgeChangeSummary()`.
+    /// silently rewriting priors underneath them. `modelChange` is set when the move
+    /// crossed a coverage boundary and the active model was switched (or switched off)
+    /// as a result — a statement of what happened, never a question. `speciesChanged`
+    /// counts codes for the *active* model only — a refresh touches every model's
+    /// priors, but only the active one affects what the user sees classified right
+    /// now. Cleared via `acknowledgeChangeSummary()`.
     ///
     /// **Never set on the first derivation** (2026-08-17). Until then it was, and on a
     /// clean install that was a bug the user saw: every species the grid reports as
@@ -133,14 +134,32 @@ final class AutoIDSettings {
     private(set) var pendingChangeSummary: PriorRefreshSummary?
 
     struct PriorRefreshSummary {
-        var recommendedModel: ModelDescriptor?
+        /// Set only when this refresh actually changed the model — see
+        /// `applyCoverage`. Nil on a move within the same coverage.
+        var modelChange: ModelChange?
         /// How many of the active model's species were switched on or off by this
         /// refresh. A count rather than two lists: the sheet that showed the lists
-        /// was scrapped on 2026-08-17 (see `SuggestedModelSheet`), and nothing else
+        /// was scrapped on 2026-08-17 (see `AreaChangeSheet`), and nothing else
         /// ever read them — the authoritative list is AutoID settings itself.
+        ///
+        /// Zero whenever `modelChange` is set: the count is a diff against the
+        /// model that was active before, and once that model has been swapped out
+        /// it is a number about something the user no longer has.
         var speciesChanged: Int
 
-        var isEmpty: Bool { recommendedModel == nil && speciesChanged == 0 }
+        var isEmpty: Bool { modelChange == nil && speciesChanged == 0 }
+    }
+
+    /// What the automatic switch did on a move that crossed a coverage boundary.
+    ///
+    /// Not `Equatable`: `ModelDescriptor` carries closures. Nothing compares these
+    /// — the sheet reads them once and the summary is cleared on dismissal.
+    enum ModelChange {
+        /// Moved into an area a model covers; it is now identifying.
+        case switchedTo(ModelDescriptor)
+        /// Moved out of every model's coverage; identification is now off, and this
+        /// is what was running until the move.
+        case turnedOff(previous: ModelDescriptor)
     }
 
     func acknowledgeChangeSummary() {
@@ -267,31 +286,70 @@ final class AutoIDSettings {
             }
             updated[descriptor.id] = settings
         }
-        let suggestedModel = ModelRegistry.suggestedModel(for: coordinate)
 
         await MainActor.run {
             perModel = updated
             lastPriorCheckCoordinate = coordinate
+            // Before `save()`, so the model this move switched to is persisted with
+            // the priors it was derived alongside.
+            let modelChange = applyCoverage(at: coordinate)
             save()
             isRefreshingPriors = false
 
+            // Only worth counting when the model survived the move — see
+            // `PriorRefreshSummary.speciesChanged`.
             var speciesChanged = 0
-            if let activeID = activeIDAtStart, let newSpecies = updated[activeID]?.species {
+            if modelChange == nil, let activeID = activeIDAtStart,
+               let newSpecies = updated[activeID]?.species {
                 for (code, newState) in newSpecies {
                     let wasEnabled = previousActiveSpecies[code]?.enabled ?? true
                     if newState.enabled != wasEnabled { speciesChanged += 1 }
                 }
             }
-            // Never re-recommend the model already in use.
-            let recommended = suggestedModel.flatMap { $0.id == activeIDAtStart ? nil : $0 }
 
-            let summary = PriorRefreshSummary(recommendedModel: recommended,
+            let summary = PriorRefreshSummary(modelChange: modelChange,
                                               speciesChanged: speciesChanged)
             if !summary.isEmpty && !isFirstDerivation {
                 pendingChangeSummary = summary
             }
         }
         priorRefreshLock.lock(); refreshInFlight = false; priorRefreshLock.unlock()
+    }
+
+    /// Points `activeModelID` at whichever model covers `coordinate`, or at nothing
+    /// when none does.
+    ///
+    /// **Location owns the model** (Niall, 2026-09-08). This used to be a sheet:
+    /// a fresh install starts with `activeModelID == nil`, and the one thing that
+    /// ever turned identification on was a card asking the user to confirm the only
+    /// answer their coordinates allowed — the coverage boxes are disjoint, so there
+    /// is never a second option to weigh. Worse, it was one of five presentations
+    /// racing for the first-launch slot, and losing that race left a brand-new user
+    /// with the app's headline feature silently switched off and no sign of why.
+    ///
+    /// Moving out of coverage switches identification off rather than leaving the
+    /// last model running: a North American classifier in Europe does not decline
+    /// gracefully, it names European bats after American ones. Silence is the honest
+    /// output there, and `ModelChange.turnedOff` is what tells the user so.
+    ///
+    /// Called only from `refreshPriors`, which already runs on exactly the fixes that
+    /// can matter — the first one ever, and any that has moved
+    /// `priorRefreshDistanceKm`. A coverage boundary cannot be crossed without
+    /// moving vastly further than that.
+    ///
+    /// Internal rather than private so `ModelCoverageTests` can drive the
+    /// transitions directly: every one of them is a border crossing, and none is
+    /// reachable by tapping anything.
+    @discardableResult
+    func applyCoverage(at coordinate: CLLocationCoordinate2D) -> ModelChange? {
+        let covering = ModelRegistry.suggestedModel(for: coordinate)
+        guard covering?.id != activeModelID else { return nil }
+        let previous = ModelRegistry.descriptor(id: activeModelID)
+        activeModelID = covering?.id
+        if let covering { return .switchedTo(covering) }
+        // `previous` is nil only if the stored id names a model this build no longer
+        // has, in which case there is nothing truthful to name in a notice.
+        return previous.map { .turnedOff(previous: $0) }
     }
 
     // MARK: Init
@@ -301,18 +359,26 @@ final class AutoIDSettings {
         var pm: [String: ModelSettings] = [:]
         for d in ModelRegistry.all { pm[d.id] = Self.defaultSettings(for: d) }
         self.perModel = pm
-        // No model active by default — auto-activating a model regardless of where the
-        // phone is would risk quietly running a wrong-region classifier (e.g. a North
-        // American model somewhere it has no business identifying calls) before the
-        // location-suggestion flow in AutoIDSettingsView ever gets a say. `load()` below
-        // restores a real saved choice if one exists.
+        // No model active until a location fix says which one — running a
+        // wrong-region classifier (a North American model somewhere it has no
+        // business identifying calls) is worse than identifying nothing for the few
+        // seconds a fix takes. `applyCoverage` is what fills this in, and `load()`
+        // below restores the last coverage answer so a launch with no signal keeps
+        // identifying with whatever covered the user last time.
         self.activeModelID = nil
 
         let defaults = UserDefaults.standard
+        // The two map-pin thresholds are the only values in this type that may
+        // be set remotely. Everything per-model — pass timeout, confidence,
+        // pulses, margin, the quality gate — deliberately cannot: those decide
+        // what a recording is identified AS, and belong to a build that was
+        // tested with the model they go with. See `AUDIT-2026-09-09-parameters.md`.
         self.mapPinMinConfidence = defaults.object(forKey: Self.keyMapConf) != nil
-            ? defaults.float(forKey: Self.keyMapConf) : 0.70
+            ? defaults.float(forKey: Self.keyMapConf)
+            : Tunable.mapPinMinConfidence.value(Float(0.70))
         self.mapPinMinPulseCount = defaults.object(forKey: Self.keyMapPulses) != nil
-            ? defaults.integer(forKey: Self.keyMapPulses) : 3
+            ? defaults.integer(forKey: Self.keyMapPulses)
+            : Tunable.mapPinMinPulseCount.value(3)
 
         // NOT load() — see `loadPersisted()`. The two UserDefaults scalar reads
         // above are cheap enough to leave here; the JSON decode is not.
@@ -500,6 +566,29 @@ final class AutoIDSettings {
         }
         defaults.set(true, forKey: Self.keyPassTimeoutMigration)
         if changed { save() }
+    }
+
+    /// Suppresses the persisting `didSet`s while a re-seed assigns — see
+    /// `RemoteDefaultsReseed.swift`.
+    var isSeeding = false
+
+    private func persist(_ value: Any, _ key: String) {
+        guard !isSeeding else { return }
+        UserDefaults.standard.set(value, forKey: key)
+    }
+
+    /// The two map-pin thresholds, and nothing else. Per-model values are not
+    /// remotely settable at all — see the note in `init`.
+    func reseedRemoteDefaults() {
+        let d = UserDefaults.standard
+        seeding {
+            if d.object(forKey: Self.keyMapConf) == nil {
+                mapPinMinConfidence = Tunable.mapPinMinConfidence.value(Float(0.70))
+            }
+            if d.object(forKey: Self.keyMapPulses) == nil {
+                mapPinMinPulseCount = Tunable.mapPinMinPulseCount.value(3)
+            }
+        }
     }
 
     func save() {

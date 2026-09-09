@@ -67,62 +67,62 @@ nonisolated enum ConfigMenu {
     static let explanation = "This menu is locked because its controls can break the app if not used correctly. We leave these in the app for situations where more control is needed"
 }
 
-/// The remote kill switches, listed so they can be turned back on by hand.
+/// The kill switches, listed so this device can decide them for itself.
 ///
-/// Only a remotely-disabled feature has anything to override: a feature that is
-/// simply on shows as on and cannot be switched off here. This menu restores
-/// the app to what shipped — it does not configure it — which is what keeps
-/// every switch in it incapable of producing an app that does more than the one
-/// Apple reviewed.
+/// **Both directions** (Niall, 2026-09-09). This was a list of switches that
+/// were dead unless the config file had turned something off — so the one thing
+/// the menu could not do was try the app WITHOUT a feature, which is most of
+/// what a kill switch is for: seeing what a user sees the day it is thrown.
+/// Every switch here now works, and `Clear device overrides` is the way back to
+/// whatever the config file says.
+///
+/// It still cannot produce an app that does more than the one Apple reviewed:
+/// on restores the compiled default and off takes something away. See
+/// `FeatureFlagStore.setLocalOverride`.
 struct ConfigFeatureSection: View {
     let flags: FeatureFlagStore
 
     var body: some View {
-        VStack(spacing: 12) {
-            HStack {
-                Text("Features")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Text(flags.source.rawValue)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
+        Section {
             ForEach(Feature.allCases) { feature in
-                VStack(alignment: .leading, spacing: 2) {
-                    Toggle(feature.title, isOn: Binding(
-                        get: { flags.isEnabled(feature) },
-                        set: { flags.setLocalOverride(feature, on: $0) }
-                    ))
-                    .font(.callout)
-                    .disabled(!flags.isRemotelyDisabled(feature))
-                    Text(flags.isRemotelyDisabled(feature)
-                         ? "Switched off remotely. This turns it back on for this device only."
-                         : feature.detail)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
+                SettingToggle(feature.title, note(for: feature), isOn: Binding(
+                    get: { flags.isEnabled(feature) },
+                    set: { flags.setLocalOverride(feature, on: $0) }
+                ))
             }
 
             if let message = flags.maintenanceMessage {
-                Text(message)
-                    .font(.caption2)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                Label(message, systemImage: "exclamationmark.triangle")
+                    .font(.footnote)
             }
             if let error = flags.lastRefreshError {
                 Text("Last check: \(error)")
-                    .font(.caption2)
+                    .font(.caption)
                     .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
             }
 
             Button("Clear device overrides") { flags.clearLocalOverrides() }
-                .buttonStyle(.bordered)
-                .frame(maxWidth: .infinity)
+        } header: {
+            CardHeader("Features", "What this device does, and what it doesn't") {
+                Text(flags.source.rawValue)
+                    .font(.caption)
+                    .textCase(nil)
+                    .foregroundStyle(.secondary)
+            }
         }
-        .padding()
-        .background(.quaternary, in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    /// What the feature is, plus where its current answer is coming from — the
+    /// two questions a switch in here raises, and neither of them fits on a row.
+    private func note(for feature: Feature) -> String {
+        var note = feature.detail
+        if flags.isRemotelyDisabled(feature) {
+            note += "\n\nSwitched off remotely by the OpenBat team."
+        }
+        if flags.isLocallyOverridden(feature) {
+            note += "\n\nThis device is deciding it for itself. Clear device overrides puts it back to "
+                  + "what the config file says."
+        }
+        return note
     }
 }

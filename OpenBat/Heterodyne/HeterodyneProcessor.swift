@@ -27,18 +27,47 @@ nonisolated final class HeterodyneProcessor: @unchecked Sendable {
 
     private let ctrlLock = NSLock()
     private var _loFrequency: Double = 40_000
-    /// Was 6, which was 15 dB too hot (Niall, 2026-09-01, listening on device
-    /// at half volume). The number in isolation looked reasonable; what it
-    /// misses is that everything here then passes through the output stage's
-    /// fixed ×4 makeup (`ListenOutputStage`), so 6 was really 24× and a
-    /// heterodyne output of 0.03 already reached the soft clipper. Measured off
-    /// a heterodyne-only stretch at the old default, 0.78% of output samples
-    /// were pinned at full scale.
+    /// The level this channel rests at, and what `HeterodyneSettings.trimDB`
+    /// shifts. A `static` so the settings store can express itself as ±dB from
+    /// here rather than owning the number: this is a correction for a fixed
+    /// output attenuation, not a matter of taste, and only one file should be
+    /// able to change it.
     ///
-    /// Not persisted anywhere — this is a live-only knob (the tuning overlay's
-    /// "Output gain"), so it returns to this value every launch and changing it
-    /// here is the whole change.
-    private var _gain: Float = 1
+    /// 6 was too hot, 1 was too quiet, and this is the middle (Niall,
+    /// 2026-09-09, after a night in the field: "the audio from the phone wasn't
+    /// very loud").
+    ///
+    /// The history matters, because both ends of it were measured. 6 came down
+    /// to 1 on 2026-09-01 for a real reason: everything here passes through the
+    /// output stage's fixed ×4 makeup (`ListenOutputStage`), so 6 was really
+    /// 24×, a heterodyne output of 0.03 already reached the soft clipper, and
+    /// 0.78% of output samples on a heterodyne-only stretch sat pinned at full
+    /// scale. But that was a 15 dB cut made in one step, and 1 put the live bed
+    /// about 24 dB under the slow-replay channel — which is normalised to land
+    /// just under the clipper (`SnippetExpansionProcessor.targetPeak`) and was
+    /// never the half that sounded quiet.
+    ///
+    /// 3 is −6 dB from the setting that pinned samples and about +9.5 dB on
+    /// where this has been since, which puts the live bed at roughly the level
+    /// the replays already arrive at. The peaks that do reach the knee meet a
+    /// soft clipper rather than a clamp, so a close pass compresses instead of
+    /// buzzing — that is the mechanism that makes a hotter default safe here,
+    /// and it is why the answer to "not loud enough" is this number rather than
+    /// a bigger makeup gain: the makeup gain is a fixed correction for the
+    /// output attenuation `.measurement` mode imposes, and the replay path
+    /// derives its own target from it, so raising it would move the correction
+    /// without moving the replays.
+    ///
+    /// **The device's own volume control is the level control**, and the point
+    /// of a hotter default is that its full range is useful — full volume a
+    /// little louder than anyone wants, and silence at the bottom.
+    ///
+    /// The tuning overlay's "Output gain" still writes the processor directly
+    /// and is still not persisted — that is what a live knob is for. The
+    /// persisted half is the trim in `HeterodyneSettings`, re-applied at every
+    /// capture start.
+    static var defaultGain: Float { Tunable.heterodyneGain.value(Float(3)) }
+    private var _gain: Float = HeterodyneProcessor.defaultGain
     private var _bandLowFraction: Double = 0   // fraction of Nyquist
     private var _denoiseMode: SnippetDenoiseMode = .off
 

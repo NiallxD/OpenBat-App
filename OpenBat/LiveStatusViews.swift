@@ -726,7 +726,7 @@ struct SnippetStatusPill: View {
         .accessibilityLabel(label(activity))
         .popover(isPresented: $showExplainer) {
             VStack(alignment: .leading, spacing: 6) {
-                Text("Slow replay").font(.subheadline.weight(.semibold))
+                Text("Time expansion").font(.subheadline.weight(.semibold))
                 // "Ready to capture", not "armed and recording": this pill
                 // says nothing about the WAV recorder, and the old wording
                 // was read as if it did.
@@ -761,65 +761,10 @@ struct SnippetStatusPill: View {
 
     private func label(_ a: SnippetExpansionProcessor.Activity) -> String {
         switch a {
-        case .listening: "Slow replay: listening"
-        case .capturing: "Slow replay: capturing"
-        case .replaying: "Slow replay: replaying, not capturing"
+        case .listening: "Time expansion: listening"
+        case .capturing: "Time expansion: capturing"
+        case .replaying: "Time expansion: replaying, not capturing"
         }
     }
 }
 
-// MARK: - Recording status
-
-/// "Not recording" / "Recording" badge for the corner of the spectrogram.
-///
-/// The record button alone was not reading clearly enough: armed and unarmed
-/// differ only by the button's tint, which is easy to miss in the field and
-/// costly to get wrong — a whole session can be listened through without a
-/// single file being written. This states it in words, in the place the user is
-/// already looking.
-///
-/// **Static, with no pulsing dot.** The first version pulsed the dot with
-/// `.repeatForever(autoreverses:)`. That is the one animation kind
-/// `RecordPulse` documents as unsafe here: it can be picked up from the
-/// transaction by unrelated views, and once inherited there is nothing to end
-/// it, so they oscillate for the rest of the run. Adding a second one to the
-/// hierarchy (the record glyph already has the one carefully scoped instance)
-/// set the status pills and toolbar sliding around the screen. The badge's job
-/// is legibility, not motion, so the motion is simply gone.
-///
-/// Tied to `isArmed` — the record BUTTON's state — not to `isWriting`.
-///
-/// Writing is the literally accurate signal, and was tried first: armed means
-/// "will record when a call arrives", so between calls nothing is being written.
-/// But that makes the pill flicker between "Recording" and "Not recording"
-/// through every gap in a pass, which is worse than useless for the one job it
-/// has. The user feedback this exists to answer is "it's easy to miss that
-/// you're not recording", and against that question the honest answer is
-/// whether recording is switched on, not whether a bat happens to be calling
-/// this second.
-struct RecordingStatusBadge: View {
-    let recorder: AudioRecorder
-    /// Forces the recording appearance for the guided tour, matching
-    /// `SessionTimerPill.tourDemo`.
-    var tourDemo: Bool = false
-
-    private var isOn: Bool { tourDemo || recorder.isArmed }
-
-    var body: some View {
-        HStack(spacing: 5) {
-            Circle()
-                .fill(isOn ? Color.primary : Color.secondary.opacity(0.7))
-                .frame(width: 6, height: 6)
-            Text(isOn ? "Recording" : "Not recording")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(isOn ? Color.primary : Color.secondary)
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(.ultraThinMaterial, in: Capsule())
-        // NO pulsing dot, deliberately — see the type's doc comment.
-        .transaction { $0.animation = nil }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(isOn ? "Recording" : "Not recording")
-    }
-}

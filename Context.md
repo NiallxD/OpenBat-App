@@ -72,6 +72,7 @@ Reconstructed from git history. Dates are commit dates.
 | 2026-08-16 | **Playback folds into Sessions.** The Playback tab and the recording detail page are both gone: a recording opens the player wherever you tap it, and its per-pulse IDs are a sheet over the player. Sessions loses its Sessions/Recordings segmented picker. See §7. |
 | 2026-09-01 | **The player stops stuttering, stops blurring and starts actually cutting silence.** Three unrelated causes: the pacing thread was running a whole live spectrogram to extract one number and re-tuning the oscillator 500×/s with a slew meant for 15 Hz; the detail-tile chain restarted every 0.3 s from a step that can never be used during playback; and silence detection measured no spread, padded in display columns, and inherited the overview's resolution (146 ms/column on a ten-minute recording). Measured on the demo file: kept share 43.6% → 17.4% with no call energy lost. See §3. |
 | 2026-08-28 | **Playback speed becomes a control (4×/8×/16×), and hiding silence starts applying to playback.** The compressed timeline used to be torn down the moment you pressed play, and the gap-skipping written for that case was unreachable dead code; the pacing thread now walks the kept segments directly, so every time the engine publishes is in the packed timeline. Detection reworked alongside: the threshold is dB above the file's own noise floor, runs need hysteresis and a minimum duration, and a "found nothing" fallback is flagged instead of silently showing the whole file. See §3. |
+| 2026-09-08 | **Onboarding trimmed to fit one screen, and it now checks for the microphone.** The ID step lost its two label cards (they taught pill wording for a screen the user has not reached); the welcome footer reports whether an ultrasonic mic is actually plugged in rather than warning in the abstract; a denied microphone says what it costs instead of sharing location's mild wording. `OnboardingMetrics` tightens spacing on 667pt screens so every step fits without scrolling. See §7. |
 
 ---
 
@@ -1088,9 +1089,92 @@ moves first.
   the output side only: `AudioEngineController.listenOutputMakeupGain`, +12 dB
   with a quadratic soft knee from 0.7, applied once to whatever the listen mode
   produced. It cannot reach capture, the recorder, detection or calibration.
-  The processors' own gains (heterodyne 6×, replay 4×) are unchanged and remain
-  the per-bat knobs; this is a fixed correction for a fixed attenuation, and the
-  figure is an estimate — it wants checking by ear against playback on a device.
+  The processors' own gains are NOT separate from this correction, and must not
+  be described as if they were: everything downstream of them is multiplied by
+  the makeup, so a processor gain of 6 was really 24. That sentence used to end
+  this bullet, and it is what left both gains far too hot. Heterodyne came down
+  6 → 1 on 2026-09-01 (measured: 0.78% of output samples pinned at full scale),
+  and the replay path stopped naming a number at all — it normalises against
+  `ListenOutputStage` so a snippet lands on the knee whatever the makeup is.
+- **1 was then too quiet in the field, and the fix was the heterodyne gain, not
+  the makeup.** Reported 2026-09-09 after a night out: "the audio from the phone
+  wasn't very loud". The replay channel was never the quiet half — it is
+  normalised to just under the clipper, median call at −6 dBFS — while the live
+  heterodyne bed sat about 24 dB below it, because the 2026-09-01 cut was 15 dB
+  in one step. Heterodyne's default is now **3**: −6 dB from the setting that
+  pinned samples, ~+9.5 dB on where it had been, which puts the live bed at
+  roughly the level the replays already arrive at. Raising the makeup instead
+  would have been wrong twice over — it is a fixed correction for a fixed
+  attenuation, and the replay path derives its own target from it, so raising it
+  moves the correction without moving the replays. The device's own volume
+  control is the level control; the point of a hotter default is that its full
+  range is useful.
+- **The live channel's level and background reduction are settings now, not
+  live-only knobs.** `HeterodyneProcessor.gain` and `.denoiseMode` existed, but
+  only in the tuning overlay behind the config menu's passcode, and neither
+  survived a launch — so anyone who found them lost them. `HeterodyneSettings`
+  persists a ±18 dB trim (against `HeterodyneProcessor.defaultGain`, which stays
+  the one place the level itself is decided) and the background mode, applied at
+  every capture start by `seedSnippetProcessor`. Settings ▸ Detecting shows both
+  channels in one card, "Live listening", behind a two-pill switcher carrying the
+  transport menu's own glyphs — one decision, not two, because under `.both`
+  routing they are set against each other. The overlay still writes the
+  processor directly and still doesn't persist: that is what a live knob is for.
+  Heterodyne's background default stays **Off** where the replay's is Scrub —
+  Scrub silences whatever doesn't clear the gate, and on the channel that tells
+  you a bat exists at all, "missed bat" and "quiet night" must not sound alike.
+- **Default VALUES can now be set remotely, in the same file as the kill
+  switches.** `RemoteDefaults` + `Tunable` (2026-09-09). The flags scheme's
+  promise — the worst a bad config can do is remove a feature — does not survive
+  numbers, so this half carries its own guard rails: only the parameters listed
+  in `Tunable` exist, each declares the range it may take, and a value outside
+  that range is IGNORED rather than clamped so a typo fails visibly instead of
+  half-applying in the field. Changes take effect at the next launch (the fetch
+  lands after the stores are built), and the whole scheme rests on one property
+  of every settings store in the app: absence of a stored value IS the record
+  that the user never chose one, so a remote default replaces the compiled
+  constant and never a person's choice. **Anything that writes a default the
+  user did not choose silently freezes that parameter on every install** — three
+  places did, and were fixed with this: the one-time amplitude repair, the band
+  simplified view applies on entry (which now stamps WHICH band it applied, so a
+  changed default reaches installs that have already been through it), and the
+  recording timings, which turned out not to be persisted at all. Per-model
+  AutoID values are deliberately excluded — they decide what a recording is
+  identified as, and belong to a build. See `AUDIT-2026-09-09-parameters.md` for
+  the full inventory, and `SettingsDump`, which now records which defaults the
+  config file is setting so two dumps can be compared without ambiguity.
+- **The config file has a second message that does not interrupt.** `notice`
+  stands at the top of Settings for as long as it is non-empty — a known issue,
+  a release note, a thank-you — with no alert and no once-per-message
+  bookkeeping. The maintenance message keeps both, and its Settings card is
+  headed "Maintenance" now that the two sit together.
+- **The live snippet mode is called "Time expansion" in the UI, and the noise
+  reduction is Off / Normal / High.** Two naming decisions, both 2026-09-09.
+  "Slow replay" was the app's own coinage for the D240x pattern and nobody
+  outside the app used it; time expansion is what bat workers call this, and the
+  playback-only mode keeps the plain name too, distinguished as "Time expansion
+  (file)" in the one place it can appear. The code keeps `snippetExpansion` /
+  `SnippetExpansionProcessor` throughout — the type names say which of the two
+  shapes it is, which is exactly the distinction Context.md §5 turns on, and
+  renaming them would blur it. Likewise `SnippetDenoiseMode`'s cases stay
+  `.reduce` / `.scrub` while the labels read Normal / High: a person is choosing
+  an amount, a reader of `SpectralDenoiser` needs to know that one of them
+  silences everything that isn't plainly a call.
+- **Demo mode now runs the same session as a live capture, because level
+  judgements were being made against a louder path.** It used
+  `.playback`/`.default` — deliberately, to stay off the record path entirely:
+  no permission prompt, no input negotiation, nothing to fail where there is no
+  microphone. But that is the category *without* the measurement-mode output
+  cut, so the demo was several dB louder than the thing it stands in for, and
+  the demo is what levels get tuned against. `configureSessionForDemo` now takes
+  the ordinary session and keeps `.playback` only as a fallback for a device
+  that cannot open a record-capable one (the simulator, or a refused
+  microphone), so the pipeline still runs there. Only when a listen mode is on:
+  demo with listening off still touches the session not at all, which is what
+  the documented "demo dies when backgrounded with listening off" behaviour
+  rests on, and there is nothing to hear in that state anyway. The one
+  difference that cannot be removed is that there is no input tap — the file is
+  the input.
 - **A changed delivered rate has to hold before it is published.** Plugging the
   Griff in tears the engine down and rebuilds it, and while iOS renegotiates the
   route the input node hands out 48 kHz buffers for a few hundred ms before the
@@ -1178,6 +1262,119 @@ Both found by a full-codebase sweep, both fixed the same day.
   It now writes into a lock-free SPSC ring (`captureRing`) and the queue drains
   it; `handle`/`write` take an `UnsafeBufferPointer` so the drain can coalesce
   several buffers into one pass.
+
+### The config menu's kill switches work both ways (2026-09-09)
+
+They only ever turned a remotely-disabled feature back ON — a feature the config
+file left alone showed as on and could not be touched. So the one thing the menu
+could not do was run the app WITHOUT a feature, which is most of what a kill
+switch is for: seeing what a user sees on the day one is thrown, before throwing
+it. Every switch now works in both directions, and `Clear device overrides` is
+the way back to whatever the config file says.
+
+The safety argument is unchanged, because it never rested on the direction: an
+override can restore the compiled default or take something away, and neither
+produces an app that does more than the one Apple reviewed. What changed shape is
+the stored value — a set of "switched back on" became a per-feature true/false,
+so a decision survives the config file changing its mind. The old array is still
+read on first launch after the update, as "these were on", so an installed device
+keeps what it had.
+
+The two iNaturalist posting-limit switches moved off the posting feature and into
+the Overrides card (Niall). The feature switches say whether a feature exists on
+this device; the overrides change how one behaves while it does, and hanging them
+off the posting switch made them read as part of that feature's definition rather
+than as a rule being suspended for a test.
+
+### The mic QA numbers were measuring the wrong things (2026-09-09)
+
+Three of the four microphone quality figures in the configuration menu had never
+been usable, which is why nobody trusted them.
+
+- **Noise floor was a running minimum of buffer RMS.** One buffer in hundreds of
+  thousands decided it, and a capture's first buffers are routinely exact
+  digital silence while the input unit settles — so it snapped to the meter's
+  −80 dBFS floor within a tenth of a second and stayed there, on every
+  microphone, forever. It is now the tenth percentile of a 1 dB histogram of
+  buffer levels, which is the number the label always claimed: what this mic
+  sounds like when nothing is happening. Buffers of exact silence are excluded
+  rather than counted as very quiet, and a capture that is *all* silence reports
+  no floor at all (`hasNoiseFloor`) instead of a spectacular one.
+- **DC offset was the latest buffer's mean**, published at 15 Hz. A single ~10 ms
+  window of real audio has a nonzero mean whether or not the hardware has any
+  offset, so the figure flickered and meant nothing. It is now the session mean
+  (sum of per-buffer means weighted by length), where honest audio cancels and
+  only a real offset survives.
+- **Peak level and the clip count included the settling window.** The transient
+  an input unit can emit as it opens set the session peak. The first
+  `AudioLevel.micQASettleSeconds` (0.25 s) of every capture is now discarded
+  before any QA figure starts, and `totalSampleCount` counts only what was
+  measured, so all four numbers are quoted over the same span.
+
+The numbers are only comparable between two microphones if both were asked the
+same question, so there is now a "Start measuring again" button
+(`AudioEngineController.resetMicQA`). Before it, the only way to begin a fixed
+test run was to stop and start the detector, which on a real night means ending
+the session you are in the middle of.
+
+### Settings cards lost their grey notes (2026-09-09)
+
+Niall's second note the same day, and the bigger one: "the small text inside the
+cards... I just want a row with the option title, and the action item (toggle,
+button, pill) whatever."
+
+Every card carried a line of grey type above each of its controls. One is fine;
+a card with four controls carried four, and a page of those cards read as a wall
+of small text — which is what "it makes the settings menus look so messy" was
+about. **A row is now the option's name and the thing you touch, and nothing
+else.** The explanation lives behind an ⓘ on the name (`SettingInfo`,
+`SettingName`, and the row types built on them in `SettingsView`). The card
+header keeps its title and its one-line description, which is what he asked to
+keep.
+
+The old ten-word, one-line rule went with the notes. It existed because the text
+sat under a control on the narrowest iPhone; a popover has room, and several
+notes had been cut back to the point of saying nothing ("NABat uses 21 dB.").
+Every one of them was rewritten to say the whole thing.
+
+**Two exceptions, both deliberate.** A *reason a control is unavailable* stays on
+screen — the calibration button's "Plug in your ultrasonic mic", the haptics
+card's Low Power Mode line, the mic QA card's "a demo file is playing" — because
+nobody taps an ⓘ to find out why nothing happened, and a greyed-out control with
+no reason beside it reads as a bug. And `ControlNote` survives for the two
+screens that are not settings cards and read as prose: the model detail page's
+citation, and the iNaturalist observation sheet.
+
+The ⓘ is `.buttonStyle(.borderless)`, which is load-bearing rather than
+cosmetic: a row can hold it and a real button (Share Log, Delete NoID), and a
+List makes two plain buttons in one row ambiguous — tapping either fires both.
+
+### The configuration menu became a settings page (2026-09-09)
+
+Niall's call, and the same complaint as the Settings cleanup of 2026-09-02: it
+was hand-rolled `VStack` cards on a rounded rectangle — a settings form drawn
+worse — with a description above and a paragraph below every control. It is now
+`Form`/`Section` under the three-part card rule in `SettingsView`'s header.
+
+Four things left. **Demo mode** is a real feature now (started from the app-info
+sheet, ended from the mic pill), so its entry behind a passcode was the last
+trace of it being a debug tool. **The session button card** had settled the
+question it was built for. **The four microphone cards** — stream, level meter,
+mic QA, and a loose status line — became one, because a reader should not have
+to know which of three cards to believe about the same microphone. And the
+**iNaturalist posting-limit overrides** moved onto the posting feature switch as
+its sub-controls: they are that feature's own settings and mean nothing while it
+is off. They stay out of Settings for the original reason — the rules they lift
+protect iNaturalist from near-duplicate records, and there is deliberately no
+user-facing "post anyway".
+
+One thing was added: an **Overrides** card, holding a switch that starts every
+launch at the welcome flow. Onboarding happens once by design, so until now the
+only way to look at a change to it was to delete the app and reinstall — which
+takes the recordings, the sessions and the iNaturalist sign-in with it. The flag
+is read once per launch, after the release decision rather than instead of it,
+so What's New still gets to explain a build that re-runs the intro for its own
+reasons (`OnboardingState.applyEveryLaunchOverrideOnce`).
 
 ### Demo mode
 
@@ -1996,6 +2193,125 @@ app's grouped `List`.
   New vanished. Both it and the post-onboarding model suggestion are now gated on
   `showWhatsNew`, joining the `!tourActive` gate that was already there for the
   same reason. Anything else added to that screen needs to join the queue.
+
+### The permission rows' empty circles read as checkboxes (2026-09-09)
+
+Tester feedback: each permission card carried a dotted empty circle on its right
+while the answer was still to come, which is the shape of a checkbox — so the
+three cards read as a list of things to tick rather than a list of what the next
+tap will ask for. Worse, one of the three (iCloud) genuinely is a control, which
+made the wrong reading look confirmed.
+
+The pending glyph is gone; the slot stays, so the tick arriving doesn't re-wrap
+the paragraph beside it, and the row now animates on `state` — the answer comes
+from an OS dialog, outside any `withAnimation`, so the glyph's own transition had
+never played.
+
+The refused mark went the same afternoon, for the same reason at the other end: a
+denied row already swaps its paragraph for `deniedNote`, which says what is lost,
+so the grey slash beside it was a second, vaguer copy of a message already in
+plain words. **A tick, or nothing.**
+
+The step also gained the grey footer the ID step ends on, saying that refusing is
+not final and either permission can be switched on later in Settings. The two
+`deniedNote`s lost their own copies of that sentence with it — the row says what
+is lost, the footer says where to change it, and neither says both.
+
+### iOS never asks twice, so the refused rows do the asking (2026-09-09)
+
+The step asked for a permission only when it believed the status was
+undetermined, so one stale reading was enough to skip a dialog iOS would have
+shown, and Continue appeared to do nothing. Both are now requested
+unconditionally — an answer already given is returned without anything appearing
+on screen, so there is no cost to asking — and each status is re-read from the
+system afterwards rather than predicted.
+
+That fixes the case where a dialog was owed. **It cannot fix the refused case,
+because iOS puts its dialog up once per install and never again.** So a refused
+row is now a button: a red cross for the answer, a chevron beside it, and a tap
+that opens OpenBat's page in the Settings app — which is the whole of "ask
+again". A row that says what was lost without offering the one way back is a
+statement with no reply.
+
+The three states are therefore: nothing while it is still to come, a green tick
+for yes, and a red cross plus a chevron for no. The cross and the chevron are not
+redundant — one is the answer, the other is what to do about it — and this is the
+only tappable row on the screen, which is the opposite of the empty circles that
+came off it the same day.
+
+### The permission rows were believing a stale location status (2026-09-09)
+
+Found by Niall testing the refused path: with Location set to Never and the
+microphone off, the mic row said so and the location row still offered sunset
+times — and Continue then appeared to do nothing, because with nothing left to
+ask it asked for nothing and the step's "everything decided" test was reading the
+same stale value.
+
+`LocationProvider.authorization` is published state set in `init` and thereafter
+only by the delegate, and a `CLLocationManager` read the instant it is created
+can answer `.notDetermined` before its connection to the location daemon is up.
+`refreshAuthorization()` re-reads it, and onboarding now calls that — along with
+re-reading the microphone status — on appear and whenever the app becomes active,
+since both can change outside the app and neither is observable.
+
+
+### The ID step's cards are now about IDs (2026-09-09)
+
+Under a heading reading "About the IDs", the step's one card explained where the
+app's settings live — true, useful, and about a different subject, which made the
+heading look like a mistake. The card and the footer swapped places: the caveat
+that identifications are suggestions was the pinned warning at the bottom and is
+now the first card, because it is the thing the step exists to say, and "nothing
+here is permanent" is the closing note instead.
+
+A second card was added beside it — OpenBat can post a recording to iNaturalist,
+where other people can check it. It is the honest answer to the question the
+first card raises ("then how do I ever know?"), and the only one the app can
+give. It is deliberately not gated on the iNaturalist feature switch: onboarding
+runs before `ContentView`, which is where the flag store lives, and the card is a
+statement about the app rather than about tonight.
+
+The footer went grey with a gear, rather than staying orange with a warning
+triangle. It is a reassurance now, and an orange wash on a reassurance teaches a
+user that the colour means nothing — which would cost the welcome step's
+"no microphone connected" warning its force.
+
+### Onboarding: one screen per step, and a microphone it can see (2026-09-08)
+
+A review of the three-screen flow. The shape was right; two things were not.
+
+- **The ID step was teaching vocabulary for a screen nobody had reached.** It
+  carried a card each for the "sounds alike" and "or SPECIES" pills, explaining
+  a distinction that is invisible until you are looking at a pass — which no
+  first-run user is. Both cut. Each pill already explains itself where it
+  appears, and that is the moment the difference is worth anything. The step is
+  now the caveat, one card promising nothing is permanent, and the warning
+  footer. This is the same mistake, at smaller scale, that the eight-screen cut
+  of 2026-08-17 was fixing.
+- **"You need a microphone" was a standing warning, so nobody it applied to
+  read it.** The welcome footer now probes for a USB input every two seconds
+  while onboarding is up (`UltrasonicMicProbe`) and says which of three things
+  is true: not checked yet, none connected, or connected — the last in green,
+  because orange for a satisfied condition is how a user learns to stop reading
+  a colour. The probe sets an `AVAudioSession` category and reads
+  `availableInputs`; it never activates the session, so it prompts for nothing
+  and interrupts nothing. The category is required — under the default
+  playback-only category `availableInputs` hides inputs entirely, the same trap
+  `AudioEngineController.prepareInputMonitoring` documents.
+- **A denied microphone and a denied location no longer say the same mild
+  thing.** Both rows shared "You can turn this on later in the Settings app".
+  Without location the app is slightly less helpful; without the microphone it
+  shows a permanently empty spectrogram and reads as broken. Each row now
+  carries its own `deniedNote`.
+- **Every step is meant to fit without scrolling**, and two of them did not on a
+  667pt phone. The ScrollView underneath is for large Dynamic Type — a card
+  below the fold on a default install is a card nobody reads. Fixed from both
+  ends: the copy is shorter (the location row was four one-shot uses spelled out
+  in one 40-word sentence; it is now one clause naming three), and
+  `OnboardingMetrics` supplies a second, tighter set of spacings below 700pt,
+  resolved once from the window scene rather than per-frame from a
+  `GeometryReader`. **No font size changes** — only the air around the text.
+  The welcome step is the tightest at roughly 633pt of 647 available.
 
 ### Species search: results dropdown, not a screen swap (2026-08-17)
 
@@ -3293,6 +3609,46 @@ trusted on anything touching a northern edge.
 What *would* work is geography rather than geometry: a land mask. The Miami
 stray's buffer expands across open water; boreal Canada is solid ground. Not
 built — it is a coastline raster in the generator for the sake of one cell.
+
+### Coverage picks the model; nobody is asked (2026-09-08)
+
+`activeModelID` is now written by `AutoIDSettings.applyCoverage`, from the
+location fix, on the same refreshes that derive priors. The "Suggested Model"
+card, the "Suggested for your location" section with its Use button, the
+per-model radios in AutoID settings and the "Use this model" toggle in
+`ModelDetailView` are all gone. Niall's call, and the direction was "completely
+automate this whole thing".
+
+- **It was never a choice.** The two coverage boxes are disjoint — NABat is North
+  America, BatDetect2 is the UK — so a fix yields exactly one answer or none.
+  The card asked the user to confirm the only answer their coordinates allowed.
+- **A fresh install has no model at all** (`init` sets `activeModelID = nil`), so
+  that card was not offering an upgrade, it was the sole path to switching
+  identification on. It was also one of five presentations racing for the
+  first-launch slot, and losing that race left a new user with the app's headline
+  feature silently off and nothing on screen to say so. See the ContentView
+  first-launch queue problem, still open.
+- **Out of coverage switches identification off**, rather than leaving the last
+  model running. A North American classifier in Europe does not degrade, it names
+  European bats after American ones with full confidence. `ModelChange.turnedOff`
+  is what tells the user, and `AreaChangeSheet` says plainly that detecting and
+  recording carry on.
+- **The manual override went with it.** Any hand-picked model would have been
+  overwritten by the next fix, and a control the app quietly undoes is worse than
+  no control. The cost is real and accepted: someone just outside a box — France,
+  say — can no longer force BatDetect2. If that comes back it has to come back as
+  an override the automation *respects*, not as a switch that fights it.
+- **Silent on the first fix, spoken on a move.** `pendingChangeSummary` is still
+  never set on the first derivation, so first-run activation happens with no
+  sheet at all. `AreaChangeSheet` (was `SuggestedModelSheet`) is now a notice with
+  one button — by the time it appears the switch has already happened.
+- **`speciesChanged` is suppressed when the model changed.** It is a diff against
+  the model that was active before, and once that model is gone it counts
+  something the user no longer has.
+- `OnboardingState.justFinishedOnboarding` was deleted with this: the
+  post-onboarding suggestion was its only consumer.
+- Border crossings are covered by `ModelCoverageTests` — the transitions are pairs
+  of coordinates thousands of km apart and unreachable by tapping.
 
 ---
 

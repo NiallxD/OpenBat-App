@@ -30,29 +30,40 @@ final class OnboardingState {
     static let shared = OnboardingState()
 
     private static let key = "onboarding.hasCompletedWelcome"
-    private static let handoffKey = "onboarding.justFinishedOnboarding"
     private static let simplifiedTourKey = "tour.hasCompletedSimplified"
     private static let advancedTourKey = "tour.hasCompletedAdvanced"
     private static let nudgeKey = "tour.hasNudged"
 
-    var hasCompletedWelcome: Bool {
-        didSet { UserDefaults.standard.set(hasCompletedWelcome, forKey: Self.key) }
+    /// The configuration menu's "always show onboarding" override.
+    ///
+    /// Onboarding is, by design, a thing that happens once, so the only way to
+    /// see a change to it was to delete the app and reinstall — which also
+    /// takes the recordings, the sessions and the iNaturalist sign-in with it.
+    /// This switch starts every launch at the welcome flow instead.
+    ///
+    /// A plain key read at launch rather than a tracked property: nothing but
+    /// `applyEveryLaunchOverrideOnce()` reads it, and the switch that writes it
+    /// is in the configuration menu, which is a different screen from the one
+    /// this decides.
+    static let forceEveryLaunchKey = "onboarding.forceEveryLaunch"
+
+    private static var hasAppliedLaunchOverride = false
+
+    /// Clears the completion flag when the override is on, once per launch.
+    ///
+    /// Once, for the same reason `ReleaseState.evaluateLaunch` is idempotent:
+    /// `RootView`'s initializer can run more than once in a session, and
+    /// clearing the flag on a later run would throw somebody back to the
+    /// welcome screen in the middle of using the app rather than at its start.
+    static func applyEveryLaunchOverrideOnce() {
+        guard !hasAppliedLaunchOverride else { return }
+        hasAppliedLaunchOverride = true
+        guard UserDefaults.standard.bool(forKey: forceEveryLaunchKey) else { return }
+        shared.hasCompletedWelcome = false
     }
 
-    /// Set by onboarding's last step just before it hands off to `ContentView`;
-    /// consumed once, there, to run whatever should happen on the very first
-    /// arrival at the detector — currently only the recommended-model offer, if
-    /// the location fix landed in time to find one. It used to also auto-launch
-    /// the guided tour; that stopped when the last step became "Let's go!"
-    /// rather than "Take the Tour".
-    ///
-    /// A second flag rather than folding into `hasCompletedWelcome` so `RootView`
-    /// — which only reads that one property — never re-evaluates when this one
-    /// changes (see this file's header comment on why `@AppStorage` at the root
-    /// is dangerous; a second plain `@Observable` property has the same
-    /// one-property-at-a-time tracking, it just isn't read by the same view).
-    var justFinishedOnboarding: Bool {
-        didSet { UserDefaults.standard.set(justFinishedOnboarding, forKey: Self.handoffKey) }
+    var hasCompletedWelcome: Bool {
+        didSet { UserDefaults.standard.set(hasCompletedWelcome, forKey: Self.key) }
     }
 
     /// Whether the guided tour has been seen to the end, tracked separately for
@@ -111,7 +122,6 @@ final class OnboardingState {
     private init() {
         // Absent key reads as false — a fresh install starts at onboarding.
         hasCompletedWelcome = UserDefaults.standard.bool(forKey: Self.key)
-        justFinishedOnboarding = UserDefaults.standard.bool(forKey: Self.handoffKey)
         hasCompletedSimplifiedTour = UserDefaults.standard.bool(forKey: Self.simplifiedTourKey)
         hasCompletedAdvancedTour = UserDefaults.standard.bool(forKey: Self.advancedTourKey)
         hasNudgedTour = UserDefaults.standard.bool(forKey: Self.nudgeKey)

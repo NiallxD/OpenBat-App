@@ -18,7 +18,7 @@ import Observation
 import CoreLocation
 
 @Observable
-final class PulseDetector {
+final class PulseDetector: Reseedable {
 
     // MARK: Settings
 
@@ -51,7 +51,7 @@ final class PulseDetector {
     // init(), so trigger tuning survives app relaunch instead of resetting.
 
     var triggerMode: TriggerMode = .ultrasonic {
-        didSet { defaults.set(triggerMode.rawValue, forKey: Key.triggerMode) }
+        didSet { persist(triggerMode.rawValue, Key.triggerMode) }
     }
     /// Normalised peak magnitude (0–1) on the fixed −90…−20 dB trigger scale, so
     /// 0.05 here is 3.5 dB. Matches spectrogram brightness — 0.5 = medium-bright.
@@ -75,16 +75,22 @@ final class PulseDetector {
     /// and 0.55 already cuts a real *Lasiurus cinereus* pass. See `Context.md`
     /// §8. Re-tune downward from here deliberately, now that moving the slider
     /// does something.
-    var amplitudeThreshold: Float = 0.5 {
-        didSet { defaults.set(amplitudeThreshold, forKey: Key.amplitudeThreshold) }
+    ///
+    /// The property initialiser here — and on every tunable below it — is the
+    /// COMPILED default, which `Tunable` may replace with a remotely-set one.
+    /// `init` then overwrites it from storage if the user has ever chosen a
+    /// value, so the precedence is: the user's choice, else the config file,
+    /// else this number. See `RemoteDefaults`.
+    var amplitudeThreshold: Float = Tunable.pulseAmplitudeThreshold.value(Float(0.5)) {
+        didSet { persist(amplitudeThreshold, Key.amplitudeThreshold) }
     }
     /// Minimum peak frequency (Hz) required in .ultrasonic mode. Default 15 kHz
     /// rejects wind and handling noise without cutting off any bat species.
-    var minFrequencyHz: Double = 15_000 {
-        didSet { defaults.set(minFrequencyHz, forKey: Key.minFrequencyHz) }
+    var minFrequencyHz: Double = Tunable.pulseMinFrequencyHz.value(15_000.0) {
+        didSet { persist(minFrequencyHz, Key.minFrequencyHz) }
     }
-    var minConsecutiveColumns: Int = 3 {
-        didSet { defaults.set(minConsecutiveColumns, forKey: Key.minConsecutiveColumns) }
+    var minConsecutiveColumns: Int = Tunable.pulseMinColumns.value(3) {
+        didSet { persist(minConsecutiveColumns, Key.minConsecutiveColumns) }
     }
     /// Minimum gap between detections. Field data (Bat_Walk_27_06_2026) shows a
     /// median inter-pulse gap of ~79 ms, so the old 150 ms default silently dropped
@@ -92,28 +98,28 @@ final class PulseDetector {
     /// and the classifier. 50 ms passes typical call spacing while still rejecting the
     /// closest echoes; amplitude does the rest (echoes return much quieter).
     /// Field tuning took it further, to 30 ms (2026-08-17 dump).
-    var holdOffSeconds: Double = 0.03 {
-        didSet { defaults.set(holdOffSeconds, forKey: Key.holdOffSeconds) }
+    var holdOffSeconds: Double = Tunable.pulseHoldOffSeconds.value(0.03) {
+        didSet { persist(holdOffSeconds, Key.holdOffSeconds) }
     }
     /// Bridges brief amplitude dips *within* a single call (FM sweeps have nulls).
     /// A pulse only ends once this many consecutive columns fall below threshold,
     /// so one call yields exactly one capture instead of fragmenting. Default 6 ms.
-    var maxGapMs: Double = 6 {
-        didSet { defaults.set(maxGapMs, forKey: Key.maxGapMs) }
+    var maxGapMs: Double = Tunable.pulseMaxGapMs.value(6.0) {
+        didSet { persist(maxGapMs, Key.maxGapMs) }
     }
     /// Fixed time span of the captured zoom window. Because every capture uses the
     /// SAME width, the pulse always renders at the same scale and the onset is
     /// always locked at `onsetFraction` from the left — one pulse, same place, every
     /// time. ~10 ms is the sweet spot for resolving a single bat call's structure.
-    var displayWindowMs: Double = 10 {
-        didSet { defaults.set(displayWindowMs, forKey: Key.displayWindowMs) }
+    var displayWindowMs: Double = Tunable.pulseDisplayWindowMs.value(10.0) {
+        didSet { persist(displayWindowMs, Key.displayWindowMs) }
     }
     /// Brightness gate applied to the captured pulse image (0–1). Pixels below this
     /// are rendered black; the remaining range is stretched to use the full
     /// colormap, so only the high-energy pulse shows and the background haze is
     /// removed. Raise to strip more noise; 0 disables the gate.
     var pulseNoiseFloor: Float = 0.35 {
-        didSet { defaults.set(pulseNoiseFloor, forKey: Key.pulseNoiseFloor) }
+        didSet { persist(pulseNoiseFloor, Key.pulseNoiseFloor) }
     }
     /// Same brightness gate as `pulseNoiseFloor`, applied independently to the live
     /// scrolling spectrogram (Spectrogram.metal's noiseFloor uniform) instead of
@@ -126,23 +132,23 @@ final class PulseDetector {
     /// above predicted. The two being independent is what matters; which one
     /// ends up higher is a matter of taste and was settled by looking.
     var spectrogramNoiseFloor: Float = 0.40 {
-        didSet { defaults.set(spectrogramNoiseFloor, forKey: Key.spectrogramNoiseFloor) }
+        didSet { persist(spectrogramNoiseFloor, Key.spectrogramNoiseFloor) }
     }
     /// Display colormap, shared by the live spectrogram (GPU) and the pulse-view
     /// image + thumbnails (CPU) — see `DisplayPalette.swift`.
     var displayPalette: Palette = .inferno {
-        didSet { defaults.set(displayPalette.rawValue, forKey: Key.displayPalette) }
+        didSet { persist(displayPalette.rawValue, Key.displayPalette) }
     }
     /// When true the renderer skips uploading silent columns to the ring buffer,
     /// so the spectrogram fills with back-to-back pulses instead of continuous audio.
     var triggeredDisplayMode: Bool = false {
-        didSet { defaults.set(triggeredDisplayMode, forKey: Key.triggeredDisplayMode) }
+        didSet { persist(triggeredDisplayMode, Key.triggeredDisplayMode) }
     }
     /// Minimum seconds between pulse display updates. Detection and rate counting
     /// still happen every pulse; this only throttles how often the zoom image and
     /// frequency stats refresh. 0 = update on every pulse.
     var displayRefreshIntervalSeconds: Double = 2.0 {
-        didSet { defaults.set(displayRefreshIntervalSeconds, forKey: Key.displayRefreshIntervalSeconds) }
+        didSet { persist(displayRefreshIntervalSeconds, Key.displayRefreshIntervalSeconds) }
     }
 
     /// Pulse onset position within the fixed window (fraction from the left edge).
@@ -174,12 +180,23 @@ final class PulseDetector {
         static let amplitudeGateRepaired             = "pulse.amplitudeGateRepaired"
     }
 
+    /// Suppresses the persisting `didSet`s while a re-seed assigns — see
+    /// `RemoteDefaultsReseed.swift` for why that matters more than it looks.
+    var isSeeding = false
+
+    /// Write unless a re-seed is in progress.
+    private func persist(_ value: Any, _ key: String) {
+        guard !isSeeding else { return }
+        defaults.set(value, forKey: key)
+    }
+
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         // Restore saved settings; absent keys leave the property defaults above.
         if let raw = defaults.string(forKey: Key.triggerMode),
            let mode = TriggerMode(rawValue: raw) { triggerMode = mode }
-        if defaults.object(forKey: Key.amplitudeThreshold) != nil {
+        let hadStoredAmplitude = defaults.object(forKey: Key.amplitudeThreshold) != nil
+        if hadStoredAmplitude {
             amplitudeThreshold = defaults.float(forKey: Key.amplitudeThreshold)
         }
         // One-time repair, once per install. A saved threshold below 0.5 was set
@@ -188,9 +205,28 @@ final class PulseDetector {
         // now would hand the user 14 dB of extra sensitivity they never asked for.
         // Written straight to `defaults` as well as to the property so the repair
         // sticks whether or not `didSet` fires for this assignment.
+        //
+        // **Only when there is something to repair** (2026-09-09). It used to
+        // write the threshold unconditionally, which meant every install that
+        // had ever launched held a stored value — including the ones that had
+        // never touched the slider. A stored value is the app's record of "the
+        // user chose this", so writing one here froze the threshold on every
+        // phone and put it permanently out of reach of a remotely-set default.
+        // The stamp is still written unconditionally: it says the repair has
+        // been considered, which is true either way.
+        //
+        // `hadStoredAmplitude` gates it as well, and that matters more than it
+        // looks: the repair exists to undo a value the USER's install saved, and
+        // the compiled default it compares against can now itself be set
+        // remotely. Without the gate, a config file trying 0.4 would be clamped
+        // straight back to 0.5 on every fresh install and then written down as
+        // the user's own choice — the config defeated and the parameter frozen,
+        // in one line.
         if !defaults.bool(forKey: Key.amplitudeGateRepaired) {
-            if amplitudeThreshold < 0.5 { amplitudeThreshold = 0.5 }
-            defaults.set(amplitudeThreshold, forKey: Key.amplitudeThreshold)
+            if hadStoredAmplitude, amplitudeThreshold < 0.5 {
+                amplitudeThreshold = 0.5
+                defaults.set(amplitudeThreshold, forKey: Key.amplitudeThreshold)
+            }
             defaults.set(true, forKey: Key.amplitudeGateRepaired)
         }
         if defaults.object(forKey: Key.minFrequencyHz) != nil {
@@ -224,6 +260,31 @@ final class PulseDetector {
         }
         if defaults.object(forKey: Key.displayRefreshIntervalSeconds) != nil {
             displayRefreshIntervalSeconds = defaults.double(forKey: Key.displayRefreshIntervalSeconds)
+        }
+    }
+
+    /// Pick up remotely-set defaults for every value the user has never set.
+    /// Only those: a stored key is this user's own choice and is left alone.
+    func reseedRemoteDefaults() {
+        seeding {
+            if defaults.object(forKey: Key.amplitudeThreshold) == nil {
+                amplitudeThreshold = Tunable.pulseAmplitudeThreshold.value(Float(0.5))
+            }
+            if defaults.object(forKey: Key.minFrequencyHz) == nil {
+                minFrequencyHz = Tunable.pulseMinFrequencyHz.value(15_000.0)
+            }
+            if defaults.object(forKey: Key.minConsecutiveColumns) == nil {
+                minConsecutiveColumns = Tunable.pulseMinColumns.value(3)
+            }
+            if defaults.object(forKey: Key.holdOffSeconds) == nil {
+                holdOffSeconds = Tunable.pulseHoldOffSeconds.value(0.03)
+            }
+            if defaults.object(forKey: Key.maxGapMs) == nil {
+                maxGapMs = Tunable.pulseMaxGapMs.value(6.0)
+            }
+            if defaults.object(forKey: Key.displayWindowMs) == nil {
+                displayWindowMs = Tunable.pulseDisplayWindowMs.value(10.0)
+            }
         }
     }
 

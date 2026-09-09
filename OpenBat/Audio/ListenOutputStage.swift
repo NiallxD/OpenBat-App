@@ -27,13 +27,13 @@ nonisolated enum ListenOutputStage {
     /// imposes — see `AudioEngineController.listenOutputMakeupGain`'s doc
     /// comment for why the session mode itself can't be changed instead.
     /// Applied once to whatever the active mode produced.
-    static let makeupGain: Float = 4.0
+    static var makeupGain: Float { Tunable.listenMakeupGain.value(Float(4.0)) }
 
     /// Where the soft clip starts, at the output. Below this the makeup gain is
     /// exactly linear; above it the signal compresses toward ±1 instead of
     /// buzzing. A level that lands here is as loud as the path goes without
     /// distorting, which makes it the right target for anything normalising.
-    static let softClipKnee: Float = 0.7
+    static var softClipKnee: Float { Tunable.listenSoftClipKnee.value(Float(0.7)) }
 
     /// What a signal should be scaled to BEFORE the makeup gain in order to
     /// arrive at `softClipKnee` after it.

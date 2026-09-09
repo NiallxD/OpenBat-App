@@ -27,7 +27,7 @@ enum LiveTuningTab: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .heterodyne: "Heterodyne"
-        case .replay: "Slow Replay"
+        case .replay: "Time Expansion"
         case .haptics: "Pulse Haptics"
         case .pulse: "Pulse Trigger"
         case .display: "Display"
@@ -67,7 +67,9 @@ struct HeterodyneTuningTab: View {
                     get: { audio.heterodyne.denoiseMode },
                     set: { audio.heterodyne.denoiseMode = $0 }
                 )) {
-                    ForEach(SnippetDenoiseMode.allCases) { Text($0.label).tag($0) }
+                    // Off and Normal only on this channel — see
+                    // `SnippetDenoiseMode.liveChoices`.
+                    ForEach(SnippetDenoiseMode.liveChoices) { Text($0.label).tag($0) }
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
@@ -132,7 +134,7 @@ struct SnippetExpansionTuningTab: View {
     let settings: SnippetExpansionSettings
 
     private var inactive: String? {
-        audio.listenMode == .snippetExpansion ? nil : "Slow replay is not the active listen mode"
+        audio.listenMode == .snippetExpansion ? nil : "Time expansion is not the active listen mode"
     }
 
     /// Taken from the processor so the slider cannot offer a value its setter

@@ -31,6 +31,14 @@ enum SnippetOutputRouting: Int, CaseIterable {
 }
 
 /// How much of the background a replay keeps.
+///
+/// **The case names and the labels deliberately differ** (Niall, 2026-09-09).
+/// "Reduce" and "Scrub" describe the mechanism, and a person setting noise
+/// reduction is choosing an amount, not an algorithm — so the control reads Off
+/// / Normal / High, which is a scale, while the code keeps the names that say
+/// what each one actually does. Do not rename the cases to match: `.scrub`
+/// silences everything that isn't plainly a call, and a case called `.high`
+/// would hide that from the next person to read `SpectralDenoiser`.
 enum SnippetDenoiseMode: Int, CaseIterable, Identifiable {
     /// The snippet exactly as captured.
     case off = 0
@@ -45,16 +53,26 @@ enum SnippetDenoiseMode: Int, CaseIterable, Identifiable {
     var label: String {
         switch self {
         case .off:    "Off"
-        case .reduce: "Reduce"
-        case .scrub:  "Scrub"
+        case .reduce: "Normal"
+        case .scrub:  "High"
         }
     }
+
+    /// What the LIVE heterodyne channel offers: Off and Normal, no High.
+    ///
+    /// Not a default, a restriction (Niall, 2026-09-09). High silences whatever
+    /// doesn't clear the gate, which on a replay is a feature — you already know
+    /// a call is in the buffer, so the gaps are only gaps. Live, this is the
+    /// channel that tells you a bat is there at all, and a gate a shade too
+    /// tight makes "missed bat" and "quiet night" the same sound. There is no
+    /// setting of it that is worth that, so it isn't offered.
+    static let liveChoices: [SnippetDenoiseMode] = [.off, .reduce]
 
     var strength: DenoiseStrength { self == .scrub ? .scrub : .reduce }
 }
 
 @Observable
-final class SnippetExpansionSettings {
+final class SnippetExpansionSettings: Reseedable {
 
     /// Slowdown factor. 8× is the natural 384/48 ratio and costs no filtering;
     /// below it the processor installs an anti-alias low-pass (see
@@ -72,7 +90,7 @@ final class SnippetExpansionSettings {
             // Assigning inside didSet doesn't re-enter it, so this settles in
             // one pass and only the snapped value is ever persisted.
             if snapped != expansion { expansion = snapped; return }
-            UserDefaults.standard.set(expansion, forKey: Self.keyExpansion)
+            persist(expansion, Self.keyExpansion)
         }
     }
 
@@ -89,11 +107,11 @@ final class SnippetExpansionSettings {
     /// during which no new snippet can be captured — so this and `expansion`
     /// together set how much of the night the mode is deaf for.
     var memorySeconds: Double {
-        didSet { UserDefaults.standard.set(memorySeconds, forKey: Self.keyMemory) }
+        didSet { persist(memorySeconds, Self.keyMemory) }
     }
 
     var routing: SnippetOutputRouting {
-        didSet { UserDefaults.standard.set(routing.rawValue, forKey: Self.keyRouting) }
+        didSet { persist(routing.rawValue, Self.keyRouting) }
     }
 
     /// Volume trim in dB, on top of the automatic snippet-to-snippet level
@@ -102,7 +120,7 @@ final class SnippetExpansionSettings {
     /// a dB trim would give every existing install +4 dB on top of an already
     /// correct level.
     var trimDB: Double {
-        didSet { UserDefaults.standard.set(trimDB, forKey: Self.keyTrim) }
+        didSet { persist(trimDB, Self.keyTrim) }
     }
 
     /// How much background a replay keeps — see `SpectralDenoiser`. Replaced a
@@ -111,18 +129,18 @@ final class SnippetExpansionSettings {
     /// These are not points on that dial: each is a different decision about
     /// what counts as a call.
     var denoiseMode: SnippetDenoiseMode {
-        didSet { UserDefaults.standard.set(denoiseMode.rawValue, forKey: Self.keyDenoise) }
+        didSet { persist(denoiseMode.rawValue, Self.keyDenoise) }
     }
 
     /// Deliberate pause after each replay before the mode will trigger again —
     /// see `SnippetExpansionProcessor.rearmSeconds`.
     var rearmSeconds: Double {
-        didSet { UserDefaults.standard.set(rearmSeconds, forKey: Self.keyRearm) }
+        didSet { persist(rearmSeconds, Self.keyRearm) }
     }
 
     /// Fade in/out at each end of a replay, ms of output time.
     var fadeMS: Double {
-        didSet { UserDefaults.standard.set(fadeMS, forKey: Self.keyFade) }
+        didSet { persist(fadeMS, Self.keyFade) }
     }
 
     // Field tuning session, 2026-08-17: 16x over a 0.5 s buffer. Deliberately
@@ -137,9 +155,9 @@ final class SnippetExpansionSettings {
     // per trigger. "Fewer calls heard completely beats more calls heard
     // partially" cuts this way too: the call is still whole, there is simply
     // less nothing around it.
-    static let defaultExpansion: Double = 16
-    static let defaultMemorySeconds: Double = 0.1
-    static let defaultTrimDB: Double = 0
+    static var defaultExpansion: Double { Tunable.snippetExpansion.value(16.0) }
+    static var defaultMemorySeconds: Double { Tunable.snippetMemorySeconds.value(0.1) }
+    static var defaultTrimDB: Double { Tunable.snippetTrimDB.value(0.0) }
     /// Scrub, not Reduce. Measured against the demo file the two are
     /// indistinguishable on every figure that describes the CALL — peak within
     /// 0.0 dB, total call energy within 0.3 dB, onset frame within 0.02 dB —
@@ -153,8 +171,8 @@ final class SnippetExpansionSettings {
     /// after each replay. Long enough that the echoes of the call just played
     /// have died away; short enough that a bat working an area still gets
     /// caught two or three times a pass.
-    static let defaultRearmSeconds: Double = 0.5
-    static let defaultFadeMS: Double = 30
+    static var defaultRearmSeconds: Double { Tunable.snippetRearmSeconds.value(0.5) }
+    static var defaultFadeMS: Double { Tunable.snippetFadeMS.value(30.0) }
 
     /// How long a replay lasts at the current settings — shown next to the
     /// sliders, because the cost of a long buffer or a high factor is not the
@@ -196,6 +214,28 @@ final class SnippetExpansionSettings {
             ? (SnippetOutputRouting(rawValue: d.integer(forKey: Self.keyRouting))
                ?? Self.defaultRouting)
             : Self.defaultRouting
+    }
+
+    /// Suppresses the persisting `didSet`s while a re-seed assigns — see
+    /// `RemoteDefaultsReseed.swift`.
+    var isSeeding = false
+
+    private func persist(_ value: Any, _ key: String) {
+        guard !isSeeding else { return }
+        UserDefaults.standard.set(value, forKey: key)
+    }
+
+    /// Remote defaults for everything the user has never set. See
+    /// `RemoteDefaultsReseed.swift`.
+    func reseedRemoteDefaults() {
+        let d = UserDefaults.standard
+        seeding {
+            if d.object(forKey: Self.keyExpansion) == nil { expansion = Self.defaultExpansion }
+            if d.object(forKey: Self.keyMemory) == nil { memorySeconds = Self.defaultMemorySeconds }
+            if d.object(forKey: Self.keyTrim) == nil { trimDB = Self.defaultTrimDB }
+            if d.object(forKey: Self.keyRearm) == nil { rearmSeconds = Self.defaultRearmSeconds }
+            if d.object(forKey: Self.keyFade) == nil { fadeMS = Self.defaultFadeMS }
+        }
     }
 
     func apply(to processor: SnippetExpansionProcessor) {

@@ -135,6 +135,16 @@ private struct RemoteConfig: Decodable {
     /// Shown once, on launch, when `maintenanceMessage` is non-empty.
     var maintenance: Bool?
     var maintenanceMessage: String?
+    /// A standing note at the top of Settings. Same reach as the maintenance
+    /// message and none of its interruption: no alert, no once-per-message
+    /// bookkeeping, it is simply there while the file says something and gone
+    /// when it doesn't. For anything worth telling everybody that isn't worth
+    /// stopping them to say — a known issue, a release note, a thank-you.
+    var notice: String?
+    /// Default VALUES, keyed by `Tunable.rawValue`. Unknown keys and values
+    /// outside a parameter's declared range are ignored — see `RemoteDefaults`,
+    /// which owns every rule about these; this struct only carries them.
+    var defaults: [String: Double]?
 
     static let supportedSchemaVersion = 1
 
@@ -154,8 +164,15 @@ final class FeatureFlagStore {
 
     /// What the remote file has switched OFF. Absent means on.
     private var remoteOff: Set<Feature> = []
-    /// What the config menu has switched back on locally, by hand.
-    private var localOverrides: Set<Feature> = []
+    /// What the config menu has decided by hand for this device, either way.
+    ///
+    /// **Both directions since 2026-09-09** (Niall). It was a set of features
+    /// switched back ON, and a feature the remote file left alone could not be
+    /// switched off at all — so the one thing the menu could not do was try the
+    /// app without a feature, which is most of what a kill switch is for. A
+    /// local `false` cannot produce an app that does more than the one Apple
+    /// reviewed either; it produces one that does less.
+    private var localOverrides: [Feature: Bool] = [:]
 
     /// Whether the config menu can be opened at all.
     ///
@@ -175,6 +192,21 @@ final class FeatureFlagStore {
     private(set) var configMenuAvailable = true
 
     private(set) var maintenanceMessage: String?
+    /// The standing note for the top of Settings — see `RemoteConfig.notice`.
+    private(set) var notice: String?
+    /// Bumped whenever an adopted config actually changed a default VALUE.
+    /// `ContentView` watches this and re-seeds the settings stores; a counter
+    /// rather than a flag so it cannot be missed or need clearing.
+    private(set) var defaultsGeneration = 0
+    /// When the config file was last successfully downloaded — not when it last
+    /// changed, and not when it was last read. Persisted, so it describes the
+    /// cached file a launch starts from rather than resetting to "never" every
+    /// time the app opens.
+    ///
+    /// Shown at the foot of Settings. A remote switch that silently stopped
+    /// arriving looks exactly like a switch nobody threw, and this is the one
+    /// thing on screen that can tell those apart.
+    private(set) var lastFetch: Date?
     private(set) var isRefreshing = false
     private(set) var lastRefreshError: String?
     /// Where the current answers came from, for the config menu's footer.
@@ -195,30 +227,45 @@ final class FeatureFlagStore {
     /// before it landed would keep offering something that has been turned off
     /// until the app was restarted.
     func isEnabled(_ feature: Feature) -> Bool {
-        !remoteOff.contains(feature) || (configMenuAvailable && localOverrides.contains(feature))
+        if configMenuAvailable, let local = localOverrides[feature] { return local }
+        return !remoteOff.contains(feature)
     }
 
     /// Whether the remote file is what is switching this off — so the config
     /// menu can show a switch as overridden rather than merely on.
     func isRemotelyDisabled(_ feature: Feature) -> Bool { remoteOff.contains(feature) }
+    /// Whether this device is deciding this feature for itself, in either
+    /// direction — so the menu can say so, and `Clear device overrides` can be
+    /// offered as the way back to what the config file says.
     func isLocallyOverridden(_ feature: Feature) -> Bool {
-        configMenuAvailable && localOverrides.contains(feature)
+        configMenuAvailable && localOverrides[feature] != nil
     }
 
-    /// Turn a remotely-disabled feature back on for this device only.
+    /// Decide a feature for this device, whichever way the config file has it.
     ///
-    /// It can only ever restore the compiled default, never exceed it, so an
-    /// override cannot produce an app that does more than the one Apple
-    /// reviewed. That is why this is safe to put behind a passcode rather than
-    /// behind an account.
+    /// Turning one ON can only ever restore the compiled default, never exceed
+    /// it, and turning one OFF can only take something away — so an override
+    /// cannot produce an app that does more than the one Apple reviewed. That
+    /// is why this is safe to put behind a passcode rather than behind an
+    /// account.
+    ///
+    /// An override that agrees with the config file is still recorded, and
+    /// deliberately: it is a decision this device has made, and it must survive
+    /// the config file changing its mind. `clearLocalOverrides()` is how the
+    /// device goes back to being told.
     func setLocalOverride(_ feature: Feature, on: Bool) {
-        if on { localOverrides.insert(feature) } else { localOverrides.remove(feature) }
-        UserDefaults.standard.set(localOverrides.map(\.rawValue), forKey: Self.overridesKey)
+        localOverrides[feature] = on
+        persistOverrides()
     }
 
     func clearLocalOverrides() {
-        localOverrides = []
+        localOverrides = [:]
         UserDefaults.standard.removeObject(forKey: Self.overridesKey)
+    }
+
+    private func persistOverrides() {
+        let stored = Dictionary(uniqueKeysWithValues: localOverrides.map { ($0.key.rawValue, $0.value) })
+        UserDefaults.standard.set(stored, forKey: Self.overridesKey)
     }
 
     // MARK: Loading
@@ -228,6 +275,7 @@ final class FeatureFlagStore {
     /// as well so locking the menu can clear it — see `configMenuAvailable`.
     static let postingCapOverrideKey = "openbat.inat.debugIgnoreLimits"
     private static let seenMessageKey = "config.lastSeenMaintenanceMessage"
+    private static let lastFetchKey = "config.lastFetchDate"
 
     nonisolated private static let cacheURL: URL = {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory,
@@ -237,6 +285,26 @@ final class FeatureFlagStore {
         return dir.appendingPathComponent("OpenBatConfig.json")
     }()
 
+    /// Reads the saved overrides, in either shape they can be on disk.
+    ///
+    /// A build before 2026-09-09 wrote an array of the features it had switched
+    /// back on; this one writes a dictionary, because a switch can now go both
+    /// ways. The array is read as "these were on" so an installed device keeps
+    /// its overrides across the update rather than silently losing them.
+    private static func storedOverrides() -> [Feature: Bool] {
+        let defaults = UserDefaults.standard
+        if let stored = defaults.dictionary(forKey: overridesKey) {
+            return stored.reduce(into: [:]) { result, entry in
+                if let feature = Feature(rawValue: entry.key), let on = entry.value as? Bool {
+                    result[feature] = on
+                }
+            }
+        }
+        return (defaults.stringArray(forKey: overridesKey) ?? [])
+            .compactMap(Feature.init(rawValue:))
+            .reduce(into: [:]) { $0[$1] = true }
+    }
+
     /// Cheap, for the same reason `SpeciesGuideStore.init` is: this is built as
     /// a `@State` default inside the window's content closure, which
     /// re-evaluates more often than once.
@@ -245,8 +313,11 @@ final class FeatureFlagStore {
     /// Adopts the cached file, if there is one. Call before `refreshFromRemote`
     /// so a phone with no signal still gets the last answer it was given.
     func loadCached() {
-        localOverrides = Set((UserDefaults.standard.stringArray(forKey: Self.overridesKey) ?? [])
-            .compactMap(Feature.init(rawValue:)))
+        localOverrides = Self.storedOverrides()
+        // Read before the guard below: a cache that has since been deleted
+        // still doesn't make the last download un-happen, and "downloaded, then
+        // the file went missing" is worth being able to see.
+        lastFetch = UserDefaults.standard.object(forKey: Self.lastFetchKey) as? Date
         guard let data = try? Data(contentsOf: Self.cacheURL),
               let config = decode(data)
         else { return }
@@ -275,6 +346,12 @@ final class FeatureFlagStore {
                 return
             }
             try? data.write(to: Self.cacheURL, options: .atomic)
+            // Every successful download, not only one that changed something:
+            // the question this answers is "is the app still being told", and a
+            // file that hasn't changed is still an answer.
+            let now = Date()
+            UserDefaults.standard.set(now, forKey: Self.lastFetchKey)
+            lastFetch = now
             adopt(config, from: .remote)
         } catch {
             lastRefreshError = error.localizedDescription
@@ -308,6 +385,13 @@ final class FeatureFlagStore {
         }
         let message = config.maintenanceMessage?.trimmingCharacters(in: .whitespacesAndNewlines)
         maintenanceMessage = (config.maintenance == true && !(message ?? "").isEmpty) ? message : nil
+        // No `maintenance` gate of its own: an empty string IS the off switch,
+        // because there is nothing to sequence around — this one never
+        // interrupts anybody, so there is no state where you would want the
+        // text present but suppressed.
+        let standing = config.notice?.trimmingCharacters(in: .whitespacesAndNewlines)
+        notice = (standing?.isEmpty == false) ? standing : nil
+        if RemoteDefaults.adopt(config.defaults) { defaultsGeneration += 1 }
         self.source = source
     }
 

@@ -136,7 +136,7 @@ struct WavTuningControl: View {
                     ForEach(SnippetDenoiseMode.allCases) { Text($0.label).tag($0.rawValue) }
                 }
                 .pickerStyle(.segmented)
-                Text("Reduce measures the background hiss in each frequency band and subtracts it. Scrub keeps only what is plainly a call and silences the rest. The spectrogram and the call measurements still come from the original recording either way.")
+                Text("Normal measures the background hiss in each frequency band and subtracts it. High keeps only what is plainly a call and silences the rest. The spectrogram and the call measurements still come from the original recording either way.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
