@@ -61,6 +61,5 @@
   },
 
   "defaults": {
-    "heterodyne.gain": 2
   }
 }
