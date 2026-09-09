@@ -61,5 +61,6 @@
   },
 
   "defaults": {
+    "pulse.maxGapMs": 12
   }
 }
