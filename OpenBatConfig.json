@@ -1,6 +1,8 @@
 {
   "schemaVersion": 1,
-  "_comment": "Remote kill switches for OpenBat. See OpenBat/FeatureFlags.swift. Only `false` does anything: every flag is compiled ON in the app, and this file can only override a default to off. Setting a flag back to true (or removing it) returns the app to the state Apple reviewed. Edit this file on `main` \u2014 the branch FeatureFlagStore.remoteURL names \u2014 or nothing happens; the copy on a version branch is only source. Leave everything true while a build is in review; flip after approval and before release. `configMenu` locks the config menu itself: setting it false closes the menu, drops every local override it had set, and returns the iNaturalist posting-cap bypass to its compiled state.",
+  "_comment": "Remote control for OpenBat: kill switches (see OpenBat/FeatureFlags.swift), two messages, and default VALUES (see OpenBat/RemoteDefaults.swift). Edit this file on `main` — the branch FeatureFlagStore.remoteURL names — or nothing happens; the copy on a version branch is only source. Leave features true while a build is in review; flip after approval and before release.",
+
+  "_comment_features": "Only `false` does anything: every flag is compiled ON, and this file can only override a default to off. Setting one back to true (or removing it) returns the app to the state Apple reviewed. `configMenu` locks the config menu itself: false closes the menu, drops every local override it had set, and returns the iNaturalist posting-cap bypass to its compiled state.",
   "features": {
     "inaturalistUpload": false,
     "automaticID": true,
@@ -8,6 +10,15 @@
     "locationWeighting": true,
     "configMenu": true
   },
+
+  "_comment_maintenance": "Interrupts. Shown as an alert once per distinct message, and standing in Settings while set. For explaining that part of the app is switched off. Needs `maintenance: true` as well as text.",
   "maintenance": false,
-  "maintenanceMessage": ""
+  "maintenanceMessage": "",
+
+  "_comment_notice": "Does not interrupt. A standing note at the top of Settings for as long as this is non-empty — a known issue, a release note, a thank-you. No alert, no once-per-message bookkeeping. Empty string is off.",
+  "notice": "",
+
+  "_comment_defaults": "Default VALUES. Only the keys listed in `Tunable` (RemoteDefaults.swift) exist; anything else is ignored, and so is any value outside that parameter's declared range — a rejected value is ignored, never clamped, so a typo fails visibly rather than half-applying in the field. Two rules worth knowing before editing: (1) these move a default, not a user's choice — anyone who has moved the matching slider keeps their own value, and only untouched installs follow this file; (2) a change takes effect at the NEXT launch, because the file arrives a moment after the app has built its settings. Per-model AutoID values are deliberately NOT settable here: they decide what a recording is identified as, and belong to a build. Delete a key to return that parameter to its compiled default.",
+  "defaults": {
+  }
 }
