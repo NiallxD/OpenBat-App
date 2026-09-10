@@ -191,3 +191,5 @@ This repo is **source-available for transparency, not open source** — it exist
 so anyone can read, inspect, and understand how the app works. See
 [LICENSE](./LICENSE) for what that does and doesn't permit. The field guide data
 is a separate repo with its own terms.
+
+You can learn more about my choice of the word 'Open' in our name [here](https://openbat.app/blog/the-open-in-openbat/).
