@@ -166,27 +166,68 @@ enum WikipediaSpeciesImageService {
         cacheLock.unlock()
         if let cached { return cached }
 
-        let result = await reallyFetch(scientificName)
-
-        cacheLock.lock()
-        cache[scientificName] = result
-        saveCache()
-        cacheLock.unlock()
-        return result
+        switch await reallyFetch(scientificName) {
+        case .photo(let photo):
+            cacheLock.lock()
+            cache[scientificName] = photo
+            saveCache()
+            cacheLock.unlock()
+            return photo
+        case .noPhoto:
+            // The only answer worth remembering as "no": Wikipedia replied, and
+            // this species genuinely has no usable image.
+            cacheLock.lock()
+            cache[scientificName] = .some(nil)
+            saveCache()
+            cacheLock.unlock()
+            return nil
+        case .unavailable:
+            // Deliberately not cached, in memory or on disk. Every failure used to
+            // land here as a plain nil and be written down as "checked, no photo
+            // exists" — permanently, with no retry and no expiry. Opening the guide
+            // once on a plane, or during one of the 429s Wikimedia answers a burst
+            // of parallel requests with, cost those species their photos on every
+            // future launch, and the only way back was deleting the cache file.
+            return nil
+        }
     }
 
-    private static func reallyFetch(_ scientificName: String) async -> Photo? {
+    /// What a lookup actually concluded. The distinction between the last two is
+    /// the whole point — see `fetchPhoto`.
+    private enum FetchOutcome {
+        /// Wikipedia answered and this is the picture.
+        case photo(Photo)
+        /// Wikipedia answered, and there is no article or no usable image.
+        case noPhoto
+        /// We could not tell: offline, a timeout, a 5xx, a rate limit, or a body
+        /// that didn't decode. Says nothing about the species.
+        case unavailable
+    }
+
+    /// True for a response we can draw a conclusion from. A 404 is an answer (the
+    /// caller turns it into `.noPhoto`); a 429 or a 503 is not.
+    private static func isUsable(_ response: URLResponse) -> Bool {
+        guard let http = response as? HTTPURLResponse else { return true }
+        return (200..<300).contains(http.statusCode) || http.statusCode == 404
+    }
+
+    private static func reallyFetch(_ scientificName: String) async -> FetchOutcome {
         let title = scientificName
             .trimmingCharacters(in: .whitespaces)
             .replacingOccurrences(of: " ", with: "_")
         guard let encodedTitle = title.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
               let mediaListURL = URL(string: "https://en.wikipedia.org/api/rest_v1/page/media-list/\(encodedTitle)")
-        else { return nil }
+        else { return .noPhoto }
 
         do {
             let (data, response) = try await session.data(from: mediaListURL)
-            if let http = response as? HTTPURLResponse, http.statusCode == 404 { return nil }
-            let mediaList = try JSONDecoder().decode(WikiMediaList.self, from: data)
+            guard isUsable(response) else { return .unavailable }
+            if let http = response as? HTTPURLResponse, http.statusCode == 404 { return .noPhoto }
+            guard let mediaList = try? JSONDecoder().decode(WikiMediaList.self, from: data) else {
+                // A body that doesn't decode is a server having a bad day, not a
+                // species without a picture.
+                return .unavailable
+            }
 
             let imageTitles = mediaList.items
                 .filter { $0.type == "image" }
@@ -198,7 +239,7 @@ enum WikipediaSpeciesImageService {
                     return !bannedTitleWords.contains { lower.contains($0) }
                 }
                 .prefix(6)
-            guard !imageTitles.isEmpty else { return nil }
+            guard !imageTitles.isEmpty else { return .noPhoto }
 
             var components = URLComponents(string: "https://en.wikipedia.org/w/api.php")!
             components.queryItems = [
@@ -209,10 +250,12 @@ enum WikipediaSpeciesImageService {
                 URLQueryItem(name: "iiurlwidth", value: "800"),
                 URLQueryItem(name: "format", value: "json"),
             ]
-            guard let infoURL = components.url else { return nil }
+            guard let infoURL = components.url else { return .noPhoto }
 
-            let (infoData, _) = try await session.data(from: infoURL)
-            let info = try JSONDecoder().decode(WikiImageInfo.self, from: infoData)
+            let (infoData, infoResponse) = try await session.data(from: infoURL)
+            guard isUsable(infoResponse),
+                  let info = try? JSONDecoder().decode(WikiImageInfo.self, from: infoData)
+            else { return .unavailable }
             let candidates: [Candidate] = (info.query?.pages.values ?? Dictionary<String, WikiImagePage>().values)
                 .compactMap { page in
                     guard let detail = page.imageinfo?.first,
@@ -228,10 +271,13 @@ enum WikipediaSpeciesImageService {
             // Prefer a landscape photo (reads better in a wide hero/thumbnail
             // slot); fall back to the widest available if none are landscape.
             guard let chosen = candidates.first(where: { $0.width > $0.height }) ?? candidates.max(by: { $0.width < $1.width })
-            else { return nil }
-            return Photo(url: chosen.url, artist: chosen.artist, license: chosen.license)
+            else { return .noPhoto }
+            return .photo(Photo(url: chosen.url, artist: chosen.artist, license: chosen.license))
         } catch {
-            return nil
+            // Only `session.data` throws in here now, and it throws for exactly the
+            // reasons that say nothing about the species: offline, timed out,
+            // cancelled.
+            return .unavailable
         }
     }
 }

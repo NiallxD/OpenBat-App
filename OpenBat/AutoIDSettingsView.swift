@@ -68,16 +68,18 @@ struct AutoIDSettingsView: View {
             locationUnavailableSection
             noCoverageSection
 
-            Section {
-                ForEach(ModelRegistry.all) { model in
-                    modelRow(model)
+            if !modelsInRange.isEmpty {
+                Section {
+                    ForEach(modelsInRange) { model in
+                        modelRow(model)
+                    }
+                } header: {
+                    // The subtitle carries the rule now that nothing on the card is
+                    // tappable except the model names: one model runs, and where you
+                    // are is what picks it. See `SettingsView`'s header for the
+                    // three-part shape every settings card now follows.
+                    CardHeader("Models", "Chosen for you from where you are.")
                 }
-            } header: {
-                // The subtitle carries the rule now that nothing on the card is
-                // tappable except the model names: one model runs, and where you
-                // are is what picks it. See `SettingsView`'s header for the
-                // three-part shape every settings card now follows.
-                CardHeader("Models", "Chosen for you from where you are.")
             }
 
             // Moved here from General (2026-08-18). It lived under a "Location"
@@ -150,18 +152,44 @@ struct AutoIDSettingsView: View {
             if ModelRegistry.suggestedModel(for: coordinate) == nil {
                 Section {
                     Label {
-                        Text("No model covers where you are, so identification is "
-                           + "off. Detecting and recording work as normal, and a "
-                           + "model switches itself on if you travel into one's "
-                           + "range.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 4) {
+                            // Said plainly first (Niall, 2026-09-10). With the
+                            // model list now hidden here rather than listing
+                            // models that can't run, this line is the whole
+                            // answer to "why is nothing being named" and it
+                            // shouldn't have to be inferred from a paragraph.
+                            Text("AutoID not available in your region")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(.primary)
+                            Text("Detecting and recording work as normal, and a "
+                               + "model switches itself on if you travel into "
+                               + "one's range.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     } icon: {
                         Image(systemName: "mappin.slash")
                             .foregroundStyle(.secondary)
                     }
                 }
             }
+        }
+    }
+
+    /// The models that can actually run where the user is standing, plus whichever
+    /// one is running if that somehow isn't one of them.
+    ///
+    /// **Listing every model the app ships was a lie about a choice.** Location
+    /// picks the classifier outright, and has since 2026-09-08 — but the card went
+    /// on showing all of them, each one tappable through to its own settings
+    /// screen. Someone in Canada saw a European model listed beside the North
+    /// American one and could open and configure it, which reads as two available
+    /// options and an implied switch. There is no switch, and there never was one
+    /// to find.
+    private var modelsInRange: [ModelDescriptor] {
+        guard let coordinate = location.currentCoordinate else { return [] }
+        return ModelRegistry.all.filter { model in
+            model.coverage?.contains(coordinate) ?? false || model.id == settings.activeModelID
         }
     }
 

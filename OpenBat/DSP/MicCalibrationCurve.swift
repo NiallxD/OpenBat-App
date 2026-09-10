@@ -38,6 +38,19 @@ struct MicCalibrationCurve: Codable, Equatable {
     /// Hz spanned by one bin in this curve's own grid.
     private var hzPerBin: Double { sampleRate / Double(fftSize) }
 
+    /// Whether this curve's bins mean the same frequencies as a stream running at
+    /// `rate` — the precondition `apply(to:)` documents and cannot check for
+    /// itself, since the bin count is the same at every rate.
+    ///
+    /// A tolerance rather than equality: a negotiated rate is reported as a Double
+    /// and can come back a hair off the nominal figure. 0.5% is far tighter than
+    /// any real rate step (48/96/192/384 kHz are factors of two apart) and far
+    /// looser than that jitter.
+    func matches(sampleRate rate: Double) -> Bool {
+        guard rate > 0, sampleRate > 0 else { return false }
+        return abs(rate - sampleRate) / sampleRate < 0.005
+    }
+
     /// Direct per-index application for a caller whose own grid matches this
     /// curve's (`binCount`/`fftSize`/`sampleRate` all equal) — the common
     /// case, since `SpectrogramProcessor` and `STFTGrid` share one grid by

@@ -398,6 +398,35 @@ final class AutoIDSettings: Reseedable {
         load()
     }
 
+    /// Puts this object back to what a fresh install holds, after the stored keys
+    /// have already been erased.
+    ///
+    /// Only "Reset all settings" needs it, and it needs it badly. `loadPersisted()`
+    /// is a no-op by the time Settings can be opened at all, so the reset's call to
+    /// it left every value sitting in memory — and the sheet writes this object out
+    /// on the way to dismissal, so the erasure was undone before the user got back
+    /// to the app. Re-reading storage isn't enough either: after an erase there is
+    /// nothing there to read, and `load()` leaves whatever is already in memory
+    /// alone. So the defaults are rebuilt here, from the same descriptors `init`
+    /// seeds from.
+    ///
+    /// Assigning inside `seeding` matters as much as the values: the map-pin
+    /// thresholds persist on write, and writing them back would pin them to today's
+    /// number and stop this install ever receiving a remote change to either again.
+    func reloadAfterReset() {
+        hasLoaded = true
+        var pm: [String: ModelSettings] = [:]
+        for d in ModelRegistry.all { pm[d.id] = Self.defaultSettings(for: d) }
+        perModel = pm
+        // No model until coverage says which one, exactly as on a fresh install —
+        // the next location fix refills it through `applyCoverage`.
+        activeModelID = nil
+        seeding {
+            mapPinMinConfidence = Tunable.mapPinMinConfidence.value(Float(0.70))
+            mapPinMinPulseCount = Tunable.mapPinMinPulseCount.value(3)
+        }
+    }
+
     // MARK: Active-model accessors (read by the classifier / pulse detector)
 
     var activeModel: ModelSettings? { activeModelID.flatMap { perModel[$0] } }

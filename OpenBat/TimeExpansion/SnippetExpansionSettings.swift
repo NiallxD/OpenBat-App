@@ -30,6 +30,47 @@ enum SnippetOutputRouting: Int, CaseIterable {
     }
 }
 
+/// The balance between the two live channels, as one number.
+///
+/// **There is only one volume control now, and it is on the side of the phone**
+/// (Niall, 2026-09-10). Both channels default to the top of their range, so the
+/// app is as loud as its output stage allows and the device buttons cover the
+/// whole useful range. What was left was two sliders that no longer set loudness
+/// — the only thing they could still do was set the two channels against each
+/// other, which is one decision wearing two controls.
+///
+/// So they became this: centre is both channels at full, and moving off centre
+/// holds the *other* one down by up to 24 dB. Expressed to the reader as "+n dB to
+/// this side", which is what it sounds like and is true relative to the other
+/// channel; it has to be an attenuation underneath because there is nothing above
+/// full scale to give away.
+///
+/// Stored as the two existing per-channel trims rather than as a new preference,
+/// so the reset, the remote-default re-seed and the tuning overlay all keep
+/// working on exactly the values they already knew about.
+enum ListenMixer {
+    /// How far off centre the mixer goes, in dB.
+    static let maxOffsetDB: Double = 24
+    static var range: ClosedRange<Double> { -maxOffsetDB...maxOffsetDB }
+
+    /// Each channel's "full" level — the trim it sits at when the mixer is
+    /// centred, which is also its default.
+    static var expansionFull: Double { SnippetExpansionSettings.defaultTrimDB }
+    static var heterodyneFull: Double { HeterodyneSettings.defaultTrimDB }
+
+    /// Negative favours time expansion (the slider's left), positive heterodyne.
+    static func balance(expansionTrim: Double, heterodyneTrim: Double) -> Double {
+        let held = (expansionFull - expansionTrim) - (heterodyneFull - heterodyneTrim)
+        return min(max(held, -maxOffsetDB), maxOffsetDB)
+    }
+
+    /// The two trims a balance implies. Only ever one side is held down.
+    static func trims(forBalance balance: Double) -> (expansion: Double, heterodyne: Double) {
+        let b = min(max(balance, -maxOffsetDB), maxOffsetDB)
+        return (expansionFull - max(0, b), heterodyneFull - max(0, -b))
+    }
+}
+
 /// How much of the background a replay keeps.
 ///
 /// **The case names and the labels deliberately differ** (Niall, 2026-09-09).
@@ -157,7 +198,33 @@ final class SnippetExpansionSettings: Reseedable {
     // less nothing around it.
     static var defaultExpansion: Double { Tunable.snippetExpansion.value(16.0) }
     static var defaultMemorySeconds: Double { Tunable.snippetMemorySeconds.value(0.1) }
-    static var defaultTrimDB: Double { Tunable.snippetTrimDB.value(0.0) }
+    /// **The top of the range, from a night in the field** (Niall, 2026-09-09/10:
+    /// "the sound last night was too low"; then "default both to +24 and allow the
+    /// user to control volume with their device buttons").
+    ///
+    /// The default IS the maximum, deliberately, and that is what makes the phone's
+    /// own volume control the level control: its full range is useful, with full
+    /// volume a little louder than anyone wants and silence at the bottom. The
+    /// slider below it is then what it should have been all along — a way to back
+    /// one channel off, and to set the two against each other under "time
+    /// expansion with heterodyne", where both are heard at once and the device
+    /// buttons move them together.
+    ///
+    /// Worth understanding what the last few dB actually buy, because it is not
+    /// loudness on a close pass. A replay is already peak-matched to
+    /// `SnippetExpansionProcessor.targetPeak`, which is 0.8 × the soft clipper's
+    /// knee, and the knee to the ceiling is another 3 dB — so a replay whose peak
+    /// really is a close call can only rise about 5 dB no matter what is put in
+    /// front of it, and +24 rather than +18 moves that peak by a tenth of a dB.
+    ///
+    /// What DOES gain is everything else: `maxBackground` deliberately holds a
+    /// window with loud room tone below the peak target, and those — the distant
+    /// bats, the ones that were inaudible outdoors — take the full difference. The
+    /// price is that the soft knee is now doing heavy compression on the loudest
+    /// replays, so a bat overhead and a bat across the field arrive closer in
+    /// level than they really are. That is a real loss of a real cue, accepted
+    /// because a call you cannot hear carries no cue at all.
+    static var defaultTrimDB: Double { Tunable.snippetTrimDB.value(24.0) }
     /// Scrub, not Reduce. Measured against the demo file the two are
     /// indistinguishable on every figure that describes the CALL — peak within
     /// 0.0 dB, total call energy within 0.3 dB, onset frame within 0.02 dB —
@@ -247,13 +314,18 @@ final class SnippetExpansionSettings: Reseedable {
         processor.fadeMS = fadeMS
     }
 
+    /// Inside `seeding` — see `PulseHaptics.resetToDefaults` for why. The reset has
+    /// already erased these keys; writing them back would pin them to today's
+    /// numbers and stop this install ever picking up a remote change to them.
     func reset() {
-        expansion = Self.defaultExpansion
-        memorySeconds = Self.defaultMemorySeconds
-        trimDB = Self.defaultTrimDB
-        denoiseMode = Self.defaultDenoiseMode
-        rearmSeconds = Self.defaultRearmSeconds
-        fadeMS = Self.defaultFadeMS
-        routing = Self.defaultRouting
+        seeding {
+            expansion = Self.defaultExpansion
+            memorySeconds = Self.defaultMemorySeconds
+            trimDB = Self.defaultTrimDB
+            denoiseMode = Self.defaultDenoiseMode
+            rearmSeconds = Self.defaultRearmSeconds
+            fadeMS = Self.defaultFadeMS
+            routing = Self.defaultRouting
+        }
     }
 }

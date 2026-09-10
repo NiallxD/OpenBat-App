@@ -30,9 +30,14 @@ struct SpeciesFeedView: View {
     /// row, so that placement passes false.
     var showsThumbnail: Bool = true
     /// False when no AutoID model is active (`AutoIDSettings.activeModelID == nil`) —
-    /// the feed can never populate in that state, so the empty view explains how to
-    /// turn a classifier on instead of implying the app is just waiting for a bat.
+    /// the feed can never populate in that state, so the empty view says why instead
+    /// of implying the app is just waiting for a bat.
     var autoIDActive: Bool = true
+    /// True when there is no location fix yet. Splits the one silence above into
+    /// its two causes: a model can't be chosen *yet*, or there is no model for
+    /// here at all. They need opposite messages — one resolves itself in a few
+    /// seconds, the other never does.
+    var awaitingLocation: Bool = false
     /// True when identification is switched off remotely rather than simply
     /// unselected. The two look identical in the feed and need opposite
     /// messages: one is a thing the user can fix in Settings, the other is not.
@@ -109,7 +114,16 @@ struct SpeciesFeedView: View {
             return Text("Identification is switched off.")
         }
         if !autoIDActive {
-            return Text("No AutoID model is active. Turn one on in Settings ▸ AutoID to identify species.")
+            // **No instruction, because there is no control.** This used to say
+            // "Turn one on in Settings ▸ AutoID", which was written when a model
+            // could be chosen by hand. Location picks the model now, so anyone
+            // who followed that sentence arrived at a screen with nothing to turn
+            // on — and someone genuinely outside every model's range had no way
+            // at all to do what the app was telling them to.
+            if awaitingLocation {
+                return Text("Waiting for a location fix — it decides which model identifies your bats.")
+            }
+            return Text("AutoID not available in your region.")
         }
         guard sessionStart == nil else { return Text("No species detected yet") }
         return Text("Tap the play button (\(Image(systemName: "play.fill"))) to start detecting, species detected will appear here")
@@ -121,7 +135,9 @@ struct SpeciesFeedView: View {
     private var emptyMessageAccessibilityLabel: String {
         if identificationDisabled { return "Identification is switched off." }
         if !autoIDActive {
-            return "No AutoID model is active. Turn one on in Settings, AutoID, to identify species."
+            return awaitingLocation
+                ? "Waiting for a location fix — it decides which model identifies your bats."
+                : "AutoID not available in your region."
         }
         guard sessionStart == nil else { return "No species detected yet" }
         return "Tap the play button to start detecting, species detected will appear here"
@@ -134,6 +150,15 @@ private struct SpeciesFeedRow: View {
     let guide: SpeciesGuideStore
     let presenceStore: SpeciesPresenceStore
     let showsThumbnail: Bool
+
+    /// Numbers are advanced-mode furniture (Niall, 2026-09-10). Simplified view
+    /// keeps the species, the photo and the "sounds alike" caveat — the answer
+    /// and its one honest qualifier — and drops the score chips and the model's
+    /// track record, which need this whole essay to read correctly. The info
+    /// button beside the pulses button carries the short version instead.
+    @AppStorage(SimplifiedView.key) private var simplifiedMode = true
+
+    @State private var showHowInfo = false
 
     /// Tapping a row opens the same pass-detail screen the Sessions list uses —
     /// the pulses behind the ID, per-pulse score bars, runner-up, complex notes.
@@ -190,7 +215,7 @@ private struct SpeciesFeedRow: View {
             .padding(.leading, showsThumbnail ? Self.photoWidth + 10 : 10)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(alignment: .leading) {
-                if showsThumbnail { thumbnail }
+                if showsThumbnail { tappableThumbnail }
             }
         }
         .background(.ultraThinMaterial)
@@ -198,16 +223,6 @@ private struct SpeciesFeedRow: View {
         // run into the card's leading edge and pick up its corners.
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        // The row goes to the animal, not to the evidence (Niall, 2026-09-02).
-        // A row that has just named a bat is read as that bat, and the guide
-        // page is what nearly every tap on it was after; the pulses behind the
-        // ID are one deliberate tap away on the button. Falls back to the
-        // pulses for a species the guide has no page for — the models name far
-        // more bats than the guide describes, and a dead tap is worse than the
-        // wrong destination.
-        .onTapGesture {
-            if let page = guidePage { profile = page } else { showDetail = true }
-        }
         // No thumbnail decode here any more: the row shows the guide photo when
         // there is a species and the app's own mark when there is not, so the
         // pulse image it used to load was being decoded and then never drawn.
@@ -249,6 +264,23 @@ private struct SpeciesFeedRow: View {
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
         }
+        .contentShape(Rectangle())
+        .onTapGesture(perform: openSpecies)
+    }
+
+    /// The row goes to the animal, not to the evidence (Niall, 2026-09-02). A row
+    /// that has just named a bat is read as that bat, and the guide page is what
+    /// nearly every tap on it was after; the pulses behind the ID are one
+    /// deliberate tap away on the button. Falls back to the pulses for a species
+    /// the guide has no page for — the models name far more bats than the guide
+    /// describes, and a dead tap is worse than the wrong destination.
+    ///
+    /// **The name and the photo, not the whole row** (Niall, 2026-09-10): the
+    /// precision pill needs its own tap for its explanation, and a row-wide
+    /// gesture takes every tap before the pill can see one. The two things a tap
+    /// lands on are the two that read as "this bat".
+    private func openSpecies() {
+        if let page = guidePage { profile = page } else { showDetail = true }
     }
 
     // No NoID line here: `ClassificationStore.speciesFeed` filters those out
@@ -260,19 +292,14 @@ private struct SpeciesFeedRow: View {
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
         }
-        if let runnerUp = pass.runnerUpSpecies {
-            // Two lines rather than one wrapped one: the label is fixed and the
-            // name is not, so wrapping broke the species across lines and put
-            // half of "Runner-up:" on the second one.
-            Text("Runner-up:")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-            Text((SpeciesInfo.commonName[runnerUp] ?? runnerUp)
-                 + (pass.runnerUpConfidence.map { String(format: " (%.0f%%)", $0 * 100) } ?? ""))
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
+        // The winner's own score above the runner-up's, both coloured by how far
+        // apart they are. The old "Runner-up: Yuma Myotis (40%)" said the same
+        // facts, but left the reader to do the subtraction that matters.
+        if !pass.isNoID && !simplifiedMode {
+            ScoreComparison(species: pass.species,
+                            confidence: pass.confidence,
+                            runnerUpSpecies: pass.runnerUpSpecies,
+                            runnerUpConfidence: pass.runnerUpConfidence)
         }
     }
 
@@ -282,7 +309,9 @@ private struct SpeciesFeedRow: View {
         // a real score rather than "we don't know".
         if !pass.isNoID {
             HStack(spacing: 6) {
-                ConfidenceBadge(confidence: pass.confidence)
+                if !simplifiedMode {
+                    IDBadge(species: pass.species, interactive: true)
+                }
                 ComplexIndicator(pass: pass)
             }
         }
@@ -303,8 +332,79 @@ private struct SpeciesFeedRow: View {
                              label: "Pulses behind this identification") {
                     showDetail = true
                 }
+                howButton
             }
         }
+    }
+
+    /// "How was this identified?" — the whole pipeline in under fifty words.
+    ///
+    /// Simplified view only. Advanced mode explains itself through the score
+    /// chip and the precision pill, each with its own popover; putting a third
+    /// explanation beside them would be the same story told three times.
+    @ViewBuilder private var howButton: some View {
+        if simplifiedMode {
+            Button { showHowInfo = true } label: {
+                Image(systemName: "info.circle")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(Color.batAccent)
+                    .frame(width: 34, height: 34)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("How this bat was identified")
+            .popover(isPresented: $showHowInfo) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("How we get to an ID").font(.subheadline.weight(.semibold))
+                    Text("The bat calls. We turn each call into a picture of its sound, and a model trained on thousands of known calls says which species it looks most like. Several calls agree, and we name the bat.")
+                        .font(.caption)
+                    Text("It is a suggestion, not a record — some species sound almost identical.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    // **The numbers live here in simplified view, rather than
+                    // nowhere** (Niall, 2026-09-10). The row deliberately carries
+                    // no percentages — they are advanced-mode furniture, and this
+                    // is the mode for someone who wants to know what bat it is.
+                    // But hiding them used to mean the only way to see the
+                    // evidence was to go and change a setting, which this popover
+                    // then told you to do. Behind one tap is the right place for
+                    // them: out of the way, and not out of reach.
+                    Divider().padding(.vertical, 2)
+                    ForEach(simplifiedScoreLines, id: \.self) { line in
+                        Text(line)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(14)
+                .frame(width: 280)
+                .fixedSize(horizontal: false, vertical: true)
+                .presentationCompactAdaptation(.popover)
+            }
+        }
+    }
+
+    /// The same two facts advanced mode shows as chips, said as sentences: what
+    /// this call scored against its nearest rival, and what the model's track
+    /// record for the winning species is.
+    private var simplifiedScoreLines: [String] {
+        var lines: [String] = []
+        let name = SpeciesInfo.commonName[pass.species] ?? pass.species
+        if let runnerUp = pass.runnerUpSpecies, let runnerUpConfidence = pass.runnerUpConfidence {
+            let runnerUpName = SpeciesInfo.commonName[runnerUp] ?? runnerUp
+            lines.append(String(format: "This call scored %.0f%% for %@, against %.0f%% for %@ — the gap between the two is what matters.",
+                                pass.confidence * 100, name, runnerUpConfidence * 100, runnerUpName))
+        } else {
+            lines.append(String(format: "This call scored %.0f%% for %@, with nothing else close to it.",
+                                pass.confidence * 100, name))
+        }
+        if let precision = ModelReliability.precision(for: pass.species) {
+            lines.append(String(format: "When this model names %@, it turns out to be right about %.0f%% of the time.",
+                                name, precision * 100))
+        } else {
+            lines.append("There is no measured track record for this species, so there is no figure for how often the model is right when it names it.")
+        }
+        return lines
     }
 
     private func actionButton(systemImage: String,
@@ -358,6 +458,15 @@ private struct SpeciesFeedRow: View {
             UnknownSpeciesThumbnail(reason: pass.isNoise ? .notABat : .unidentified,
                                     size: Self.photoWidth, fillsHeight: true)
         }
+    }
+
+    /// The photo, carrying the same tap as the name. Applied out here rather than
+    /// on each branch above so both the guide photo and the placeholder behave
+    /// the same way.
+    @ViewBuilder private var tappableThumbnail: some View {
+        thumbnail
+            .contentShape(Rectangle())
+            .onTapGesture(perform: openSpecies)
     }
 
     /// Optional, and the `?? pulses.first` matters: `max(by:)` returns nil

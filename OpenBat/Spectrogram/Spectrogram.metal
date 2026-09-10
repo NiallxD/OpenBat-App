@@ -120,7 +120,15 @@ fragment float4 spectro_fragment(VertexOut in [[stage_in]],
     // advances by fractional columns each frame. Seek texture is linear (not a
     // ring) — repeat-wrapping it would blend in texels from the opposite edge near
     // the visible window's boundary, so it gets clamp_to_edge instead.
-    constexpr sampler ringSampler(filter::linear, address::repeat);
+    //
+    // The ring wraps in TIME only. Only the horizontal axis is a ring; the
+    // vertical one is the frequency axis, and wrapping it made the topmost row at
+    // bandHigh == 1 blend the Nyquist bin with row 0 — DC, where this hardware's
+    // offset lives — for a top edge that means neither, and one the scrolled-back
+    // (clamped) view didn't have.
+    constexpr sampler ringSampler(filter::linear,
+                                  s_address::repeat,
+                                  t_address::clamp_to_edge);
     constexpr sampler seekSampler(filter::linear, address::clamp_to_edge);
     bool ring = isRing > 0.5;
 

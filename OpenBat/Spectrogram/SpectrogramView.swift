@@ -10,8 +10,28 @@
 import SwiftUI
 import MetalKit
 
+/// How far back the history actually goes, in columns, published by the renderer
+/// (which owns the buffer) for the gesture in `SpectrogramView` (which does not).
+///
+/// **Scroll-back had no end.** The drag and its coasting flick both clamped at
+/// zero and nothing else, so past the end of the 60 s buffer the renderer zeroed
+/// every column that wasn't there and the view went flat black — indistinguishable
+/// from a stalled feed or a dead microphone. A hard flick could leave the offset
+/// tens of thousands of columns beyond anything real, and dragging back had to
+/// cover all of it; the only quick way out was the button that only exists because
+/// you are already lost.
+///
+/// A plain box rather than an `@Observable`: it is written once per frame from
+/// `draw(in:)` and read from a gesture, both on the main thread, and nothing
+/// should re-render because it changed.
+@MainActor final class ScrollLimit {
+    /// Largest offset with real history behind it. 0 until the first frame.
+    var maxOffset: Double = 0
+}
+
 private struct MetalSpectrogramView: UIViewRepresentable {
     let processor: SpectrogramProcessor
+    let scrollLimit: ScrollLimit
     let columnsPerSecond: Double
     let bandLow: Double
     let bandHigh: Double
@@ -44,6 +64,7 @@ private struct MetalSpectrogramView: UIViewRepresentable {
 
     func updateUIView(_ uiView: MTKView, context: Context) {
         guard let coordinator = context.coordinator else { return }
+        coordinator.scrollLimit = scrollLimit
         if columnsPerSecond > 0 {
             coordinator.columnsPerSecond = columnsPerSecond
         }
@@ -109,6 +130,7 @@ struct SpectrogramView: View {
     @State private var scrollColumnOffset: Double = 0
     @State private var lastDragTranslation: CGFloat = 0
     @State private var momentum = ScrollMomentum()
+    @State private var scrollLimit = ScrollLimit()
 
     /// Columns produced per second = sampleRate / hop = (2 * Nyquist) / hopSize.
     private var columnsPerSecond: Double {
@@ -119,6 +141,7 @@ struct SpectrogramView: View {
         GeometryReader { geo in
             ZStack(alignment: .topLeading) {
                 MetalSpectrogramView(processor: processor,
+                                     scrollLimit: scrollLimit,
                                      columnsPerSecond: columnsPerSecond,
                                      bandLow: bandLow,
                                      bandHigh: bandHigh,
@@ -163,7 +186,10 @@ struct SpectrogramView: View {
                 lastDragTranslation = value.translation.width
                 // Drag right = scrolling into the past (positive offset = older data).
                 let columnsPerPoint = columnsPerSecond * timeWindowSeconds / Double(max(viewWidth, 1))
-                scrollColumnOffset = max(0, scrollColumnOffset + dx * columnsPerPoint)
+                // Clamped at both ends now — see `ScrollLimit`. The buffer has an
+                // edge and the gesture should feel it, rather than dragging on into
+                // columns that were never recorded.
+                scrollColumnOffset = clampedOffset(scrollColumnOffset + dx * columnsPerPoint)
             }
             .onEnded { value in
                 lastDragTranslation = 0
@@ -173,9 +199,14 @@ struct SpectrogramView: View {
                 let residualColumns = (value.predictedEndTranslation.width - value.translation.width) * columnsPerPoint
                 let base = scrollColumnOffset
                 momentum.start(residual: residualColumns) { delta in
-                    scrollColumnOffset = max(0, base + delta)
+                    scrollColumnOffset = clampedOffset(base + delta)
                 }
             }
+    }
+
+    /// Between the live edge and the oldest column actually in the buffer.
+    private func clampedOffset(_ offset: Double) -> Double {
+        min(max(0, offset), scrollLimit.maxOffset)
     }
 
     // MARK: Return to live

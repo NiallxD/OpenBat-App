@@ -96,9 +96,28 @@ final class MicCalibrationSettings {
 
     /// The curve to actually apply right now, or `nil` if calibration is off,
     /// there's no stored curve, or the stored curve doesn't match the
-    /// currently-connected mic.
-    func currentCurve(forMicName micName: String) -> MicCalibrationCurve? {
-        guard isEnabled, let curve, curve.micName == micName else { return nil }
+    /// currently-connected mic — by name AND by the rate it was measured at.
+    ///
+    /// **The rate check is not belt-and-braces, it is the half that was missing.**
+    /// A curve is a correction per FFT bin, and a bin is a different frequency at
+    /// a different sample rate (`sampleRate / fftSize` Hz per bin). The bin COUNT
+    /// is 1024 whatever the rate, so `MicCalibrationCurve.apply`'s length check
+    /// can never notice a mismatch: a curve measured at 192 kHz applied to a
+    /// 384 kHz stream lands every correction at half the frequency it belongs to,
+    /// silently, on the realtime audio thread, and flows into both the picture and
+    /// the trigger scan.
+    ///
+    /// It matters more than it looks because the name is a weak key. USB mics do
+    /// not report a UID we can rely on, so what is being matched is a generic port
+    /// name that a second mic of the same type — or the same mic on a route that
+    /// negotiated a different rate — will share.
+    ///
+    /// `sampleRate` is the rate capture is actually running at. Pass 0 where it
+    /// isn't known yet, which declines rather than guessing.
+    func currentCurve(forMicName micName: String, sampleRate: Double) -> MicCalibrationCurve? {
+        guard isEnabled, let curve, curve.micName == micName,
+              curve.matches(sampleRate: sampleRate)
+        else { return nil }
         return curve
     }
 
@@ -122,10 +141,14 @@ final class MicCalibrationSettings {
     /// someone else's detector, most of all. No correction is the right answer
     /// there: a curve measured on the Griff describes the Griff's resonances
     /// and nothing else.
-    func storedCurve(forMicName micName: String) -> MicCalibrationCurve? {
+    /// - Parameter sampleRate: the rate the recording was captured at. Same rule
+    ///   as `currentCurve(forMicName:sampleRate:)`: a curve measured at another
+    ///   rate describes other frequencies and is refused rather than misapplied.
+    func storedCurve(forMicName micName: String, sampleRate: Double) -> MicCalibrationCurve? {
         guard isEnabled, !micName.isEmpty, micName != "—" else { return nil }
         guard let data = UserDefaults.standard.data(forKey: Self.curveKey(forMicName: micName)),
-              let loaded = try? JSONDecoder().decode(MicCalibrationCurve.self, from: data)
+              let loaded = try? JSONDecoder().decode(MicCalibrationCurve.self, from: data),
+              loaded.matches(sampleRate: sampleRate)
         else { return nil }
         return loaded
     }

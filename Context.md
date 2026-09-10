@@ -37,6 +37,7 @@ upload path, or the Live Activity. Most of what's here was expensive to learn.
 14. [Target and build wiring](#14-target-and-build-wiring)
 15. [The 2026-07-27 review](#15-the-2026-07-27-review)
 16. [Open questions](#16-open-questions)
+17. [The 2026-09-10 bug comb](#17-the-2026-09-10-bug-comb)
 
 ---
 
@@ -73,6 +74,7 @@ Reconstructed from git history. Dates are commit dates.
 | 2026-09-01 | **The player stops stuttering, stops blurring and starts actually cutting silence.** Three unrelated causes: the pacing thread was running a whole live spectrogram to extract one number and re-tuning the oscillator 500×/s with a slew meant for 15 Hz; the detail-tile chain restarted every 0.3 s from a step that can never be used during playback; and silence detection measured no spread, padded in display columns, and inherited the overview's resolution (146 ms/column on a ten-minute recording). Measured on the demo file: kept share 43.6% → 17.4% with no call energy lost. See §3. |
 | 2026-08-28 | **Playback speed becomes a control (4×/8×/16×), and hiding silence starts applying to playback.** The compressed timeline used to be torn down the moment you pressed play, and the gap-skipping written for that case was unreachable dead code; the pacing thread now walks the kept segments directly, so every time the engine publishes is in the packed timeline. Detection reworked alongside: the threshold is dB above the file's own noise floor, runs need hysteresis and a minimum duration, and a "found nothing" fallback is flagged instead of silently showing the whole file. See §3. |
 | 2026-09-08 | **Onboarding trimmed to fit one screen, and it now checks for the microphone.** The ID step lost its two label cards (they taught pill wording for a screen the user has not reached); the welcome footer reports whether an ultrasonic mic is actually plugged in rather than warning in the abstract; a denied microphone says what it costs instead of sharing location's mild wording. `OnboardingMetrics` tightens spacing on 667pt screens so every step fits without scrolling. See §7. |
+| 2026-09-10 | Systematic bug comb across every subsystem (`BUGCOMB.md`). Capture/session, settings-reset, launch-presentation, identification-score and field-guide findings fixed — see §17; the listening-DSP and export findings are reviewed but unfixed. |
 
 ---
 
@@ -2098,6 +2100,42 @@ one switch away.
   is seven steps: the three panes, a pointer at each tab, and the session button.
   The `advancedOnly` flag is gone with the filter — a step's mode is now decided
   by which list it is in, so there is nothing left that can disagree.
+
+### Two things the spotlight got wrong (2026-09-09)
+
+- **The transport-menu step was cut around where the menu had been for one
+  frame, not where it is.** `SessionButtonAttached` centred its content on the
+  button with `.position`, which needs the content's height, which meant
+  measuring it into `@State` and placing it correctly only on the *next* pass.
+  The first pass therefore laid the menu out centred on the session button —
+  about 85pt below where it settles — and although that frame is invisible
+  (`.opacity(0)`), a hidden view still publishes its geometry, and the tour reads
+  exactly that. Whether the overlay ever saw the corrected rect was a race: in
+  the simulator the stale one was the last value logged as often as not, and it
+  spotlights the bottom of the menu plus a strip of empty screen, so Record (and
+  sometimes Listen) sits outside the hole.
+
+  Placed by layout alone now — a bottom-aligned frame of the available height
+  puts the menu's lower edge exactly above the button, a centre-aligned frame of
+  twice the button's centre-x puts its middle on the button's — so there is one
+  geometry, published once, with nothing to go stale. The measured-size state and
+  the `.opacity(0)` first frame are both gone with it.
+
+  Worth knowing for any future spotlight: **a target that is placed from measured
+  state will publish a wrong anchor first.** Anything the tour points at wants to
+  be placed by layout, or fed in from a window-space measurement the way the tab
+  bar and session button already are.
+
+- **The short tour ended mid-sentence.** Its last step was the spotlight on the
+  transport menu, and the tick closed menu and tour together with nothing said.
+  It now ends the way the long one does, on a card with no target: the menu
+  closes, the screen is handed back, and it says where the tour lives afterwards.
+
+  Not reproduced: Niall also reports the sun clock spotlight sitting too high on
+  his phone. It measures correctly in the simulator on an iPhone 17 and a 14 Pro
+  Max (26.5), an iPhone 16 Pro (18.0) and an 11-inch iPad, from all three entry
+  paths (Info & Tour, the nudge popover, and cold), so whatever it is is not
+  reproducible here yet.
 
 ### The tour's own affordance (2026-08-17)
 
@@ -5318,3 +5356,201 @@ rebuild touched other subsystems, expect the same pattern there.
   the field guide, complementing the region-grouped list.
 - **Illustrated morphology icons** — `SpeciesDetailView`'s morphology section is
   text-only.
+
+---
+
+## 17. The 2026-09-10 bug comb
+
+A systematic sweep of every subsystem (`BUGCOMB.md`, untracked). What was fixed
+that day, and the reasoning worth keeping.
+
+### An interruption is not the end of a session
+
+An incoming call silently disarmed the recorder. `isActive` — the flag that
+exists precisely so a transient stop doesn't read as "session over" — covered
+the listen-mode restart and nothing else, so `handleInterruption(.began)` took
+the same path a user-initiated stop takes, and `ContentView`'s
+`onChange(of: isRunning)` disarmed. Capture came back on `.ended`, the screen
+looked normal, and nothing was recorded from then on.
+
+`isInterrupted` now joins `isRunning` and `isSwitchingListenMode` in `isActive`.
+It is cleared by a successful start and by `stop()` — ending the session by hand
+is the one thing that outranks a held interruption. The general rule this is the
+second instance of: **anything that ends a session must distinguish "the engine
+stopped" from "the user is finished".**
+
+Demo mode was fixed in the same place: `DemoFileSource` drives its own timer and
+knew nothing about the session, so it kept feeding the pipeline under a screen
+reading "Interrupted". It is stopped on `.began` and restarted with everything
+else.
+
+### The audio-session rule applies to playback too
+
+`CLAUDE.md` has said "AVAudioSession configuration must run off the main actor"
+since the live capture path froze on it (§6). `PlaybackDriver.startEngine` was
+calling `setCategory`/`setActive` straight out of `play()` on the main actor
+anyway — the rule was written about one file and read as being about that file.
+Session configuration and the whole output-engine lifecycle now live on a serial
+`sessionQueue`. Two details that had to come with it: `outputSampleRate` is still
+published synchronously, because the pacing thread reads it and pacing must not
+wait on a route negotiation; and `stopEngine` sets a mute flag synchronously, or
+a stop issued while the queue is inside `setActive` would keep the ring's last
+~100 ms playing until that returned.
+
+### A reset has to clear memory as well as storage
+
+"Reset all settings" is a denylist over the whole preferences domain
+(`SettingsReset`), which is the right shape. Two things went wrong after it.
+
+`AutoIDSettings.loadPersisted()` refuses to run twice, so the reset's call to it
+was a no-op, and the sheet writes that object out on dismissal — the erasure was
+undone before the user got back to the app. Re-reading storage is not enough
+either: after an erase there is nothing to read, and `load()` leaves memory
+alone. `reloadAfterReset()` rebuilds the defaults from the model descriptors
+instead.
+
+And every `reset()`/`resetToDefaults()` assigned outside `seeding {}`, so each
+persisting `didSet` wrote back the key the erase had just removed. From then on
+`reseedRemoteDefaults`'s "only touch a key nobody has set" test failed forever
+for ~18 remotely-settable values. All four now assign inside `seeding`.
+
+### Ranges validate a number; pairs need validating too
+
+`Tunable.range` can only ask whether a value is sane on its own. Both halves of a
+swapped floor/ceiling pair pass, and the config is accepted in full — which
+inverts the haptic mapping, and an *equal* pair divides by zero and hands
+`CHHapticEventParameter` a NaN that no clamp catches, because every comparison
+against NaN is false. `RemoteDefaults.adopt` now cross-checks ordered pairs and
+drops **both** halves, so a rejected pair falls back to the compiled numbers as a
+pair. `PulseHaptics` also answers 1 rather than NaN for a degenerate span,
+because the guard belongs at the consumer as well as at the door.
+
+### One-shot presentations take turns
+
+The re-consent prompt and What's New both became true inside one `.onAppear`,
+before SwiftUI had drawn anything, so one presented and the other was dropped —
+permanently, since each latches as seen when it is *raised*. Pairwise guards had
+already been added twice and had already been forgotten twice (the calibration
+offer's guard never learned about the re-consent prompt or the nearby-species
+sheet). There is a queue now: `LaunchPresentation`, drained one at a time, each
+advanced by the previous one's dismissal after a beat — a sheet raised from
+inside a dismissing presentation is dropped, which is the trap this codebase
+keeps rediscovering.
+
+**Note for anyone adding to `ContentView`'s body:** its modifier chain is at the
+type-checker's limit. Adding a single `.onChange` to it fails the build with
+"unable to type-check this expression in reasonable time", reported against
+whatever closure happens to be last. That is why the queue advances from inside
+existing `onDismiss` closures rather than from an observer, and why the tail of
+`.onAppear` now lives in `finishFirstAppearWiring()`.
+
+### One pill, one quantity
+
+`IDBadge` showed a species' precision where the model published one and fell back
+to the call's own confidence where it didn't. Two quantities, different scales,
+different colour bands, printed as the same bare "94%" — and in a Sessions list a
+species with a track record sat one row from a species without one, wearing
+identical badges. Only the accessibility label told them apart.
+
+The badge is precision, always (Niall, 2026-09-10). Where there is none it is
+replaced by an `ⓘ` naming which reason applies — the model publishes no table, or
+the species was tested on too few recordings — because an absence that explains
+itself is worth more than a number that means something else. A pulse row, which
+is about one call rather than a recording, gets a labelled `PulseScoreChip`
+instead of a bare pill.
+
+Simplified view was hiding the numbers in the feed and showing them everywhere
+else. Its rule now: **no percentages on any row, in the feed or in Sessions, and
+the numbers one tap away** — the feed's "How we get to an ID" popover carries
+what this call scored, what came second, and the winner's track record, in
+sentences. It used to tell the reader to go and switch Advanced on.
+
+### Location picks the model, so only list the models location can pick
+
+The AutoID card listed every model the app ships, each openable through to its
+own settings screen, which reads as a choice between them — someone in Canada saw
+the European model listed beside the North American one. Coverage has decided the
+model outright since 2026-09-08. The card lists only models covering the current
+fix, and says "AutoID not available in your region" where none does; the species
+feed's empty state said "Turn one on in Settings ▸ AutoID", naming a control that
+was deleted in the same change, and says the same thing now.
+
+### Two smaller ones
+
+A failed Wikipedia photo fetch was cached as a permanent "no photo" — every
+failure mode returned the same plain nil, including timeouts, 5xx and the 429s
+Wikimedia answers a burst of parallel requests with. One offline visit to the
+guide cost those species their photos forever. Only a genuine answer (a 404, or a
+page with no usable image) is remembered now.
+
+And a call selection narrower than one analysis window produced no measurement at
+all — the STFT needs `windowLen + hop` samples, 1.4 ms at 384 kHz, which is easy
+to box by hand when zoomed in. `CallAnalysis` widens the *read* around the middle
+of the selection to that minimum while leaving the selection alone. The picture
+path had solved this already (`STFTGrid.effectiveHop`); it was never carried
+across.
+
+### Measure the room before you clean it
+
+The snippet path's two level protections were both taken on the *cleaned* window,
+"because what matters is the level of what actually comes out". True of the peak;
+fatal for everything else, because the shipped default background mode is `scrub`,
+which multiplies rejected time-frequency cells by a hard zero. A cleaned window's
+median sample is therefore not a quiet level, it is 0, and both protections
+collapsed: the background clamped to 1e-9, so the crest of any window holding any
+surviving transient came out at 100+ dB and cleared a gate calibrated at 24 dB
+against the RAW distribution (noise-only windows 15–19 dB, windows with a call
+32 dB and up); and `byBackground` came out at ~6×10⁵ and never bound, so the
+constraint documented as "what makes replays sound alike" did nothing and a
+residual click was matched up to `targetPeak` or the 32× ceiling. Niall heard
+exactly this in the field: keys and footsteps replayed at full volume.
+
+The gate and the background cap are now measured before the denoiser runs; the
+peak still isn't, because the peak is what will be heard. Room tone measured
+before cleanup is also the right denominator for the cap on principle — what it
+bounds is how far the ROOM gets lifted, and that answer should not change with a
+listening preference.
+
+Worth being clear about what this does *not* do: the replay is already gated
+behind the pulse detector's rising edge, and a key jingle is genuinely loud
+ultrasound, so it passes that gate honestly. The crest test rejects windows with
+no transient at all; it cannot reject a transient that isn't a bat. Doing better
+means judging what a call *is*, which the D240x-pattern rule in `CLAUDE.md`
+explicitly bars this mode from doing (§3, §5). The remaining lever is the
+detector's own amplitude/frequency threshold, which is shared with recording.
+
+### The heterodyne channel's output rate is derived, not asserted
+
+`outputSampleRate` was a hard 48 kHz while the producer emitted
+`inputSampleRate / decimation`. The two agree only for input rates that are a
+whole multiple of 48 kHz — which every expected rate is, but the rate is whatever
+the hardware negotiates and nothing checked it. A 44.1 kHz interface gave a
+permanent 8% underfill that the ±3% drift correction cannot close, so the ring ran
+dry every time and `render`'s zero-fill turned that into continuous crackle. Both
+listening processors now derive the rate; they share one output node and have to
+agree about what a second is.
+
+### A calibration curve is bins, and bins are only frequencies at one rate
+
+`MicCalibrationCurve.apply` documents its precondition as "binCount, fftSize and
+sampleRate all equal" and checked only the counts — and the count is 1024 at every
+rate, so the guard could never catch a rate mismatch. The one gate in front of it
+compared the mic's *name*, which is a weak key precisely because USB mics do not
+report a UID we can rely on. A curve measured at another rate would have applied
+every correction at the wrong frequency, silently, on the realtime thread, into
+both the picture and the trigger scan. Both lookups now require the rate to match,
+and a live rate change re-asks rather than leaving the old curve installed.
+
+### Two more from section L
+
+Scroll-back had no end stop — past the buffer the view went black with no way back
+but the button that exists because you are already lost. The renderer publishes how
+far the history actually goes (`ScrollLimit`) and the gesture clamps to it.
+
+And every session export left its zip in `tmp` for good, one per session title,
+hundreds of megabytes each. Exports now live in their own `tmp` subdirectory,
+swept at launch and before each new export — deliberately *not* on the share
+sheet's dismissal, which happens the moment a destination is picked and before
+some activities have finished reading the file. A cancel landing during the
+uninterruptible zip leg also deletes the file instead of opening a share sheet for
+an export the user cancelled.

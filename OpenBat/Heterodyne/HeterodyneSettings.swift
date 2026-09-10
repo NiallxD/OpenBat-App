@@ -29,10 +29,11 @@ import Foundation
 @Observable
 final class HeterodyneSettings: Reseedable {
 
-    /// Shift on the heterodyne channel's own level, in dB. ±18 matches the
+    /// Shift on the heterodyne channel's own level, in dB. ±24 matches the
     /// replay path's trim, which is the other half of the same decision — a
     /// listener balancing the two channels under `.both` routing is setting
-    /// these against each other.
+    /// these against each other, and that balance is the job this control is
+    /// really for; see `defaultTrimDB`.
     var trimDB: Double {
         didSet { persist(trimDB, Self.keyTrim) }
     }
@@ -58,10 +59,37 @@ final class HeterodyneSettings: Reseedable {
         }
     }
 
-    static var defaultTrimDB: Double { Tunable.heterodyneTrimDB.value(0.0) }
-    /// Off, where the replay path defaults to High — and High isn't reachable
+    /// **The top of the range, matching the replay path** — see
+    /// `SnippetExpansionSettings.defaultTrimDB`, which carries the reasoning for
+    /// both: the default is the maximum so that the phone's own volume control is
+    /// the level control, and this slider is for balancing the two channels
+    /// against each other rather than for setting how loud the app is.
+    ///
+    /// On top of `HeterodyneProcessor.defaultGain` (3) and the output stage's
+    /// fixed ×4, this is an effective ×190 where the last measured reference point
+    /// — 0.78% of samples pinned at full scale on a heterodyne-only stretch — was
+    /// ×24. The loudest live content is therefore well inside the soft knee, being
+    /// compressed rather than clipped.
+    ///
+    /// Deliberate, not an oversight. The ceiling is full scale whatever we
+    /// multiply by, so nothing here makes a close bat louder; what was wrong in
+    /// the field is that a DISTANT bat was inaudible at full phone volume, and
+    /// only the quiet end of the range can fix that. What comes up with it is the
+    /// hiss, which is why this channel's Background control now ships on Normal —
+    /// see `defaultDenoiseMode`.
+    static var defaultTrimDB: Double { Tunable.heterodyneTrimDB.value(24.0) }
+    /// Normal, where the replay path defaults to High — and High isn't reachable
     /// here at all; see `SnippetDenoiseMode.liveChoices` for why.
-    static let defaultDenoiseMode: SnippetDenoiseMode = .off
+    ///
+    /// **It shipped Off, and the new full-scale default is what changed the answer**
+    /// (Niall, 2026-09-10). The argument for Off was that this is the channel
+    /// that tells you a bat is there at all, so a gate a shade too tight makes
+    /// "missed bat" and "quiet night" the same sound. Normal is not a gate: it
+    /// subtracts the measured noise per frequency band and leaves a quiet bed
+    /// behind, so nothing is ever silenced outright and the faintest call still
+    /// comes through. What it removes is the hiss that the new default gain
+    /// raises by exactly as much as it raises the calls.
+    static let defaultDenoiseMode: SnippetDenoiseMode = .reduce
 
     private static let keyTrim = "Heterodyne.trimDB"
     private static let keyDenoise = "Heterodyne.denoiseMode"
@@ -103,8 +131,13 @@ final class HeterodyneSettings: Reseedable {
         processor.denoiseMode = denoiseMode
     }
 
+    /// Inside `seeding` — see `PulseHaptics.resetToDefaults` for why. The reset has
+    /// already erased the trim; writing it back would stop this install ever
+    /// picking up a remote change to it.
     func reset() {
-        trimDB = Self.defaultTrimDB
-        denoiseMode = Self.defaultDenoiseMode
+        seeding {
+            trimDB = Self.defaultTrimDB
+            denoiseMode = Self.defaultDenoiseMode
+        }
     }
 }

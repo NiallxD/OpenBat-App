@@ -42,7 +42,10 @@ import Synchronization
 
 nonisolated final class SnippetExpansionProcessor: @unchecked Sendable {
 
-    let outputSampleRate: Double = 48_000
+    /// Derived exactly as `HeterodyneProcessor.outputSampleRate` is, and for the
+    /// same reason — with the added constraint that the two are mixed into one
+    /// output node, so they must agree about what a second is.
+    private(set) var outputSampleRate: Double = HeterodyneProcessor.nominalOutputRate
 
     /// Capture memory bounds, in seconds — continuous, not the D240x's three
     /// switch positions (3.4 / 1.7 / 0.1). Deliberate deviation, recorded in
@@ -234,7 +237,10 @@ nonisolated final class SnippetExpansionProcessor: @unchecked Sendable {
     var trimDB: Double {
         get { ctrlLock.lock(); defer { ctrlLock.unlock() }; return _trimDB }
         set {
-            let clamped = min(max(newValue, -18), 18)
+            // ±24, matching the slider and `Tunable.snippetTrimDB`'s own range.
+            // It was ±18, which became the CEILING the day +18 became the default
+            // — a control that can only ever go quieter is half a control.
+            let clamped = min(max(newValue, -24), 24)
             ctrlLock.lock(); _trimDB = clamped; ctrlLock.unlock()
         }
     }
@@ -447,51 +453,84 @@ nonisolated final class SnippetExpansionProcessor: @unchecked Sendable {
             (prepared.baseAddress! + firstRun).update(from: ring.baseAddress!, count: count - firstRun)
         }
 
+        // **Measured BEFORE cleanup, and this is the whole of the fix for "some
+        // replays are just noise, played loud".**
+        //
+        // The two decisions below used to be taken on the cleaned window, on the
+        // reasoning that what matters is the level of what actually comes out.
+        // That is true of the peak and false of everything else, because the
+        // default background mode is `scrub`, which multiplies every rejected
+        // time-frequency cell by a hard zero. So a cleaned window's median sample
+        // is not a quiet level, it is 0 — and both of these collapsed:
+        //
+        //   * `background` clamped to 1e-9, so the crest of ANY window holding
+        //     any surviving transient came out at 100+ dB and cleared a gate whose
+        //     24 dB was chosen from the RAW distribution (noise-only windows sit at
+        //     15–19 dB, windows with a call at 32 dB and up). The gate could only
+        //     ever reject a window that scrubbed to complete silence.
+        //   * `byBackground` came out at ~6×10⁵ and never bound, so the constraint
+        //     documented as "what makes replays sound alike" did nothing at all,
+        //     and a residual click was matched up to `targetPeak` or the 32×
+        //     ceiling and replayed at full volume.
+        //
+        // Room tone measured before cleanup is also the honest denominator for the
+        // background cap: what it bounds is how far the ROOM gets lifted, and the
+        // answer should not change with a listening preference.
+        let (rawPeak, rawBackground) = measureLevels(count: count)
+
+        // Nothing worth hearing in this window — drop it and get back to
+        // listening. Caller sees the phase go straight back to recording.
+        let crestDB = 20 * log10(rawPeak / rawBackground)
+        guard rawPeak > 0, crestDB >= crestGateDB else {
+            accepted = false
+            return
+        }
+
         let mode = denoiseMode
         if mode != .off {
             denoiser.denoiseOffline(prepared.baseAddress!, count: count,
                                     strength: mode.strength)
         }
+        accepted = true
 
-        // Both measured AFTER cleanup, not before: what matters is the level of
-        // what actually comes out, and denoising changes both of these.
+        // The peak IS measured after cleanup: it is what will actually be heard,
+        // and denoising moves it.
         var peak: Float = 0
         for i in 0..<count { peak = max(peak, abs(prepared[i])) }
-
-        // The background, as the median of the snippet's own sample magnitudes.
-        // A median rather than an RMS precisely because a call is in here: the
-        // call is a couple of percent of the window, so it cannot move the
-        // median, but it dominates an RMS.
-        let probeCount = min(count, Self.maxLevelProbe)
-        let step = max(1, count / probeCount)
-        for i in 0..<probeCount { levelProbe[i] = abs(prepared[min(count - 1, i * step)]) }
-        levelProbe[0..<probeCount].sort()
-        let background = max(levelProbe[probeCount / 2], 1e-9)
-
-        // Nothing worth hearing in this window — drop it and get back to
-        // listening. Caller sees the phase go straight back to recording.
-        let crestDB = 20 * log10(peak / background)
-        guard crestDB >= crestGateDB else {
-            accepted = false
-            return
-        }
-        accepted = true
 
         // Match every snippet to the same output level, so a bat at 40 m and a
         // bat overhead replay equally loud — but never at the cost of lifting
         // the background, which is what `maxBackground` bounds.
         let byPeak = levelTargetPeak / max(peak, 1e-9)
-        let byBackground = levelMaxBackground / background
+        let byBackground = levelMaxBackground / rawBackground
         let auto = min(min(byPeak, byBackground), Self.maxAutoGain)
         replayGain = auto * Float(pow(10, trimDB / 20))
         replayPos = 0
         replayEnvelope = 0
     }
 
+    /// The window's loudest sample, and its background level.
+    ///
+    /// The background is the MEDIAN of the sample magnitudes, not an RMS,
+    /// precisely because a call is in here: the call is a couple of percent of the
+    /// window, so it cannot move the median, but it dominates an RMS. Clamped
+    /// away from zero so the crest ratio above it stays finite.
+    private func measureLevels(count: Int) -> (peak: Float, background: Float) {
+        var peak: Float = 0
+        for i in 0..<count { peak = max(peak, abs(prepared[i])) }
+
+        let probeCount = min(count, Self.maxLevelProbe)
+        let step = max(1, count / probeCount)
+        for i in 0..<probeCount { levelProbe[i] = abs(prepared[min(count - 1, i * step)]) }
+        levelProbe[0..<probeCount].sort()
+        return (peak, max(levelProbe[probeCount / 2], 1e-9))
+    }
+
     /// Reconfigure for a capture sample rate and reset all state. Call before
     /// installing the tap — no concurrent `process`/`render` at this point.
     func reset(inputSampleRate fs: Double) {
         inputSampleRate = fs
+        outputSampleRate = fs / Double(max(1, Int((fs / HeterodyneProcessor.nominalOutputRate).rounded())))
         // **Snapshot the `Tunable`-backed levels here, at capture start.**
         // `prepareReplay` runs on the capture thread, and a `Tunable` read takes
         // a lock (`RemoteDefaults`) — not something to do per snippet on a

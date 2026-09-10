@@ -224,15 +224,48 @@ nonisolated enum CallAnalysis {
             WavPlayerDebugLog.log("CallAnalysis", "analyze: degenerate range \(startSample)-\(endSample), aborting")
             return nil
         }
-        guard let pcm = WavPCMReader.readSamples(wavURL: wavURL, startSample: startSample,
-                                                 count: clampedEnd - startSample)
+        // **A selection narrower than the instrument reads a little wider.**
+        // Nothing can be measured from fewer samples than one analysis window
+        // plus a hop — below that the STFT has under two frames and returns
+        // nothing at all, and the card simply went blank, which is
+        // indistinguishable from the measurement being broken. Zoomed in on a
+        // short call that is easy to do by hand: it is 1.4 ms of audio at
+        // 384 kHz, narrower than some calls.
+        //
+        // So the READ is grown around the middle of the selection to the minimum
+        // the analysis needs, while the selection itself is left alone. The
+        // window is this instrument's own time resolution — asking about a span
+        // shorter than it and answering about the window centred there is the
+        // honest reading, and it is what the picture already does (see
+        // `STFTGrid.effectiveHop`, which solves the same problem for the tile
+        // renderer and was never carried across to here).
+        let minimumSamples = STFTGrid.windowLen + STFTGrid.hop
+        var readStart = startSample
+        var readEnd = clampedEnd
+        if readEnd - readStart < minimumSamples {
+            let centre = (readStart + readEnd) / 2
+            readStart = max(0, centre - minimumSamples / 2)
+            readEnd = readStart + minimumSamples
+        }
+        guard let pcm = WavPCMReader.readSamples(wavURL: wavURL, startSample: readStart,
+                                                 count: readEnd - readStart)
         else {
-            WavPlayerDebugLog.log("CallAnalysis", "analyze: WavPCMReader.readSamples FAILED for \(startSample)-\(clampedEnd)")
+            WavPlayerDebugLog.log("CallAnalysis", "analyze: WavPCMReader.readSamples FAILED for \(readStart)-\(readEnd)")
             return nil
         }
-        WavPlayerDebugLog.log("CallAnalysis", "analyze: read \(pcm.count) samples (\(startSample)-\(clampedEnd), requested \(clampedEnd - startSample))")
+        // A selection against the very end of the recording can't grow forwards —
+        // there is no audio there — so make the shortfall up behind it instead.
+        var samples = pcm
+        if samples.count < minimumSamples, readStart > 0 {
+            let widenedStart = max(0, readStart - (minimumSamples - samples.count))
+            if let widened = WavPCMReader.readSamples(wavURL: wavURL, startSample: widenedStart,
+                                                      count: readEnd - widenedStart) {
+                samples = widened
+            }
+        }
+        WavPlayerDebugLog.log("CallAnalysis", "analyze: read \(samples.count) samples (\(readStart)-\(readEnd), selection \(startSample)-\(clampedEnd))")
         return WavPlayerDebugLog.time("CallAnalysis", "analyze") {
-            analyze(pcm: pcm, sampleRate: sampleRate, minFrequencyHz: minFrequencyHz,
+            analyze(pcm: samples, sampleRate: sampleRate, minFrequencyHz: minFrequencyHz,
                    maxFrequencyHz: maxFrequencyHz,
                    noiseFloor: noiseFloor, cfTailFraction: cfTailFraction,
                    calibrationCurve: calibrationCurve)

@@ -257,15 +257,45 @@ nonisolated final class PlaybackDriver: @unchecked Sendable {
     /// playback speed. Rebuilding the node is the only way to change it.
     private(set) var outputSampleRate: Double = 0
 
+    /// Where the audio session is configured and the output graph is built and
+    /// torn down — never on the caller's thread.
+    ///
+    /// `AVAudioSession.setCategory`/`setActive` are synchronous system calls that
+    /// can block for hundreds of milliseconds while iOS renegotiates a route.
+    /// `AudioEngineController.configureSession` has run them off the main actor
+    /// since the live capture path froze on exactly that, and it is a stated rule
+    /// of the project — but this path called them straight out of `play()` on the
+    /// main actor, so starting playback (especially into headphones or Bluetooth)
+    /// could freeze the whole UI for as long as the renegotiation took.
+    ///
+    /// Serial, so a burst of rate changes still applies in order, and the only
+    /// place `engine`/`sourceNode` are touched.
+    private let sessionQueue = DispatchQueue(label: "uk.openbat.playback-session", qos: .userInitiated)
+
+    /// Set synchronously by `stopEngine()` so silence is immediate even though the
+    /// teardown itself lands on `sessionQueue` a moment later. Without it, a stop
+    /// issued while the queue is inside `setActive` would leave the ring's last
+    /// ~100 ms playing until that call returned.
+    nonisolated(unsafe) private var outputMuted = false
+
     /// Brings the output graph up at `sampleRate`, rebuilding it if it is
     /// already running at a different one. Idempotent at an unchanged rate,
     /// so this is safe to call before every `start()`.
+    ///
+    /// Returns as soon as the work is queued. `outputSampleRate` is published
+    /// here rather than on the queue because `start()` reads it to pace the file,
+    /// and pacing must not depend on how long the session takes to come up.
     func configureOutput(sampleRate: Double) {
-        if engine != nil, outputSampleRate == sampleRate { return }
-        if engine != nil { stopEngine() }
-        startEngine(outputRate: sampleRate)
+        if outputSampleRate == sampleRate { return }
+        outputSampleRate = sampleRate
+        outputMuted = false
+        sessionQueue.async { [self] in
+            teardownEngine()
+            startEngine(outputRate: sampleRate)
+        }
     }
 
+    /// `sessionQueue` only.
     private func startEngine(outputRate: Double) {
         guard engine == nil else { return }
         let session = AVAudioSession.sharedInstance()
@@ -302,6 +332,12 @@ nonisolated final class PlaybackDriver: @unchecked Sendable {
             let buffers = UnsafeMutableAudioBufferListPointer(audioBufferList)
             guard let data = buffers[0].mData else { return noErr }
             let out = data.assumingMemoryBound(to: Float.self)
+            // See `outputMuted`: a stop has to silence this node now, not when
+            // the queued teardown gets its turn.
+            guard !self.outputMuted else {
+                for i in 0..<Int(frameCount) { out[i] = 0 }
+                return noErr
+            }
             switch self.mode {
             case .heterodyne:        hetero.render(out, frames: Int(frameCount))
             case .timeExpansion:     timeExp.render(out, frames: Int(frameCount))
@@ -322,14 +358,21 @@ nonisolated final class PlaybackDriver: @unchecked Sendable {
         try? e.start()
         engine = e
         sourceNode = node
-        outputSampleRate = outputRate
     }
 
+    /// Silences the output immediately and queues the teardown behind whatever
+    /// the session queue is already doing.
     func stopEngine() {
+        outputMuted = true
+        outputSampleRate = 0
+        sessionQueue.async { [self] in teardownEngine() }
+    }
+
+    /// `sessionQueue` only.
+    private func teardownEngine() {
         engine?.stop()
         engine = nil
         sourceNode = nil
-        outputSampleRate = 0
         // No session category/mode restore needed — AudioEngineController
         // unconditionally sets its own category/mode fresh every time IT
         // starts (see configureSession()), regardless of what this engine

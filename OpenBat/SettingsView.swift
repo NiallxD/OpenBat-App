@@ -337,8 +337,10 @@ struct SettingsView: View {
         SettingsReset.eraseUserPreferences()
         // Before anything else: this sheet's Done writes `settings` back out, so
         // an AutoIDSettings still holding the old values in memory would undo
-        // half of this on the way out.
-        settings.loadPersisted()
+        // half of this on the way out. `loadPersisted()` cannot do that job —
+        // it refuses to run twice, and after an erase there is nothing left to
+        // read anyway. See `reloadAfterReset`.
+        settings.reloadAfterReset()
         haptics.resetToDefaults()
         snippetExpansion.reset()
         heterodyne.reset()
@@ -1032,6 +1034,8 @@ struct SettingsView: View {
             .pickerStyle(.segmented)
             .accessibilityLabel("Listening channel")
 
+            mixerRows
+
             switch liveChannel {
             case .expansion:  slowReplayRows
             case .heterodyne: heterodyneRows
@@ -1039,6 +1043,59 @@ struct SettingsView: View {
         } header: {
             CardHeader("Live listening", "What you hear when listening to bats.")
         }
+    }
+
+    /// The one control that used to be two volume sliders — see `ListenMixer`.
+    ///
+    /// Under the channel pill rather than inside it: it belongs to both channels,
+    /// so it must not sit behind a switch that shows one of them.
+    @ViewBuilder
+    private var mixerRows: some View {
+        SettingValue("Mixer",
+                     "Which channel sits on top when you hear both. Volume itself is your "
+                   + "phone's own buttons.",
+                     value: mixerLabel)
+        Slider(value: mixerBalance, in: ListenMixer.range, step: 1) {
+            Text("Mixer")
+        } minimumValueLabel: {
+            Image(systemName: LiveChannel.expansion.symbol)
+                .foregroundStyle(.secondary)
+        } maximumValueLabel: {
+            Image(systemName: LiveChannel.heterodyne.symbol)
+                .foregroundStyle(.secondary)
+        }
+        .accessibilityLabel("Channel mixer")
+        .accessibilityValue(mixerLabel)
+    }
+
+    /// Reads back as a balance and writes back as the pair of trims, so nothing
+    /// else in the app has to know the mixer exists.
+    private var mixerBalance: Binding<Double> {
+        Binding(
+            get: {
+                ListenMixer.balance(expansionTrim: snippetExpansion.trimDB,
+                                    heterodyneTrim: heterodyne.trimDB)
+            },
+            set: { balance in
+                let trims = ListenMixer.trims(forBalance: balance)
+                snippetExpansion.trimDB = trims.expansion
+                heterodyne.trimDB = trims.heterodyne
+                // Straight through to the running processors, so it is heard now
+                // rather than at the next capture — the whole reason to set this
+                // is that a bat is overhead. The stores are what make it survive
+                // a launch; these two lines are what make it audible.
+                audio.snippetExpansion.trimDB = trims.expansion
+                heterodyne.apply(to: audio.heterodyne)
+            }
+        )
+    }
+
+    private var mixerLabel: String {
+        let balance = ListenMixer.balance(expansionTrim: snippetExpansion.trimDB,
+                                          heterodyneTrim: heterodyne.trimDB)
+        if abs(balance) < 0.5 { return "Balanced" }
+        let channel = balance < 0 ? LiveChannel.expansion : .heterodyne
+        return String(format: "%@ +%.0f dB", channel.label, abs(balance))
     }
 
     @ViewBuilder
@@ -1059,25 +1116,10 @@ struct SettingsView: View {
             .accessibilityLabel("Time expansion speed")
             .accessibilityValue(slowReplaySpeedLabel)
 
-        // Volume had no setting at all outside the tuning overlay, and was
-        // a fixed multiplier applied to every snippet regardless of how
-        // loud the pass was (Niall, 2026-09-01).
-        SettingValue("Volume",
-                     "Replays are already levelled, so a faint bat and a close one come back at "
-                   + "similar loudness. This shifts all of them up or down together.",
-                     value: String(format: "%+.0f dB", snippetExpansion.trimDB))
-        Slider(value: Binding(
-            get: { snippetExpansion.trimDB },
-            set: {
-                snippetExpansion.trimDB = $0
-                // Settings are pushed into the processor at start(), so a
-                // change made mid-session would otherwise not be heard
-                // until the next run — same reasoning as the speed slider.
-                audio.snippetExpansion.trimDB = $0
-            }
-        ), in: -18...18, step: 1)
-            .accessibilityLabel("Replay volume trim")
-
+        // No per-channel volume slider here any more: the app starts as loud as
+        // it goes, the phone's buttons are the volume control, and what is left
+        // — how the two channels sit against each other — is the Mixer above.
+        // See `ListenMixer`.
         SettingName("Background",
                     "What to do with the hiss behind a replayed call. Normal cuts the steady "
                   + "background; High keeps only the call itself and silences everything else.")
@@ -1095,22 +1137,8 @@ struct SettingsView: View {
 
     @ViewBuilder
     private var heterodyneRows: some View {
-        SettingValue("Volume",
-                     "Shifts the live channel up or down. Set it against the replay volume — under "
-                   + "Time expansion with heterodyne you hear both, and this is the one underneath.",
-                     value: String(format: "%+.0f dB", heterodyne.trimDB))
-        Slider(value: Binding(
-            get: { heterodyne.trimDB },
-            set: {
-                heterodyne.trimDB = $0
-                // Straight through to the running processor, so it is heard
-                // now rather than at the next capture — the whole reason to
-                // set this is that a bat is overhead. `apply` is what makes
-                // it survive a launch; this is what makes it audible.
-                heterodyne.apply(to: audio.heterodyne)
-            }
-        ), in: -18...18, step: 1)
-            .accessibilityLabel("Heterodyne volume trim")
+        // Volume lives on the phone's own buttons and the balance lives in the
+        // Mixer above — see `ListenMixer`.
 
         SettingName("Background",
                     "What to do with the hiss on the live channel. Normal measures the steady "

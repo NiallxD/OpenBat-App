@@ -152,6 +152,41 @@ nonisolated enum SessionExport {
         }
     }
 
+    /// Where finished zips live until they are swept.
+    ///
+    /// A directory of their own, so sweeping is unambiguous: they used to be
+    /// written into the root of `tmp` next to everybody else's scratch files,
+    /// where nothing could safely delete them by pattern.
+    static var exportsDirectory: URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SessionExports", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    /// Deletes every finished export except `keeping`.
+    ///
+    /// **Nothing used to delete them at all.** A zip was handed to the share sheet
+    /// and left in `tmp` for good — one per session title, each a whole night's
+    /// WAVs compressed, routinely hundreds of megabytes, invisible to the user and
+    /// reclaimed only whenever iOS decided to purge `tmp`, which it does not
+    /// promise to do while the app is in use.
+    ///
+    /// Swept at launch and at the start of the next export, deliberately NOT when
+    /// the share sheet closes: the sheet dismisses the moment a destination is
+    /// picked, and some activities read the file after that. Waiting until the
+    /// next export (or the next launch) bounds this to one zip at a time and none
+    /// across launches, without racing a share that is still going.
+    static func purgeFinishedExports(keeping: URL? = nil) {
+        let fm = FileManager.default
+        guard let contents = try? fm.contentsOfDirectory(at: exportsDirectory,
+                                                         includingPropertiesForKeys: nil)
+        else { return }
+        for url in contents where url.standardizedFileURL != keeping?.standardizedFileURL {
+            try? fm.removeItem(at: url)
+        }
+    }
+
     /// Builds the zip and returns its URL. Pure file IO — call it off the main
     /// actor, since copying a night's worth of WAVs and zipping them is slow.
     ///
@@ -171,6 +206,8 @@ nonisolated enum SessionExport {
                               isCancelled: @Sendable () -> Bool = { false },
                               onProgress: @Sendable (Progress) -> Void = { _ in }) -> URL? {
         let fm = FileManager.default
+        // Whatever the last export left behind — see `purgeFinishedExports`.
+        purgeFinishedExports()
         let baseName = safeName(input.title)
         let stage = fm.temporaryDirectory.appendingPathComponent(baseName, isDirectory: true)
         try? fm.removeItem(at: stage)
@@ -230,7 +267,7 @@ nonisolated enum SessionExport {
         NSFileCoordinator().coordinate(readingItemAt: stage, options: [.forUploading], error: &coordError) { tempZip in
             // `tempZip` is system-managed and deleted when this closure returns —
             // move it somewhere we control and hand that back.
-            let dest = fm.temporaryDirectory.appendingPathComponent("\(baseName).zip")
+            let dest = exportsDirectory.appendingPathComponent("\(baseName).zip")
             try? fm.removeItem(at: dest)
             if (try? fm.moveItem(at: tempZip, to: dest)) != nil { zipURL = dest }
         }

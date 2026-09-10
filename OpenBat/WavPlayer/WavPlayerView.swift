@@ -870,9 +870,13 @@ struct WavPlayerView: View {
             // hundred bytes, but it is still file IO on a file that may have
             // just come down from iCloud, so it goes off the main actor.
             let settings = micCalSettings
+            // The recording's OWN rate, not the device's: a curve measured at
+            // another rate describes other frequencies — see
+            // `MicCalibrationCurve.matches(sampleRate:)`.
+            let fileRate = engine.sampleRate
             let calCurve = await Task.detached(priority: .userInitiated) {
                 guard let make = GuanoMetadata.read(from: url)?["Make"] else { return nil as MicCalibrationCurve? }
-                return await settings.storedCurve(forMicName: make)
+                return await settings.storedCurve(forMicName: make, sampleRate: fileRate)
             }.value
             guard !Task.isCancelled else { return }
             calibrationCurve = calCurve

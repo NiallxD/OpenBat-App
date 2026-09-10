@@ -257,18 +257,29 @@ final class PulseHaptics: Reseedable {
         }
     }
 
+    /// Inside `seeding`, so the defaults land in memory and nothing is written
+    /// back to storage.
+    ///
+    /// The reset has already erased these keys. Assigning outside `seeding` fires
+    /// every persisting `didSet` and writes them straight back — after which
+    /// `reseedRemoteDefaults`'s "only touch a key nobody has set" test fails
+    /// forever, and this install can never receive a remote change to any of these
+    /// eleven values again. A reset is the most likely moment for someone to want
+    /// exactly such a correction.
     func resetToDefaults() {
-        strength = Self.defaultStrength
-        levelFloor = Self.defaultLevelFloor
-        levelCeiling = Self.defaultLevelCeiling
-        minIntensity = Self.defaultMinIntensity
-        freqFloorHz = Self.defaultFreqFloorHz
-        freqCeilingHz = Self.defaultFreqCeilingHz
-        buzzEnterHz = Self.defaultBuzzEnterHz
-        buzzExitHz = Self.defaultBuzzExitHz
-        rateWindow = Self.defaultRateWindow
-        buzzHangover = Self.defaultBuzzHangover
-        minTapInterval = Self.defaultMinTapInterval
+        seeding {
+            strength = Self.defaultStrength
+            levelFloor = Self.defaultLevelFloor
+            levelCeiling = Self.defaultLevelCeiling
+            minIntensity = Self.defaultMinIntensity
+            freqFloorHz = Self.defaultFreqFloorHz
+            freqCeilingHz = Self.defaultFreqCeilingHz
+            buzzEnterHz = Self.defaultBuzzEnterHz
+            buzzExitHz = Self.defaultBuzzExitHz
+            rateWindow = Self.defaultRateWindow
+            buzzHangover = Self.defaultBuzzHangover
+            minTapInterval = Self.defaultMinTapInterval
+        }
     }
 
     // MARK: Engine
@@ -557,17 +568,30 @@ final class PulseHaptics: Reseedable {
 
     // MARK: Mapping
 
+    /// Where in the floor…ceiling span a value sits, 0…1.
+    ///
+    /// **A degenerate span answers 1, not NaN.** These two mappings each divide by
+    /// a span that nothing guarantees is positive: equal ends divide by zero, and
+    /// `min(max(t, 0), 1)` does not catch the result, because every comparison
+    /// against a NaN is false and both bounds are simply passed through — straight
+    /// into a `CHHapticEventParameter`. A remote config could produce exactly that
+    /// (now rejected at the door, see `RemoteDefaults.adopt`), and so could any
+    /// future control that lets the two ends meet. Answering "top of the range"
+    /// keeps the feedback working and loud rather than undefined.
+    private static func position(_ value: Double, floor: Double, ceiling: Double) -> Double {
+        let span = ceiling - floor
+        guard span > 0 else { return 1 }
+        return min(max((value - floor) / span, 0), 1)
+    }
+
     private func intensityFor(_ level: Float) -> Float {
-        let span = levelCeiling - levelFloor
-        let t = min(max((level - levelFloor) / span, 0), 1)
+        let t = Float(Self.position(Double(level), floor: Double(levelFloor), ceiling: Double(levelCeiling)))
         let base = minIntensity + t * (1 - minIntensity)
         return min(max(base * Float(strength), 0), 1)
     }
 
     private func sharpnessFor(_ frequency: Double) -> Float {
-        let span = freqCeilingHz - freqFloorHz
-        let t = (frequency - freqFloorHz) / span
-        return Float(min(max(t, 0), 1))
+        Float(Self.position(frequency, floor: freqFloorHz, ceiling: freqCeilingHz))
     }
 
     // MARK: Rendering

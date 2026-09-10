@@ -212,6 +212,18 @@ nonisolated enum Tunable: String, CaseIterable, Sendable {
 /// start — never per buffer.
 nonisolated enum RemoteDefaults {
 
+    /// Parameters that only mean anything as a pair: the first must be strictly
+    /// below the second. Checked in `adopt`, where the reason is written out.
+    ///
+    /// `hapticBuzzEnterHz`/`hapticBuzzExitHz` are deliberately absent: that pair is
+    /// a hysteresis threshold rather than a span, and `PulseHaptics` already
+    /// cross-checks it in the two properties' own observers.
+    private static let orderedPairs: [(Tunable, Tunable)] = [
+        (.hapticLevelFloor, .hapticLevelCeiling),
+        (.hapticFreqFloorHz, .hapticFreqCeilingHz),
+        (.simplifiedBandLowHz, .simplifiedBandHighHz),
+    ]
+
     private static let storageKey = "config.remoteDefaults"
     private static let lock = NSLock()
     nonisolated(unsafe) private static var cache: [String: Double]?
@@ -247,6 +259,27 @@ nonisolated enum RemoteDefaults {
                 accepted[tunable.rawValue] = raw
             } else {
                 rejected.append("\(tunable.rawValue)=\(raw) outside \(tunable.range)")
+            }
+        }
+        // Pairs, after each value has passed its own range.
+        //
+        // `range` can only ask "is this number sane on its own", and for a
+        // floor/ceiling pair that is not the question: both halves of a swapped
+        // pair are individually in range, and a config that swaps one is accepted
+        // in full. Downstream that inverts the mapping it feeds — faint calls
+        // buzzing at full strength and loud ones at the minimum — and an *equal*
+        // pair divides by zero, which no clamp catches because every comparison
+        // against a NaN is false. Both halves are dropped rather than one, so a
+        // rejected pair falls back to the compiled numbers as a pair; keeping
+        // either half is exactly the half-applied config this file promises not to
+        // ship. A pair with only one half in the file is left alone — there is
+        // nothing here to compare it against, and its range still applies.
+        for (low, high) in Self.orderedPairs {
+            guard let l = accepted[low.rawValue], let h = accepted[high.rawValue] else { continue }
+            if l >= h {
+                accepted[low.rawValue] = nil
+                accepted[high.rawValue] = nil
+                rejected.append("\(low.rawValue)=\(l) is not below \(high.rawValue)=\(h)")
             }
         }
         if !rejected.isEmpty {

@@ -89,13 +89,25 @@ final class AudioEngineController {
     /// about to be undone.
     private(set) var isSwitchingListenMode = false
 
-    /// What the UI should treat as "detecting": running, or briefly between the two
-    /// halves of a listen-mode restart. `isRunning` alone makes the Start button
-    /// flick back to its idle ear and the transport buttons disable themselves for
-    /// a few hundred ms every time the mode crosses `.off` — reporting a stop the
-    /// user did not ask for. Anything that acts on capture actually being down
-    /// (finalizing a pass, stopping the pump) must keep using `isRunning`.
-    var isActive: Bool { isRunning || isSwitchingListenMode }
+    /// True from the moment iOS takes the session away (a call, Siri, another app)
+    /// until capture is running again or the user ends the session themselves.
+    ///
+    /// The same idea as `isSwitchingListenMode`, and it exists for the same reason:
+    /// capture really has stopped, but the *session* has not ended — the user did
+    /// not ask for this and, when iOS says the session may resume, it is about to
+    /// be undone. Without it an incoming call read as "session over" and silently
+    /// disarmed the recorder, which is precisely the failure the flag beside it was
+    /// added to prevent, reached by a different route.
+    private(set) var isInterrupted = false
+
+    /// What the UI should treat as "detecting": running, briefly between the two
+    /// halves of a listen-mode restart, or held by an interruption. `isRunning`
+    /// alone makes the Start button flick back to its idle ear and the transport
+    /// buttons disable themselves for a few hundred ms every time the mode crosses
+    /// `.off` — reporting a stop the user did not ask for. Anything that acts on
+    /// capture actually being down (finalizing a pass, stopping the pump) must keep
+    /// using `isRunning`.
+    var isActive: Bool { isRunning || isSwitchingListenMode || isInterrupted }
 
     /// Nonisolated, thread-safe mirror of `isRunning` — lets `PlaybackDriver`
     /// (which has no reference to this @MainActor instance, and whose own
@@ -494,6 +506,7 @@ final class AudioEngineController {
             try startEngine()
             startStatsTimer()
             isRunning = true
+            isInterrupted = false
             startFailure = nil
             status = diagnostics.isNativeRate
                 ? "Capturing at \(Int(diagnostics.actualSampleRate)) Hz"
@@ -528,6 +541,10 @@ final class AudioEngineController {
             try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         }
         isRunning = false
+        // Ending the session by hand is the one thing that outranks a held
+        // interruption: from here the session really is over, and everything
+        // keyed to `isActive` — the armed recorder included — should see that.
+        isInterrupted = false
         // Drop the meter to silence — otherwise it freezes at the last live value.
         statsLock.lock(); latestLevelDB = AudioLevel.minDB; statsLock.unlock()
         diagnostics.currentLevelDB = AudioLevel.minDB
@@ -635,6 +652,7 @@ final class AudioEngineController {
 
             startStatsTimer()
             isRunning = true
+            isInterrupted = false
             startFailure = nil
             status = "Demo: \(demoFileName ?? url.lastPathComponent) at \(Int(rate)) Hz"
         } catch {
@@ -1364,6 +1382,18 @@ final class AudioEngineController {
         case .began:
             statsTimer?.invalidate()
             statsTimer = nil
+            // A demo drives its own timer and knows nothing about the audio
+            // session, so without this it carries on feeding the pipeline —
+            // spectrogram scrolling, pulses detected, the demo clock advancing —
+            // underneath a screen that says "Interrupted". Stop it, so the word
+            // means the same thing in demo mode as it does with a real mic;
+            // `.ended` restarts it the same way it restarts capture.
+            demoSource?.stop()
+            demoSource = nil
+            // Set before `isRunning`, so anything observing that change already
+            // sees the session as held rather than ended — the recorder's armed
+            // state is decided in exactly that observer.
+            isInterrupted = true
             isRunning = false
             status = "Interrupted"
         case .ended:

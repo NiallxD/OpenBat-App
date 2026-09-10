@@ -69,6 +69,10 @@ final class SpectrogramRenderer: NSObject, MTKViewDelegate {
     /// Pulse detector fed once per drained column. Set from updateUIView.
     var pulseDetector: PulseDetector?
 
+    /// Where the gesture is told the history ends — see `ScrollLimit`. Published
+    /// from here because this is what owns the buffer.
+    var scrollLimit: ScrollLimit?
+
     /// Explicit palette override, independent of `pulseDetector.displayPalette` —
     /// for callers with no live PulseDetector (e.g. PlaybackView, which renders a
     /// file's spectrogram rather than the live detector's). Takes precedence over
@@ -243,6 +247,14 @@ final class SpectrogramRenderer: NSObject, MTKViewDelegate {
         }
 
         advanceDisplayHead()
+
+        // How far back there is anything to see. Taken from the frozen snapshot
+        // while scrolling, since that is what is on screen; the live buffer keeps
+        // filling behind it and its count would let the gesture run past the end
+        // of what the user is actually looking at.
+        let history = snapshotHistory ?? liveHistory
+        let recorded = min(history.totalWritten, history.capacity)
+        scrollLimit?.maxOffset = Double(max(0, recorded - visibleColumns))
 
         // **Nothing is drawn into a layer with no size.** A rotation takes the
         // view through a zero drawable size on its way to the new one ("CAMetal

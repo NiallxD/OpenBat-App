@@ -251,7 +251,15 @@ final class SessionExportManager {
         compressionEstimate = nil
         let wasCancelled = job == nil
         job = nil
-        if let url {
+        if let url, wasCancelled {
+            // **A cancelled export must not still open a share sheet.** The zip
+            // leg can't be interrupted (see `SessionExport.makeShareItem`), so a
+            // cancel landing during compression — the longer leg on a big session
+            // — still comes back with a finished file. This used to be handed
+            // straight to `ready`: the banner disappeared on the tap, and a minute
+            // later a share sheet appeared for the export the user had cancelled.
+            try? FileManager.default.removeItem(at: url)
+        } else if let url {
             ready = Ready(title: title, url: url)
         } else if !wasCancelled {
             failure = "Couldn't build the export for \(title). There may not be room on the device for a copy of its recordings."

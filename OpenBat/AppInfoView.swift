@@ -105,7 +105,7 @@ struct TourStep: Identifiable {
 /// The simplified tour used to be the advanced one with the advanced-only steps
 /// filtered out, which left sixteen steps — every pill in the stats header, both
 /// listening modes, the deaf-window trade-off — for someone who has not yet heard
-/// a bat. It is now its own short script of five: the three panes, then the
+/// a bat. It is now its own short script of six: the three panes, then the
 /// session button and what its second tap opens.
 ///
 /// The advanced tour is unchanged in shape and still walks the whole screen; it
@@ -150,6 +150,17 @@ enum TourScript {
         TourStep(target: .transportMenu, symbol: "slider.horizontal.3", opensTransportMenu: true,
                  title: "Record, listen, end",
                  detail: "Record keeps a file of each pass. Listen brings the calls down into your hearing, tapping through the options. End stops the session and files it away. (Shown here for the tour.)"),
+
+        // The short tour used to stop dead here: the last card was a spotlight
+        // on the transport menu, and the tick took both the menu and the whole
+        // tour away in one frame with nothing said. The long tour has always
+        // closed with a card that hands the screen back and says where the tour
+        // lives afterwards; this is the same courtesy, in five words fewer
+        // (2026-09-09). No target, so the menu closes and the screen is
+        // uncovered behind it — which is itself part of the goodbye.
+        TourStep(target: nil, symbol: "checkmark.circle",
+                 title: "That's it",
+                 detail: "Settings and Help are behind the gear, top right, along with this tour if you'd like it again. Happy detecting!"),
     ]
 
     // Walks the screen top-to-bottom: the nav bar, each pane first, then each
@@ -279,7 +290,7 @@ struct TourOfferPopover: View {
             }
 
             Text(simplified
-                 ? "A quick guided tour points out what's on the screen and how to start listening — five taps."
+                 ? "A quick guided tour points out what's on the screen and how to start listening — half a dozen taps."
                  : "A guided tour walks you round every readout and control on the detector, one at a time.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)

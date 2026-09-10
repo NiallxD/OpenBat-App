@@ -32,6 +32,59 @@
   interrupts everybody, before they reach the detector.
 -->
 
+## v0.9.7 (Build 249)
+
+<!-- openbat: reonboard -->
+
+### New
+- **Live listening is one place in Settings** — Both channels now sit in a single card under Detecting, behind a two-way switch: time expansion on one side, heterodyne on the other. Under "time expansion with heterodyne" you hear both at once, so setting them against each other is one decision rather than two.
+- **The live channel has a volume and a background control** — They existed, but only inside the tuning panel, and they forgot themselves every time you opened the app. They are ordinary settings now and they stay put.
+- **Settings can be corrected without an app update** — If a default value turns out to be wrong or not ideal, we can change it for everybody to improve the experience. **A value you have set yourself is never touched** — only the ones left as they came. Nothing about how species are identified can be changed this way; that still takes a new app update.
+- **A notice can appear at the top of Settings** — For something worth telling everybody that is not worth interrupting anybody: a known issue, or a note about a release.
+- **Settings says when it last heard from us** — A line at the bottom with the time of the last check. A setting we changed that never arrived looks exactly like one nobody changed, and this is what tells the two apart.
+
+### Changed
+- **One volume control: the buttons on your phone** — Both listening channels now start as loud as the app can go, after a night in the field where neither was loud enough with the phone turned all the way up.
+- **The two volume sliders are now one Mixer** — Under the channel pill in Settings. In the middle both channels are at full; slide it towards the tortoise or the antenna to put that one on top by up to 24 dB. It replaces a pair of sliders that could no longer set loudness, only the balance — which is one decision, so it is now one control.
+- **The live channel starts with background reduction on** — Set to Normal rather than Off, because the extra volume above raises the hiss by as much as it raises the calls. Normal subtracts the steady background and leaves a quiet bed behind, so nothing is silenced and a faint bat still comes through.
+- **The percentage on an identification is one thing now** — The badge on a row is the model's track record for that species and nothing else: how often it turns out to be right when it names that bat. Where a species has no measured track record the badge is replaced by an ⓘ that says why, instead of quietly showing a different number in the same place.
+- **Simplified view keeps the scores one tap away** — The row still carries no percentages, but the ⓘ beside it now shows what this call scored, what came second, and how often the model is right about the winner. It used to send you to Settings to turn Advanced on.
+- **AutoID only lists models that work where you are** — Every model the app ships was listed, each one openable, which read as a choice between them. Where you are picks the model; where nothing covers you, the screen says so.
+- **Slow replay is now called time expansion** — It is what the mode has always been, and what everybody else calls it.
+- **The live channel is louder** — Heterodyne sat far below the replayed calls, so turning the phone up enough to hear a distant bat made every replay a shock. The two now arrive at about the same level, and the phone's own volume control covers the range it should.
+- **Background reduction reads Off, Normal and High** — Instead of Off, Reduce and Scrub, which described how it works rather than how much of it you get.
+- **No High on the live channel** — High keeps only what is plainly a call and silences everything else. On a replay that is useful; live, it would make a missed bat and a quiet night sound identical, so it is not offered there.
+- **The demo sounds like the real thing** — Demo mode played through a louder path than live listening, so anything judged by ear against it was several decibels out. It now uses the same path as the microphone.
+- **The species card says how to start** — It read "Start detecting to see species here" without saying where that button is.
+- **The "Not recording" pill is gone** — The reminder that appears when you have been listening a while says it better, and the pill spent most of its life covering the spectrogram to say "no".
+
+### Fixed
+- **A phone call no longer stops your recording** — Being interrupted — a call, Siri, another app taking the microphone — quietly switched recording off. Listening came back when the call ended and looked completely normal, but nothing was being kept.
+- **Replays are calls, not clatter** — Keys, footsteps and other loud noise could be replayed at full volume, and the check meant to throw those windows away had stopped working: on High background removal it was measuring a background that had already been silenced. It measures the room as recorded now, so a window with no call in it is dropped and the mode goes back to listening.
+- **Every replay lands at the same level again** — The limit that keeps a quiet window quiet was also being measured after cleanup, so it never applied, and a faint click could be amplified as far as a bat.
+- **Session exports don't fill up your phone** — Every session you exported left its zip file on the device for good, invisibly, often hundreds of megabytes each. Old ones are cleared at launch and before each new export.
+- **Cancelling an export really cancels it** — Cancelling while it was compressing hid the progress, then opened the share sheet a minute later anyway.
+- **The spectrogram stops at the end of what it kept** — Flicking back through history could run far past the last thing recorded, leaving a blank screen with no way back but the "Return to live" button.
+- **Listening works on microphones that aren't 384 kHz** — On a microphone running at a rate like 44.1 kHz, the live channel produced continuous crackle. It now follows whatever rate the hardware gives it.
+- **Microphone calibration is only applied where it belongs** — A calibration is measured at one sample rate and only means anything at that rate, but the only check was the microphone's name — and USB microphones report generic names. A calibration measured at a different rate would have been applied at the wrong frequencies, silently.
+- **"Reset all settings" now resets the AutoID settings too** — Everything on that tab survived the reset: species, thresholds, the model, the map-pin limits. It said it had worked, and it had not.
+- **A reset no longer freezes settings we can correct later** — After resetting, about eighteen values could never again pick up a correction we send out. Resetting is exactly when somebody most wants one.
+- **Terms updates and What's New both appear** — On a release that changed both, whichever came second was dropped and never shown again.
+- **Pressing play doesn't freeze the screen** — Starting playback set the audio route up on the same thread that draws, so with headphones or Bluetooth connected the app could lock up for the best part of a second.
+- **Species photos come back after a bad connection** — Opening the guide once while offline (or during a Wikipedia hiccup) recorded those species as having no photo, permanently. They are only remembered as photo-less now when Wikipedia actually says so.
+- **Very short call selections can be measured** — Boxing a call while zoomed right in left the analysis card blank with no explanation. Anything narrower than the analysis window now reads a fraction wider rather than refusing.
+- **Demo mode stops when something interrupts it** — It kept running underneath a screen that said "Interrupted".
+- **Opening Settings could hang for a few seconds** — Long enough to look like a crash, and worst right after a busy night. It was measuring the classifier log on the wrong thread.
+- **Recording lengths are remembered** — How much is kept before and after a call, and the longest a single recording can run, all went back to their starting values every time the app was reopened.
+- **Ending a demo really ends it** — Ending the session from the button in the tab bar stopped the sound but left the app in demo mode, so the next start replayed the file again instead of opening the microphone.
+- **The tour's spotlight covers the whole session menu** — On the step about Record, Listen and End, the highlight was cut around where the menu had been for an instant rather than where it ended up, leaving the top of it in the dark.
+- **The short tour says goodbye** — It used to stop dead on its last spotlight. It now finishes on a card that hands the screen back and says where to find the tour again.
+- **A call with nothing running second no longer looks like a close one** — The winner-and-runner-up chip washed from green to red even when there was no runner-up to be red, so the clearest result on the screen wore the same warning colours as the muddiest.
+- **The ⓘ beside an identification only appears where it opens something** — In Sessions the row itself opens the detail screen, so the info mark there was decorative and swallowed your tap.
+- **The top edge of the live spectrogram is honest again** — The topmost row of pixels was mixing the highest frequency with the microphone's own DC offset, so the live view and the scrolled-back view disagreed along their top edge.
+- **Hide silence doesn't repeat a sliver at each gap** — The compressed overview drew one column twice wherever a silent stretch had been removed.
+
+
 ## v0.9.7 (Build 223)
 
 ### Fixed

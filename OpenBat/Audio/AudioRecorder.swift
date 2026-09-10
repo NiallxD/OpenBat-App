@@ -213,10 +213,17 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
     /// settings", which erases the stored keys — without this the running
     /// recorder would keep the old values in memory and write them straight
     /// back out at the next slider move.
+    ///
+    /// Inside `seeding`: memory updated, storage left alone, which is what this
+    /// comment always described wanting. Assigning outside it wrote all three keys
+    /// back with today's numbers, and from that point `reseedRemoteDefaults`'s
+    /// "only touch a key nobody has set" test could never pass for them again.
     func resetToDefaults() {
-        preRollSeconds = Self.defaultPreRollSeconds
-        postRollSeconds = Self.defaultPostRollSeconds
-        maxSegmentSeconds = Self.defaultMaxSegmentSeconds
+        seeding {
+            preRollSeconds = Self.defaultPreRollSeconds
+            postRollSeconds = Self.defaultPostRollSeconds
+            maxSegmentSeconds = Self.defaultMaxSegmentSeconds
+        }
     }
 
     // MARK: Queue-local state (recorder queue only)

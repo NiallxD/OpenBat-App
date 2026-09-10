@@ -416,11 +416,22 @@ nonisolated enum WavSpectrogramEngine {
         let nCols = raw.nCols
         let total = max(map.realTotal, 1)
         // Per-segment source column ranges (clamped, at least one column each).
+        // A segment's end rounds while the next segment's start floors, so a
+        // boundary falling inside one source column lands in both ranges and
+        // that column is copied twice — a repeated column at every gap edge, and
+        // an overview one column longer than the segments say it is. Each range
+        // therefore starts where the previous one ended: the kept regions are
+        // non-overlapping in time, and the columns standing for them have to be
+        // non-overlapping too.
         var colRanges: [Range<Int>] = []
+        var previousEnd = 0
         for seg in map.segments {
-            let c0 = min(max(Int(Double(seg.realStart) * Double(nCols) / Double(total)), 0), nCols - 1)
+            let c0 = max(min(max(Int(Double(seg.realStart) * Double(nCols) / Double(total)), 0), nCols - 1),
+                         previousEnd)
+            guard c0 < nCols else { break }   // ordered segments: nothing left for the rest either
             let c1 = min(max(Int((Double(seg.realEnd) * Double(nCols) / Double(total)).rounded()), c0 + 1), nCols)
             colRanges.append(c0..<c1)
+            previousEnd = c1
         }
         let outCols = colRanges.reduce(0) { $0 + $1.count }
         var grid = [Float](repeating: -160, count: bins * outCols)

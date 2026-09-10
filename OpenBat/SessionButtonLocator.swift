@@ -709,30 +709,47 @@ struct SessionButtonAttached<Content: View>: View {
     /// Handed the button's measured width, so content can size itself to match.
     @ViewBuilder let content: (CGFloat) -> Content
 
-    /// The content's own size, needed because placing something *beside*
-    /// another thing means knowing how big it is; `position` centres.
-    @State private var contentSize: CGSize = .zero
-
+    /// **Placed by layout alone — deliberately no measured content size.**
+    ///
+    /// It used to centre the content with `.position`, which means knowing how
+    /// tall the content is, which meant measuring it into `@State` and placing
+    /// it on the *next* pass. The first pass therefore laid the content out
+    /// centred on the button rather than beside it. That frame was hidden
+    /// (`.opacity(0)`), so it looked harmless — but a hidden view still
+    /// publishes its geometry, and the guided tour reads exactly that: the
+    /// spotlight on the transport menu was cut around where the menu had been
+    /// for one frame, ~85pt below where it ended up, so it covered the bottom of
+    /// the menu and a strip of empty screen under it (2026-09-09).
+    ///
+    /// Framing instead of positioning needs no size at all: a frame of height
+    /// `bottom` bottom-aligned puts the content's lower edge exactly there, and
+    /// a frame of width `2 × centreX` centre-aligned puts its middle on the
+    /// button's. One pass, one geometry, nothing to go stale.
     var body: some View {
         GeometryReader { proxy in
             if let button = locator.frameInWindow {
                 let host = proxy.frame(in: .global)
-                content(button.width)
-                    .onGeometryChange(for: CGSize.self) { $0.size } action: { contentSize = $0 }
-                    .position(x: button.midX - host.minX,
-                              y: centreY(button: button, hostMinY: host.minY))
-                    // The first layout pass has no size yet, so the content
-                    // would flash at the wrong place before settling. One frame
-                    // of nothing is better than one frame of somewhere else.
-                    .opacity(contentSize == .zero ? 0 : 1)
-            }
-        }
-    }
+                // Where the content's near edge has to land: just clear of the
+                // button, on the side away from the bar.
+                let centreX = button.midX - host.minX
+                let above = button.minY - host.minY - gap
+                let below = button.maxY - host.minY + gap
+                // A first layout pass during a tab transition or a rotation can
+                // report the button above the host's top edge or at its leading
+                // edge, which makes these zero or negative. Clamping alone
+                // renders the content *crushed* to nothing rather than merely
+                // mispositioned, so the degenerate pass is hidden outright —
+                // opacity, not a branch, so the content keeps its state and its
+                // animations across the frame it sits out.
+                let degenerate = centreX <= 0 || (placement == .above && above <= 0)
 
-    private func centreY(button: CGRect, hostMinY: CGFloat) -> CGFloat {
-        switch placement {
-        case .above: button.minY - hostMinY - gap - contentSize.height / 2
-        case .below: button.maxY - hostMinY + gap + contentSize.height / 2
+                content(button.width)
+                    .frame(width: max(0, 2 * centreX), alignment: .center)
+                    .frame(height: placement == .above ? max(0, above) : nil,
+                           alignment: .bottom)
+                    .padding(.top, placement == .below ? max(0, below) : 0)
+                    .opacity(degenerate ? 0 : 1)
+            }
         }
     }
 }

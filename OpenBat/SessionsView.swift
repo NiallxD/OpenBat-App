@@ -1173,6 +1173,10 @@ struct PassRow: View {
     let pass: PassRecord
     let store: ClassificationStore
     @State private var image: UIImage?
+    /// Same rule as the species feed: no percentages on a row in simplified view.
+    /// They were hidden there and shown here, which is how a mode that is supposed
+    /// to be simpler ended up being simpler in one place and not the next.
+    @AppStorage(SimplifiedView.key) private var simplifiedMode = true
 
     var body: some View {
         HStack(spacing: 12) {
@@ -1203,7 +1207,7 @@ struct PassRow: View {
             Spacer()
             if !pass.isNoID {
                 VStack(alignment: .trailing, spacing: 4) {
-                    ConfidenceBadge(confidence: pass.confidence)
+                    if !simplifiedMode { IDBadge(species: pass.species) }
                     ComplexIndicator(pass: pass)
                 }
             }
@@ -1265,13 +1269,7 @@ struct PassDetailView: View {
         List {
             Section {
                 VStack(alignment: .leading, spacing: 6) {
-                    HStack {
-                        Text(pass.species).font(.title2.bold())
-                        Spacer()
-                        if !pass.isNoID {
-                            ConfidenceBadge(confidence: pass.confidence)
-                        }
-                    }
+                    Text(pass.species).font(.title2.bold())
                     Text(pass.commonName).foregroundStyle(.secondary)
                     if pass.isNoise {
                         Text("NOISE means it wasn't a bat")
@@ -1286,6 +1284,19 @@ struct PassDetailView: View {
                     Text("\(pass.pulseCount) classified pulse\(pass.pulseCount == 1 ? "" : "s") · \(Self.timestamp(pass.date))")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    // Both numbers, each behind its own explanation, precision
+                    // first. The header pill used to carry confidence alone up
+                    // here; it was the first thing read and the least able to
+                    // answer what was being asked of it (Niall, 2026-09-09).
+                    if !pass.isNoID {
+                        VStack(alignment: .leading, spacing: 3) {
+                            if let precision = ModelReliability.precision(for: pass.species) {
+                                IDScoreLine(kind: .precision, value: precision, species: pass.species)
+                            }
+                            IDScoreLine(kind: .confidence, value: pass.confidence)
+                        }
+                        .padding(.top, 2)
+                    }
                     if let runnerUp = pass.runnerUpSpecies {
                         Text("Runner-up: \(SpeciesInfo.commonName[runnerUp] ?? runnerUp)"
                              + (pass.runnerUpConfidence.map { String(format: " (%.0f%%)", $0 * 100) } ?? ""))
@@ -1294,11 +1305,6 @@ struct PassDetailView: View {
                     }
                 }
                 .padding(.vertical, 4)
-            } footer: {
-                // Plain-language caveat: the % is a posterior renormalized over the
-                // species enabled in AutoID settings, not an absolute certainty —
-                // without this, "85%" over-promises whenever species are disabled.
-                Text("Confidence is how the classifier splits its belief between the species enabled in AutoID settings — not an absolute certainty. Disabling species hands their share to the rest, so the number can read high even for an unclear call.")
             }
 
             if pass.complex != nil {
@@ -1343,7 +1349,7 @@ private struct PulseDetailRow: View {
             HStack {
                 Text(pulse.species).font(.headline)
                 Spacer()
-                ConfidenceBadge(confidence: pulse.confidence)
+                PulseScoreChip(confidence: pulse.confidence)
             }
 
             HStack(spacing: 14) {
@@ -1452,36 +1458,7 @@ struct PulseImagePlot: View {
 
 // MARK: - Small components
 
-struct ConfidenceBadge: View {
-    let confidence: Float
-    var body: some View {
-        Text(String(format: "%.0f%%", confidence * 100))
-            .font(.caption.monospacedDigit().weight(.semibold))
-            // Never wrap ("51" over "%") when a narrow container squeezes the row.
-            .fixedSize()
-            .padding(.horizontal, 8)
-            .padding(.vertical, 3)
-            // The wash stays as bright as it ever was; the ink and the edge are
-            // what darken in light mode, where full-strength orange or yellow on
-            // a pale wash is barely there. The border is the other half of the
-            // fix: on white the wash alone doesn't describe a shape.
-            .background(color.opacity(0.2), in: Capsule())
-            .overlay { Capsule().strokeBorder(ink.opacity(0.45), lineWidth: 1) }
-            .foregroundStyle(ink)
-    }
-
-    private var ink: Color { color.darkenedInLightMode() }
-
-    private var color: Color {
-        switch confidence {
-        case 0.6...:  return .green
-        case 0.3..<0.6: return .yellow
-        default:      return .orange
-        }
-    }
-}
-
-/// Small amber pill shown alongside a `ConfidenceBadge` when the winning species is
+/// Small amber pill shown alongside an `IDBadge` when the winning species is
 /// one the model can't cleanly separate. Non-interactive — the full explanation lives
 /// in `ComplexCallout` on the detail screen. When the ID is an *active* ambiguity it
 /// names the close alternative ("or MYYU"); otherwise it flags the group ("sounds

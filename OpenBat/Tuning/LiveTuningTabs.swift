@@ -211,7 +211,7 @@ struct SnippetExpansionTuningTab: View {
             TuningSlider(
                 label: "Volume trim", explanation: TuningHelp.snippetTrim,
                 initial: settings.trimDB,
-                range: -18...18,
+                range: -24...24,
                 step: 1,
                 format: { String(format: "%+.0f dB", $0) },
                 onLive: { audio.snippetExpansion.trimDB = $0 },

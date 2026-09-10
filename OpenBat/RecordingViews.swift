@@ -390,10 +390,12 @@ struct RecordingPulsesSheet: View {
             List {
                 Section {
                     LabeledContent("Species") { Text("\(recording.species) · \(recording.commonName)") }
+                    // Same pair, same order, same explanations as PassDetailView.
+                    if let precision = ModelReliability.precision(for: recording.species) {
+                        IDScoreLine(kind: .precision, value: precision, species: recording.species)
+                    }
                     if let confidence = recording.confidence {
-                        LabeledContent("Confidence") {
-                            Text(String(format: "%.0f%%", confidence * 100))
-                        }
+                        IDScoreLine(kind: .confidence, value: confidence)
                     }
                     LabeledContent("Duration") { Text(RecordingRow.durationString(recording.durationSeconds)) }
                     LabeledContent("Recorded") { Text(Self.fullTimestamp(recording.date)) }

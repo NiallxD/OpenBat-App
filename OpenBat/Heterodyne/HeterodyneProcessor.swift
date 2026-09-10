@@ -21,7 +21,25 @@ import Synchronization
 
 nonisolated final class HeterodyneProcessor: @unchecked Sendable {
 
-    let outputSampleRate: Double = 48_000
+    /// The rate this channel AIMS for. What it actually produces is
+    /// `inputSampleRate / decimation`, which only equals this when the input rate
+    /// is a whole multiple of it.
+    static let nominalOutputRate: Double = 48_000
+
+    /// The rate this channel actually produces, settled by `reset` from the input
+    /// rate it was given.
+    ///
+    /// **It was a hard 48 kHz, and the ring is drained at whatever this says.** The
+    /// producer emits `inputSampleRate / decimation` samples per second, so the two
+    /// agreed only for input rates that are a multiple of 48 kHz. Every rate the app
+    /// expects is one — 384 kHz on the Griff, 48/96/192 elsewhere — but the rate is
+    /// whatever the hardware negotiates, and nothing checks it. A 44.1 kHz USB
+    /// interface gave `decimation == 1` and a permanent 8% underfill, which the
+    /// ±3% drift correction in `render` cannot close: the ring runs dry every time
+    /// and the zero-fill at the bottom of `render` turns that into continuous
+    /// crackle for as long as the mic is plugged in. Deriving the rate instead of
+    /// asserting it costs nothing and the mixer resamples to the hardware anyway.
+    private(set) var outputSampleRate: Double = HeterodyneProcessor.nominalOutputRate
 
     // MARK: Control (main thread ↔ audio thread)
 
@@ -235,7 +253,9 @@ nonisolated final class HeterodyneProcessor: @unchecked Sendable {
     /// before installing the tap (no concurrent `process`/`render` at this point).
     func reset(inputSampleRate fs: Double) {
         inputSampleRate = fs
-        decimation = max(1, Int((fs / outputSampleRate).rounded()))
+        // Nominal rate picks the divisor; the true output rate falls out of it.
+        decimation = max(1, Int((fs / Self.nominalOutputRate).rounded()))
+        outputSampleRate = fs / Double(decimation)
         // LPF cutoff: bat calls shifted down by audibleOffsetHz land at ≤3 kHz,
         // so 4 kHz keeps all relevant content while cutting broadband impact noise.
         let cutoff = min(4_000.0, outputSampleRate * 0.35)

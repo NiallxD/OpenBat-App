@@ -396,7 +396,7 @@ struct ContentView: View {
                 // participation just quietly ends. Asked once per launch, and
                 // only of people who actually did opt in — `needsReconsent` is
                 // false for anyone who declined or never decided.
-                .sheet(isPresented: $showReconsentPrompt) {
+                .sheet(isPresented: $showReconsentPrompt, onDismiss: advanceLaunchQueueAfterDismissal) {
                     NavigationStack {
                         ConsentView(consent: consent) { showReconsentPrompt = false }
                             .padding(.horizontal)
@@ -584,7 +584,7 @@ struct ContentView: View {
                 // this is the one remaining live path to the full ConsentView.
                 // Only matters for a device that granted under a pre-pause
                 // build; gate it the same way every other entry point is gated.
-                showReconsentPrompt = ConsentStore.uploadContributionEnabled && consent.needsReconsent
+                enqueueReconsentIfNeeded()
             }
             RecordingUploader.shared.retryContextProvider = { [consent] in
                 UploadRetryContext(consent: consent)
@@ -638,51 +638,7 @@ struct ContentView: View {
                         consent: consent)
                 }
             }
-            processor.sampleRate = audio.diagnostics.actualSampleRate
-            micCalSettings.load(forMicName: audio.diagnostics.inputName)
-            processor.calibrationCurve = micCalSettings.currentCurve(forMicName: audio.diagnostics.inputName)
-            pulseDetector.pcmProvider = { [processor] count, endAbsolute in
-                processor.pcmSnapshot(count: count, endingAtAbsolute: endAbsolute)
-            }
-            pulseDetector.autoIDSettings = autoIDSettings
-            pulseDetector.store = classStore
-            recorder.setActiveModel(id: autoIDSettings.effectiveModelID)
-            recorder.setPassGates(minConfidence: autoIDSettings.minPassConfidence,
-                                  minPulseCount: autoIDSettings.minPassPulseCount,
-                                  minWinningMargin: autoIDSettings.minWinningMargin)
-            pulseDetector.coordinateProvider = { [location] in location.currentCoordinate }
-            // Lock-screen card. `endOrphanedActivities` clears any card left behind by a
-            // crash or force-quit in a previous run — those survive in the system and
-            // would otherwise show a frozen readout from a session that ended days ago.
-            liveActivity.detector = pulseDetector
-            // Reads the controller's own weak detector reference rather than capturing
-            // `pulseDetector` here — the closure is stored *on* the detector, so
-            // capturing it would be a retain cycle.
-            pulseDetector.onPassFinalized = { [liveActivity] in
-                liveActivity.updateFromDetector(force: true)
-            }
-            LiveActivityController.endOrphanedActivities()
-            location.store = classStore
-            applyBand()
-            // Region fix so species priors can be derived from the bundled
-            // presence grid for where the user is (see the onChange below) — same
-            // lightweight, one-shot fix AutoIDSettingsView already uses, just
-            // requested proactively on launch instead of only when that screen is
-            // opened. It was a live GBIF query until 2026-08-16.
-            location.requestRegionFix()
-
-            // Decided back in `RootView.init`, acted on here — the detector is
-            // the first thing that exists to present a sheet over.
-            //
-            // Nothing else is raised on a first arrival any more. The
-            // recommended-model card that used to be handed off from onboarding
-            // is gone: the model is picked from the fix requested just above,
-            // silently, by `AutoIDSettings.applyCoverage`.
-            if ReleaseState.shared.shouldShowWhatsNew {
-                showWhatsNew = true
-            }
-
-            nudgeTourAfterDelay()
+            finishFirstAppearWiring()
         }
         // Once per build, for someone who already had the app — see
         // `ReleaseState`. Presented from here rather than from `RootView` so it
@@ -696,6 +652,7 @@ struct ContentView: View {
         // exactly what it did.
         .sheet(isPresented: $showWhatsNew, onDismiss: {
             ReleaseState.shared.markWhatsNewSeen()
+            advanceLaunchQueueAfterDismissal()
         }) {
             WhatsNewSheet()
                 .presentationDragIndicator(.visible)
@@ -705,7 +662,7 @@ struct ContentView: View {
         // from `onDismiss` rather than from the button, so it is presented over
         // a screen with nothing else on it.
         .sheet(isPresented: $showCalibrationOffer, onDismiss: {
-            guard calibrationAccepted else { return }
+            guard calibrationAccepted else { advanceLaunchQueueAfterDismissal(); return }
             calibrationAccepted = false
             showMicCalibration = true
         }) {
@@ -713,7 +670,7 @@ struct ContentView: View {
                 calibrationAccepted = true
             }
         }
-        .sheet(isPresented: $showMicCalibration) {
+        .sheet(isPresented: $showMicCalibration, onDismiss: advanceLaunchQueueAfterDismissal) {
             MicCalibrationView(audio: audio, settings: micCalSettings) {
                 showMicCalibration = false
             }
@@ -734,10 +691,16 @@ struct ContentView: View {
         // out of body for). The mirrors only notify on actual change.
         .onChange(of: audio.activeSampleRate) { _, rate in
             processor.sampleRate = rate
+            // The curve's bins mean frequencies, and which frequencies depends on
+            // this rate — so a rate change can invalidate a curve that the mic
+            // name still matches. Re-asked here rather than left in place.
+            processor.calibrationCurve = micCalSettings.currentCurve(forMicName: audio.activeInputName,
+                                                                     sampleRate: rate)
         }
         .onChange(of: audio.activeInputName) { _, name in
             micCalSettings.load(forMicName: name)
-            processor.calibrationCurve = micCalSettings.currentCurve(forMicName: name)
+            processor.calibrationCurve = micCalSettings.currentCurve(forMicName: name,
+                                                                     sampleRate: audio.activeSampleRate)
             recorder.setInputName(name)
             offerCalibrationIfAppropriate()
         }
@@ -989,7 +952,7 @@ struct ContentView: View {
                 .padding(.horizontal, 8)
                 .padding(.top, 8)
                 .padding(.bottom, 4)
-            SpeciesFeedView(store: classStore, guide: speciesGuide, presenceStore: speciesPresence, activeSessionID: classStore.activeSessionID, sessionStart: feedSessionStart, autoIDActive: autoIDSettings.effectiveModelID != nil,
+            SpeciesFeedView(store: classStore, guide: speciesGuide, presenceStore: speciesPresence, activeSessionID: classStore.activeSessionID, sessionStart: feedSessionStart, autoIDActive: autoIDSettings.effectiveModelID != nil, awaitingLocation: location.currentCoordinate == nil,
                                 identificationDisabled: autoIDSettings.remotelyDisabled)
         }
         .panelCard()
@@ -1942,8 +1905,6 @@ struct ContentView: View {
         // for a moment on every listening-mode change, and a session is very
         // much still in progress across that dip.
         guard audio.ultrasonicMicAttached, !audio.isRunning, !audio.isActive else { return }
-        guard !tourActive, !showWhatsNew, !showCalibrationOffer, !showMicCalibration,
-              !menuIsOpen else { return }
 
         let name = audio.activeInputName
         guard micCalSettings.shouldOfferCalibration(forMicName: name) else { return }
@@ -1952,7 +1913,150 @@ struct ContentView: View {
         // Safe to read `diagnostics` here: this runs from an `onChange` closure,
         // not from `body`, so it registers no observation dependency.
         calibrationOfferMicName = audio.diagnostics.micDisplayName
-        showCalibrationOffer = true
+        // Queued rather than raised. The list of "is anything else up" flags that
+        // used to guard this was incomplete twice over — it never learned about
+        // the re-consent prompt or the nearby-species sheet — and each omission
+        // cost this offer permanently, because the mic is marked as offered above
+        // whether or not the sheet ever appeared.
+        enqueueLaunchPresentation(.calibrationOffer)
+    }
+
+    /// The tail of `.onAppear`, in a method rather than in the closure.
+    ///
+    /// Not a tidy-up: that closure is long enough that the compiler gives up
+    /// type-checking it if anything at all is added, here or anywhere else in the
+    /// view's modifier chain. Everything below is plain statements with no view
+    /// building in it, so it costs nothing to move and the closure gets its
+    /// headroom back.
+    private func finishFirstAppearWiring() {
+        processor.sampleRate = audio.diagnostics.actualSampleRate
+        micCalSettings.load(forMicName: audio.diagnostics.inputName)
+        processor.calibrationCurve = micCalSettings.currentCurve(forMicName: audio.diagnostics.inputName,
+                                                                 sampleRate: audio.diagnostics.actualSampleRate)
+        pulseDetector.pcmProvider = { [processor] count, endAbsolute in
+            processor.pcmSnapshot(count: count, endingAtAbsolute: endAbsolute)
+        }
+        pulseDetector.autoIDSettings = autoIDSettings
+        pulseDetector.store = classStore
+        recorder.setActiveModel(id: autoIDSettings.effectiveModelID)
+        recorder.setPassGates(minConfidence: autoIDSettings.minPassConfidence,
+                              minPulseCount: autoIDSettings.minPassPulseCount,
+                              minWinningMargin: autoIDSettings.minWinningMargin)
+        pulseDetector.coordinateProvider = { [location] in location.currentCoordinate }
+        // Lock-screen card. `endOrphanedActivities` clears any card left behind by a
+        // crash or force-quit in a previous run — those survive in the system and
+        // would otherwise show a frozen readout from a session that ended days ago.
+        liveActivity.detector = pulseDetector
+        // Reads the controller's own weak detector reference rather than capturing
+        // `pulseDetector` here — the closure is stored *on* the detector, so
+        // capturing it would be a retain cycle.
+        pulseDetector.onPassFinalized = { [liveActivity] in
+            liveActivity.updateFromDetector(force: true)
+        }
+        LiveActivityController.endOrphanedActivities()
+        // Whatever the last run's exports left in tmp — see
+        // `SessionExport.purgeFinishedExports`. Same idea as the orphaned-activity
+        // sweep above and as `RecordingUploader.purgeOrphanedDerivedCopies`.
+        SessionExport.purgeFinishedExports()
+        location.store = classStore
+        applyBand()
+        // Region fix so species priors can be derived from the bundled
+        // presence grid for where the user is (see the onChange below) — same
+        // lightweight, one-shot fix AutoIDSettingsView already uses, just
+        // requested proactively on launch instead of only when that screen is
+        // opened. It was a live GBIF query until 2026-08-16.
+        location.requestRegionFix()
+
+        // Decided back in `RootView.init`, acted on here — the detector is
+        // the first thing that exists to present a sheet over.
+        //
+        // Nothing else is raised on a first arrival any more. The
+        // recommended-model card that used to be handed off from onboarding
+        // is gone: the model is picked from the fix requested just above,
+        // silently, by `AutoIDSettings.applyCoverage`.
+        //
+        // Queued, not raised: the re-consent prompt is decided earlier in the
+        // same pass and both used to become true before SwiftUI had drawn
+        // anything — so whichever lost presented and the other was silently
+        // dropped, for good. See `LaunchPresentation`.
+        enqueueWhatsNewIfNeeded()
+
+        nudgeTourAfterDelay()
+    }
+
+    // MARK: One-shot presentations
+
+    /// The presentations the app raises by itself, rather than because something
+    /// was tapped.
+    ///
+    /// They arrive within a second or two of each other on exactly the launch
+    /// where they are most likely to collide — a build that both updates the terms
+    /// and bumps the version — and **a sheet raised while another is presenting is
+    /// dropped by SwiftUI, not queued**. Each one also latches as "done" the
+    /// moment it is raised, so a dropped one is gone for good rather than retried.
+    ///
+    /// Guarding each against the others pairwise is what was here before, and it
+    /// failed the same way twice: every new presentation has to be added to every
+    /// existing guard, and the ones that were missed were missed silently. So they
+    /// take turns instead — same shape as the maintenance notice, which had this
+    /// problem first (see `MaintenanceNoticeModifier`).
+    private enum LaunchPresentation: Equatable {
+        case reconsent, whatsNew, calibrationOffer
+    }
+
+    /// Waiting to be shown, in the order they were asked for.
+    @State private var launchQueue: [LaunchPresentation] = []
+
+    /// Only matters for a device that granted consent under a pre-pause build:
+    /// contribution is switched off app-wide, and nothing in the current UI can
+    /// grant it, so this is the one remaining live path to the full `ConsentView`.
+    private func enqueueReconsentIfNeeded() {
+        guard ConsentStore.uploadContributionEnabled, consent.needsReconsent else { return }
+        enqueueLaunchPresentation(.reconsent)
+    }
+
+    private func enqueueWhatsNewIfNeeded() {
+        guard ReleaseState.shared.shouldShowWhatsNew else { return }
+        enqueueLaunchPresentation(.whatsNew)
+    }
+
+    private func enqueueLaunchPresentation(_ presentation: LaunchPresentation) {
+        guard !launchQueue.contains(presentation) else { return }
+        launchQueue.append(presentation)
+        presentNextLaunchPresentation()
+    }
+
+    /// Anything at all that would swallow a sheet raised right now — including
+    /// the maintenance alert, which is not part of `presentationIsBusy` because
+    /// that flag is the alert's own gate.
+    private var launchQueueIsBlocked: Bool {
+        presentationIsBusy || maintenanceNoticeShowing
+    }
+
+    /// What carries the queue forward: called as each of these closes.
+    ///
+    /// **After a beat, not immediately.** A sheet raised from inside a dismissing
+    /// presentation is dropped silently — the same trap that costs this app a
+    /// presentation every time somebody forgets it — so the next one waits for the
+    /// dismissal to finish first.
+    private func advanceLaunchQueueAfterDismissal() {
+        guard !launchQueue.isEmpty else { return }
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(350))
+            presentNextLaunchPresentation()
+        }
+    }
+
+    /// Safe to call as often as you like — it does nothing while anything is up.
+    private func presentNextLaunchPresentation() {
+        guard !launchQueueIsBlocked else { return }
+        guard let next = launchQueue.first else { return }
+        launchQueue.removeFirst()
+        switch next {
+        case .reconsent:        showReconsentPrompt = true
+        case .whatsNew:         showWhatsNew = true
+        case .calibrationOffer: showCalibrationOffer = true
+        }
     }
 
     /// Exactly one owner drains FFT columns at a time (Context.md §7): the Metal
@@ -2270,7 +2374,7 @@ struct ContentView: View {
                 .allowsHitTesting(!effectiveSpectrogramShowsSpeciesID)
 
             if effectiveSpectrogramShowsSpeciesID {
-                SpeciesFeedView(store: classStore, guide: speciesGuide, presenceStore: speciesPresence, activeSessionID: classStore.activeSessionID, sessionStart: feedSessionStart, autoIDActive: autoIDSettings.effectiveModelID != nil,
+                SpeciesFeedView(store: classStore, guide: speciesGuide, presenceStore: speciesPresence, activeSessionID: classStore.activeSessionID, sessionStart: feedSessionStart, autoIDActive: autoIDSettings.effectiveModelID != nil, awaitingLocation: location.currentCoordinate == nil,
                                 identificationDisabled: autoIDSettings.remotelyDisabled)
             }
         }
@@ -2287,7 +2391,7 @@ struct ContentView: View {
             if showsSpeciesID {
                 // Mirrors the spectrogram panel's species ID list, thumbnail
                 // included — see `spectrogramPanelContent`.
-                SpeciesFeedView(store: classStore, guide: speciesGuide, presenceStore: speciesPresence, activeSessionID: classStore.activeSessionID, sessionStart: feedSessionStart, autoIDActive: autoIDSettings.effectiveModelID != nil,
+                SpeciesFeedView(store: classStore, guide: speciesGuide, presenceStore: speciesPresence, activeSessionID: classStore.activeSessionID, sessionStart: feedSessionStart, autoIDActive: autoIDSettings.effectiveModelID != nil, awaitingLocation: location.currentCoordinate == nil,
                                 identificationDisabled: autoIDSettings.remotelyDisabled)
             }
         }

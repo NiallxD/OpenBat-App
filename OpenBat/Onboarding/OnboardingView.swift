@@ -380,6 +380,24 @@ struct OnboardingView: View {
                         systemImage: "exclamationmark.triangle.fill",
                         title: "Every ID is a suggestion",
                         detail: "Calls change with the environment, other bats and insects, so confirming a species takes further analysis.")
+                    // The percentage, in one card, because a number that looks
+                    // like certainty and isn't is the single most misread thing
+                    // the app shows (Niall, 2026-09-10). Deliberately about the
+                    // IDEA rather than about any pill or screen — the 2026-09-08
+                    // cut above stands, and teaching the label of a widget the
+                    // user has not reached is exactly what it cut. This is
+                    // "what a percentage means", which is true wherever they
+                    // first meet one, and in either interface mode.
+                    //
+                    // Precision leads, because the app leads with it: the pill
+                    // on a row is the track record, and the softmax figure is
+                    // the one you have to go looking for. An earlier draft of
+                    // this card described them the other way round and taught
+                    // the user to read the headline number as the wrong thing.
+                    OnboardingCard(
+                        systemImage: "percent",
+                        title: "What the percentages mean",
+                        detail: "The percentage we show is how often this model is right when it names that species — its track record, not a verdict on this call. A second number, further in, says how clearly this call beat the alternatives.")
                     // The honest answer to "then how do I ever know?", and the
                     // only one the app can offer: other people. Not gated on
                     // the iNaturalist feature switch — onboarding runs before
