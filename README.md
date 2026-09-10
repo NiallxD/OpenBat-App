@@ -166,7 +166,7 @@ tools/            offline scripts; not part of the app target
 Context.md        why the app is built the way it is — decisions, measurements,
                   and approaches that were tried and rejected
 ```
-## How I Use AI
+## How I Use AI
 
 I want to be open an honest about how I use AI in the development of OpenBat.
 
