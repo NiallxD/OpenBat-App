@@ -372,7 +372,7 @@ final class AutoIDSettings: Reseedable {
         // be set remotely. Everything per-model — pass timeout, confidence,
         // pulses, margin, the quality gate — deliberately cannot: those decide
         // what a recording is identified AS, and belong to a build that was
-        // tested with the model they go with. See `AUDIT-2026-09-09-parameters.md`.
+        // tested with the model they go with. See `AUDIT-2026-09-09-parameters.md` in the git history.
         self.mapPinMinConfidence = defaults.object(forKey: Self.keyMapConf) != nil
             ? defaults.float(forKey: Self.keyMapConf)
             : Tunable.mapPinMinConfidence.value(Float(0.70))

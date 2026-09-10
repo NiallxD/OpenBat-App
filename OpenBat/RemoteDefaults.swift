@@ -19,7 +19,8 @@
 //      the config rather than half-applying in the field;
 //    * nothing here decides what a recording is identified AS. Per-model AutoID
 //      settings are deliberately absent and belong to a build — see
-//      `AUDIT-2026-09-09-parameters.md`.
+//      `AUDIT-2026-09-09-parameters.md`, which lives in the git history rather
+//      than the working tree.
 //
 //  THE RULE ABOUT WHOSE VALUE IT IS
 //  --------------------------------

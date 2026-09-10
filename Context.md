@@ -74,7 +74,7 @@ Reconstructed from git history. Dates are commit dates.
 | 2026-09-01 | **The player stops stuttering, stops blurring and starts actually cutting silence.** Three unrelated causes: the pacing thread was running a whole live spectrogram to extract one number and re-tuning the oscillator 500×/s with a slew meant for 15 Hz; the detail-tile chain restarted every 0.3 s from a step that can never be used during playback; and silence detection measured no spread, padded in display columns, and inherited the overview's resolution (146 ms/column on a ten-minute recording). Measured on the demo file: kept share 43.6% → 17.4% with no call energy lost. See §3. |
 | 2026-08-28 | **Playback speed becomes a control (4×/8×/16×), and hiding silence starts applying to playback.** The compressed timeline used to be torn down the moment you pressed play, and the gap-skipping written for that case was unreachable dead code; the pacing thread now walks the kept segments directly, so every time the engine publishes is in the packed timeline. Detection reworked alongside: the threshold is dB above the file's own noise floor, runs need hysteresis and a minimum duration, and a "found nothing" fallback is flagged instead of silently showing the whole file. See §3. |
 | 2026-09-08 | **Onboarding trimmed to fit one screen, and it now checks for the microphone.** The ID step lost its two label cards (they taught pill wording for a screen the user has not reached); the welcome footer reports whether an ultrasonic mic is actually plugged in rather than warning in the abstract; a denied microphone says what it costs instead of sharing location's mild wording. `OnboardingMetrics` tightens spacing on 667pt screens so every step fits without scrolling. See §7. |
-| 2026-09-10 | Systematic bug comb across every subsystem (`BUGCOMB.md`). Capture/session, settings-reset, launch-presentation, identification-score and field-guide findings fixed — see §17; the listening-DSP and export findings are reviewed but unfixed. |
+| 2026-09-10 | Systematic bug comb across every subsystem (`BUGCOMB.md`, in the git history). Capture/session, settings-reset, launch-presentation, identification-score and field-guide findings fixed — see §17; the listening-DSP and export findings are reviewed but unfixed. |
 
 ---
 
@@ -1142,8 +1142,8 @@ moves first.
   changed default reaches installs that have already been through it), and the
   recording timings, which turned out not to be persisted at all. Per-model
   AutoID values are deliberately excluded — they decide what a recording is
-  identified as, and belong to a build. See `AUDIT-2026-09-09-parameters.md` for
-  the full inventory, and `SettingsDump`, which now records which defaults the
+  identified as, and belong to a build. See `AUDIT-2026-09-09-parameters.md` in the git
+  history for the full inventory, and `SettingsDump`, which now records which defaults the
   config file is setting so two dumps can be compared without ambiguity.
 - **The config file has a second message that does not interrupt.** `notice`
   stands at the top of Settings for as long as it is non-empty — a known issue,
@@ -5361,7 +5361,8 @@ rebuild touched other subsystems, expect the same pattern there.
 
 ## 17. The 2026-09-10 bug comb
 
-A systematic sweep of every subsystem (`BUGCOMB.md`, untracked). What was fixed
+A systematic sweep of every subsystem (`BUGCOMB.md`, kept in the git history
+rather than the working tree). What was fixed
 that day, and the reasoning worth keeping.
 
 ### An interruption is not the end of a session

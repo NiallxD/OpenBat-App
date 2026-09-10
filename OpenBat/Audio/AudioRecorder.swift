@@ -109,7 +109,7 @@ nonisolated final class AudioRecorder: @unchecked Sendable {
     /// they lived only in memory, so each one silently returned to the number
     /// below at the next launch — a setting that forgets, which is worse than
     /// no setting, because it looks like it worked. Found while auditing what
-    /// could be moved to a remote config; see `AUDIT-2026-09-09-parameters.md`.
+    /// could be moved to a remote config; see `AUDIT-2026-09-09-parameters.md` in the git history.
     ///
     /// Written only from `didSet`, i.e. only when something actually assigns a
     /// new value, so an install that has never touched a slider has no stored
