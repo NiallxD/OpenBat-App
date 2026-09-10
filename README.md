@@ -166,6 +166,24 @@ tools/            offline scripts; not part of the app target
 Context.md        why the app is built the way it is — decisions, measurements,
                   and approaches that were tried and rejected
 ```
+## How I Use AI
+
+I want to be open an honest about how I use AI in the development of OpenBat.
+
+I use Claude code to help speed up my development. I don't have any fancy account or
+credit tiers, I just use the the cheapest tier. All code is designed and architected
+by me. I plan a lot and do a lot of research before hand and use Claude to rapidly
+draft code. I use it to speed up debugging too. All UI is designed by me. No AI
+graphics or images are used, I do all those myself. I write a good chunk of the code
+myself but do rely on claude to create documentation in the code for future me.
+
+From time to time I have Claude help my tidy up my repos, and you may see Claude as
+a collaborator. I know git fairly well, but I'm slow. A few targeted prompts can help
+me tidy things up rapidly and focus on actual testing. 
+
+If you would like to discuss more please shoot me an email: hello@openbat.app.
+
+Cheers
 
 ## Licence
 
