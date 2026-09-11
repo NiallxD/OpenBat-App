@@ -650,6 +650,14 @@ struct SessionDetailView: View {
     /// recording cannot be opened while a session is running.
     let audio: AudioEngineController
     let onRequestEndSession: () -> Void
+    /// Whether a recording row opens the player or the classifier's working.
+    /// Session-local and not persisted: it is a thing you switch on to answer a
+    /// question and off again, not a preference.
+    @State private var showsClassifierAnalysis = false
+    /// The recording whose analysis is open. Captured on tap for the same
+    /// reason `SpeciesFeedRow` captures its pass — a sheet that reads a live
+    /// value re-reads it.
+    @State private var analysing: Recording?
     @AppStorage("display.showNoID") private var showNoID = false
     /// Queued by a swipe or by the toolbar's Delete, pending confirmation — a
     /// delete takes the WAV with no way back, so it is asked about here exactly
@@ -708,7 +716,37 @@ struct SessionDetailView: View {
                     .glassTile()
                     .tileRow()
             }
-            TileSectionHeading(title: "Recordings")
+            // The heading carries the switch that changes what a recording row
+            // opens. A mode rather than a second row of buttons: one recording
+            // has two things worth looking at — what it sounds like, and how it
+            // was named — and putting both on every row would say twice, on
+            // every row, what one switch says once.
+            HStack(alignment: .firstTextBaseline) {
+                TileSectionHeading(title: "Recordings")
+                Button {
+                    showsClassifierAnalysis.toggle()
+                } label: {
+                    Label("Classifier Analysis", systemImage: "function")
+                        .font(.caption.weight(.semibold))
+                        .labelStyle(.titleAndIcon)
+                        .foregroundStyle(showsClassifierAnalysis ? Color.batAccent : Color.secondary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityHint(showsClassifierAnalysis
+                                   ? "On. Tapping a recording shows how the classifier identified it."
+                                   : "Off. Tapping a recording opens the player.")
+            }
+            .listRowInsets(EdgeInsets(top: TileList.headerTopPadding, leading: 0,
+                                      bottom: 0, trailing: 4))
+            .listRowBackground(Color.clear)
+            .listRowSeparator(.hidden)
+            if showsClassifierAnalysis {
+                Text("Tapping a recording shows the model's own scores for every call in it, and what the location weighting did to them.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+            }
             if sessionRecordings.isEmpty {
                 Text(allSessionRecordings.isEmpty
                      ? "No recordings in this session."
@@ -723,7 +761,7 @@ struct SessionDetailView: View {
                     SelectableRow(isSelecting: isSelecting,
                                   isSelected: selection.contains(recording.id),
                                   toggle: { toggle(recording.id) },
-                                  blocked: audio.isRunning ? onRequestEndSession : nil) {
+                                  blocked: blockedAction(for: recording)) {
                         // Lazy: WavPlayerView's `@State` engine is expensive
                         // to construct — see LazyDestination.
                         LazyDestination {
@@ -752,6 +790,9 @@ struct SessionDetailView: View {
         }
         .pageBackground()
         .pageColumn()
+        .sheet(item: $analysing) { recording in
+            ClassifierAnalysisSheet(recording: recording, store: store, settings: settings)
+        }
         .listStyle(.plain)
         .listRowSpacing(0)
         .contentMargins(.top, TileList.scrollTopMargin, for: .scrollContent)
@@ -963,6 +1004,17 @@ struct SessionDetailView: View {
     private var sessionPasses: [PassRecord] { store.passes(inSession: session.id) }
     /// Everything in the session, unfiltered — what the export bundles.
     private var allSessionRecordings: [Recording] { store.recordings(inSession: session.id) }
+    /// What a tap on a recording should do instead of navigating, if anything.
+    ///
+    /// Two reasons a row doesn't open the player, in order: a session is
+    /// running and the player cannot have the audio session, or the analysis
+    /// mode is on and the row's job is to show the classifier's working.
+    private func blockedAction(for recording: Recording) -> (() -> Void)? {
+        if audio.isRunning { return onRequestEndSession }
+        if showsClassifierAnalysis { return { analysing = recording } }
+        return nil
+    }
+
     private var sessionRecordings: [Recording] {
         allSessionRecordings.filteredByNoID(showNoID: showNoID)
     }
@@ -1577,7 +1629,9 @@ struct ComplexCallout: View {
     }
 }
 
-private struct ScoreBar: View {
+/// Shared with `ClassifierAnalysisSheet`, which draws two of them per species —
+/// the model's own score and the one after weighting.
+struct ScoreBar: View {
     let species: String
     let score: Float
     var body: some View {
