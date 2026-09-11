@@ -32,7 +32,7 @@ enum TourID: Hashable {
     case sessionTimer                          // spectrogram header
     case pulseSpeciesToggle, pulseSettings     // pulse-view header
     case spectrogramSpeciesToggle, compressTimeline, batRange, palette, bandSettings
-    case start, record, listen                 // session button + its transport menu
+    case start, record, listen, end            // session button + its transport menu
     /// The transport menu as a whole. The simplified tour covers Record, Listen
     /// and End in one step; the advanced tour keeps `record` and `listen`
     /// separate.
@@ -239,12 +239,17 @@ enum TourScript {
         TourStep(target: .record, symbol: "record.circle", opensTransportMenu: true,
                  title: "Record",
                  detail: "Arms WAV recording — each detected pass is saved as its own file, with the species ID in its metadata. It arms itself when a session starts unless you've turned that off in Settings."),
+        // One card, not two. The second was "Time expansion, and going deaf",
+        // which spotlighted the same button a step later to finish a sentence
+        // the first card had started — the deaf window is the reason the fourth
+        // mode exists, so it belongs in the paragraph that lists the modes
+        // rather than in a card of its own (Niall, 2026-09-10).
         TourStep(target: .listen, symbol: "headphones", opensTransportMenu: true,
                  title: "Listen",
-                 detail: "One button, four steps: off, heterodyne (tuned-down clicks and chirps), time expansion (a snippet around each call played back 8× slower, so its real shape is audible), then time expansion with heterodyne underneath it. The glyph shows which you're on — headphones, antenna, tortoise, filled tortoise."),
-        TourStep(target: .listen, symbol: "tortoise.fill", opensTransportMenu: true,
-                 title: "Time expansion, and going deaf",
-                 detail: "While a snippet is replaying, no new call is being captured — that's the trade-off, and it's why the fourth step exists: heterodyne keeps playing underneath, so you can still hear the bat overhead while the last call is replayed. The status pill up in the stats header shows which of the two it's doing."),
+                 detail: "One button, four steps: off, heterodyne (tuned-down clicks and chirps), time expansion (a snippet around each call replayed 8× slower, so its real shape is audible), then both at once. The glyph shows which you're on. While a snippet replays, no new call is being caught — which is what the fourth step is for: heterodyne keeps going underneath, so the bat overhead is still audible while the last call plays back. The pill in the stats header says which of the two it's doing."),
+        TourStep(target: .end, symbol: "stop.circle", opensTransportMenu: true,
+                 title: "End",
+                 detail: "Stops listening and recording, and closes the session — everything it identified stays saved, grouped under that session in the Sessions tab and mapped where it was heard. It asks first."),
 
         // Was one card claiming a Playback tab that no longer exists — playback
         // folded into Sessions (2026-08-16), so a recording now has exactly one

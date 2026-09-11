@@ -373,6 +373,7 @@ struct TransportMenu: View {
                 accessibilityLabel: "End session",
                 action: onEndSession
             )
+            .tourTarget(.end)
         }
         .frame(width: width)
         .liquidGlass(in: .rect(cornerRadius: width / 2))

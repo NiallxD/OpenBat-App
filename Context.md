@@ -1401,6 +1401,13 @@ since numbers appearing behind a card read as the selection having done nothing.
 Phones only: an iPad has the height for both, and hiding a panel there would be
 taking something away to solve a problem that device does not have.
 
+Two more tour edits the same evening: **End has a step** (it was the only one of
+the three transport controls without one, and it is the one that decides whether
+a night is filed or left running), and the **two listening cards became one**.
+The second spotlighted the same button a step later to finish a sentence the
+first had started — the deaf window is the reason the fourth mode exists, so it
+belongs in the paragraph that lists the modes, not in a card of its own.
+
 ### 2026-08-09: a listen-mode switch no longer restarts the engine
 
 Switching listen mode used to `stop()` then `start()` unconditionally. Three
