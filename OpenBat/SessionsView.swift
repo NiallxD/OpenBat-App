@@ -1313,9 +1313,22 @@ struct PassDetailView: View {
                 }
             }
 
-            Section("Pulses") {
+            Section {
                 ForEach(pass.pulses) { pulse in
                     PulseDetailRow(pulse: pulse, store: store)
+                }
+            } header: {
+                // The caveat sits with the heading rather than on each row that
+                // lacks one: said once it is a fact about the list, said on
+                // every third row it is an apology. The rows carry a two-word
+                // marker so you can still tell which is which.
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Pulses")
+                    Text("Not all pulses get a spectrogram rendered, to maintain real-time performance.")
+                        .textCase(nil)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
@@ -1357,10 +1370,9 @@ private struct PulseDetailRow: View {
                 // the moment before the file finishes loading, and a note that
                 // flashed on every row on the way past would be worse than the
                 // gap it explains.
-                Text("No picture of this call — while detecting, one is drawn every couple of seconds rather than one per call, so the rest can keep being counted.")
+                Text("No spectrogram")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
-                    .fixedSize(horizontal: false, vertical: true)
             }
 
             HStack {
