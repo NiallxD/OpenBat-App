@@ -152,7 +152,7 @@ MIN_RECORDS_FOR_PRESENCE = 50
 
 SCHEMA_VERSION = 1
 # Bump on every regeneration intended to ship.
-DATA_VERSION = 5
+DATA_VERSION = 6
 # Extra taxon names to union into a code's range, beyond the scientific name the
 # model itself uses. Every entry needs a reason: this table is the difference
 # between a correct range and a confidently wrong one, and an unexplained line
