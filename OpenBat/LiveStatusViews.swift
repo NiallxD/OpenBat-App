@@ -306,7 +306,7 @@ struct SpeakerFeedbackWarningPill: View {
                 .popover(isPresented: $showExplainer) {
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Feedback risk").font(.subheadline.weight(.semibold))
-                        Text("When listening through the phone speaker OpenBat's sound output may be picked up by the mic, showing as a second, lower-pitched call. Wear headphones or move the mic away from the phone to avoid it.")
+                        Text("When listening through the phone speaker OpenBat's sound output may be picked up by the mic, showing as a second, lower-pitched call. Wear headphones or move the mic away from the phone to avoid it.\n\nIf that loop starts to run away — a sharp sound and then rising hiss — OpenBat pulls the volume down and holds it a little lower than the level it ran away at.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)

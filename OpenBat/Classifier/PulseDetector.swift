@@ -320,6 +320,10 @@ final class PulseDetector: Reseedable {
     /// a new capture only updates the display if its quality exceeds this.
     private var displayWindowQuality: Float = 0
     private(set) var pulseCount: Int = 0              // total pulses detected this session
+    /// Passes closed this session. Counted for the power log, which needs to
+    /// know how much work a sample interval actually contained — an hour with
+    /// 400 passes and an hour with none cost very different amounts.
+    private(set) var passCount: Int = 0
     private(set) var pulseRateHz: Double = 0          // recent calls per second
     private(set) var lastClassification: ClassificationResult? = nil
 
@@ -596,6 +600,7 @@ final class PulseDetector: Reseedable {
         )
         lastPassResult = passResult
         lastPassPulseCount = passPulseCount
+        passCount += 1
         lastPassDate = Date()
         ClassificationLogger.shared.logPass(passResult, pulseCount: passPulseCount,
                                             modelID: autoIDSettings?.effectiveModelID)
@@ -668,6 +673,7 @@ final class PulseDetector: Reseedable {
         pendingArmAbs = 0
         pendingClassifications = 0
         pulseCount = 0
+        passCount = 0
         pulseRateHz = 0
         capturesSkipped = 0
         classificationsSkipped = 0

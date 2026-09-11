@@ -167,6 +167,12 @@ enum SettingsDump {
         appStorage["pulse.displayPalette"] = storedInt("pulse.displayPalette", 0)
         appStorage["recording.autoRecordOnSessionStart"] =
             storedBool("recording.autoRecordOnSessionStart", true)
+        appStorage[AudioEngineController.feedbackSuppressionKey] =
+            storedBool(AudioEngineController.feedbackSuppressionKey, true)
+        appStorage[AudioEngineController.feedbackWarningKey] =
+            storedBool(AudioEngineController.feedbackWarningKey, true)
+        appStorage[AudioEngineController.holdToEarKey] =
+            storedBool(AudioEngineController.holdToEarKey, true)
         root["appStorage"] = appStorage
 
         // MARK: AutoID — per model, with the species table in full

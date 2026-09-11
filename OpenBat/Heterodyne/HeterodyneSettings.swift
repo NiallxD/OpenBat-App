@@ -65,8 +65,8 @@ final class HeterodyneSettings: Reseedable {
     /// the level control, and this slider is for balancing the two channels
     /// against each other rather than for setting how loud the app is.
     ///
-    /// On top of `HeterodyneProcessor.defaultGain` (3) and the output stage's
-    /// fixed ×4, this is an effective ×190 where the last measured reference point
+    /// On top of `HeterodyneProcessor.defaultGain` (5) and the output stage's
+    /// fixed ×4, this is an effective ×317 where the last measured reference point
     /// — 0.78% of samples pinned at full scale on a heterodyne-only stretch — was
     /// ×24. The loudest live content is therefore well inside the soft knee, being
     /// compressed rather than clipped.

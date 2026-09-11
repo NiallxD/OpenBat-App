@@ -264,6 +264,10 @@ enum TuningHelp {
         The frequency range shown, and listened to. It also limits both \
         listening modes, so narrowing it removes noise outside the band from \
         what you hear, not just from the display.
+
+        Listening never goes below 15 kHz whatever this is set to. Below that \
+        is where the phone's own speaker output lives, and letting the \
+        listening path hear it is what makes the sound feed back on itself.
         """
 
     static let timeWindow = """

@@ -297,6 +297,22 @@ struct ContentView: View {
             // progress card and the share sheet at the end are hosted here —
             // see SessionExportManager.
             .overlay(alignment: exportPillAlignment) { sessionExportOverlay }
+            // Black the instant the phone reaches an ear. iOS's own proximity
+            // blanking takes about 1.5 s to follow, and that gap reads as the
+            // feature not having worked — the sound has already moved to the
+            // earpiece by then. This is not the screen turning off (the system
+            // still does that); it is the screen having nothing on it first.
+            // It also swallows touches, which at an ear are a cheek.
+            .overlay {
+                if audio.isOnEarpiece {
+                    Color.black
+                        .ignoresSafeArea()
+                        .contentShape(Rectangle())
+                        .onTapGesture { }
+                        .transition(.identity)
+                        .accessibilityHidden(true)
+                }
+            }
             // An iNaturalist post outlives its sheet for the same reason an
             // export outlives the session screen — see INatUploadManager.
             .overlay(alignment: exportPillAlignment) { inatUploadOverlay }
@@ -311,6 +327,20 @@ struct ContentView: View {
                 Button("OK") { }
             } message: {
                 Text(exportManager.failure ?? "")
+            }
+            // Raised once per capture, by the volume itself — see
+            // `AudioEngineController.feedbackRiskVolume`. Held back while
+            // another presentation is up rather than being posted into it:
+            // an alert raised under a sheet is dropped silently, and this
+            // binding re-evaluates when `presentationIsBusy` clears, so the
+            // warning arrives late instead of never.
+            .alert("Feedback at this volume", isPresented: Binding(
+                get: { audio.speakerVolumeWarning && !presentationIsBusy },
+                set: { if !$0 { audio.speakerVolumeWarning = false } }
+            )) {
+                Button("OK") { audio.speakerVolumeWarning = false }
+            } message: {
+                Text("The mic can hear the phone's own speaker. Above about half volume that lands in the recording underneath the calls, not just in what you hear — and it can build into a hiss that drowns them out.\n\nTurn the volume down, use headphones, hold the phone to your ear, or keep the mic away from the phone.")
             }
                 .sheet(isPresented: $showDiagnostics) {
                     DiagnosticsView(audio: audio, recorder: recorder,
@@ -597,6 +627,23 @@ struct ContentView: View {
                 recorder.append(buffer)
             }
             audio.autoTunePeakProvider = { [processor] in processor.peakFrequency }
+            // What the power log records alongside the battery — see
+            // `PowerLogger`. Every field is something that can be switched off
+            // one at a time, which is the whole method: the drain is found by
+            // elimination, not by a number.
+            PowerLogger.shared.contextProvider = { [audio, recorder, pulseDetector] in
+                var context = PowerLogger.Context()
+                context.isRunning = audio.isRunning
+                context.isRecording = recorder.isWriting
+                context.isDemo = audio.isDemoMode
+                context.listenMode = audio.listenMode.logName
+                context.tab = section.rawValue
+                context.sampleRate = audio.diagnostics.actualSampleRate
+                context.pulses = pulseDetector.pulseCount
+                context.passes = pulseDetector.passCount
+                return context
+            }
+            PowerLogger.shared.start()
             pulseDetector.onPulseStart = { [audio, haptics] freq, level in
                 audio.notifyPulseDetected(frequency: freq)
                 // Accessibility channel — see PulseHaptics. Deliberately not

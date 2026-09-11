@@ -739,6 +739,9 @@ struct SettingsView: View {
     }
 
     @AppStorage("detector.model") private var detectorChoice = ""
+    @AppStorage(AudioEngineController.feedbackWarningKey) private var warnAtHighVolume = true
+    @AppStorage(AudioEngineController.feedbackSuppressionKey) private var suppressFeedback = true
+    @AppStorage(AudioEngineController.holdToEarKey) private var holdToEar = true
 
     /// Named by the user rather than detected, because what iOS reports is the
     /// firmware's own port name — the Griff calls itself `bat_detector_usb` —
@@ -1035,6 +1038,30 @@ struct SettingsView: View {
             .accessibilityLabel("Listening channel")
 
             mixerRows
+
+            SettingToggle("Hold to ear",
+                          "Sound normally plays from the bottom speaker, the one furthest from the "
+                        + "mic. Raise the phone to your ear and it moves quietly to the earpiece and "
+                        + "the screen goes dark, like a call. Turn it off if you leave the phone "
+                        + "face down while detecting.",
+                          isOn: Binding(get: { holdToEar },
+                                        set: { holdToEar = $0
+                                               audio.applyHoldToEarSetting() }))
+
+            SettingToggle("Reduce feedback",
+                          "On the phone's speaker, OpenBat quietens itself if the sound starts to "
+                        + "run away, and keeps what leaves the speaker below the pitches it listens "
+                        + "to. Off, you hear the live channel untouched — and a runaway is left to "
+                        + "run.",
+                          isOn: Binding(get: { suppressFeedback },
+                                        set: { suppressFeedback = $0
+                                               audio.applyFeedbackSuppressionSetting() }))
+
+            SettingToggle("Warn about feedback",
+                          "Above half volume on the phone's speaker, the mic hears the phone and "
+                        + "records it underneath the calls. This says so, once per session. Turn it "
+                        + "off if you always listen on headphones.",
+                          isOn: $warnAtHighVolume)
 
             switch liveChannel {
             case .expansion:  slowReplayRows

@@ -26,6 +26,26 @@ nonisolated final class HeterodyneProcessor: @unchecked Sendable {
     /// is a whole multiple of it.
     static let nominalOutputRate: Double = 48_000
 
+    /// The lowest frequency this channel will ever listen at, whatever band the
+    /// display is set to. A hard floor, not a default.
+    ///
+    /// Advanced view's band starts at 0.02 of Nyquist — 3.8 kHz on the Griff —
+    /// and that is a reasonable thing for a *spectrogram* to show. As a
+    /// LISTENING floor it is a feedback path: the phone's own output lives at
+    /// 1–5 kHz, the auto-tuner is free to call that peak the loudest thing
+    /// around, and once the LO parks a few kHz under it the speaker is mixing
+    /// its own output back down into the audible band. That is the loop the
+    /// 2026-09-10 capture shows — 0–8 kHz climbing 15 dB over a run while the
+    /// ultrasonic band stays clean, i.e. a runaway that never involved an
+    /// ultrasonic frequency at all.
+    ///
+    /// 15 kHz because no bat is below it (the lowest, Euderma and Tadarida,
+    /// sit at 11–18 kHz and are audible to some people unaided) and because
+    /// almost everything a phone speaker can emit is. Matches the band floor
+    /// simplified view already applies (`SimplifiedView.bandLowHz`); the
+    /// difference is that this one cannot be turned off.
+    static let minimumListenHz: Double = 15_000
+
     /// The rate this channel actually produces, settled by `reset` from the input
     /// rate it was given.
     ///
@@ -80,11 +100,20 @@ nonisolated final class HeterodyneProcessor: @unchecked Sendable {
     /// of a hotter default is that its full range is useful — full volume a
     /// little louder than anyone wants, and silence at the bottom.
     ///
+    /// 3 became 5 on 2026-09-10, after a night on real bats came back "the
+    /// volume could definitely be louder". What makes that safe now is not a
+    /// change of mind about 6: it is that the output is band-limited below the
+    /// listening band on the speaker route (`HowlGuard.bandLimitHeterodyneHz`),
+    /// so the clipper's harmonics can no longer be heard by the microphone.
+    /// Clipping used to cost loudness AND feed the loop; now it only costs
+    /// loudness. 5 is +4.4 dB on 3 and 1.6 dB under the 6 that pinned samples,
+    /// into a soft knee that compresses rather than squares off.
+    ///
     /// The tuning overlay's "Output gain" still writes the processor directly
     /// and is still not persisted — that is what a live knob is for. The
     /// persisted half is the trim in `HeterodyneSettings`, re-applied at every
     /// capture start.
-    static var defaultGain: Float { Tunable.heterodyneGain.value(Float(3)) }
+    static var defaultGain: Float { Tunable.heterodyneGain.value(Float(5)) }
     private var _gain: Float = HeterodyneProcessor.defaultGain
     private var _bandLowFraction: Double = 0   // fraction of Nyquist
     private var _denoiseMode: SnippetDenoiseMode = .off
@@ -288,10 +317,15 @@ nonisolated final class HeterodyneProcessor: @unchecked Sendable {
         let lowCut = low * nyquist
         let highCut = high * nyquist
 
-        applyHP = lowCut > 100
+        // Clamped, not trusted — see `minimumListenHz`. On an input whose
+        // Nyquist is below the floor there is nothing to listen to up there
+        // anyway, so leave the band alone rather than filtering everything out.
+        let floor = min(Self.minimumListenHz, nyquist * 0.5)
+        applyHP = max(lowCut, floor) > 100
         if applyHP {
-            bandHPa = .highpass(cutoff: lowCut, sampleRate: inputSampleRate)
-            bandHPb = .highpass(cutoff: lowCut, sampleRate: inputSampleRate)
+            let cut = max(lowCut, floor)
+            bandHPa = .highpass(cutoff: cut, sampleRate: inputSampleRate)
+            bandHPb = .highpass(cutoff: cut, sampleRate: inputSampleRate)
         }
         applyLP = highCut < nyquist * 0.98
         if applyLP {

@@ -29,6 +29,7 @@
 //
 
 import SwiftUI
+import UIKit
 
 struct DiagnosticsView: View {
     let audio: AudioEngineController
@@ -352,6 +353,20 @@ private struct MicrophoneRows: View {
                 d.actualSampleRate > 0 ? "\(Int(d.actualSampleRate)) Hz" : "—",
                 emphasis: d.isNativeRate ? .green : (d.actualSampleRate > 0 ? .orange : .secondary))
             row("Channels", d.channelCount > 0 ? "\(d.channelCount)" : "—")
+            // Whether hold-to-ear is even armed, and what the sensor says right
+            // now — the two things that separate "the feature is broken" from
+            // "this device has no sensor" / "it is switched off".
+            // Sampled once a minute by `PowerLogger`, not read live — this is a
+            // window onto the row it just wrote, so the log can be sanity-checked
+            // without exporting it.
+            row("Power (last sample)", PowerLogger.shared.lastSummary)
+            row("Hold to ear",
+                UIDevice.current.isProximityMonitoringEnabled
+                    ? (UIDevice.current.proximityState ? "watching · near" : "watching · far")
+                    : "off")
+            row("Output", d.outputName,
+                badge: d.outputChannelCount > 1 ? "\(d.outputChannelCount) ch" : nil,
+                emphasis: d.outputChannelCount > 1 ? .orange : .secondary)
             row("Buffers", "\(d.bufferCount)")
             if recorder.lastWrittenSampleRate > 0 {
                 row("Written rate", "\(Int(recorder.lastWrittenSampleRate)) Hz",

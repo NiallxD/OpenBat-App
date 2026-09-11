@@ -32,11 +32,13 @@
   interrupts everybody, before they reach the detector.
 -->
 
-## v0.9.7 (Build 249)
+## v0.9.7 (Build 251)
 
 <!-- openbat: reonboard -->
 
 ### New
+- **Hold the phone to your ear** — Raise it while listening and the sound moves quietly to the earpiece and the screen goes dark, like a call; lower it and it comes back to the speaker. Under Detecting ▸ Live listening if you would rather it didn't — worth turning off if you leave the phone face down while detecting, since that covers the same sensor.
+- **A warning when the volume is high enough to feed back** — Above about half volume on the phone's own speaker, the microphone hears the app and records it underneath the calls. The app now says so, once a session.
 - **Live listening is one place in Settings** — Both channels now sit in a single card under Detecting, behind a two-way switch: time expansion on one side, heterodyne on the other. Under "time expansion with heterodyne" you hear both at once, so setting them against each other is one decision rather than two.
 - **The live channel has a volume and a background control** — They existed, but only inside the tuning panel, and they forgot themselves every time you opened the app. They are ordinary settings now and they stay put.
 - **Settings can be corrected without an app update** — If a default value turns out to be wrong or not ideal, we can change it for everybody to improve the experience. **A value you have set yourself is never touched** — only the ones left as they came. Nothing about how species are identified can be changed this way; that still takes a new app update.
@@ -44,6 +46,9 @@
 - **Settings says when it last heard from us** — A line at the bottom with the time of the last check. A setting we changed that never arrived looks exactly like one nobody changed, and this is what tells the two apart.
 
 ### Changed
+- **The live channel is louder again** — About 4 dB, after a night on real bats where a distant one was still too quiet with the phone turned all the way up.
+- **The sound comes out of the bottom speaker** — The one furthest from the microphone. It was coming out of the earpiece, two centimetres from where the mic is held, which is the loudest path the phone has back into its own ears.
+- **Listening never goes below 15 kHz** — Whatever the frequency band is set to. Below that is where the phone's own output lives and no bat is down there. The spectrogram still shows whatever you ask it to; this is only what you hear.
 - **One volume control: the buttons on your phone** — Both listening channels now start as loud as the app can go, after a night in the field where neither was loud enough with the phone turned all the way up.
 - **The two volume sliders are now one Mixer** — Under the channel pill in Settings. In the middle both channels are at full; slide it towards the tortoise or the antenna to put that one on top by up to 24 dB. It replaces a pair of sliders that could no longer set loudness, only the balance — which is one decision, so it is now one control.
 - **The live channel starts with background reduction on** — Set to Normal rather than Off, because the extra volume above raises the hiss by as much as it raises the calls. Normal subtracts the steady background and leaves a quiet bed behind, so nothing is silenced and a faint bat still comes through.
@@ -59,6 +64,7 @@
 - **The "Not recording" pill is gone** — The reminder that appears when you have been listening a while says it better, and the pill spent most of its life covering the spectrogram to say "no".
 
 ### Fixed
+- **The hiss that ran away with itself** — A sharp sound near the phone could set the listening path howling: what left the speaker came back in through the microphone, louder each time, until it drowned everything else. The app now quietens itself when that starts and afterwards holds the level a little below where it ran away, and what leaves the speaker is filtered so the microphone can no longer hear it. Both can be turned off under Live listening.
 - **A phone call no longer stops your recording** — Being interrupted — a call, Siri, another app taking the microphone — quietly switched recording off. Listening came back when the call ended and looked completely normal, but nothing was being kept.
 - **Replays are calls, not clatter** — Keys, footsteps and other loud noise could be replayed at full volume, and the check meant to throw those windows away had stopped working: on High background removal it was measuring a background that had already been silenced. It measures the room as recorded now, so a window with no call in it is dropped and the mode goes back to listening.
 - **Every replay lands at the same level again** — The limit that keeps a quiet window quiet was also being measured after cleanup, so it never applied, and a faint click could be amplified as far as a bat.

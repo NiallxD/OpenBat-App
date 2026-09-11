@@ -106,7 +106,10 @@ final class ClassificationLogger {
         }
         // Copies taken ON `queue`, so none of them can catch a half-written row.
         queue.sync {
-            for url in [fileURL] + archiveURLs() {
+            // The power log rides along: it is a different shape of data, but
+            // it is the same question — what was this session doing — and
+            // nobody sending one log wants to be told to go and find another.
+            for url in [fileURL] + archiveURLs() + PowerLogger.shared.exportURLs() {
                 try? fm.copyItem(at: url, to: stage.appendingPathComponent(url.lastPathComponent))
             }
         }

@@ -104,13 +104,20 @@ struct SettingsResetTests {
     /// The remote kill switches' local overrides are preferences, and a reset is
     /// exactly when somebody wants them gone — they are the one thing that can
     /// make two devices behave differently on the same config file.
-    @Test func localFeatureOverridesAreCleared() {
+    /// The config file's own state survives — it is not this user's settings.
+    ///
+    /// This test asserted the opposite until 2026-09-10, and had been failing
+    /// since `config.localFeatureOverrides` joined the preserved list on
+    /// 2026-09-09 (`35f8de7`), which changed the behaviour and left the test
+    /// behind. Clearing it would quietly return the app to compiled values
+    /// until the next successful fetch — see `SettingsReset`'s header.
+    @Test func localFeatureOverridesSurvive() {
         let (defaults, domain) = makeDefaults("flags")
         defaults.set(["automaticID"], forKey: "config.localFeatureOverrides")
 
         SettingsReset.eraseUserPreferences(in: defaults, domain: domain)
 
-        #expect(defaults.object(forKey: "config.localFeatureOverrides") == nil)
+        #expect(defaults.stringArray(forKey: "config.localFeatureOverrides") == ["automaticID"])
     }
 
     @Test func anEmptyDomainIsNotAnError() {

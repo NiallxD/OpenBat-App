@@ -71,3 +71,17 @@ Offline scripts. Nothing here is part of the app target or runs on device.
 - **`openbat_vs_echotouch_analysis.ipynb`** — one-off comparison of OpenBat's
   call measurements against EchoTouch's. Kept as a record of the analysis, not
   as a maintained tool.
+
+- **`batsim.sh`** — a train of downward FM sweeps out of the Mac's speaker, for
+  exercising the live listening path (detector, squelch gate, auto-tune,
+  `HowlGuard`) without a bat. A laptop tops out around 23 kHz, so this is the
+  right SHAPE at the wrong frequency: the defaults (22→16 kHz, 5 ms, 10/s) sit
+  above the app's 15 kHz band floor and below Nyquist. `--buzz` appends a
+  feeding buzz — the one natural sound dense enough to test that the runaway
+  guard leaves real activity alone.
+
+  ```
+  tools/batsim.sh                        # play the default train
+  tools/batsim.sh -s 23 -e 18 -d 3       # steeper, shorter pulses
+  tools/batsim.sh --buzz -o /tmp/b.wav -P  # write a file, don't play
+  ```

@@ -17,11 +17,25 @@
 import AVFoundation
 import Observation
 import Synchronization   // Atomic, for the realtime-thread-safe snippet routing
+import UIKit             // UIDevice, for the proximity sensor (hold-to-ear)
 
 /// How the captured ultrasound is rendered to the speaker for listening.
 /// `Int`-backed so it can live in an `Atomic` the realtime threads read — see
 /// `AudioEngineController.liveMode`. Nothing persists these raw values, so the
 /// numbering is free to change.
+extension ListenMode {
+    /// Short, stable name for the power log's `listen_mode` column. Not the
+    /// user-facing label, which is free to change wording.
+    var logName: String {
+        switch self {
+        case .off:              "off"
+        case .heterodyne:       "heterodyne"
+        case .timeExpansion:    "expansion"
+        case .snippetExpansion: "snippet"
+        }
+    }
+}
+
 enum ListenMode: Int, CaseIterable {
     case off
     case heterodyne
@@ -73,9 +87,188 @@ final class AudioEngineController {
     /// feedback-risk warning: listening audio played out the speaker gets picked
     /// back up by the mic and reprocessed as a spurious low-pitch "call". No
     /// software fix short of full echo cancellation, which risks degrading the
-    /// ultrasonic capture path, so this only warns the user to wear headphones.
-    /// See Context.md §6.
+    /// ultrasonic capture path, so this warns the user to wear headphones.
+    /// It also arms `howlGuard`, which does not remove the spurious call but
+    /// does stop it running away into hiss. See Context.md §6.
     private(set) var isOutputOnSpeaker = false
+
+    /// Media volume above which the speaker route is loud enough to put the
+    /// phone's own output into the recording, not just into the listener's ear.
+    ///
+    /// Half. The number is a judgement, not a measurement — but the thing it
+    /// guards against is measured: in the 2026-09-10 capture the heterodyne
+    /// output came back off the speaker at 27→42 dB, the same level as the
+    /// calls themselves, and sat under every single one of them in the saved
+    /// WAV. The filters and `HowlGuard` stop that becoming a runaway; nothing
+    /// stops it being recorded, because the recording is deliberately whatever
+    /// the microphone delivered.
+    static let feedbackRiskVolume: Float = 0.5
+
+    /// Whether that warning is raised at all — Settings ▸ Detecting ▸ Live
+    /// listening. Read from `UserDefaults` rather than injected, so the audio
+    /// controller stays something a view configures by existing rather than by
+    /// being wired up. Default on: someone who has never thought about it is
+    /// exactly who the warning is for.
+    static let feedbackWarningKey = "listen.warnAtHighVolume"
+
+    /// Whether the speaker route's feedback handling runs at all — the runaway
+    /// stabiliser and the output band-limit, both of which are `HowlGuard`'s
+    /// `armed` flag. Settings ▸ Detecting ▸ Live listening.
+    ///
+    /// On by default and only worth turning off to hear what it is doing:
+    /// off, the live channel keeps its full bandwidth on the speaker and a
+    /// runaway is left to run. The 15 kHz listening floor is deliberately NOT
+    /// behind this switch — it is not a trade-off, it is where bats start.
+    static let feedbackSuppressionKey = "listen.suppressFeedback"
+    static var isFeedbackSuppressionEnabled: Bool {
+        UserDefaults.standard.object(forKey: feedbackSuppressionKey) as? Bool ?? true
+    }
+
+    // MARK: Hold to ear
+
+    /// Whether raising the phone to your ear moves the sound to the earpiece.
+    /// Settings ▸ Detecting ▸ Live listening. Default on.
+    static let holdToEarKey = "listen.holdToEar"
+    static var isHoldToEarEnabled: Bool {
+        UserDefaults.standard.object(forKey: holdToEarKey) as? Bool ?? true
+    }
+
+    /// True while the phone is at your ear and the sound has moved to the
+    /// earpiece. iOS blanks the screen itself while proximity monitoring is on,
+    /// so this is only about the audio.
+    private(set) var isOnEarpiece = false
+
+    /// How much quieter the earpiece is than the bottom speaker.
+    ///
+    /// −6 dB, not the −12 it started at. The receiver is a centimetre from an
+    /// eardrum, so quieter is right in principle — but this whole path is
+    /// already attenuated by `.measurement` mode (the reason
+    /// `listenOutputMakeupGain` exists), and the first field test came back
+    /// "earpiece goes silent when holding up". Half of that may simply have
+    /// been level.
+    static var earpieceTrim: Float { 0.5 }
+
+    /// Level applied to everything leaving the listen output node, on top of
+    /// the makeup gain. 1 on the speaker, `earpieceTrim` at the ear. Boxed in
+    /// an atomic because the render block reads it per buffer.
+    private final class TrimBox: @unchecked Sendable {
+        let bits = Atomic<UInt32>(Float(1).bitPattern)
+        var gain: Float { Float(bitPattern: bits.load(ordering: .relaxed)) }
+        func set(_ g: Float) { bits.store(g.bitPattern, ordering: .releasing) }
+    }
+    private let outputTrim = TrimBox()
+
+    /// Serialised, because two flips in quick succession (a phone going up and
+    /// straight back down) would otherwise race and could leave the route on
+    /// the wrong one — the last call to start is not the last to finish.
+    private var routeOverrideTask: Task<Void, Never>?
+
+    /// Enabled only while listening: with it on, iOS turns the screen off when
+    /// the sensor is covered, which is right at the ear and wrong in a pocket
+    /// with nothing playing.
+    private func setProximityMonitoring(_ on: Bool) {
+        let wanted = on && Self.isHoldToEarEnabled
+        let device = UIDevice.current
+        guard device.isProximityMonitoringEnabled != wanted else { return }
+        // An iPad has no sensor: this reads back false and nothing else here
+        // ever fires.
+        device.isProximityMonitoringEnabled = wanted
+        if !wanted, isOnEarpiece { handleProximity(near: false) }
+    }
+
+    private func handleProximity(near: Bool) {
+        guard near != isOnEarpiece else { return }
+        guard !near || (isRunning && isListening && Self.isHoldToEarEnabled) else { return }
+        isOnEarpiece = near
+        outputTrim.set(near ? Self.earpieceTrim : 1)
+        applyPreferredOutputRoute()
+    }
+
+    /// Put the sound on the speaker furthest from the microphone — which is the
+    /// bottom one — unless the phone is at an ear.
+    ///
+    /// `.defaultToSpeaker` in the category is not enough on its own: it is a
+    /// *default*, and every route change re-decides it, while `.measurement`
+    /// mode is exactly the kind of session where iOS is happy to leave the
+    /// output on the receiver. The receiver is two centimetres from where the
+    /// mic is held, so that choice is the loudest feedback path the phone has.
+    /// An explicit override says it per session, and this is re-applied after
+    /// every route change.
+    ///
+    /// Never applied over headphones or anything external: `.speaker` would
+    /// force the built-in speaker and take the sound off them.
+    private func applyPreferredOutputRoute() {
+        guard isRunning, isListening, isConfigured, !isDemoMode else { return }
+        let toEarpiece = isOnEarpiece
+        let previous = routeOverrideTask
+        routeOverrideTask = Task.detached(priority: .userInitiated) {
+            await previous?.value
+            let session = AVAudioSession.sharedInstance()
+            let port = session.currentRoute.outputs.first?.portType
+            guard port == .builtInSpeaker || port == .builtInReceiver else { return }
+            // **Only when it would actually move the route.** Overriding to
+            // where the sound already is still posts a route change, which
+            // brings us straight back here — and each pass renegotiates the
+            // whole route, which is how the first version of this stopped the
+            // Griff binding at all (2026-09-10).
+            let wanted: AVAudioSession.Port = toEarpiece ? .builtInReceiver : .builtInSpeaker
+            guard port != wanted else { return }
+            // **`.none` means "the category's default", and the category's
+            // default is `.defaultToSpeaker`** — so on its own, overriding to
+            // `.none` to reach the earpiece lands back on the speaker and
+            // hold-to-ear does nothing at all (2026-09-10). Reaching the
+            // receiver means restating the category without that option first.
+            let options: AVAudioSession.CategoryOptions =
+                toEarpiece ? [.allowBluetoothA2DP] : [.defaultToSpeaker, .allowBluetoothA2DP]
+            try? session.setCategory(.playAndRecord, mode: .measurement, options: options)
+            // Restated with the category, because restating the category is a
+            // renegotiation and the capture rate is the one thing here that
+            // must not quietly come back at 48 kHz.
+            try? session.setPreferredSampleRate(Self.preferredSampleRate)
+            try? session.overrideOutputAudioPort(toEarpiece ? .none : .speaker)
+            // Re-asserted because changing the output re-picks the input: on a
+            // `.playAndRecord` session an output override can drop a preferred
+            // USB input back to the built-in mic, silently.
+            if let usb = session.availableInputs?.first(where: { $0.portType == .usbAudio }),
+               session.currentRoute.inputs.first?.portType != .usbAudio {
+                try? session.setPreferredInput(usb)
+            }
+        }
+    }
+
+    /// Re-arm the guard after the setting changes. Called by Settings, because
+    /// the route poll that would otherwise pick it up is suspended while
+    /// capturing — which is exactly when this switch is worth flipping.
+    func applyFeedbackSuppressionSetting() {
+        howlGuard.setArmed(isOutputOnSpeaker && Self.isFeedbackSuppressionEnabled)
+    }
+
+    /// Called by Settings when the hold-to-ear switch moves, for the same
+    /// reason as `applyFeedbackSuppressionSetting`.
+    func applyHoldToEarSetting() {
+        setProximityMonitoring(isRunning && isListening)
+    }
+
+    /// Set when listening starts on the speaker with the volume already up, or
+    /// when it is turned up past `feedbackRiskVolume` mid-session. The Detector
+    /// clears it when the alert is dismissed. Once per capture: this is a
+    /// warning, not a nag, and a user who has read it and left the volume up
+    /// has made their choice.
+    var speakerVolumeWarning = false
+    private var hasWarnedAboutVolume = false
+    private var volumeObservation: NSKeyValueObservation?
+
+    /// Re-check whether the warning is due. Cheap; called from the route poll,
+    /// from `start`, and from the volume observer.
+    private func updateSpeakerVolumeWarning() {
+        guard isRunning, isListening, isOutputOnSpeaker, !isDemoMode else { return }
+        guard UserDefaults.standard.object(forKey: Self.feedbackWarningKey) as? Bool ?? true
+        else { return }
+        guard AVAudioSession.sharedInstance().outputVolume > Self.feedbackRiskVolume else { return }
+        guard !hasWarnedAboutVolume else { return }
+        hasWarnedAboutVolume = true
+        speakerVolumeWarning = true
+    }
     private(set) var isRunning = false {
         didSet {
             guard oldValue != isRunning else { return }
@@ -136,6 +329,11 @@ final class AudioEngineController {
     /// Live snippet expansion (D240x pattern) — see SnippetExpansionProcessor,
     /// and Context.md §5's rule on which live expansion shapes are permitted.
     let snippetExpansion = SnippetExpansionProcessor()
+    /// Catches the speaker→mic→heterodyne→speaker runaway that a finger snap
+    /// (or a close bat) sets off when there are no headphones in — see
+    /// `HowlGuard`. Lives on the output stage, armed by `updateInputDiagnostics`
+    /// whenever the route is the built-in speaker.
+    let howlGuard = HowlGuard()
     /// What reaches the speaker in `.snippetExpansion`, as an atomic rather than
     /// a read of the settings object: the output render block runs on the
     /// realtime thread and must not touch main-actor state, and changing routing
@@ -207,10 +405,16 @@ final class AudioEngineController {
         get { cleanup.snippetMixBuffer }
         set { cleanup.snippetMixBuffer = newValue }
     }
-    /// How far heterodyne drops while a snippet is sounding. −6 dB: enough to put
-    /// the replay in front without losing the live channel, which is the whole
+    /// How far heterodyne drops while a snippet is sounding: enough to put the
+    /// replay in front without losing the live channel, which is the whole
     /// reason both are audible at once.
-    private static var snippetHeterodyneDuck: Float { Tunable.snippetDuckLevel.value(Float(0.5)) }
+    ///
+    /// −10.5 dB, and it moved there with the live bed. It was −6 dB against a
+    /// heterodyne base gain of 3; that gain went to 5 on 2026-09-10, which is
+    /// +4.4 dB on the bed and would have left the replay only 1.6 dB in front
+    /// of where it used to be 6. The relationship is what matters here, not
+    /// either number, so the duck deepened by the same amount.
+    private static var snippetHeterodyneDuck: Float { Tunable.snippetDuckLevel.value(Float(0.3)) }
     /// Per-sample slew for that duck — ~40 ms at 48 kHz, so the live channel
     /// steps back and returns smoothly around a replay instead of clicking.
     private static var snippetDuckSlew: Float { 1.0 / Float(48_000 * Tunable.snippetDuckSeconds.value(0.04)) }
@@ -506,6 +710,18 @@ final class AudioEngineController {
             try startEngine()
             startStatsTimer()
             isRunning = true
+            // Brackets the interval in the power log, so a capture's cost isn't
+            // smeared across the minute either side of it.
+            PowerLogger.shared.mark("capture-start")
+            observeOutputVolume()
+            // Again here, after the route has settled: the one inside
+            // `configureSession` runs the instant the session goes active, and
+            // what `currentRoute` reports at that moment is not always what it
+            // settles on. Idempotent — it does nothing if the sound is already
+            // on the speaker.
+            applyPreferredOutputRoute()
+            setProximityMonitoring(isListening)
+            updateSpeakerVolumeWarning()
             isInterrupted = false
             startFailure = nil
             status = diagnostics.isNativeRate
@@ -541,6 +757,12 @@ final class AudioEngineController {
             try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         }
         isRunning = false
+        PowerLogger.shared.mark("capture-stop")
+        // A new capture gets a fresh warning — the volume, the route and where
+        // the phone is sitting can all be different by then.
+        hasWarnedAboutVolume = false
+        speakerVolumeWarning = false
+        setProximityMonitoring(false)
         // Ending the session by hand is the one thing that outranks a held
         // interruption: from here the session really is over, and everything
         // keyed to `isActive` — the armed recorder included — should see that.
@@ -850,6 +1072,27 @@ final class AudioEngineController {
             }
 
             try session.setActive(true)
+
+            // Put the sound on the bottom speaker before the engine starts,
+            // not after: this renegotiates the route, and doing it under a
+            // running tap means a route change mid-capture. See
+            // `applyPreferredOutputRoute` for why the override is needed at
+            // all, and for the input it can quietly drop.
+            // **One output channel, because two of them is the earpiece.** An
+            // iPhone 14 drives the bottom speaker and the receiver as a stereo
+            // pair for this route — the Output row in Diagnostics reports
+            // `Speaker · 2 ch` — and no port override picks one of a pair.
+            // Asking for mono is the only lever an app has over it (Niall,
+            // 2026-09-10: "standard the sound comes from both speakers").
+            if listening { try? session.setPreferredOutputNumberOfChannels(1) }
+
+            if listening, session.currentRoute.outputs.first?.portType == .builtInReceiver {
+                try? session.overrideOutputAudioPort(.speaker)
+                if let usbInput = session.availableInputs?.first(where: { $0.portType == .usbAudio }),
+                   session.currentRoute.inputs.first?.portType != .usbAudio {
+                    try? session.setPreferredInput(usbInput)
+                }
+            }
         }.value
         isConfigured = true
         updateInputDiagnostics()
@@ -909,7 +1152,16 @@ final class AudioEngineController {
         // Provisional until the first real buffer arrives and flushStats corrects it.
         if diagnostics.actualSampleRate == 0 { diagnostics.actualSampleRate = session.sampleRate }
         let outputPort = session.currentRoute.outputs.first
+        diagnostics.outputName = outputPort?.portName ?? "—"
+        diagnostics.outputChannelCount = outputPort?.channels?.count ?? 0
+        // The receiver counts: it is a speaker sitting beside the microphone,
+        // which makes it the worse of the two for feedback, not the safer one.
         isOutputOnSpeaker = outputPort?.portType == .builtInSpeaker
+            || outputPort?.portType == .builtInReceiver
+        // The loop only exists through the built-in speaker; through headphones a
+        // long steady sound is real signal and must not be ducked.
+        applyFeedbackSuppressionSetting()
+        updateSpeakerVolumeWarning()
         syncSlowDiagnostics()
     }
 
@@ -1044,6 +1296,9 @@ final class AudioEngineController {
         let knee = Self.listenSoftClipThreshold
         let duckTarget = Self.snippetHeterodyneDuck
         let duckSlew = Self.snippetDuckSlew
+        let howl = howlGuard
+        howl.reset(sampleRate: outFormat.sampleRate)
+        let trim = outputTrim
 
         let mixCapacity = 4096
         let mixBuffer = UnsafeMutableBufferPointer<Float>.allocate(capacity: mixCapacity)
@@ -1136,8 +1391,18 @@ final class AudioEngineController {
             // and the mix of the two are corrected identically — see
             // `listenOutputMakeupGain`. `.off` returns above rather than
             // multiplying a buffer of zeroes.
+            // One read per buffer, not per sample — and a step rather than a
+            // ramp, because the only thing that moves it is a phone arriving at
+            // or leaving an ear, which is louder than the step is.
+            let level = makeup * trim.gain
+            for i in 0..<n { out[i] *= level }
+            // Between the makeup gain and the clipper, which is where it has to
+            // be: the clipper is what turns a pinned output into the >15 kHz
+            // harmonics the mic feeds back, so the level has to come down
+            // before it rather than after. See `HowlGuard`.
+            howl.process(out, frames: n)
             for i in 0..<n {
-                let x = out[i] * makeup
+                let x = out[i]
                 let mag = abs(x)
                 if mag <= knee {
                     out[i] = x
@@ -1150,6 +1415,12 @@ final class AudioEngineController {
                     out[i] = x < 0 ? -shaped : shaped
                 }
             }
+            // Last, because the clipper above is what puts energy up where the
+            // input band can hear it. On the speaker route this is what stops
+            // the loop existing electrically at all — see `HowlGuard.bandLimitHz`.
+            howl.bandLimitOutput(out, frames: n,
+                                 cutoffHz: mode == .heterodyne ? HowlGuard.bandLimitHeterodyneHz
+                                                               : HowlGuard.bandLimitHz)
             return noErr
         }
         engine.attach(node)
@@ -1242,13 +1513,20 @@ final class AudioEngineController {
             snippetExpansion.trigger()
         }
         guard listenMode == .heterodyne || listenMode == .snippetExpansion,
-              isAutoTune, frequency > 0 else { return }
+              isAutoTune, frequency >= HeterodyneProcessor.minimumListenHz else { return }
+        // A runaway looks exactly like a detection to everything upstream of
+        // here, so while the guard is holding the output down the LO stays put
+        // and the gate stays shut. Otherwise the hiss retunes the LO onto
+        // itself and renews the 530 ms squelch hold every tick, which is the
+        // half of the loop that gain alone can't break.
+        guard !howlGuard.isSuppressing else { return }
         if tunedFrequency <= 0 || abs(frequency - tunedFrequency) > 8_000 {
             tunedFrequency = frequency          // snap for large species shifts
         } else {
             tunedFrequency += (frequency - tunedFrequency) * 0.3   // slew within species
         }
-        heterodyne.loFrequency = max(tunedFrequency - audibleOffsetHz, 100)
+        heterodyne.loFrequency = max(tunedFrequency - audibleOffsetHz,
+                                     HeterodyneProcessor.minimumListenHz - audibleOffsetHz)
         gateHoldTicks = gateHoldDuration
         heterodyne.setGate(true)
     }
@@ -1259,9 +1537,10 @@ final class AudioEngineController {
     func setManualTune(frequency: Double) {
         isAutoTune = false
         let nyquist = diagnostics.actualSampleRate > 0 ? diagnostics.actualSampleRate / 2 : 192_000
-        let clamped = min(max(frequency, 1_000), nyquist)
+        let clamped = min(max(frequency, HeterodyneProcessor.minimumListenHz), nyquist)
         tunedFrequency = clamped // the frequency we're listening at
-        heterodyne.loFrequency = max(clamped - audibleOffsetHz, 100)
+        heterodyne.loFrequency = max(clamped - audibleOffsetHz,
+                                     HeterodyneProcessor.minimumListenHz - audibleOffsetHz)
         heterodyne.setGate(true)
     }
 
@@ -1279,7 +1558,17 @@ final class AudioEngineController {
         // auto-tune and squelch behaviour as `.heterodyne` itself.
         guard listenMode == .heterodyne || listenMode == .snippetExpansion,
               isAutoTune else { return }
-        let peak = autoTunePeakProvider?() ?? 0
+        guard !howlGuard.isSuppressing else {   // see `notifyPulseDetected`
+            gateHoldTicks = 0
+            heterodyne.setGate(false)
+            return
+        }
+        // A peak below the listening floor is the phone hearing itself, not a
+        // bat — see `HeterodyneProcessor.minimumListenHz`. Treated as no
+        // detection at all, so the squelch hold runs down and the gate shuts
+        // rather than the LO being dragged down onto the speaker's own output.
+        var peak = autoTunePeakProvider?() ?? 0
+        if peak < HeterodyneProcessor.minimumListenHz { peak = 0 }
 
         if peak > 0 {
             // `tunedFrequency` is the frequency we're listening at (the detected call);
@@ -1289,7 +1578,8 @@ final class AudioEngineController {
             } else {
                 tunedFrequency += (peak - tunedFrequency) * 0.3 // slew for stability
             }
-            heterodyne.loFrequency = max(tunedFrequency - audibleOffsetHz, 100)
+            heterodyne.loFrequency = max(tunedFrequency - audibleOffsetHz,
+                                     HeterodyneProcessor.minimumListenHz - audibleOffsetHz)
             gateHoldTicks = gateHoldDuration
             heterodyne.setGate(true)
         } else {
@@ -1300,6 +1590,48 @@ final class AudioEngineController {
                 heterodyne.setGate(false)
             }
         }
+    }
+
+    /// Watch the hardware volume buttons. KVO rather than a notification: there
+    /// is no public notification for `outputVolume`, and polling it on the stats
+    /// timer would report the change up to 67 ms after the user let go of the
+    /// button.
+    private func observeOutputVolume() {
+        guard volumeObservation == nil else { return }
+        volumeObservation = AVAudioSession.sharedInstance()
+            .observe(\.outputVolume, options: [.new]) { [weak self] _, _ in
+                // KVO fires on whatever thread changed the value.
+                Task { @MainActor in self?.updateSpeakerVolumeWarning() }
+            }
+    }
+
+    /// Rebuild the listening output after the engine's configuration changes
+    /// underneath it.
+    ///
+    /// Moving the sound to the earpiece is a route change, and a route change
+    /// invalidates the engine's connections: the source node stops being pulled
+    /// and the output goes silent with nothing reported anywhere (Niall,
+    /// 2026-09-10: "comes from none when sensor is covered"). Only the output
+    /// half is rebuilt — the input's format doesn't change when the output port
+    /// does, and tearing down a running 384 kHz tap to re-make it is how a
+    /// route change starts dropping buffers.
+    private var lastOutputRebuild = Date.distantPast
+
+    private func handleEngineConfigurationChange() {
+        guard isRunning, isListening, !isReconfiguring, !isSwitchingListenMode else { return }
+        // Rebuilding the graph can itself provoke a configuration change, and
+        // an unguarded handler that re-enters on its own work is a loop that
+        // takes the audio thread with it. A real second change (the route
+        // settling in two steps) posts again well after this window.
+        guard Date().timeIntervalSince(lastOutputRebuild) > 0.3 else { return }
+        lastOutputRebuild = Date()
+        if let node = sourceNode {
+            engine.disconnectNodeOutput(node)
+            engine.detach(node)
+            sourceNode = nil
+        }
+        attachListenOutput()
+        if !engine.isRunning { try? engine.start() }
     }
 
     // MARK: Notifications
@@ -1317,6 +1649,21 @@ final class AudioEngineController {
         // Tokens are retained (see `Cleanup`) so these registrations are removed
         // when the controller goes away — the center holds block-based observers
         // itself, so they otherwise survive their owner.
+        cleanup.tokens.append(center.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.handleEngineConfigurationChange() }
+        })
+
+        cleanup.tokens.append(center.addObserver(
+            forName: UIDevice.proximityStateDidChangeNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            let near = UIDevice.current.proximityState
+            Task { @MainActor in self?.handleProximity(near: near) }
+        })
+
         cleanup.tokens.append(center.addObserver(
             forName: AVAudioSession.routeChangeNotification,
             object: nil, queue: .main
@@ -1348,6 +1695,12 @@ final class AudioEngineController {
     /// risks a restart storm (a change triggering another change). See Context.md §6.
     private func handleRouteChange(_ reason: AVAudioSession.RouteChangeReason) async {
         updateInputDiagnostics()
+        // Re-stated rather than assumed: an override is per route, so plugging
+        // anything in or out puts the sound back on whatever iOS prefers —
+        // which on this session is the receiver. `.override` is excluded
+        // because that reason is this app's own doing; re-entering here on it
+        // is a loop. See `applyPreferredOutputRoute`.
+        if reason != .override { applyPreferredOutputRoute() }
 
         // A demo feed has no input to rebind, and the restart below would tear
         // down the file source to re-tap a mic it never used. Plugging the Griff

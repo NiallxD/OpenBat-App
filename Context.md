@@ -1189,11 +1189,189 @@ moves first.
   alarming claim, and the one a transient produces — has to survive ~1.5 s. The
   first rate of a capture is still adopted immediately, since there is nothing
   on screen yet for it to flicker against.
-- **Acoustic feedback has no software fix.** Listening audio played out the
-  built-in speaker gets picked back up by the mic and reprocessed as a spurious
-  low-pitch "call" layered on the real one. Full echo cancellation risks
-  degrading the ultrasonic capture path, so the app only warns and tells the
-  user to wear headphones — which is confirmed to fix it.
+- **Acoustic feedback is not fully fixable in software, but the runaway is.**
+  Listening audio played out the built-in speaker gets picked back up by the mic
+  and reprocessed as a spurious low-pitch "call" layered on the real one. Full
+  echo cancellation risks degrading the ultrasonic capture path, so the app
+  warns and tells the user to wear headphones — which is confirmed to fix it.
+  What the app does now fix (2026-09-10) is the *runaway*: a finger snap near
+  the phone used to set off four seconds of rising broadband hiss, because the
+  soft clipper turns a pinned output into >15 kHz harmonics the band filter
+  passes straight back in, and the noise renews the squelch hold every tick so
+  the gate never shuts. `HowlGuard` sits between the makeup gain and the
+  clipper, collapses the output when its level stays up longer than a bat pass
+  does (0.35 s), freezes the LO and closes the gate while it does, and brings
+  the level back to a ceiling 6 dB under wherever it ran away — so the gain
+  converges on the loudest this phone/position/volume can hold instead of
+  pumping. Armed only on the built-in speaker.
+
+  The stabiliser alone left audible interference (Niall, same evening), so the
+  same speaker route now also **band-limits the output to 8 kHz after the
+  clipper** — below the 15 kHz the input band starts at, so the app can no
+  longer hear its own output through any electrical path; what is left is the
+  speaker's own acoustic distortion, which no filter reaches. Free on
+  heterodyne (already low-passed to 4 kHz); it costs the 8× replay channel
+  calls above 64 kHz, which is why it lifts on headphones rather than being
+  unconditional.
+
+  And the loop that mattered most turned out not to involve an ultrasonic
+  frequency at all. A 384 kHz capture from the field (2026-09-10, `LACI`, with
+  a laptop playing FM sweeps at it) shows the sweeps steady at 37–43 dB the
+  whole run while 0–8 kHz — the phone's own output, heard by the mic — climbs
+  from 27 to 42 dB, as loud as the calls themselves, with the gaps between
+  calls rising 24 dB over the last seconds. Advanced view's band starts at
+  0.02 of Nyquist (3.8 kHz on the Griff), so the auto-tuner was free to call
+  the speaker's own output the loudest thing around and park the LO a few kHz
+  under it — after which the speaker is mixing its own output back down into
+  the audible band. **Listening is now floored at 15 kHz whatever the display
+  band says** (`HeterodyneProcessor.minimumListenHz`): the input high-pass, the
+  auto-tune peak, the LO and manual tune are all clamped to it. The display
+  band is unchanged — it is a reasonable thing for a spectrogram to show, and
+  only listening had a feedback path through it. Niall's call, on the evidence
+  above: "for listening we can safely ignore anything under 15 kHz".
+
+  **The warning is now an alert, not only the pill.** Above half media volume,
+  on the speaker route, the first capture raises "Feedback at this volume" —
+  once per capture, held back while another presentation is up (an alert raised
+  under a sheet is dropped silently) and re-offered when that clears. Volume is
+  watched by KVO on `outputVolume`; there is no notification for it, and the
+  15 Hz stats timer would report a button press up to 67 ms late. The reason it
+  earns an alert rather than a quieter hint is that the cost is not just an
+  unpleasant noise: the pickup is *in the saved recording*, under every call,
+  and no later processing can take it out again.
+
+  Both halves are switchable in Settings ▸ Detecting ▸ Live listening — "Hold
+  back feedback" (the stabiliser and the output band-limit together, i.e.
+  `HowlGuard`'s armed flag) and "Warn about feedback" (the alert). Both default
+  on. The 15 kHz listening floor is deliberately not among them: it is not a
+  trade-off, it is where bats start.
+
+- **The receiver was the loudest feedback path the phone has, and the session
+  was leaving the sound on it.** `.playAndRecord` is configured with
+  `.defaultToSpeaker`, but that is a *default*: every route change re-decides
+  it, and under `.measurement` iOS is content to leave output on the receiver —
+  which on an iPhone 14 is two centimetres from where the mic is held (Niall,
+  2026-09-10: "we play the sound loud through the ear piece speaker"). Listening
+  now states it explicitly with `overrideOutputAudioPort(.speaker)` after
+  activation and again after every route change, so the sound comes out of the
+  bottom speaker, the one furthest from the mic. Never applied over headphones
+  or anything external — `.speaker` would force the built-in speaker and take
+  the sound off them.
+
+  On top of that, **hold to ear**: while listening, proximity monitoring is on,
+  so raising the phone blanks the screen (iOS does that itself) and the sound
+  moves to the receiver at −12 dB, like a call; lowering it puts it back. The
+  false positive is a phone left face down — the sensor is covered, so the
+  screen goes off and the sound plays into the table — which is why it is a
+  switch (Settings ▸ Detecting ▸ Live listening ▸ "Hold to ear", default on)
+  rather than unconditional. An iPad has no sensor and reads the flag back
+  false, so nothing there ever fires.
+
+  **The first version of this stopped the Griff connecting**, and both causes
+  are worth knowing. An output override posts a route change of its own
+  (reason `.override`), and the re-apply was wired to *every* route change — so
+  each override triggered another, and the route renegotiated in a loop while
+  the engine was trying to bind the USB input. And on `.playAndRecord`,
+  changing the output re-picks the input: an override can drop a preferred USB
+  input back to the built-in mic, silently. So the override is now (a) skipped
+  unless it would actually move the route, (b) not re-applied on `.override`,
+  (c) followed by re-asserting the USB input, and (d) done inside
+  `configureSession` after `setActive`, before the engine starts, rather than
+  under a running tap.
+
+  **And `.none` does not mean "the receiver".** It means "the category's
+  default", and this category's default is `.defaultToSpeaker` — so overriding
+  to `.none` to put the sound at the ear landed straight back on the speaker
+  and hold-to-ear did nothing at all on its first outing. Reaching the receiver
+  means restating the category *without* that option and then overriding, which
+  is a renegotiation — hence the preferred sample rate and the preferred USB
+  input are both restated alongside it.
+
+  Diagnostics now carries the two rows this cost a round trip for want of:
+  **Output** (the port's own name, badged with its channel count) and **Hold to
+  ear** (whether the sensor is being watched, and what it reads). An iPhone
+  reporting `Speaker · 2 ch` is driving the earpiece as part of that route, and
+  no override available to an app fixes that.
+
+  The screen blanking is iOS's, and it lags the sensor by about 1.5 s — long
+  enough that raising the phone reads as nothing having happened, even though
+  the sound has already moved. The app paints its own black over everything the
+  instant `isOnEarpiece` goes true, so the gap is invisible; the system blank
+  then arrives underneath it. The overlay also swallows touches, which at an
+  ear are a cheek.
+
+  Two more things the first field test found. **Moving the route kills the
+  audio**: a route change invalidates `AVAudioEngine`'s connections, the source
+  node stops being pulled, and the output goes silent with nothing reported
+  anywhere — so `.AVAudioEngineConfigurationChange` is now observed and the
+  listening output node is rebuilt on it (only the output half: the input's
+  format doesn't change when the output port does, and re-making a running
+  384 kHz tap is how a route change starts dropping buffers). The handler is
+  debounced at 0.3 s, because rebuilding the graph can provoke the very
+  notification it is handling.
+
+  And **the phone drives both speakers**: on an iPhone 14 the bottom speaker
+  and the receiver are a stereo pair for this route (`Speaker · 2 ch` in
+  Diagnostics), and no port override picks one of a pair. Asking for mono —
+  `setPreferredOutputNumberOfChannels(1)` — is the only lever an app has over
+  it. Whether it takes is visible in the same Diagnostics row.
+
+  It does not take: the row still reads `Speaker · 2 ch` on an iPhone 14, so
+  the earpiece is driven at the hardware level whenever the speaker is, and
+  that is the end of the line for an app. Hold-to-ear and headphones are the
+  ways out of it, which is why the volume alert now names hold-to-ear as one of
+  the answers.
+
+  The earpiece level is **half** the speaker's (`earpieceTrim`), applied
+  digitally on the output. It started at a quarter and the first field test
+  came back "earpiece goes silent when holding up" — this path is already
+  attenuated by `.measurement`, so a quarter of it was inaudible. Half is a
+  level, not the system volume: an app cannot move the user's volume slider,
+  and one that could should not, since it would still be moved after the phone
+  came back down.
+
+- **Heterodyne base gain 3 → 5 (2026-09-10)**, after a night on real bats came
+  back "the volume could definitely be louder... but I don't think we have any
+  more room". There was room, and the reason is the band-limit: clipping used
+  to cost loudness *and* feed the loop, because the clipper's harmonics landed
+  where the microphone was listening. Filtered below the listening band, it now
+  only costs loudness, and the knee is soft. +4.4 dB, still 1.6 dB under the 6
+  that pinned samples.
+
+  Two things this turned up. The live chain is **×317**, not the dozen that
+  `HowlGuard`'s header claimed: it is the base gain × the trim (which defaults
+  to its +24 dB maximum, deliberately, so the phone's volume control is the
+  level control) × the output stage's ×4. Both comments now say so. And the
+  snippet duck moved with the bed — −6 dB became −10.5 dB, because a hotter
+  live channel with the same duck would have left the replay only 1.6 dB in
+  front of where it used to be. The relationship is the thing, not the number.
+
+### 2026-09-10: the power log
+
+"The app is power hungry for sure but it would be good to see if we can pin any
+down" (Niall). Nothing on the device will tell an app how many joules it spent,
+so `PowerLogger` does the only thing that can actually find a culprit: one row a
+minute recording what was switched on *and* what it was costing — battery
+percentage and state, low-power mode, thermal state, process CPU as a
+percentage of one core over the interval, screen brightness — against the
+running/recording/demo flags, the listen mode, the visible tab, the sample rate
+and the session's pulse and pass counts. A night where the battery falls 9%/hour
+with the spectrogram on screen and 4%/hour in a pocket is an answer; a single
+number for "the app" is not. Capture start and stop write their own marked rows
+so an interval isn't smeared across the minute either side of it.
+
+Its own cost is a coalescable timer (60 s, 10 s tolerance — a power log that
+wakes the phone on its own schedule is measuring itself) and ~60 kB a night.
+
+A separate CSV, carried inside the same export: the classifier log is one row
+per pulse and 48 score columns, and power samples share none of that shape.
+`ClassificationLogger.makeShareItem` stages it alongside, so "send me the
+classifier log" still fetches everything.
+
+Process CPU comes from two `task_info` calls — `MACH_TASK_BASIC_INFO` for
+threads that have exited and `TASK_THREAD_TIMES_INFO` for the ones still
+running. `proc_pid_rusage` would do it in one, but libproc is not in the iOS
+SDK's module map and is not reachable from Swift.
 
 ### 2026-08-09: a listen-mode switch no longer restarts the engine
 

@@ -39,6 +39,13 @@ struct AudioDiagnostics: Equatable {
     /// not — drives the mic-connection pill even while capture is stopped.
     var usbMicAvailable: Bool = false
     var channelCount: Int = 0
+    /// The active OUTPUT port and how many channels it carries — the only way
+    /// to tell "iOS put the sound on the receiver" from "iOS calls this the
+    /// speaker and drives both of them". An iPhone that reports `Speaker` with
+    /// 2 channels is playing out of the earpiece as well, and no override
+    /// fixes that. Diagnostics only.
+    var outputName: String = "—"
+    var outputChannelCount: Int = 0
     /// Number of capture callbacks received since the engine started — should tick
     /// up steadily while running.
     var bufferCount: Int = 0
