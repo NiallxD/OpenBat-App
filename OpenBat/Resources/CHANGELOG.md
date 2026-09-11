@@ -43,10 +43,10 @@
 - **The live channel has a volume and a background control** — They existed, but only inside the tuning panel, and they forgot themselves every time you opened the app. They are ordinary settings now and they stay put.
 - **Settings can be corrected without an app update** — If a default value turns out to be wrong or not ideal, we can change it for everybody to improve the experience. **A value you have set yourself is never touched** — only the ones left as they came. Nothing about how species are identified can be changed this way; that still takes a new app update.
 - **A notice can appear at the top of Settings** — For something worth telling everybody that is not worth interrupting anybody: a known issue, or a note about a release.
+- **Three more bats in the field guide** — Andersen's fruit-eating bat, the Ecuadorean tailless bat and the Amazonian sac-winged bat, the first two with range maps. The third is a bat the records barely know, so the app holds no opinion about where it lives rather than guessing.
 - **Settings says when it last heard from us** — A line at the bottom with the time of the last check. A setting we changed that never arrived looks exactly like one nobody changed, and this is what tells the two apart.
 
 ### Changed
-- **The live channel is louder again** — About 4 dB, after a night on real bats where a distant one was still too quiet with the phone turned all the way up.
 - **The sound comes out of the bottom speaker** — The one furthest from the microphone. It was coming out of the earpiece, two centimetres from where the mic is held, which is the loudest path the phone has back into its own ears.
 - **Listening never goes below 15 kHz** — Whatever the frequency band is set to. Below that is where the phone's own output lives and no bat is down there. The spectrogram still shows whatever you ask it to; this is only what you hear.
 - **One volume control: the buttons on your phone** — Both listening channels now start as loud as the app can go, after a night in the field where neither was loud enough with the phone turned all the way up.
@@ -56,10 +56,12 @@
 - **Simplified view keeps the scores one tap away** — The row still carries no percentages, but the ⓘ beside it now shows what this call scored, what came second, and how often the model is right about the winner. It used to send you to Settings to turn Advanced on.
 - **AutoID only lists models that work where you are** — Every model the app ships was listed, each one openable, which read as a choice between them. Where you are picks the model; where nothing covers you, the screen says so.
 - **Slow replay is now called time expansion** — It is what the mode has always been, and what everybody else calls it.
-- **The live channel is louder** — Heterodyne sat far below the replayed calls, so turning the phone up enough to hear a distant bat made every replay a shock. The two now arrive at about the same level, and the phone's own volume control covers the range it should.
+- **The live channel is louder** — Heterodyne sat far below the replayed calls, so turning the phone up enough to hear a distant bat made every replay a shock. The two now arrive at about the same level, and then about 4 dB louder again after a night on real bats where a distant one was still too quiet with the phone turned all the way up.
 - **Background reduction reads Off, Normal and High** — Instead of Off, Reduce and Scrub, which described how it works rather than how much of it you get.
 - **No High on the live channel** — High keeps only what is plainly a call and silences everything else. On a replay that is useful; live, it would make a missed bat and a quiet night sound identical, so it is not offered there.
 - **The demo sounds like the real thing** — Demo mode played through a louder path than live listening, so anything judged by ear against it was several decibels out. It now uses the same path as the microphone.
+- **The tour covers End, and says the listening modes once** — End was the only one of the three session controls without a step of its own, and it is the one that decides whether a night is filed or left running. The two cards about listening became one, since the deaf window is the reason the fourth mode exists rather than a separate subject.
+- **The sun clock has left the tour** — Its highlight sat above the pill rather than on it, and a step pointing at the wrong part of the screen is worse than no step. Tapping the pill still tells you both times.
 - **The species card says how to start** — It read "Start detecting to see species here" without saying where that button is.
 - **The "Not recording" pill is gone** — The reminder that appears when you have been listening a while says it better, and the pill spent most of its life covering the spectrogram to say "no".
 
