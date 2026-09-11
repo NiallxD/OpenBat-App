@@ -189,11 +189,7 @@ private struct SpeciesFeedRow: View {
                 // other rather than stacked: stacked, a row with both of them
                 // was taller than the photo beside it for no reason, and the
                 // score and the caveat about it belong together.
-                HStack(alignment: .top, spacing: 8) {
-                    titleAndTime(now: context.date)
-                    Spacer(minLength: 4)
-                    trailingBadges
-                }
+                topLine(now: context.date)
                 // The runner-up/noise lines and the two destinations share the
                 // bottom line — the text explains the ID, the buttons leave for
                 // the animal (guide) or the evidence (pulses).
@@ -303,7 +299,31 @@ private struct SpeciesFeedRow: View {
         }
     }
 
-    @ViewBuilder private var trailingBadges: some View {
+    /// Name, code and badges on one line — with a narrower shape to fall back
+    /// to before the name starts truncating.
+    ///
+    /// The badges are fixed-size and the name is not, so on a small phone (or
+    /// at a large text size) the name is what gives: "Little Brown Bat" became
+    /// "Little Brow…" while an unabbreviated "sounds alike" sat beside it
+    /// (Niall, 2026-09-10). The species is the thing the row exists to say, so
+    /// when there isn't room for both, the caveat drops to its question-mark
+    /// glyph and keeps its meaning on tap.
+    private func topLine(now: Date) -> some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .top, spacing: 8) {
+                titleAndTime(now: now)
+                Spacer(minLength: 4)
+                trailingBadges(compact: false)
+            }
+            HStack(alignment: .top, spacing: 8) {
+                titleAndTime(now: now)
+                Spacer(minLength: 4)
+                trailingBadges(compact: true)
+            }
+        }
+    }
+
+    @ViewBuilder private func trailingBadges(compact: Bool) -> some View {
         // A NOID pass has no meaningful confidence number (it's exactly the case
         // where the model never settled on anything) — showing "0%" would read as
         // a real score rather than "we don't know".
@@ -312,7 +332,7 @@ private struct SpeciesFeedRow: View {
                 if !simplifiedMode {
                     IDBadge(species: pass.species, interactive: true)
                 }
-                ComplexIndicator(pass: pass)
+                ComplexIndicator(pass: pass, compact: compact)
             }
         }
     }

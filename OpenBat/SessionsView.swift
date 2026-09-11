@@ -1478,13 +1478,25 @@ struct PulseImagePlot: View {
 /// the wording here changes, the callout is what has to change with it.
 struct ComplexIndicator: View {
     let pass: PassRecord
+    /// Glyph only, no words. For a row that has run out of width — see
+    /// `SpeciesFeedRow.topLine`, which offers this shape as its fallback rather
+    /// than letting the species name truncate to "Little Brow…".
+    var compact = false
 
     var body: some View {
         if pass.complex != nil {
-            Label(text, systemImage: "questionmark.circle")
+            // Branched rather than a ternary on `labelStyle`: the two styles are
+            // different types, and there is no type-erased label style to put
+            // them behind. The chrome is applied once, to whichever was built.
+            Group {
+                if compact {
+                    Label(text, systemImage: "questionmark.circle").labelStyle(.iconOnly)
+                } else {
+                    Label(text, systemImage: "questionmark.circle").labelStyle(.titleAndIcon)
+                }
+            }
                 .font(.system(size: 10, weight: .semibold))
                 .fixedSize()
-                .labelStyle(.titleAndIcon)
                 .padding(.horizontal, 7)
                 .padding(.vertical, 3)
                 // Darker orange in light mode — see `darkenedInLightMode`. On

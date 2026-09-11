@@ -37,7 +37,12 @@ enum TourID: Hashable {
     /// and End in one step; the advanced tour keeps `record` and `listen`
     /// separate.
     case transportMenu
-    case sunClock                              // nav bar
+    // `sunClock` was here. The spotlight sat too high over it and two attempts
+    // at the anchor did not fix it (Niall, 2026-09-10) — it lives in a
+    // `ToolbarItem`, whose frame the tour's preference chain reads through the
+    // navigation bar's own hosting rather than the view tree it expects. A step
+    // that highlights the wrong piece of screen is worse than no step, and the
+    // pill explains itself on tap, so the step is gone rather than moved.
     /// The three ordinary tabs. Unlike every other case these are NOT published
     /// by `.tourTarget` — on iOS 26 a `Tab`'s label is drawn by the bar, outside
     /// the view tree the anchor preference travels through, so ContentView feeds
@@ -175,10 +180,6 @@ enum TourScript {
         TourStep(target: nil, symbol: "hand.wave",
                  title: "Welcome to OpenBat",
                  detail: "A real-time bat detector for the ultrasonic mic. Here's a quick tour of the screen — tap Next to step through, or End tour any time."),
-
-        TourStep(target: .sunClock, symbol: "sunset",
-                 title: "Sun clock",
-                 detail: "Tonight's sunset, then how long it's been since, then the coming sunrise. A filled sun means you're inside one of the two windows bats are busiest in — the first and last sixth of the night. Tap it for both times."),
 
         TourStep(target: .stats, symbol: "chart.bar",
                  title: "Live stats",

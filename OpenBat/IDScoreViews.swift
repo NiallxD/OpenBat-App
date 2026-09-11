@@ -359,6 +359,12 @@ struct ScoreComparison: View {
                 Text(caption)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
+                    // One line. Wrapped, it pushed the chip down and made the
+                    // row taller than the photo beside it — and a two-line
+                    // "Winner vs runner-up" over a one-line chip reads as two
+                    // separate things rather than a label on one.
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
                     .accessibilityHidden(true)
                 chip
             }

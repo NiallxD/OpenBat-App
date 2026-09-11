@@ -1373,6 +1373,34 @@ threads that have exited and `TASK_THREAD_TIMES_INFO` for the ones still
 running. `proc_pid_rusage` would do it in one, but libproc is not in the iOS
 SDK's module map and is not reachable from Swift.
 
+### 2026-09-10: two narrow-screen fixes, and the sun clock leaves the tour
+
+The species ID row put a fixed-size score badge and an unabbreviated "sounds
+alike" pill beside a species name that was free to shrink, so on a small phone
+the name was the part that gave: "Little Brow…" next to a caveat with room to
+spare. The row now offers a narrower shape before that happens (`ViewThatFits`,
+with `ComplexIndicator(compact:)` dropping to its question-mark glyph), because
+the species is what the row exists to say. The score chip's caption is pinned to
+one line for the same reason — wrapped, it pushed the chip down and made the row
+taller than the photo beside it. And `panelHeader`'s title takes one line now,
+after SPECTROGRAM broke across two and carried the panel's controls down with
+it.
+
+The **sun clock step is gone from the tour**. Its spotlight sat too high over
+the pill through two attempts at the anchor: the pill lives in a `ToolbarItem`,
+and the tour's anchor preference travels the view tree while the navigation bar
+hosts its items outside it. A step that highlights the wrong piece of screen is
+worse than no step, and the pill explains itself on tap.
+
+The player screen has the same shortage: the call-analysis grid, the GUANO card
+and the spectrogram do not all fit on a phone. Both cards are fixed-height and
+the spectrogram is the only element that stretches, so the metadata card's
+height came straight out of the picture the screen exists to show. They swap
+now — opening GUANO hides the analysis grid, and measuring a call closes GUANO,
+since numbers appearing behind a card read as the selection having done nothing.
+Phones only: an iPad has the height for both, and hiding a panel there would be
+taking something away to solve a problem that device does not have.
+
 ### 2026-08-09: a listen-mode switch no longer restarts the engine
 
 Switching listen mode used to `stop()` then `start()` unconditionally. Three

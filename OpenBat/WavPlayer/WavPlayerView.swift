@@ -19,6 +19,7 @@
 //
 
 import SwiftUI
+import UIKit   // UIDevice, for the phone-only panel swap below
 
 struct WavPlayerView: View {
     /// Only for the spectrogram's polarity — see the `.onChange` on the page.
@@ -524,9 +525,23 @@ struct WavPlayerView: View {
             // (`frame(maxHeight: .infinity)` below); a fixed-size sibling
             // above it can't push it around the way a resizing one below
             // it (in the old order) could.
-            statsPanel
-                .padding(.horizontal, 8)
-                .padding(.top, 8)
+            // **Metadata or analysis, not both** — on a phone, where there is
+            // room for one of them and the spectrogram (Niall, 2026-09-10).
+            // Both cards are fixed-height and the spectrogram is the only thing
+            // here that stretches, so without this the GUANO card's height came
+            // straight out of the picture the screen exists to show. Swapping
+            // them instead keeps the spectrogram exactly the size it was.
+            //
+            // The stat grid is above the spectrogram rather than below for a
+            // related reason: this VStack's only other flexible element is the
+            // spectrogram itself, and a fixed-size sibling above it can't push
+            // it around the way a resizing one below it could.
+            if !(showFileInfo && swapsAnalysisForMetadata) {
+                statsPanel
+                    .padding(.horizontal, 8)
+                    .padding(.top, 8)
+                    .transition(.opacity)
+            }
 
             spectrogramSection
                 .frame(maxHeight: .infinity)
@@ -543,6 +558,15 @@ struct WavPlayerView: View {
                                  onAddToINaturalist: iNaturalistAction)
                 .padding(.bottom, 8)
         }
+    }
+
+    /// Whether opening the GUANO card hides the call-analysis grid.
+    ///
+    /// Phones only. An iPad has the height for both, and hiding a panel there
+    /// would be taking something away to solve a problem that device does not
+    /// have.
+    private var swapsAnalysisForMetadata: Bool {
+        UIDevice.current.userInterfaceIdiom != .pad
     }
 
     private var statsPanel: some View {
@@ -1158,6 +1182,12 @@ struct WavPlayerView: View {
                 }
                 if let result {
                     WavPlayerDebugLog.log("WavPlayer", "CallAnalysis result: peak=\(Int(result.peakFreqHz))Hz duration=\(String(format: "%.1f", result.durationMs))ms quality=\(String(format: "%.0f", result.quality * 100))%")
+                    // Measuring a call with the metadata card open would
+                    // otherwise put the numbers behind it and read as the box
+                    // having done nothing. The one that was asked for wins.
+                    if self.showFileInfo, self.swapsAnalysisForMetadata {
+                        withAnimation(.snappy(duration: 0.28)) { self.showFileInfo = false }
+                    }
                     // Landmarks are real-sample offsets from the analyzed
                     // start — add that start back and map to the display
                     // (virtual) domain the spectrogram positions against.

@@ -1159,7 +1159,6 @@ struct ContentView: View {
                 if sunClockHiddenBySection[s] != true {
                     ToolbarItem(placement: .topBarLeading) {
                         SunWindowPill(coordinate: location.currentCoordinate)
-                            .tourTarget(.sunClock)
                     }
                 }
             }
@@ -2722,7 +2721,14 @@ struct ContentView: View {
             Text(title.uppercased())
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.secondary)
-            Spacer()
+                // One line, always. The trailing controls are fixed-size, so on
+                // a narrow phone the title is the part that gives — and given a
+                // second line it took one, breaking SPECTROGRAM across two rows
+                // and pushing the panel's own controls down with it.
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+                .layoutPriority(1)
+            Spacer(minLength: 6)
             trailing()
         }
         .padding(.horizontal, 4)
