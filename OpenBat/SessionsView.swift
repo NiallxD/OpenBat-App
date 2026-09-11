@@ -55,6 +55,16 @@ struct SessionsView: View {
     /// Likewise passed straight through to the player, which shows the guide's
     /// echolocation figures beside the ones it measures.
     let speciesGuide: SpeciesGuideStore
+    /// Read for one thing only: whether a session is running, which decides
+    /// whether a recording can be opened at all. The player and the live
+    /// pipeline are two claims on one audio session, and the loser of that
+    /// argument was the app (Niall, 2026-09-10: opening playback while
+    /// listening crashed it).
+    let audio: AudioEngineController
+    /// Raises the same "End this session?" prompt the transport menu's End
+    /// button does — the dialog lives in ContentView, which owns what ending a
+    /// session means beyond stopping the audio.
+    let onRequestEndSession: () -> Void
     @State private var showImporter = false
     @State private var importError: String?
     @State private var isImporting = false
@@ -319,7 +329,8 @@ struct SessionsView: View {
                                           toggle: { toggle(.session(session.id)) }) {
                                 SessionDetailView(session: session, store: store, settings: settings,
                                                   consent: consent, micCalSettings: micCalSettings,
-                                                  speciesGuide: speciesGuide)
+                                                  speciesGuide: speciesGuide, audio: audio,
+                                                  onRequestEndSession: onRequestEndSession)
                             } label: {
                                 SessionRow(session: session, store: store)
                             }
@@ -350,7 +361,8 @@ struct SessionsView: View {
                     ForEach(looseRecordings) { recording in
                             SelectableRow(isSelecting: isSelecting,
                                           isSelected: selection.contains(.recording(recording.id)),
-                                          toggle: { toggle(.recording(recording.id)) }) {
+                                          toggle: { toggle(.recording(recording.id)) },
+                                          blocked: audio.isRunning ? onRequestEndSession : nil) {
                                 recordingDestination(recording)
                             } label: {
                                 RecordingRow(recording: recording, store: store, consent: consent)
@@ -634,6 +646,10 @@ struct SessionDetailView: View {
     let consent: ConsentStore
     let micCalSettings: MicCalibrationSettings
     let speciesGuide: SpeciesGuideStore
+    /// Both passed through for the same reason as in `SessionsView`: a
+    /// recording cannot be opened while a session is running.
+    let audio: AudioEngineController
+    let onRequestEndSession: () -> Void
     @AppStorage("display.showNoID") private var showNoID = false
     /// Queued by a swipe or by the toolbar's Delete, pending confirmation — a
     /// delete takes the WAV with no way back, so it is asked about here exactly
@@ -706,7 +722,8 @@ struct SessionDetailView: View {
                 ForEach(sessionRecordings) { recording in
                     SelectableRow(isSelecting: isSelecting,
                                   isSelected: selection.contains(recording.id),
-                                  toggle: { toggle(recording.id) }) {
+                                  toggle: { toggle(recording.id) },
+                                  blocked: audio.isRunning ? onRequestEndSession : nil) {
                         // Lazy: WavPlayerView's `@State` engine is expensive
                         // to construct — see LazyDestination.
                         LazyDestination {
@@ -1107,12 +1124,19 @@ private struct SelectableRow<Destination: View, Label: View>: View {
     let isSelecting: Bool
     let isSelected: Bool
     let toggle: () -> Void
+    /// Non-nil when the row must not navigate — it taps to this instead. Used
+    /// for a recording while a session is running: the player and live capture
+    /// are two claims on one audio session.
+    var blocked: (() -> Void)?
     @ViewBuilder var destination: () -> Destination
     @ViewBuilder var label: () -> Label
 
 
     var body: some View {
-        if isSelecting {
+        if let blocked, !isSelecting {
+            Button(action: blocked) { tile { RowChevron() } }
+                .buttonStyle(.plain)
+        } else if isSelecting {
             Button(action: toggle) {
                 tile {
                     Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")

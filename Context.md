@@ -1408,6 +1408,27 @@ The second spotlighted the same button a step later to finish a sentence the
 first had started — the deaf window is the reason the fourth mode exists, so it
 belongs in the paragraph that lists the modes, not in a card of its own.
 
+### 2026-09-10: a recording cannot be opened while a session is running
+
+Tapping into a recording mid-session crashed the app (Niall). The two halves are
+two claims on one audio session: `PlaybackEngine` already declines to take the
+category while `AudioEngineController.isAnyInstanceRunning`, so playback was
+silently inaudible rather than destructive — but it still activated the session
+and attached its own engine beside a live 384 kHz tap, and that is where it
+came apart.
+
+Rather than make two engines share a session, the route is closed: while a
+session is running, a recording row raises the same "End this session?" prompt
+the transport menu's End button does, instead of navigating. `SelectableRow`
+grew a `blocked` closure for it — given one, it is a button rather than a
+navigation link. The prompt itself stays in `ContentView`, which owns what
+ending a session means beyond stopping the audio; `SessionsView` and
+`SessionDetailView` only ask for it.
+
+The crash itself has not been diagnosed, only made unreachable from the UI. If
+it turns up on another path, the place to look is `PlaybackEngine.start`'s
+`setActive(true)` and the source node it attaches to `mainMixerNode`.
+
 ### 2026-08-09: a listen-mode switch no longer restarts the engine
 
 Switching listen mode used to `stop()` then `start()` unconditionally. Three

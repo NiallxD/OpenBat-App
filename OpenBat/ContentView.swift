@@ -1125,7 +1125,12 @@ struct ContentView: View {
                 switch s {
                 case .detector: detectorScreen
                 case .sessions: SessionsView(store: classStore, settings: autoIDSettings, consent: consent,
-                                            micCalSettings: micCalSettings, speciesGuide: speciesGuide)
+                                            micCalSettings: micCalSettings, speciesGuide: speciesGuide,
+                                            audio: audio,
+                                            // The same prompt the End button raises. Tapping a
+                                            // recording mid-session asks to end it rather than
+                                            // opening a player that cannot have the audio session.
+                                            onRequestEndSession: { showEndSessionConfirm = true })
                 case .species:
                     SpeciesExplorerView(store: speciesGuide, presenceStore: speciesPresence, userCoordinate: location.currentCoordinate)
                 }
