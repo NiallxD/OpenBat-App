@@ -1429,6 +1429,37 @@ The crash itself has not been diagnosed, only made unreachable from the UI. If
 it turns up on another path, the place to look is `PlaybackEngine.start`'s
 `setActive(true)` and the source node it attaches to `mainMixerNode`.
 
+### 2026-09-10: Classifier Analysis — showing the model's working
+
+"I want to surface what the model is doing as part of our 'Open' philosophy"
+(Niall). Every other surface in the app reports a conclusion; this one reports
+the arithmetic, including the half that has never been written down anywhere:
+the model's own softmax, before the location priors touch it. The store keeps
+adjusted scores, and so does the classifier CSV — raw vectors exist only in
+memory at classification time.
+
+So it is a **re-run**, not a replay. Off the microphone there is no deadline, so
+every call gets a picture (live, they are drawn a couple of seconds apart
+because drawing holds the capture queue) and a full score vector, raw and
+adjusted side by side. Nothing is stored: the inputs are fixed — same WAV, same
+model, and the session's own `PriorSnapshot` rather than today's weights — so a
+re-run is reproducible and caching would only be a way to serve a stale one.
+
+It is reached by a **mode**, not a button per row: "Classifier Analysis" in the
+Recordings heading switches what a recording opens, because one recording has
+two things worth looking at and a button for each, on every row, would say twice
+what one switch says once.
+
+What it cannot show: calls the live path never captured. The onsets come from
+stored pulses, so a pulse dropped because a capture was already in flight leaves
+no timestamp. Finding those means re-running detection, not classification.
+
+**A Swift compiler crash came out of this** (`ClosureLifetimeFixup`, on the
+`analyse()` task closure) and only under the coverage instrumentation a test
+build turns on — a plain build was clean, `xcodebuild test` was not. The fix is
+`ClassifierAnalysis.Input`: one value crossing to the background task instead of
+twelve captures.
+
 ### 2026-08-09: a listen-mode switch no longer restarts the engine
 
 Switching listen mode used to `stop()` then `start()` unconditionally. Three
