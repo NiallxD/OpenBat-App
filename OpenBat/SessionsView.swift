@@ -1313,22 +1313,15 @@ struct PassDetailView: View {
                 }
             }
 
-            Section {
-                ForEach(pass.pulses) { pulse in
-                    PulseDetailRow(pulse: pulse, store: store)
-                }
-            } header: {
-                // The caveat sits with the heading rather than on each row that
-                // lacks one: said once it is a fact about the list, said on
-                // every third row it is an apology. The rows carry a two-word
-                // marker so you can still tell which is which.
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Pulses")
-                    Text("Not all pulses get a spectrogram rendered, to maintain real-time performance.")
-                        .textCase(nil)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+            // No pulse pictures here, and so no caveat about the ones that
+            // have none (Niall, 2026-09-10). This screen is the scores: what
+            // each call was named and what else it nearly was. The pictures
+            // are a live-view sample, drawn a couple of seconds apart rather
+            // than once per call — which made a list of them a list with holes
+            // in it, explaining itself.
+            Section("Pulses") {
+                ForEach(Array(pass.pulses.enumerated()), id: \.element.id) { index, pulse in
+                    PulseDetailRow(pulse: pulse, number: index + 1)
                 }
             }
         }
@@ -1347,36 +1340,18 @@ struct PassDetailView: View {
 
 private struct PulseDetailRow: View {
     let pulse: PulseRecord
-    let store: ClassificationStore
-    @State private var image: UIImage?
+    /// Its place in the pass, 1-based. Named rather than numbered from the
+    /// record because nothing in a `PulseRecord` knows where it came in — and
+    /// "Pulse 3" is only meaningful as a position in this list.
+    let number: Int
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if let image {
-                PulseImagePlot(image: image,
-                               freqMinHz: pulse.imageFreqMinHz,
-                               freqMaxHz: pulse.imageFreqMaxHz,
-                               spanMs: pulse.imageSpanMs)
-            } else if pulse.imageFile == nil {
-                // Says why, rather than leaving a gap that reads as a bug
-                // (Niall, 2026-09-10: "not all pulses show spectrograms").
-                // Drawing is the slowest thing on the capture queue and the
-                // queue gates whether the NEXT call is looked at, so a pass
-                // draws one picture every couple of seconds rather than one per
-                // call — see `PulseDetector`'s `wantsImage`. Everything else on
-                // this row was measured from the call either way.
-                //
-                // Keyed on `imageFile`, not on `image`: `image` is also nil for
-                // the moment before the file finishes loading, and a note that
-                // flashed on every row on the way past would be worse than the
-                // gap it explains.
-                Text("No spectrogram")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-            }
-
-            HStack {
+            HStack(alignment: .firstTextBaseline) {
                 Text(pulse.species).font(.headline)
+                Text("Pulse \(number)")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
                 Spacer()
                 PulseScoreChip(confidence: pulse.confidence)
             }
@@ -1394,9 +1369,6 @@ private struct PulseDetailRow: View {
             }
         }
         .padding(.vertical, 4)
-        .task(id: pulse.id) {
-            image = await store.loadImage(for: pulse)
-        }
     }
 
     private func stat(_ label: String, _ value: String) -> some View {

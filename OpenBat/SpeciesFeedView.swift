@@ -162,7 +162,16 @@ private struct SpeciesFeedRow: View {
 
     /// Tapping a row opens the same pass-detail screen the Sessions list uses —
     /// the pulses behind the ID, per-pulse score bars, runner-up, complex notes.
-    @State private var showDetail = false
+    ///
+    /// **The pass is captured here, not read from `pass` when the sheet
+    /// builds** (Niall, 2026-09-10: "when I have this view open and live listen
+    /// is running it keeps changing"). A `.sheet(isPresented:)` closure is
+    /// re-evaluated whenever this row re-renders, which while detecting is
+    /// every time anything is identified — so the open screen was being handed
+    /// whatever record the row held by then, and quietly became a different
+    /// pass under the reader. Held as state, it is the pass that was tapped
+    /// until it is closed.
+    @State private var detailPass: PassRecord?
     /// The field-guide page for this species, when the guide has one. Opened by
     /// the book button rather than by the row itself, so the two destinations —
     /// "what did the app hear" and "what is this animal" — stay distinct.
@@ -228,12 +237,12 @@ private struct SpeciesFeedRow: View {
         .sheet(item: $profile) { page in
             SpeciesProfileSheet(species: page, store: guide, presenceStore: presenceStore)
         }
-        .sheet(isPresented: $showDetail) {
+        .sheet(item: $detailPass) { tapped in
             NavigationStack {
-                PassDetailView(pass: pass, store: store)
+                PassDetailView(pass: tapped, store: store)
                     .toolbar {
                         ToolbarItem(placement: .confirmationAction) {
-                            Button("Done") { showDetail = false }
+                            Button("Done") { detailPass = nil }
                         }
                     }
             }
@@ -276,7 +285,7 @@ private struct SpeciesFeedRow: View {
     /// gesture takes every tap before the pill can see one. The two things a tap
     /// lands on are the two that read as "this bat".
     private func openSpecies() {
-        if let page = guidePage { profile = page } else { showDetail = true }
+        if let page = guidePage { profile = page } else { detailPass = pass }
     }
 
     // No NoID line here: `ClassificationStore.speciesFeed` filters those out
@@ -350,7 +359,7 @@ private struct SpeciesFeedRow: View {
                 guideButton
                 actionButton(systemImage: "waveform.badge.magnifyingglass",
                              label: "Pulses behind this identification") {
-                    showDetail = true
+                    detailPass = pass
                 }
                 howButton
             }
