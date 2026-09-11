@@ -1344,6 +1344,23 @@ private struct PulseDetailRow: View {
                                freqMinHz: pulse.imageFreqMinHz,
                                freqMaxHz: pulse.imageFreqMaxHz,
                                spanMs: pulse.imageSpanMs)
+            } else if pulse.imageFile == nil {
+                // Says why, rather than leaving a gap that reads as a bug
+                // (Niall, 2026-09-10: "not all pulses show spectrograms").
+                // Drawing is the slowest thing on the capture queue and the
+                // queue gates whether the NEXT call is looked at, so a pass
+                // draws one picture every couple of seconds rather than one per
+                // call — see `PulseDetector`'s `wantsImage`. Everything else on
+                // this row was measured from the call either way.
+                //
+                // Keyed on `imageFile`, not on `image`: `image` is also nil for
+                // the moment before the file finishes loading, and a note that
+                // flashed on every row on the way past would be worse than the
+                // gap it explains.
+                Text("No picture of this call — while detecting, one is drawn every couple of seconds rather than one per call, so the rest can keep being counted.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             HStack {
