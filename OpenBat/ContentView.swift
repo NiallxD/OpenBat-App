@@ -346,7 +346,8 @@ struct ContentView: View {
                     DiagnosticsView(audio: audio, recorder: recorder,
                                     onOpenTuning: { showTuningOverlay = true },
                                     onDumpSettings: dumpSettings,
-                                    flags: featureFlags)
+                                    flags: featureFlags,
+                                    autoID: autoIDSettings)
                 }
                 .sheet(isPresented: $showHelp) {
                     SafariView(url: PrivacyLinks.helpURL)
@@ -3151,7 +3152,8 @@ struct ContentView: View {
         // written, since it costs one render.
         var benchWall = "", benchCPU = "", benchFrames = ""
         if UserDefaults.standard.bool(forKey: DemoLogger.enabledKey) {
-            let b = PulseImageRenderer.benchmark(displaySpanSeconds: pulseDetector.displayWindowMs / 1000)
+            let b = PulseImageRenderer.benchmark(displaySpanSeconds: pulseDetector.displayWindowMs / 1000,
+                                                 maxCallSeconds: pulseDetector.maxCallSeconds)
             benchWall = String(format: "%.1f", b.wallMs)
             benchCPU = String(format: "%.1f", b.cpuMs)
             benchFrames = String(b.frames)

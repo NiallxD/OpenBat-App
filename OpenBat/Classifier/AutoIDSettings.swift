@@ -66,6 +66,42 @@ final class AutoIDSettings: Reseedable {
     /// The single active model. `nil` means AutoID is off (capture/stats still run).
     var activeModelID: String?
 
+    /// A model pinned by hand in the configuration menu, ignoring where the phone is.
+    ///
+    /// **This exists because the app could not be tested outside the model's own
+    /// region** (Niall, 2026-09-20). Location owns the model (`applyCoverage`), which
+    /// is right for users and impossible for the person developing it: BatDetect2
+    /// covers the UK, OpenBat is written in British Columbia, so the UK classifier
+    /// never ran, never logged a line, and could not be shown to have run at all.
+    ///
+    /// Set, it wins over coverage entirely — `applyCoverage` stops touching
+    /// `activeModelID` — so a model can be driven with recordings from anywhere.
+    /// That is also why it lives behind the passcode: pinning a classifier outside
+    /// its region is exactly the mistake `applyCoverage` exists to prevent, and it
+    /// names local bats after foreign ones rather than failing visibly. Cleared with
+    /// the rest of the menu's overrides when the config file locks it.
+    var pinnedModelID: String? {
+        didSet {
+            guard pinnedModelID != oldValue else { return }
+            let defaults = UserDefaults.standard
+            if let pinnedModelID {
+                defaults.set(pinnedModelID, forKey: Self.keyPinnedModel)
+                activeModelID = pinnedModelID
+            } else {
+                defaults.removeObject(forKey: Self.keyPinnedModel)
+                // Coverage is in charge again, but nothing asks it to re-decide until
+                // the next qualifying fix — which may be a long way off, and would
+                // leave the pinned model running with no sign that the pin is gone.
+                // The honest state in the meantime is the one a fresh install has.
+                activeModelID = nil
+            }
+        }
+    }
+
+    /// Read by `FeatureFlagStore` so locking the config menu can clear the pin
+    /// without reaching through this type.
+    static let keyPinnedModel = "config.pinnedModelID"
+
     /// Set from the remote config on every launch, and NEVER persisted — see
     /// `Feature.automaticID`.
     ///
@@ -342,6 +378,10 @@ final class AutoIDSettings: Reseedable {
     /// reachable by tapping anything.
     @discardableResult
     func applyCoverage(at coordinate: CLLocationCoordinate2D) -> ModelChange? {
+        // A hand-pinned model outranks coverage, and silently: the notice this
+        // returns tells the user their region changed which model identifies, and
+        // that would be a lie about a model somebody pinned on purpose.
+        guard pinnedModelID == nil else { return nil }
         let covering = ModelRegistry.suggestedModel(for: coordinate)
         guard covering?.id != activeModelID else { return nil }
         let previous = ModelRegistry.descriptor(id: activeModelID)
@@ -365,9 +405,15 @@ final class AutoIDSettings: Reseedable {
         // seconds a fix takes. `applyCoverage` is what fills this in, and `load()`
         // below restores the last coverage answer so a launch with no signal keeps
         // identifying with whatever covered the user last time.
-        self.activeModelID = nil
-
         let defaults = UserDefaults.standard
+        // A pin survives relaunch, or it is not much use for testing: the model it
+        // names is active from the first frame, before any location fix lands.
+        let stored = defaults.string(forKey: Self.keyPinnedModel)
+        // A pin naming a model this build no longer has is not a pin.
+        let pinned = ModelRegistry.descriptor(id: stored) != nil ? stored : nil
+        self.pinnedModelID = pinned
+        self.activeModelID = pinned
+
         // The two map-pin thresholds are the only values in this type that may
         // be set remotely. Everything per-model — pass timeout, confidence,
         // pulses, margin, the quality gate — deliberately cannot: those decide
@@ -635,7 +681,7 @@ final class AutoIDSettings: Reseedable {
             // Overlay saved per-model settings onto the descriptor-seeded defaults, so
             // models absent from the payload (e.g. added in a later build) keep defaults.
             for (id, ms) in stored.perModel { perModel[id] = ms }
-            activeModelID = stored.activeModelID
+            if pinnedModelID == nil { activeModelID = stored.activeModelID }
             migratePassTimeoutIfNeeded(defaults)
             return
         }
@@ -652,7 +698,7 @@ final class AutoIDSettings: Reseedable {
             nabat.qualitySNThreshold  = v1.qualitySNThreshold ?? nabat.qualitySNThreshold
             nabat.qualityAmpThreshold = v1.qualityAmpThreshold ?? nabat.qualityAmpThreshold
             perModel[ModelRegistry.nabatID] = nabat
-            activeModelID = ModelRegistry.nabatID
+            if pinnedModelID == nil { activeModelID = ModelRegistry.nabatID }
             save()
         }
     }

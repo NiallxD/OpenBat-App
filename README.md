@@ -154,6 +154,13 @@ The two bundled models carry different licences: **NABat ML** is CC BY 4.0;
 **BatDetect2** is **CC BY-NC 4.0 — non-commercial use only**. See
 [THIRD-PARTY.md](./THIRD-PARTY.md) for the full terms and citations.
 
+**Neither model's authors endorse OpenBat.** OpenBat is not affiliated with or
+endorsed by the BatDetect2 team at the University of Edinburgh, nor by the USGS
+or the NABat programme. Both models are used here under their licences; any
+problem with this app is OpenBat's, not theirs. BatDetect2's preprocessing is a
+Swift port of the reference Python pipeline, and its fidelity is checked
+numerically — see [tools/batdetect2_parity/README.md](./tools/batdetect2_parity/README.md).
+
 ## Repo layout
 
 ```

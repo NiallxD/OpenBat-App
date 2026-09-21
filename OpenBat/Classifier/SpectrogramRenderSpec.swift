@@ -53,6 +53,41 @@ enum SpectrogramNormalize {
     case none
 }
 
+/// How the STFT pads the signal so the first and last frames are centred on real
+/// samples (`center=True`'s job in torchaudio / librosa).
+///
+/// **This is not cosmetic, and it is not only about the edges.** Measured against the
+/// reference BatDetect2 pipeline on its own UK example recordings (see
+/// `tools/batdetect2_parity`), zero-padding a window that should have been
+/// reflect-padded costs a mean absolute error of 4.7e-03 over the output tensor and a
+/// maximum of 1.76 — a ~0.99 correlation that looks fine in a plot while the last time
+/// column is off by 26%. With reflect padding the same comparison lands at 1.2e-07.
+enum SpectrogramPadding {
+    /// Zero either side of the signal (NABat's reference pipeline).
+    case zero
+    /// Mirror the signal either side, excluding the edge sample itself —
+    /// `torch.stft`'s default `pad_mode="reflect"`, which BatDetect2 inherits by
+    /// taking `torchaudio.transforms.Spectrogram(center=True)`'s defaults.
+    case reflect
+}
+
+/// How `[minFreqHz, maxFreqHz]` turns into the bin range that survives the bandpass.
+///
+/// Two models, two answers, and OpenBat was giving BatDetect2 NABat's. The bandpass
+/// runs before PCEN and the crop, so a bin zeroed here is gone for good: BatDetect2
+/// was being handed a silent lowest row (its 10 kHz bin) where the reference pipeline
+/// has real signal — the single largest error in the parity comparison before it was
+/// fixed.
+enum SpectrogramBandEdge {
+    /// Strictly inside the band: `floor(min/binHz) + 1` up to `ceil(max/binHz) - 1`.
+    /// NABat's original bandpass semantics.
+    case strictlyInside
+    /// The same half-open `[low, high)` range BatDetect2's own `FrequencyCrop`
+    /// narrows to, so the bandpass keeps exactly the bins the crop will keep:
+    /// `floor(min/binHz)` up to `floor(max/binHz) - 1`.
+    case matchingCrop
+}
+
 enum SpectrogramResize {
     /// Each output pixel takes the value of the single data cell it falls in. Required
     /// for NABat: its training images come from a pcolormesh QuadMesh (piecewise
@@ -82,8 +117,12 @@ struct SpectrogramRenderSpec {
     var nFFT: Int
     var hop: Int
     var window: SpectrogramWindowFunction
+    /// Defaults to `.zero` so NABat's verified path is unchanged by this existing.
+    var padding: SpectrogramPadding = .zero
     var minFreqHz: Float
     var maxFreqHz: Float
+    /// Defaults to `.strictlyInside` for the same reason as `padding`.
+    var bandEdge: SpectrogramBandEdge = .strictlyInside
     var scaling: SpectrogramScaling
     var denoise: SpectrogramDenoise
     var normalize: SpectrogramNormalize

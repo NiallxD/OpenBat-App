@@ -32,9 +32,12 @@
   interrupts everybody, before they reach the detector.
 -->
 
-## v0.9.7 (Build 251)
+## v0.9.8 (Build 251)
 
-<!-- openbat: reonboard -->
+### New
+- **New Item Here** - 
+
+## v0.9.7 (Build 251)
 
 ### New
 - **Hold the phone to your ear** — Raise it while listening and the sound moves quietly to the earpiece and the screen goes dark, like a call; lower it and it comes back to the speaker. Under Detecting ▸ Live listening if you would rather it didn't — worth turning off if you leave the phone face down while detecting, since that covers the same sensor.

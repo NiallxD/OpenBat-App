@@ -126,4 +126,50 @@ struct ClassifierSpectrogramEngineTests {
         let out = try #require(ClassifierSpectrogramEngine.render(pcm: pcm, spec: BatDetect2SpectrogramRenderer.spec))
         #expect(allFinite(out.image))
     }
+
+    // MARK: Parity regressions
+
+    /// The bottom row of BatDetect2's tensor is its 10 kHz bin, and it must carry
+    /// signal when there is signal there. It did not: the bandpass used NABat's
+    /// strictly-inside rule and zeroed the very bin BatDetect2's own `FrequencyCrop`
+    /// keeps, so the model's lowest row arrived blank on every window. Caught by
+    /// `tools/batdetect2_parity` (it was the largest single error in the comparison,
+    /// max 1.76 against the reference tensor); this keeps it caught cheaply.
+    @Test func batDetect2LowestRowIsNotBlankWhenTheBandHasSignal() throws {
+        let spec = BatDetect2SpectrogramRenderer.spec
+        let pcm = burst(hz: 10_500, rate: spec.sampleRate, count: 8_192)
+        let out = try #require(ClassifierSpectrogramEngine.render(pcm: pcm, spec: spec))
+        let bottomRow = Array(out.image[0..<spec.outputWidth])
+        #expect(bottomRow.contains { $0 > 0 })
+    }
+
+    /// The window is reflect-padded, as `torchaudio.transforms.Spectrogram(center=True)`
+    /// does by default. Zero padding silences the edge frames: against the reference
+    /// tensor it left the last time column 26% too quiet and the first nine columns
+    /// wrong by a decreasing amount (`tools/batdetect2_parity`). Asserted by rendering
+    /// the same audio with the padding the port used to use and requiring the two to
+    /// disagree where the bug lived — a cheap way to state "this must not silently go
+    /// back to zero padding" without shipping a reference tensor into the test bundle.
+    @Test func batDetect2ReflectPadsItsWindow() throws {
+        let spec = BatDetect2SpectrogramRenderer.spec
+        #expect(isReflect(spec.padding))
+
+        var zeroPadded = spec
+        zeroPadded.padding = .zero
+        let pcm = burst(hz: 45_000, rate: spec.sampleRate, count: 8_192,
+                        centerFraction: 0.95, widthFraction: 0.2)   // energy AT the trailing edge
+        let asShipped = try #require(ClassifierSpectrogramEngine.render(pcm: pcm, spec: spec))
+        let asBug = try #require(ClassifierSpectrogramEngine.render(pcm: pcm, spec: zeroPadded))
+
+        let w = spec.outputWidth
+        func lastColumn(_ out: ClassifierSpectrogramEngine.RenderOutput) -> Float {
+            (0..<spec.outputHeight).reduce(0) { $0 + out.image[$1 * w + (w - 1)] }
+        }
+        #expect(lastColumn(asShipped) != lastColumn(asBug))
+    }
+
+    private func isReflect(_ padding: SpectrogramPadding) -> Bool {
+        if case .reflect = padding { return true }
+        return false
+    }
 }

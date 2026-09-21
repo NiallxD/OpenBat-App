@@ -775,11 +775,44 @@ final class PulseDetector: Reseedable {
     ///
     /// With no active model there is nothing to fill, but a capture is still
     /// drawn, so this falls back to the display window's own trailing need.
+    /// **The max() is load-bearing, not defensive.** This comment already claimed to
+    /// cover "the display window as well", and the code did not: it returned the
+    /// classifier's trailing need alone. The display capture asks for audio out to
+    /// `onsetAbs + maxCallSeconds`, and `pcmSnapshot` returns an EMPTY array — not a
+    /// short one — for any range that is still in the future, which renders as a
+    /// pulse with no image, no duration and no peak frequency rather than as an
+    /// error. Both bundled models want less here than their classifier does, so the
+    /// max never binds today; it exists so that a model whose longest call outruns
+    /// its own window can't reintroduce that silent failure.
     private var deferTrailSeconds: Double {
-        let trailing = activeClassifier().map {
+        let classifierTrail = activeClassifier().map {
             $0.descriptor.input.windowSeconds * (1 - $0.descriptor.input.onsetFraction)
-        } ?? (displayWindowMs / 1000)
-        return trailing + 0.005
+        } ?? 0
+        return max(classifierTrail, maxCallSeconds) + 0.005
+    }
+
+    /// Longest call the pulse view will capture and measure, from the selected
+    /// model's region. See `ModelInputSpec.maxCallMs`. Not private: the demo log's
+    /// render benchmark has to size its synthetic buffer the same way a real capture
+    /// does, or the frame count it reports is not the one being paid.
+    ///
+    /// **Read from the DESCRIPTOR, not from `activeClassifier()`** (2026-09-21). It
+    /// went through the classifier first, and that silently shortened the span in
+    /// three situations that have nothing to do with how long a bat calls:
+    /// `activeClassifier()` resolves `effectiveModelID`, so it is nil whenever
+    /// identification is switched off remotely; it returns nil when the CoreML model
+    /// fails to load, which the simulator does routinely; and it is nil while nothing
+    /// is selected. Each of those dropped a pinned BatDetect2 to the 30 ms fallback,
+    /// and a 58 ms horseshoe then measured 38 — a number with no meaning at all,
+    /// arrived at from a display default and a failed model load. How long a call may
+    /// be is a property of the region, so it is read from the region's descriptor and
+    /// holds whether or not anything is classifying.
+    var maxCallSeconds: Double {
+        guard let id = autoIDSettings?.activeModelID,
+              let descriptor = ModelRegistry.descriptor(id: id) else {
+            return ModelInputSpec.defaultMaxCallSeconds
+        }
+        return descriptor.input.maxCallMs / 1000
     }
 
     // Active classifier, lazily built from the active model descriptor and cached
@@ -982,6 +1015,7 @@ final class PulseDetector: Reseedable {
         let floor = pulseNoiseFloor
         let minFreq = minFrequencyHz
         let dispSpanSec = displayWindowMs / 1000
+        let maxCallSec = maxCallSeconds
         let onsetFrac = onsetFraction
         let palette = displayPalette
 
@@ -1003,7 +1037,13 @@ final class PulseDetector: Reseedable {
         let dispSpanSamples = max(PulseImageRenderer.fftLen + PulseImageRenderer.displayHop,
                                   Int(dispSpanSec * sr))
         let leadSamples  = dispSpanSamples
-        let trailSamples = dispSpanSamples * 2
+        // Trail was `dispSpanSamples * 2` — two display windows, so 20 ms at the
+        // default setting. That is what a captured call was actually allowed to be,
+        // and it was a display preference deciding it. It is now the active model's
+        // longest call plus a window of context past its end, so the bats set the
+        // span and the slider only sets the scale things are drawn at.
+        let trailSamples = max(dispSpanSamples * 2,
+                               Int(maxCallSec * sr) + dispSpanSamples)
         let capCount  = leadSamples + trailSamples
         let capEndAbs = onsetAbs + trailSamples
         // Where the onset falls inside the captured buffer (index from its start).
@@ -1087,6 +1127,7 @@ final class PulseDetector: Reseedable {
                                                    displaySpanSeconds: dispSpanSec,
                                                    onsetFraction: onsetFrac,
                                                    expectedOnsetSample: onsetInBuf,
+                                                   maxCallSeconds: maxCallSec,
                                                    palette: palette,
                                                    makeImage: wantsImage)
             let imageMs = Double(DispatchTime.now().uptimeNanoseconds

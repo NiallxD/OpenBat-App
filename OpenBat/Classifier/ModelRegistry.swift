@@ -101,6 +101,47 @@ struct ModelInputSpec {
     /// on the built-in mic, or a Griff that iOS has clamped to 48 kHz.
     var nativeSampleRate: Double = 384_000
 
+    /// Longest call, in milliseconds, this model's region actually produces — the
+    /// span the pulse view must be able to capture, measure and draw.
+    ///
+    /// **Why this is per-model and not one constant.** It sizes two things that
+    /// used to be derived from `PulseDetector.displayWindowMs`: how much audio the
+    /// display capture takes after the onset, and how far the renderer's envelope
+    /// walk may run before it stops measuring (`PulseImageRenderer`'s search
+    /// region). Both were fixed multiples of the display window — trail = 2 spans,
+    /// search = 1.5 spans — which capped a measured call at roughly 17 ms at the
+    /// default 10 ms setting, whatever the bat did. A 58 ms horseshoe was clipped,
+    /// and the only lever was a display-window slider that also changes the scale
+    /// every other call is drawn at.
+    ///
+    /// Making it one global constant would charge NABat for calls it cannot hear:
+    /// the capture gets longer, so the transform gets proportionally more frames,
+    /// on every pulse. Per-model, each region pays only for its own bats — and
+    /// BatDetect2 gets its span for free, because `deferTrailSeconds` already waits
+    /// longer than this for the *classification* window: 184 ms against the 80 asked
+    /// for here, so the audio is in the ring before the capture fires. NABat's 40 is
+    /// 5 ms past its classifier's own 35 ms wait, so it alone pays — 5 ms on the
+    /// floor between two detections, in exchange for not clipping its longest bats.
+    ///
+    /// Raising this past the model's own trailing requirement is legal but not
+    /// free — `deferTrailSeconds` takes the max of the two, so it would start
+    /// setting the floor on how close two detections can be.
+    var maxCallMs: Double = 40
+
+    /// What the pulse view allows itself when no model is active — same as NABat's,
+    /// since with nothing classifying there is no region to ask. Used as the
+    /// renderer's own default so a call site that doesn't know the active model
+    /// (tests, previews) still behaves like a real capture.
+    static let defaultMaxCallSeconds: Double = 0.040
+
+    /// 40 ms. The guide's longest North American calls are Spotted Bat at 21 ms and
+    /// Big Brown at 20, but those are quoted figures and the app measures to
+    /// `PulseImageRenderer.durationThresholdDB`, which counts 10 dB further down the
+    /// call than it used to — so the measured lengths are meaningfully longer than
+    /// the quoted ones and 30 would have started clipping them. NABat's own 50 ms
+    /// window forces a 35 ms wait; this asks for 5 ms more, which is the only place
+    /// in either model where the display span, rather than the classifier, sets the
+    /// floor on how close two detections can be.
     static let nabat = ModelInputSpec(windowSeconds: 0.05, onsetFraction: 0.30)
 
     /// 256 ms — matches BatDetect2's own training clip length exactly (see
@@ -113,7 +154,17 @@ struct ModelInputSpec {
     /// to keep the call comfortably inside the window. PulseDetector's
     /// `deferTrailSeconds` budget is widened (computed from ModelRegistry.all) to cover
     /// this window's 179.2 ms trailing requirement.
-    static let batdetect2 = ModelInputSpec(windowSeconds: 0.256, onsetFraction: 0.30)
+    ///
+    /// `maxCallMs` 80: the European rhinolophids hold a CF call far longer than any
+    /// NABat species — a greater horseshoe runs to ~58 ms in the field, which is
+    /// what exposed the old 17 ms ceiling — and 80 leaves headroom above that. The
+    /// bundled guide data can't source this number (only Common Pipistrelle carries
+    /// a `durationMsRange` for the region), so it comes from observed calls. It is
+    /// well inside BatDetect2's own 179.2 ms trailing wait, so it costs no detection
+    /// rate; what it does cost is transform frames per capture, ~3× NABat's, paid
+    /// only while this model is the active one.
+    static let batdetect2 = ModelInputSpec(windowSeconds: 0.256, onsetFraction: 0.30,
+                                           maxCallMs: 80)
 }
 
 /// Everything the app needs to know about a classifier model without loading it.
@@ -138,6 +189,13 @@ struct ModelDescriptor: Identifiable {
     let sourceURL: URL?
     /// Short license name shown next to the citation ("CC BY 4.0", "CC BY-NC 4.0").
     let licenseName: String
+    /// One line saying the model's authors did not build, review or endorse OpenBat
+    /// — shown wherever the model is credited (model detail screen, the app's
+    /// credits list). **Asked for directly by BatDetect2's authors** (Oisin Mac
+    /// Aodha, 2026-09-14): their bat collaborators must not read a third-party app
+    /// bundling their model as work the BatDetect2 team took part in. Required of
+    /// every model rather than special-cased for one — the same is true of NABat.
+    let endorsementNotice: String
     /// TASL-style notice (title/author/source/license link) shown behind a disclosure
     /// in the app's Info screen, same treatment as the bundled OSS libraries' license
     /// text — CC's own guidance treats a link to the canonical legal code as sufficient
@@ -245,6 +303,9 @@ nonisolated enum ModelRegistry {
                 + "and training code are published by the authors.",
         sourceURL: URL(string: "https://code.usgs.gov/fort/nabat/nabat-ml"),
         licenseName: "CC BY 4.0",
+        endorsementNotice: "OpenBat is not affiliated with or endorsed by the USGS "
+                         + "or the NABat programme. The model is used here under its "
+                         + "licence; any problem with this app is OpenBat's, not theirs.",
         licenseNoticeText: """
             Licensed under the Creative Commons Attribution 4.0 International license \
             (CC BY 4.0). The bundled model is a CoreML conversion of the authors' \
@@ -322,6 +383,10 @@ nonisolated enum ModelRegistry {
                 + "only. Contact the authors for any commercial use.",
         sourceURL: URL(string: "https://github.com/macaodha/batdetect2"),
         licenseName: "CC BY-NC 4.0",
+        endorsementNotice: "OpenBat is not affiliated with or endorsed by the "
+                         + "BatDetect2 team at the University of Edinburgh. The model "
+                         + "is used here under its licence; any problem with this app "
+                         + "is OpenBat's, not theirs.",
         licenseNoticeText: """
             Licensed under the Creative Commons Attribution-NonCommercial 4.0 \
             International license (CC BY-NC 4.0) — non-commercial use only; contact \

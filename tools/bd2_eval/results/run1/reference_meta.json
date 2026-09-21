@@ -1,0 +1,27 @@
+{
+  "arm": "batdetect2_python",
+  "checkpoint": "uk_same",
+  "class_names": [
+    "myomys",
+    "myoalc",
+    "cneser",
+    "pipnat",
+    "barbar",
+    "myonat",
+    "myodau",
+    "myobra",
+    "pippip",
+    "myobec",
+    "pippyg",
+    "rhihip",
+    "nyclei",
+    "rhifer",
+    "pleaur",
+    "nycnoc",
+    "pleaus"
+  ],
+  "detection_threshold": null,
+  "keep_threshold": 0.05,
+  "input": "/Users/niallbell/Downloads/BatRecordings",
+  "files": 927
+}

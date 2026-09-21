@@ -1,0 +1,113 @@
+{
+  "recordings": {
+    "reference": 927,
+    "app": 105,
+    "compared": 105
+  },
+  "settings": {
+    "reference_detection_threshold": 0.3,
+    "match_tolerance_ms": 15.0,
+    "app_scores_from": "coreml",
+    "app_trigger": {
+      "amplitude_threshold": 0.5,
+      "band_high": 0.45,
+      "band_low": 0.02,
+      "hold_off_seconds": 0.03,
+      "max_gap_ms": 6,
+      "min_consecutive_columns": 3,
+      "min_frequency_hz": 15000,
+      "trigger_mode": "Frequency + Amplitude"
+    }
+  },
+  "file_verdict": {
+    "both_named": 54,
+    "top1_agreement": 0.9815,
+    "top3_agreement": 1.0,
+    "reference_found_nothing": 5,
+    "app_found_nothing": 43,
+    "app_refused_to_name": 8,
+    "mean_confidence_gap_on_reference_species": 0.1571
+  },
+  "refusals": {
+    "passes_the_app_would_file": 60,
+    "by_outcome": {
+      "named": 60
+    },
+    "median_pass_raw_confidence": 0.7292,
+    "max_pass_raw_confidence": 0.8549,
+    "noid_gate": 0.4,
+    "passes_above_gate": 60
+  },
+  "per_species": {
+    "BARBAR": {
+      "reference_files": 2,
+      "app_files": 2,
+      "agreed": 2,
+      "recall_of_reference": 1.0,
+      "precision_of_app": 1.0
+    },
+    "CNESER": {
+      "reference_files": 2,
+      "app_files": 2,
+      "agreed": 2,
+      "recall_of_reference": 1.0,
+      "precision_of_app": 1.0
+    },
+    "PIPPIP": {
+      "reference_files": 33,
+      "app_files": 34,
+      "agreed": 33,
+      "recall_of_reference": 1.0,
+      "precision_of_app": 0.9706
+    },
+    "PIPPYG": {
+      "reference_files": 14,
+      "app_files": 13,
+      "agreed": 13,
+      "recall_of_reference": 0.9286,
+      "precision_of_app": 1.0
+    },
+    "PLEAUR": {
+      "reference_files": 2,
+      "app_files": 2,
+      "agreed": 2,
+      "recall_of_reference": 1.0,
+      "precision_of_app": 1.0
+    },
+    "RHIFER": {
+      "reference_files": 1,
+      "app_files": 1,
+      "agreed": 1,
+      "recall_of_reference": 1.0,
+      "precision_of_app": 1.0
+    }
+  },
+  "confusions": [
+    {
+      "reference": "PIPPYG",
+      "app": "PIPPIP",
+      "files": 1
+    }
+  ],
+  "call_detection": {
+    "reference_calls": 4212,
+    "app_pulses": 1020,
+    "matched": 1001,
+    "recall": 0.2377,
+    "precision": 0.9814,
+    "median_onset_offset_ms": 1.9999909400940652,
+    "mean_abs_onset_offset_ms": 2.2
+  },
+  "attribution": {
+    "scored_by": "coreml",
+    "compared_against": "pytorch",
+    "pulses_compared": 1064,
+    "same_species_per_pulse": 0.9991,
+    "mean_confidence_delta": -0.0004,
+    "max_abs_confidence_delta": 0.211036,
+    "top1_vs_reference_scored_by": 0.9815,
+    "top1_vs_reference_alt": 0.9815,
+    "files_named_scored_by": 54,
+    "files_named_alt": 54
+  }
+}

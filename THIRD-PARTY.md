@@ -26,6 +26,8 @@ screen a reader has to know to open.
   model — a modification under the licence's terms; identification logic and
   class outputs are unchanged.
 - **Source:** https://code.usgs.gov/fort/nabat/nabat-ml
+- **Not endorsed:** OpenBat is not affiliated with or endorsed by the USGS or
+  the NABat programme.
 
 ### BatDetect2
 
@@ -37,6 +39,14 @@ screen a reader has to know to open.
   `batdetect2_uk_same.ckpt` PyTorch checkpoint — a modification under the
   licence's terms.
 - **Source:** https://github.com/macaodha/batdetect2
+- **Not endorsed:** OpenBat is not affiliated with or endorsed by the BatDetect2
+  team at the University of Edinburgh. The model is used here under its licence;
+  any problem with this app is OpenBat's, not theirs.
+- **Demo audio:** the bundled UK demo clip (`OpenBat/Demo/uk_demo_bats.wav`) is
+  stitched from two recordings in BatDetect2's own `example_data/audio/`, under
+  the same CC BY-NC 4.0 terms — a greater horseshoe bat and a serotine, each
+  repeated six times and peak-normalised so both trigger the detector. See
+  `tools/make_uk_demo_clip.py`.
 
 BatDetect2's non-commercial term is why OpenBat is currently free with no
 in-app purchase or subscription — see `LICENSE`.

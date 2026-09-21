@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "port": "openbat-ios-swift",
+  "backend": "batdetect2-uk-same-v2",
+  "input": "batdetect2 example_data/audio/20170701_213954-MYOMYS-LR_0_0.5.wav (resampled offline to 256 kHz)",
+  "start_seconds": 0.0,
+  "sample_rate_hz": 256000,
+  "stage": "transform only (native 256 kHz)",
+  "shape": [
+    128,
+    256
+  ],
+  "mean_absolute_error": 8.058248823772374e-08,
+  "maximum_absolute_error": 8.367002010345459e-06,
+  "root_mean_square_error": 3.12981057959405e-07,
+  "pearson_correlation": 0.9999999999996437,
+  "reference_mean": 0.1090816780924797,
+  "native_mean": 0.1090816780924797,
+  "note": "This compares the tensor handed to the model, not model accuracy. The two sides are given identical input samples.",
+  "batdetect2_revision": "9e2697458d3b3b03c30ccd7e49ed5409c8ac330d",
+  "measured_on": "2026-09-20"
+}

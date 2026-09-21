@@ -77,6 +77,33 @@ nonisolated enum PulseImageRenderer {
     /// gives crisp contrast on a bat call while still showing harmonic structure.
     private static let dynamicRangeDB: Float = 48
 
+    /// How far below a call's own peak still counts as the call, when measuring
+    /// where it starts and ends. dB BELOW peak; larger = includes fainter energy =
+    /// longer measurement.
+    ///
+    /// **Was 12, hardcoded inline, until 2026-09-21.** A greater horseshoe in the UK
+    /// demo clip measured 38 ms against the ~58 the recording plainly contains, and
+    /// the difference was not a ceiling — it was this. A CF call holds a long quiet
+    /// tail, and 12 dB stops counting partway through it: measured per call across
+    /// the clip's 22 horseshoes, 12 dB gives a median of 29 ms and 22 dB gives 52.
+    ///
+    /// This bounds more than the reported number. The default crop is the measured
+    /// call plus ~1 ms of air, the saved thumbnail plus ~3 ms, and the frequency
+    /// extent is scanned over the same columns — so at 12 dB the tail fell outside
+    /// the picture as well as outside the duration, and the band was read from the
+    /// loud core alone. All three move together.
+    ///
+    /// `CallAnalysis` measures the same quantity the same way and reads this
+    /// constant, so the player and the pulse view cannot drift apart on what a
+    /// call's duration is; they disagreed by 10 dB before this was shared.
+    static let durationThresholdDB: Float = 22
+
+    /// How far below the peak the ONSET LOCK looks, as opposed to the duration
+    /// measurement above. See step 5b: the lock answers "where does this call look
+    /// like it starts, repeatably", the duration answers "how much of it is there",
+    /// and 22 dB is right for the second and visibly early for the first.
+    static let onsetLockThresholdDB: Float = 12
+
     struct Result {
         /// `nil` when the caller asked for measurements only (`makeImage: false`).
         /// Everything else in this type is still filled: the analysis that produces
@@ -97,6 +124,12 @@ nonisolated enum PulseImageRenderer {
         /// the same way `wideFreqMin`/`wideFreqMax` let it zoom out in frequency.
         let timeTightLeftFrac: Double
         let timeTightRightFrac: Double
+        /// Milliseconds the whole rendered image spans, so the two fractions above
+        /// can be turned into real time by a caller that doesn't know the geometry.
+        /// It used to be exactly four display windows and callers could assume that;
+        /// the right-hand pad now grows to hold the active model's longest call, so
+        /// the width is no longer derivable from the display window alone.
+        let renderedSpanMs: Double
         let peakFreq: Double     // Hz — dominant frequency
         let durationMs: Double   // call length from the −12 dB energy envelope
         /// Tight crop for stored thumbnails / the pass-detail sheet: just the
@@ -163,9 +196,15 @@ nonisolated enum PulseImageRenderer {
     /// which is the question two rounds of per-pulse timing could not answer,
     /// because every one of those measurements was taken under load.
     static func benchmark(sampleRate: Double = 384_000,
-                          displaySpanSeconds: Double) -> (wallMs: Double, cpuMs: Double, frames: Int) {
+                          displaySpanSeconds: Double,
+                          maxCallSeconds: Double = ModelInputSpec.defaultMaxCallSeconds)
+    -> (wallMs: Double, cpuMs: Double, frames: Int) {
         let span = max(fftLen + displayHop, Int(displaySpanSeconds * sampleRate))
-        let count = span * 3                       // lead + display + trail, as captured
+        // Lead + trail exactly as `PulseDetector.scheduleCapture` cuts them, so the
+        // frame count this reports is the one the live path actually pays. It was
+        // `span * 3` back when the trail was two fixed display windows.
+        let trail = max(span * 2, Int(maxCallSeconds * sampleRate) + span)
+        let count = span + trail
         var rng = SystemRandomNumberGenerator()
         // Noise, not silence: a flat buffer can be optimised through and would
         // flatter the transform.
@@ -173,7 +212,8 @@ nonisolated enum PulseImageRenderer {
         let m = ThreadClock.measure {
             render(pcm: pcm, sampleRate: sampleRate, noiseFloor: 0.35,
                    minFrequencyHz: 15_000, displaySpanSeconds: displaySpanSeconds,
-                   onsetFraction: 0.30, expectedOnsetSample: span, makeImage: false)
+                   onsetFraction: 0.30, expectedOnsetSample: span,
+                   maxCallSeconds: maxCallSeconds, makeImage: false)
         }
         return (m.wallMs, m.cpuMs, m.value?.stftFrames ?? 0)
     }
@@ -185,6 +225,7 @@ nonisolated enum PulseImageRenderer {
                        displaySpanSeconds: Double,
                        onsetFraction: Double,
                        expectedOnsetSample: Int,
+                       maxCallSeconds: Double = ModelInputSpec.defaultMaxCallSeconds,
                        palette: Palette = .inferno,
                        makeImage: Bool = true) -> Result? {
         let bins = binCount
@@ -213,7 +254,22 @@ nonisolated enum PulseImageRenderer {
         let onsetOutCol = min(max(Int(onsetFraction * Double(outFrames)), 0), outFrames - 1)
         let expectedFrame = min(max(expectedOnsetSample / displayHop, 0), nFrames - 1)
         let searchLo = max(0, expectedFrame - outFrames / 2)
-        let searchHi = min(nFrames, expectedFrame + outFrames + outFrames / 2)
+
+        // How far past the onset the envelope walk in step 5 may run. This used to
+        // be `outFrames + outFrames / 2` — 1.5 display windows, i.e. 15 ms at the
+        // default 10 ms setting — which silently capped every measured call at
+        // ~17 ms once the offset from onset to peak column is taken off. A bat that
+        // called for longer had its duration, its band and its crop all truncated
+        // at that line, and the only way to move the line was the display-window
+        // slider, which also rescales every other call that is drawn.
+        //
+        // It is now the active model's own `maxCallMs`, so the ceiling is a fact
+        // about the bats in front of the microphone rather than a side effect of a
+        // display preference. `PulseDetector` captures the matching amount of
+        // trailing audio; short of that, the `min(nFrames, …)` below is what stops
+        // the walk, exactly as before.
+        let maxCallCols = max(outFrames, Int(maxCallSeconds * sampleRate / Double(displayHop)))
+        let searchHi = min(nFrames, expectedFrame + maxCallCols + outFrames / 2)
 
 
 
@@ -247,12 +303,33 @@ nonisolated enum PulseImageRenderer {
             let i = col - searchLo
             return (i >= 0 && i < colPeaks.count) ? colPeaks[i] : 0
         }
-        let durThreshold = max(floor, peakColVal - 12.0 / dynamicRangeDB)
+        let durThreshold = max(floor, peakColVal - Self.durationThresholdDB / dynamicRangeDB)
         var durStart = peakCol, durEnd = peakCol
         while durStart - 1 >= searchLo,     columnPeak(durStart - 1) >= durThreshold { durStart -= 1 }
         while durEnd + 1 < searchHi,        columnPeak(durEnd + 1)   >= durThreshold { durEnd += 1 }
         let durationCols = durEnd - durStart + 1
         let secondsPerCol = Double(displayHop) / sampleRate
+
+        // ── 5b. Where to PIN the call, which is not where it starts ──────────
+        //  The onset lock and the duration measurement want different answers to
+        //  "where does this call begin", and using one number for both put every
+        //  pulse slightly to the right of the dashed onset line (Niall, 2026-09-21).
+        //
+        //  `durStart` is the −22 dB crossing, which deliberately includes the faint
+        //  leading edge — that is the point of measuring there. But the eye reads the
+        //  call as starting where it gets bright, and on the demo clip's calls that
+        //  is a median 0.33 ms later (up to 1.0 ms), so a line drawn at `durStart`
+        //  lands just before the call every time. The lock is also the more
+        //  noise-sensitive of the two uses: a threshold close to the noise floor
+        //  moves with the background, and this is the number that decides whether
+        //  successive captures pin the call to the SAME spot.
+        //
+        //  So the lock uses a tighter threshold — the loud core's start. Duration,
+        //  the band scan and the clean crop all still run from `durStart`, so what is
+        //  measured and saved is unchanged; only where the picture sits moves.
+        let lockThreshold = max(floor, peakColVal - Self.onsetLockThresholdDB / dynamicRangeDB)
+        var lockStart = peakCol
+        while lockStart - 1 >= searchLo, columnPeak(lockStart - 1) >= lockThreshold { lockStart -= 1 }
 
         // ── 6. Frequency extent of the call, over its active columns only ────
         //  Scanning just [durStart, durEnd] keeps quiet inter-call frames from
@@ -282,9 +359,29 @@ nonisolated enum PulseImageRenderer {
         // which is to say it hid whichever bats it was least able to describe.
         // Excluding the call's own columns makes the score independent of how long
         // the call is, which is what it was always supposed to mean.
+        //
+        // **The background window is deliberately NOT the search region.** The
+        // search region is now as wide as the active model's longest call (80 ms
+        // under BatDetect2 against 20 ms before), and quality is a ratio against
+        // the mean of whatever columns it averages: widening it sweeps in more
+        // quiet audio, lowers that mean, and raises the score for every pulse —
+        // including NABat's, whose region widened too. That would shift every call
+        // against the 0.35 the pulse view draws at and against `qualityGate`,
+        // silently, as a side effect of a change about long calls. So the window
+        // below stays the fixed span it has always been, and the same call scores
+        // the same before and after this change.
+        //
+        // A call longer than that fixed span leaves no background inside it and
+        // falls to the `bgCols == 0` branch, which is the pre-existing
+        // deliberately-unconfident 0.5 — above the draw gate, so a horseshoe is
+        // still shown, just never scored better than middling. Giving long calls a
+        // real background reading means measuring it somewhere that isn't a fixed
+        // window around the onset, which is a separate question from this one.
+        let bgLo = searchLo
+        let bgHi = min(searchHi, expectedFrame + outFrames + outFrames / 2)
         var bgSum: Float = 0
         var bgCols = 0
-        for col in searchLo..<searchHi where col < durStart || col > durEnd {
+        for col in bgLo..<bgHi where col < durStart || col > durEnd {
             bgSum += colPeaks[col - searchLo]
             bgCols += 1
         }
@@ -331,9 +428,15 @@ nonisolated enum PulseImageRenderer {
         // right edge once zoomed out to full height, with barely any breathing
         // room on that side. Bounded by what was actually captured; short of that,
         // out-of-range columns render as background same as the tight crop does.
-        let srcStart = durStart - onsetOutCol   // tight window's left edge (unchanged reference)
+        let srcStart = lockStart - onsetOutCol   // tight window's left edge (see 5b)
         let padLeft = outFrames
-        let padRight = outFrames * 2
+        // Right pad has to hold the longest call the search region can now measure,
+        // or the widened crop in 7b would be bounded by the rendered image instead
+        // of by the call: `tightFrames` is capped at `wideOutFrames`, so at the old
+        // fixed `outFrames * 2` an 80 ms horseshoe measured correctly and was then
+        // drawn clipped to 40 ms anyway. Unchanged for any model whose longest call
+        // already fitted.
+        let padRight = max(outFrames * 2, maxCallCols + outFrames)
         let wideOutFrames = padLeft + outFrames + padRight
         let wideSrcStart = srcStart - padLeft
 
@@ -353,12 +456,15 @@ nonisolated enum PulseImageRenderer {
         //  fixed scale is unchanged for most pulses; only a call that would have
         //  been clipped opens the view up, and only as far as it needs.
         let marginCols = max(2, Int(0.001 / secondsPerCol))       // ~1 ms of air each side
-        let wantFrames = durationCols + 2 * marginCols
+        // Counted from `durStart`, not from the lock point: the faint leading edge
+        // sits to the LEFT of where the call is pinned, so the crop has to be wide
+        // enough to hold it as well as the call's full measured length.
+        let wantFrames = durationCols + (lockStart - durStart) + 2 * marginCols
         // Keep the onset where the eye expects it, then take whatever width the
         // call needs, bounded by what was actually rendered.
         let tightFrames = min(wideOutFrames, max(outFrames, wantFrames))
         let tightOnsetCol = Int(onsetFraction * Double(tightFrames))
-        let tightLeftCol = min(max(0, (durStart - tightOnsetCol) - wideSrcStart),
+        let tightLeftCol = min(max(0, (lockStart - tightOnsetCol) - wideSrcStart),
                                max(0, wideOutFrames - tightFrames))
         let tightRightCol = min(wideOutFrames, tightLeftCol + tightFrames)
 
@@ -385,6 +491,7 @@ nonisolated enum PulseImageRenderer {
                 wideFreqMax: Double(renderMax) * hzPerBin,
                 timeTightLeftFrac: Double(tightLeftCol) / Double(wideOutFrames),
                 timeTightRightFrac: Double(tightRightCol) / Double(wideOutFrames),
+                renderedSpanMs: Double(wideOutFrames) * secondsPerCol * 1000,
                 peakFreq: Double(peakBin) * hzPerBin,
                 durationMs: Double(durationCols) * secondsPerCol * 1000,
                 cleanImage: nil,
@@ -477,6 +584,7 @@ nonisolated enum PulseImageRenderer {
             wideFreqMax: Double(renderMax) * hzPerBin,
             timeTightLeftFrac: Double(tightLeftCol) / Double(wideOutFrames),
             timeTightRightFrac: Double(tightRightCol) / Double(wideOutFrames),
+            renderedSpanMs: Double(wideOutFrames) * secondsPerCol * 1000,
             peakFreq: Double(peakBin) * hzPerBin,
             durationMs: Double(durationCols) * secondsPerCol * 1000,
             cleanImage: cleanCG.map { UIImage(cgImage: $0) },

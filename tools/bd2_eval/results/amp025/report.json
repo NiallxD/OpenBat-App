@@ -1,0 +1,114 @@
+{
+  "recordings": {
+    "reference": 927,
+    "app": 105,
+    "compared": 105
+  },
+  "settings": {
+    "reference_detection_threshold": 0.3,
+    "match_tolerance_ms": 15.0,
+    "app_scores_from": "coreml",
+    "app_trigger": {
+      "amplitude_threshold": 0.25,
+      "band_high": 0.45,
+      "band_low": 0.02,
+      "hold_off_seconds": 0.03,
+      "max_gap_ms": 6,
+      "min_consecutive_columns": 3,
+      "min_frequency_hz": 15000,
+      "trigger_mode": "Frequency + Amplitude"
+    }
+  },
+  "file_verdict": {
+    "both_named": 79,
+    "top1_agreement": 0.9873,
+    "top3_agreement": 1.0,
+    "reference_found_nothing": 5,
+    "app_found_nothing": 4,
+    "app_refused_to_name": 22,
+    "mean_confidence_gap_on_reference_species": 0.1343
+  },
+  "refusals": {
+    "passes_the_app_would_file": 111,
+    "by_outcome": {
+      "named": 90,
+      "weakEvidence": 21
+    },
+    "median_pass_raw_confidence": 0.6736,
+    "max_pass_raw_confidence": 0.8649,
+    "noid_gate": 0.4,
+    "passes_above_gate": 90
+  },
+  "per_species": {
+    "BARBAR": {
+      "reference_files": 2,
+      "app_files": 3,
+      "agreed": 2,
+      "recall_of_reference": 1.0,
+      "precision_of_app": 0.6667
+    },
+    "CNESER": {
+      "reference_files": 2,
+      "app_files": 2,
+      "agreed": 2,
+      "recall_of_reference": 1.0,
+      "precision_of_app": 1.0
+    },
+    "PIPPIP": {
+      "reference_files": 51,
+      "app_files": 51,
+      "agreed": 51,
+      "recall_of_reference": 1.0,
+      "precision_of_app": 1.0
+    },
+    "PIPPYG": {
+      "reference_files": 21,
+      "app_files": 21,
+      "agreed": 21,
+      "recall_of_reference": 1.0,
+      "precision_of_app": 1.0
+    },
+    "PLEAUR": {
+      "reference_files": 2,
+      "app_files": 1,
+      "agreed": 1,
+      "recall_of_reference": 0.5,
+      "precision_of_app": 1.0
+    },
+    "RHIFER": {
+      "reference_files": 1,
+      "app_files": 1,
+      "agreed": 1,
+      "recall_of_reference": 1.0,
+      "precision_of_app": 1.0
+    }
+  },
+  "confusions": [
+    {
+      "reference": "PLEAUR",
+      "app": "BARBAR",
+      "files": 1
+    }
+  ],
+  "call_detection": {
+    "reference_calls": 4212,
+    "app_pulses": 2525,
+    "matched": 2297,
+    "recall": 0.5453,
+    "precision": 0.9097,
+    "median_onset_offset_ms": 1.3333323796591579,
+    "mean_abs_onset_offset_ms": 1.7
+  },
+  "attribution": {
+    "scored_by": "coreml",
+    "compared_against": "pytorch",
+    "pulses_compared": 2642,
+    "same_species_per_pulse": 0.9981,
+    "mean_confidence_delta": -0.0003,
+    "max_abs_confidence_delta": 0.211036,
+    "top1_vs_reference_scored_by": 0.9873,
+    "top1_vs_reference_alt": 0.9873,
+    "files_named_scored_by": 79,
+    "files_named_alt": 79
+  }
+}

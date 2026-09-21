@@ -65,7 +65,19 @@ nonisolated enum ClassifierSpectrogramEngine {
 
         let nBins = nFFT / 2
         let pad = nFFT / 2
-        let padded = [Float](repeating: 0, count: pad) + pcm + [Float](repeating: 0, count: pad)
+        // `center=True`'s padding. Reflect excludes the edge sample itself (torch's
+        // convention: for [a,b,c,…] the two-sample lead-in is [c,b], not [b,a]), and
+        // needs at least `pad` samples to mirror — which the `pcm.count >= nFFT`
+        // guard above already assures, since `pad` is nFFT/2.
+        let padded: [Float]
+        switch spec.padding {
+        case .zero:
+            padded = [Float](repeating: 0, count: pad) + pcm + [Float](repeating: 0, count: pad)
+        case .reflect:
+            let leading = (1...pad).reversed().map { pcm[$0] }
+            let trailing = (1...pad).map { pcm[pcm.count - 1 - $0] }
+            padded = leading + pcm + trailing
+        }
         let nFrames = 1 + (padded.count - nFFT) / hop
 
         // ── 1. STFT → power → dB, plus a parallel linear-magnitude copy for PCEN ──
@@ -118,11 +130,21 @@ nonisolated enum ClassifierSpectrogramEngine {
         }
 
         // ── 2. Bandpass: zero bins outside [minFreqHz, maxFreqHz] ────────
-        // Strict inequality on both ends (bin*hzPerBin must be > minFreqHz and <
-        // maxFreqHz), matching the original NABat bandpass semantics exactly.
+        // Which bins count as "outside" is the model's business — see
+        // `SpectrogramBandEdge`. NABat keeps strictly-inside bins; BatDetect2 keeps
+        // exactly what its own FrequencyCrop keeps.
         let hzPerBin = Float(spec.sampleRate) / Float(nFFT)
-        let loBin = max(0, Int((spec.minFreqHz / hzPerBin).rounded(.down)) + 1)
-        let hiBin = min(nBins - 1, Int((spec.maxFreqHz / hzPerBin).rounded(.up)) - 1)
+        let loBin: Int, hiBin: Int
+        switch spec.bandEdge {
+        case .strictlyInside:
+            loBin = max(0, Int((spec.minFreqHz / hzPerBin).rounded(.down)) + 1)
+            hiBin = min(nBins - 1, Int((spec.maxFreqHz / hzPerBin).rounded(.up)) - 1)
+        case .matchingCrop:
+            // Deliberately the same arithmetic as `lowIndex`/`highIndex` in step 6 —
+            // the bandpass must not eat a bin the crop is about to keep.
+            loBin = max(0, Int((spec.minFreqHz / hzPerBin).rounded(.down)))
+            hiBin = min(nBins - 1, Int((spec.maxFreqHz / hzPerBin).rounded(.down)) - 1)
+        }
         let sentinelDB: Float = -500
         if loBin > 0 {
             for bin in 0..<loBin {

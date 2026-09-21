@@ -154,6 +154,13 @@ nonisolated enum ClassifierAnalysis {
         // what the live view would have shown.
         let dispSpanSamples = max(PulseImageRenderer.fftLen + PulseImageRenderer.displayHop,
                                   Int(displaySpanSeconds * sampleRate))
+        // Same trailing span the live capture takes, for the same reason: the
+        // renderer's envelope walk stops at whatever audio it is given, so a
+        // re-analysis reading less than the live path would report a shorter call
+        // for the same pulse. See `ModelInputSpec.maxCallMs`.
+        let maxCallSeconds = spec.maxCallMs / 1000
+        let dispTrailSamples = max(dispSpanSamples * 2,
+                                   Int(maxCallSeconds * sampleRate) + dispSpanSamples)
 
         var analysed: [Pulse] = []
         var skipped = 0
@@ -182,7 +189,7 @@ nonisolated enum ClassifierAnalysis {
             // live renderer would have drawn them — and this time for every
             // call, because nothing is waiting on this thread.
             let dispStart = max(0, onsetSample - dispSpanSamples)
-            let dispCount = min(dispSpanSamples * 3, totalSamples - dispStart)
+            let dispCount = min(dispSpanSamples + dispTrailSamples, totalSamples - dispStart)
             let dispPCM = dispCount > 0
                 ? WavPCMReader.readSamples(wavURL: wavURL, startSample: dispStart, count: dispCount)
                 : nil
@@ -194,6 +201,7 @@ nonisolated enum ClassifierAnalysis {
                                           displaySpanSeconds: displaySpanSeconds,
                                           onsetFraction: spec.onsetFraction,
                                           expectedOnsetSample: onsetSample - dispStart,
+                                          maxCallSeconds: maxCallSeconds,
                                           makeImage: true)
             }
 

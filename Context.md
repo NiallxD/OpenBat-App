@@ -3598,6 +3598,139 @@ the ones it did draw. Both were found by looking at the app rather than at the
 logs, and neither would have shown up in any log column — worth remembering next
 time the instinct is to add another one.
 
+### And then it cut them off entirely — a 17 ms ceiling nobody set (2026-09-21)
+
+The 2026-09-07 fix above widened the *crop*, which was the visible half of the
+problem. The measurement underneath it was still capped, and the cap was not a
+number anyone had chosen.
+
+Niall found it with horseshoe bats: a 58 ms call, and the pulse view never
+reported more than about 17 ms. Three things were all derived from
+`PulseDetector.displayWindowMs`, a display preference on a 6–40 ms slider:
+
+- the renderer's envelope walk ran a fixed 1.5 display windows past the onset,
+- the display capture took two display windows of trailing audio,
+- the rendered image was four display windows wide.
+
+At the 10 ms default that is a 20 ms search region, and once the offset from
+onset to the loudest column is taken off, ~17 ms is where the walk dies. The
+duration, the band and the crop were all truncated there. The slider could raise
+it, but it also rescales every other call that is drawn, which is the one thing
+the pulse view's fixed scale exists to prevent.
+
+**The span is now a property of the model's region, not of the display.**
+`ModelInputSpec.maxCallMs` — 30 for NABat, 80 for BatDetect2 — sizes the capture
+trail and the search region; `displayWindowMs` goes back to meaning only the
+scale things are drawn at. Per-model rather than one constant because a single
+global number charges NABat for calls it cannot hear: the capture grows, so the
+transform grows with it, on every pulse.
+
+**Both models get their span for free**, which is the part worth remembering.
+`deferTrailSeconds` already waits for the *classification* window — 40 ms under
+NABat, 184 ms under BatDetect2 — and both are longer than the trailing audio the
+display now asks for. The audio was already sitting in the ring by the time the
+capture fired. Nothing waits longer than it did; what BatDetect2 pays is transform
+frames, ~3× NABat's, and only while it is the active model.
+
+Two things the change had to avoid breaking, neither of them obvious:
+
+**Quality would have drifted, upward, for everyone.** `quality` is a ratio
+against the mean of the columns the call does not occupy. Widening the search
+region sweeps in more quiet audio, which lowers that mean and raises the score —
+including NABat's, whose region widened too. Every call would have shifted
+against the 0.35 the pulse view draws at and against `qualityGate`, silently, as
+a side effect of a change about long calls. The background window is therefore
+pinned to the old fixed geometry and does not follow the search region. A call
+longer than that window falls to the pre-existing `bgCols == 0` branch and scores
+a flat 0.5 — above the draw gate, so a horseshoe is shown, just never scored
+better than middling. Giving long calls a real background reading needs a
+measurement that isn't a fixed window around the onset, and is still open.
+
+**`deferTrailSeconds` was lying.** Its comment said it covered "the display
+window as well"; the code returned the classifier's trailing need alone. That was
+harmless only by luck. `pcmSnapshot` returns an EMPTY array — not a short one —
+for a range still in the future, and an empty display capture renders as a pulse
+with no image, no duration and no peak frequency rather than as any kind of
+error. It now takes the max of the two. Neither bundled model makes it bind; it
+is there so a future model whose longest call outruns its own window cannot
+reintroduce a silent failure that looks like nothing at all.
+
+**And then it measured 38 ms, which is worse than 17.** Niall retested with
+BatDetect2 pinned by hand and got 38 — not the ~58 the clip contains, and not the
+old 17 either. 38 is what a 58 ms call measures under the 30 ms fallback, so the
+pinned model was not reaching the renderer at all.
+
+The cause was reading the span through `activeClassifier()` rather than through
+the model descriptor. That helper answers a different question — *is something
+classifying right now* — and returns nil in three situations that say nothing
+about how long a bat calls: identification switched off remotely (it resolves
+`effectiveModelID`, not the pinned `activeModelID`), the CoreML model failing to
+load, which the simulator does routinely, and nothing selected. Each silently
+substituted the 30 ms fallback.
+
+17 ms was at least a stable wrong answer. 38 was a display default crossed with a
+failed model load, and nothing on screen said so. The span now comes from
+`ModelRegistry.descriptor(id: activeModelID)` — pure data, no loading, no
+dependence on whether classification is enabled — because how long a call may be
+is a fact about the region, not about what the classifier is currently doing.
+
+Worth stating as a rule: `activeClassifier()` answers "is something classifying",
+and `ModelRegistry.descriptor(id:)` answers "what is this region like". Anything
+that shapes capture, measurement or display wants the second. Reaching for the
+first because it happens to carry a descriptor is how this got in.
+
+**And 38 turned out to be right.** With the span fixed, Niall still read 38 ms
+against the ~58 the clip contains. Measuring the demo clip's 22 greater-horseshoe
+calls directly settled it: at the app's own −12 dB rule they are 14–45 ms, median
+29, so 38 was a real call length and not a cap at all. The 58 is the same calls
+measured further down — a horseshoe holds a long quiet CF tail, and where you
+stop counting decides the number.
+
+`PulseImageRenderer` stopped at 12 dB below the peak, hardcoded inline;
+`CallAnalysis` stopped at 22, as a named constant with its reasoning written out.
+The same call therefore measured 29 ms on one screen and 52 on the other, which is
+a difference anyone would find by opening both. The pulse view now uses 22 and the
+two share the constant.
+
+Worth knowing what that threshold actually bounds, because it is not only the
+reported number: the default crop is the measured call plus ~1 ms of air, the
+saved thumbnail plus ~3 ms, and the frequency extent is scanned over the same
+columns. At 12 dB the tail fell outside the picture and the band was read from the
+loud core alone. Duration, crop and band all move together.
+
+NABat's span went 30 → 40 ms as a consequence. The guide's longest North American
+calls are quoted at 20–21 ms, but those are quoted figures and the app now counts
+10 dB further down, so measured lengths run longer than published ones. This is
+the one place where the display span rather than the classifier sets the detection
+floor — 5 ms past NABat's own 35 ms wait.
+
+**The general lesson, twice over in one afternoon.** Both wrong numbers came from
+a measurement rule nobody had looked at recently, and neither was visible as a
+rule: 1.5 display windows expressed as a search bound, and 12 dB expressed as a
+literal in an expression. The fix each time was to name the quantity and say what
+it is a fact about. Measuring the source audio directly is what distinguished them
+— the first was a ceiling, the second was the answer, and they looked identical
+from inside the app.
+
+**Then every pulse sat just right of the onset line.** Raising the duration
+threshold moved the *lock* too, because one number was doing both jobs. `durStart`
+is the −22 dB crossing, which deliberately includes the faint leading edge — but
+the eye reads a call as starting where it gets bright, measured at a median 0.33 ms
+later on the demo clip's calls and up to 1.0 ms. On a 6 ms window that is 6–17% of
+the width, which is exactly the gap Niall photographed.
+
+The two uses want different thresholds and always did. Duration wants the faint
+edge counted. The lock wants the opposite: it decides whether successive captures
+pin the call to the SAME spot, and a threshold close to the noise floor moves with
+the background. So the lock now runs its own walk at 12 dB and the measurement
+keeps 22. Duration, the band scan and the clean crop are untouched — only where the
+picture sits moved.
+
+One consequence to keep in mind if this is edited: the faint lead now sits to the
+LEFT of the pin, so the default crop's width is counted from `durStart` rather than
+from the lock point, or a call with a long quiet ramp gets its own leading edge
+cropped off. There is a test for exactly that.
+
 ### The demo log became something other people send us (2026-09-07)
 
 The demo plays one fixed clip, so it is the only input two devices can be given
@@ -5820,3 +5953,61 @@ sheet's dismissal, which happens the moment a destination is picked and before
 some activities have finished reading the file. A cancel landing during the
 uninterruptible zip leg also deletes the file instead of opening a share sheet for
 an export the user cancelled.
+
+## 18. What the UK library says about the trigger (2026-09-21)
+
+927 Griff recordings from six UK bat walks (`~/Downloads/BatRecordings`,
+5 s each at 384 kHz, unlabelled) were run through OpenBat's own pipeline and
+through BatDetect2's published one. The harness is `tools/bd2_eval/`; its
+README explains the three arms and why the scoring happens on the host. All
+numbers below are over a 105-recording stratified sample (`make_sample.py`,
+seed 20260921, ~25 per walk), with BatDetect2's detections thresholded at 0.3.
+
+**The classifier is not the problem. The trigger is.**
+
+| App trigger | Files both named | Top-1 agreement | Calls found (recall) | Pulse precision |
+|---|---|---|---|---|
+| 0.50 (shipping) | 54 | 98.2% | 23.8% | 98.1% |
+| 0.35 | 71 | 95.8% | 41.5% | 95.6% |
+| 0.25 | 79 | 98.7% | 54.5% | 91.0% |
+
+Read the first and third columns together. Wherever OpenBat names a recording
+it names what BatDetect2 names — 98% at the shipping threshold, and the one
+disagreement was *Pipistrellus pygmaeus* called *pipistrellus*. But at 0.5 it
+only hears a quarter of the calls BatDetect2 finds, and on 43 of 105
+recordings it never triggers at all on audio BatDetect2 identifies to species.
+Dropping the threshold to 0.25 nearly doubles the recordings that get named
+(54 → 79) and costs 7 points of pulse precision. The onset it reports is
+right: median offset from BatDetect2's own time is 1.3–2.0 ms.
+
+**Why 0.5 is so cold on this material.** These files come off the Griff's card
+rather than through the app's input gain. In one recording exactly 1 of 7,486
+spectrogram columns clears 0.5 (99th percentile 0.18, 99.9th 0.44). Whether
+the app's live gain makes up the difference is untested — that needs a
+recording made through the app of the same bats, and until it exists the 0.5
+default should be read as tuned for one gain path and unmeasured on the other.
+
+**Two side findings worth keeping.**
+
+- **The Core ML export is vindicated.** Over 2,642 real pulses it picks the
+  PyTorch checkpoint's species 99.8% of the time, mean confidence delta
+  −0.0003. §16's open question about the conversion is answered: whatever
+  produced the 0.883-vs-0.711 reading on 2026-09-20, it was not the export.
+- **Core ML does not compute on the simulator.** It returns an all-zero output
+  for `.cpuOnly` and `.cpuAndGPU`, and `.all` — what `BatDetect2Classifier`
+  asks for — gave zeros for an entire 927-file run. The same tensor through
+  the same `.mlpackage` on the host gives PIPPYG 0.174 and PyTorch 0.175. Any
+  simulator measurement of model output is worthless; the harness scores on
+  the host and says so.
+
+**Two harness traps, both costly to rediscover.** `xcodebuild` clones the
+simulator and runs the bundle on every clone by default, so two copies walked
+the library and appended to one file — `-parallel-testing-enabled NO`. And a
+Debug test build runs this ~100× slower than Release (2.5 minutes for three
+105-file passes at `-O`, hours at `-Onone`): the per-column peak scan is
+scalar Swift, which is the `swift-dsp-debug-build-cliff` note again, this time
+in the other direction.
+
+**Not measured:** whether either pipeline is *right*. Nothing here is labelled,
+so BatDetect2 is the reference, not the truth. Both can agree and both be
+wrong about the bat.

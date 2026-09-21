@@ -1,0 +1,11 @@
+# Build output for the app arm, and the per-pulse tensor dumps the host arms
+# consume. Both are reproducible from the scripts; the tensors alone run to
+# hundreds of megabytes per threshold.
+.derived/
+.derived-mac/
+results/*/tensors/
+sample/
+
+# The full per-call reference dump: 148 MB, and the scripts regenerate it.
+# The small per-threshold arm outputs beside it are kept as the record.
+results/*/reference.jsonl

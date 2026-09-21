@@ -47,8 +47,16 @@ nonisolated enum BatDetect2SpectrogramRenderer {
         nFFT: nFFT,
         hop: hop,
         window: .hann,
+        // torchaudio.transforms.Spectrogram(center: true) reflect-pads; the port
+        // zero-padded until the parity harness measured the difference (MAE 4.7e-03
+        // → 1.2e-07). See tools/batdetect2_parity.
+        padding: .reflect,
         minFreqHz: 10_000,
         maxFreqHz: 120_000,
+        // The bandpass must keep the 10 kHz bin BatDetect2's own FrequencyCrop keeps;
+        // NABat's strictly-inside rule was zeroing it, leaving the model's lowest
+        // output row blank. Found by the same comparison.
+        bandEdge: .matchingCrop,
         // PCEN constants read directly from the checkpoint's stored preprocess
         // config: gain/bias/power match the published defaults, but time_constant is
         // 0.4, NOT the 0.1 originally guessed here.

@@ -46,6 +46,9 @@ struct DiagnosticsView: View {
     /// The remote kill switches, listed at the top so the first thing this
     /// screen answers is "what is currently switched off".
     let flags: FeatureFlagStore
+    /// For the model pin — see `modelSection`. The live object, not a copy: the
+    /// pin has to take effect on the run already in progress.
+    @Bindable var autoID: AutoIDSettings
     @Environment(\.dismiss) private var dismiss
     /// For the jump to OpenBat's page in the Settings app — see
     /// `overridesSection`.
@@ -73,6 +76,7 @@ struct DiagnosticsView: View {
         NavigationStack {
             Form {
                 ConfigFeatureSection(flags: flags)
+                modelSection
                 overridesSection
                 microphoneSection
                 demoLogSection
@@ -100,6 +104,60 @@ struct DiagnosticsView: View {
             }
         }
         .presentationDetents([.medium, .large])
+    }
+
+    /// Which classifier runs, and whether location or this screen decides it.
+    ///
+    /// **The app could not be tested outside a model's own region** (Niall,
+    /// 2026-09-20). Location owns the model — see `AutoIDSettings.applyCoverage` —
+    /// so in British Columbia the UK classifier never ran, wrote nothing to the
+    /// classifier log, and there was no way to tell "switched off because you are
+    /// not in the UK" from "broken". This card answers both: it says which model is
+    /// identifying right now and why, and it lets that answer be overruled.
+    ///
+    /// It reads out rather than only offering a picker, because the state that
+    /// confused this is the one nothing was showing.
+    private var modelSection: some View {
+        Section {
+            LabeledContent("Identifying now") {
+                Text(ModelRegistry.descriptor(id: autoID.effectiveModelID)?.displayName ?? "Nothing")
+                    .foregroundStyle(autoID.effectiveModelID == nil ? .secondary : .primary)
+            }
+            if autoID.remotelyDisabled {
+                Text("Identification is switched off remotely, so nothing will run whatever is picked here.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            SettingRow("Use model",
+                       "Overrules where the phone is. Pinned, the model runs everywhere — which is how "
+                     + "a classifier gets tested away from home, and also how it names local bats after "
+                     + "foreign ones. Automatic gives the decision back to your location.") {
+                Picker("Use model", selection: Binding(
+                    get: { autoID.pinnedModelID ?? "" },
+                    set: { autoID.pinnedModelID = $0.isEmpty ? nil : $0 }
+                )) {
+                    Text("Automatic").tag("")
+                    ForEach(ModelRegistry.all) { model in
+                        Text(model.displayName).tag(model.id)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+            }
+
+            if autoID.pinnedModelID != nil {
+                Text("Pinned. Location is not deciding this, and will not switch it back.")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            } else if autoID.activeModelID == nil {
+                Text("No model covers where you are, so nothing is identifying. Pick one above to test anyway.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        } header: {
+            CardHeader("Model", "Which classifier runs, and who decides.")
+        }
     }
 
     /// Rules the app normally enforces on itself, lifted for testing.

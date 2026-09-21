@@ -684,7 +684,8 @@ struct DataModelSourcesView: View {
             VStack(alignment: .leading, spacing: 12) {
                 ForEach(ModelRegistry.all) { model in
                     licenseRow(name: model.displayName, detail: model.citation, url: model.sourceURL,
-                               licenseName: model.licenseName, licenseText: model.licenseNoticeText)
+                               licenseName: model.licenseName, licenseText: model.licenseNoticeText,
+                               endorsement: model.endorsementNotice)
                 }
                 attributionRow(name: "GBIF",
                                detail: "Species distribution maps use occurrence data from the Global Biodiversity Information Facility (GBIF), licensed CC BY 4.0.",
@@ -735,7 +736,8 @@ struct DataModelSourcesView: View {
     /// a disclosure — required to ship the notice to users, not just leave it
     /// in a source comment, without making every OSS credit permanently
     /// full-length on screen.
-    private func licenseRow(name: String, detail: String, url: URL?, licenseName: String, licenseText: String) -> some View {
+    private func licenseRow(name: String, detail: String, url: URL?, licenseName: String, licenseText: String,
+                            endorsement: String? = nil) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             if let url {
                 Link(destination: url) {
@@ -749,6 +751,11 @@ struct DataModelSourcesView: View {
                 Text(name).font(.subheadline.weight(.semibold))
             }
             Text(detail).font(.caption).foregroundStyle(.secondary)
+            // Never behind the license-text disclosure: the authors asked for this
+            // to be visible, and a disclosure is where things go to not be read.
+            if let endorsement {
+                Text(endorsement).font(.caption).foregroundStyle(.secondary)
+            }
             DisclosureGroup("\(licenseName) license text") {
                 Text(licenseText)
                     .font(.system(size: 10, design: .monospaced))

@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "port": "openbat-ios-swift",
+  "backend": "batdetect2-uk-same-v2",
+  "input": "batdetect2 example_data/audio/20180627_215323-RHIFER-LR_0_0.5.wav (resampled offline to 256 kHz)",
+  "start_seconds": 0.192,
+  "sample_rate_hz": 256000,
+  "stage": "transform only (native 256 kHz)",
+  "shape": [
+    128,
+    256
+  ],
+  "mean_absolute_error": 7.788520406393218e-08,
+  "maximum_absolute_error": 1.0251998901367188e-05,
+  "root_mean_square_error": 2.14841392676135e-07,
+  "pearson_correlation": 0.9999999999996295,
+  "reference_mean": 0.09781362116336823,
+  "native_mean": 0.09781362116336823,
+  "note": "This compares the tensor handed to the model, not model accuracy. The two sides are given identical input samples.",
+  "batdetect2_revision": "9e2697458d3b3b03c30ccd7e49ed5409c8ac330d",
+  "measured_on": "2026-09-20"
+}

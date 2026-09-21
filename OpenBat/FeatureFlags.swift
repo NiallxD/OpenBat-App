@@ -382,6 +382,11 @@ final class FeatureFlagStore {
         if !configMenuAvailable {
             clearLocalOverrides()
             UserDefaults.standard.removeObject(forKey: Self.postingCapOverrideKey)
+            // Same reasoning, and it matters more: a model pinned by hand keeps a
+            // classifier running outside the region it was trained for, which is the
+            // one override in the menu that changes what a recording is identified
+            // AS. It cannot be allowed to outlive the menu that set it.
+            UserDefaults.standard.removeObject(forKey: AutoIDSettings.keyPinnedModel)
         }
         let message = config.maintenanceMessage?.trimmingCharacters(in: .whitespacesAndNewlines)
         maintenanceMessage = (config.maintenance == true && !(message ?? "").isEmpty) ? message : nil

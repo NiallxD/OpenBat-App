@@ -14,41 +14,42 @@
 
 import SwiftUI
 
-/// The bundled representative clip. Absent from a build that hasn't had the
-/// file added yet, in which case the sheet quietly shows only user recordings
+/// The clips bundled with the app. Absent from a build that hasn't had any
+/// added yet, in which case the sheet quietly shows only user recordings
 /// rather than a broken row.
 enum BundledDemoRecording {
-    /// Any `Demo*.wav` under `OpenBat/` is picked up: the project uses
-    /// filesystem-synchronized groups, so dropping the file in needs no
+    /// Any bundled `.wav` with "demo" in its name is picked up: the project
+    /// uses filesystem-synchronized groups, so dropping a file in needs no
     /// `project.pbxproj` edit, and resources from such a group are copied flat
     /// to the bundle root — the `Demo/` subfolder is tidiness only.
     ///
-    /// Discovered by prefix rather than matched against a hardcoded name so the
-    /// clip can be re-stitched and renamed (`Demo-MYCA-2026.wav`,
-    /// `Demo-mixed-2027.wav`, …) without touching code. Sorted so a build that
-    /// somehow ships two is deterministic about which one it offers.
+    /// Matched on the name rather than a hardcoded list so a clip can be
+    /// re-stitched and renamed (`Demo-MYCA-2026.wav`, `uk_demo_bats.wav`, …)
+    /// without touching code. Case-insensitive and unanchored so neither
+    /// capitalisation nor a prefix like `uk_` hides a file. Sorted so the order
+    /// of the rows doesn't depend on bundle enumeration order.
     ///
     /// Any sample rate/channel count AVAudioFile can open will work — 384 kHz
     /// mono 16-bit matches what the app records and gives the demo the same
     /// Nyquist as a live Griff capture.
-    private static let prefix = "Demo"
+    private static let marker = "demo"
 
-    static let title = "Demo Recording"
-
-    static var url: URL? {
-        guard let urls = Bundle.main.urls(forResourcesWithExtension: "wav", subdirectory: nil) else { return nil }
+    /// Every bundled clip, not just the first: more than one ships, and a clip
+    /// the build contains but the sheet never offers is indistinguishable from
+    /// a clip that failed to bundle.
+    static var urls: [URL] {
+        guard let urls = Bundle.main.urls(forResourcesWithExtension: "wav", subdirectory: nil) else { return [] }
         return urls
-            .filter { $0.deletingPathExtension().lastPathComponent.hasPrefix(prefix) }
+            .filter { $0.deletingPathExtension().lastPathComponent.lowercased().contains(marker) }
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
-            .first
     }
 
-    /// Filename without extension, shown as the row's subtitle and used as the
+    /// Filename without extension, shown as the row's title and used as the
     /// name the status line and mic explainer report. Deliberately not parsed
     /// for a species code: a stitched clip may hold several species, and a title
     /// inferred from the filename would then be confidently wrong.
-    static var stem: String? {
-        url?.deletingPathExtension().lastPathComponent
+    static func stem(for url: URL) -> String {
+        url.deletingPathExtension().lastPathComponent
     }
 }
 
@@ -69,19 +70,22 @@ struct DemoModeView: View {
 
     var body: some View {
             List {
-                if let bundled = BundledDemoRecording.url {
+                let bundled = BundledDemoRecording.urls
+                if !bundled.isEmpty {
                     Section {
-                        Button {
-                            onSelect(bundled, BundledDemoRecording.stem ?? BundledDemoRecording.title)
-                        } label: {
-                            row(
-                                title: BundledDemoRecording.title,
-                                subtitle: BundledDemoRecording.stem ?? "Representative bat activity",
-                                icon: "star.fill"
-                            )
+                        ForEach(bundled, id: \.self) { url in
+                            Button {
+                                onSelect(url, BundledDemoRecording.stem(for: url))
+                            } label: {
+                                row(
+                                    title: BundledDemoRecording.stem(for: url),
+                                    subtitle: "Representative bat activity",
+                                    icon: "star.fill"
+                                )
+                            }
                         }
                     } header: {
-                        Text("Default")
+                        Text(bundled.count == 1 ? "Default" : "Bundled Clips")
                     } footer: {
                         Text("Feeds this file into the detector in place of the microphone. Everything else — spectrogram, pulse detection, species ID and listening — runs exactly as it does live. Recording is disabled while a demo is running.")
                     }

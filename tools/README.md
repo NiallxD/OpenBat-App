@@ -85,3 +85,48 @@ Offline scripts. Nothing here is part of the app target or runs on device.
   tools/batsim.sh -s 23 -e 18 -d 3       # steeper, shorter pulses
   tools/batsim.sh --buzz -o /tmp/b.wav -P  # write a file, don't play
   ```
+
+- **`batdetect2_parity/`** — proves OpenBat's Swift BatDetect2 preprocessing
+  produces the same tensor as the reference Python pipeline, which BatDetect2's
+  authors asked for directly. `build.sh` compiles a dumper against the app's own
+  DSP sources; `compare.py` feeds both sides identical samples and reports the
+  error over the 128×256 tensor. Needs the official BatDetect2 v2 environment.
+  See `batdetect2_parity/README.md`.
+
+  ```
+  tools/batdetect2_parity/build.sh
+  python3 tools/batdetect2_parity/compare.py --input capture.wav \
+      --batdetect2-source ~/src/batdetect2
+  ```
+
+- **`make_uk_demo_clip.py`** — rebuilds the bundled UK demo clip
+  (`OpenBat/Demo/uk_demo_bats.wav`) from BatDetect2's own example recordings.
+  **It must stay at 384 kHz**: demo mode plays a file at its own rate, and
+  `ModelInputSpec.nativeSampleRate` only classifies at 384 kHz, so an off-rate
+  demo clip detects calls and identifies none of them — which is what the
+  previous 500 kHz clip did. The script's header has the rest of the reasoning.
+
+  ```
+  python3 tools/make_uk_demo_clip.py \
+      --first ~/Downloads/20180627_215323-RHIFER-LR_0_0.5.wav \
+      --second ~/Downloads/20180530_213516-EPTSER-LR_0_0.5.wav
+  ```
+
+- **`make_uk_species_demo_clip.py`** — builds the ten-species UK demo clip
+  (`OpenBat/Demo/Demo-UK-Species-2026.wav`, 35 s) from Niall's own bat-walk
+  library. Two species show that the pipeline runs; ten show what the app is
+  for. The windows are picked from `tools/bd2_eval/results/run1/reference.jsonl`
+  — for each species, the 2 s stretch with the most confident detections of it
+  and none of anything else — so each block lands as one pass with one answer.
+  Same 384 kHz rule as above, and the same do-not-normalise rule, which matters
+  more here because the ten sources span 32 dB. The header has the rest,
+  including which species were left out and why.
+
+  ```
+  python3 tools/make_uk_species_demo_clip.py            # --library defaults to ~/Downloads/BatRecordings
+  ```
+
+  Verified 2026-09-21 by running the stitched clip back through
+  `bd2_eval/run_reference.py`: all ten blocks still come back as their own
+  species (PIPPYG 0.87, RHIFER 0.79 … MYOMYS 0.53), and the gaps produce no
+  confident detection at all.

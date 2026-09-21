@@ -86,9 +86,20 @@ struct ModelDetailView: View {
     /// a control, so it doesn't fall under the no-paragraph rule — it is the
     /// card's content. It was in a footer under the metadata, where it read as
     /// small print about the version number.
+    ///
+    /// The licence name and `endorsementNotice` sit here rather than only in the
+    /// app-info credits list because this is the screen someone reads when they
+    /// are deciding to use a model: both facts are about *this* model, and the
+    /// authors asked for them (BatDetect2, 2026-09-14). The licence is a labelled
+    /// row so "non-commercial use only" can't be skimmed past as part of a
+    /// paragraph of credit.
     private var citationSection: some View {
         Section {
             Text(model.citation)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            LabeledContent("Licence", value: model.licenseName)
+            Text(model.endorsementNotice)
                 .font(.footnote)
                 .foregroundStyle(.secondary)
             if let url = model.sourceURL {

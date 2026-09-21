@@ -94,7 +94,11 @@ nonisolated enum CallAnalysis {
     // measured from a flat dB threshold any more — they come from the
     // dominant-frequency RIDGE (see the ridge decomposition below), which is
     // what *Identifying BC's Bats* / Kaleidoscope actually trace.
-    private static let durationThresholdDB: Float = 22
+    // Shared with the pulse view rather than restated: the two screens measure the
+    // same thing from the same STFT, and a call that reads 52 ms in one and 29 ms in
+    // the other is a bug a person finds by opening both. See its definition for why
+    // 22 and what else it bounds.
+    private static var durationThresholdDB: Float { PulseImageRenderer.durationThresholdDB }
     /// The measurement floor is CAPPED here rather than taken straight from
     /// the display noise-floor slider: a display floor of 0.5 (≈−24 dB) would
     /// otherwise cap analysis above the fainter call energy Kaleidoscope
