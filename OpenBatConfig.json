@@ -8,6 +8,8 @@
     "automaticID": true,
     "rangeMaps": true,
     "locationWeighting": true,
+    "blog": true,
+    "mapFilter": true,
     "configMenu": true
   },
 
