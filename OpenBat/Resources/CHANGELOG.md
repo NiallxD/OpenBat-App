@@ -32,10 +32,19 @@
   interrupts everybody, before they reach the detector.
 -->
 
-## v0.9.8 (Build 251)
+## v0.9.8 (Build 264)
 
 ### New
-- **New Item Here** - 
+- **A blog, in the field guide** — Posts from the website, reachable from a list, and pinned to the places they're about on the guide's globe.
+- **A dial on the globe** — Turns it between showing where species live and where blog posts are about, so the same globe answers both questions instead of needing two.
+- **Classifier Analysis, on the Recordings heading** — Opens a recording through the classifier's own working instead of the player: every call re-run through the same model with the session's own stamped priors, the raw score shown beside the weighted one, and which calls the weighting changed.
+
+### Changed
+- **The pulse list is names, not gaps** — It used to try to show a picture per call, but a pass only draws one every couple of seconds — drawing is the slowest thing on the capture queue, and holding it for a picture costs real detections. The list now shows what each call was named and what it nearly was, numbered, and it stays on the pass you tapped rather than drifting to whatever is being identified right now.
+
+### Fixed
+- **Long calls are no longer clipped or mismeasured** — The capture span and the measured envelope both came from the display window slider, which capped any measured call at about 17 ms; a 58 ms horseshoe was truncated by a display preference. The span now comes from the model's own region.
+- **Opening a recording mid-session no longer crashes** — Playback and live capture both want the microphone. A recording row now offers to end the session first instead of opening straight into a crash.
 
 ## v0.9.7 (Build 251)
 

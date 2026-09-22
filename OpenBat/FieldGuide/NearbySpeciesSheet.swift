@@ -65,7 +65,10 @@ struct NearbySpeciesSheet: View {
                     // already-resolved list, no region pins, no near-you pill —
                     // and comparison is deliberately not offered here at all
                     // (see the `.unavailable` below).
-                    case .region, .nearby, .compare:
+                    // The blog joins that list: this sheet shows one resolved
+                    // list of species, has no search field, and so has nothing
+                    // that could reach a post.
+                    case .region, .nearby, .compare, .blogList, .blogPost:
                         EmptyView()
                     }
                 }

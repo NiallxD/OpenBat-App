@@ -100,6 +100,13 @@ struct WavPlayerView: View {
     /// or the plain WAV as a fallback) drives the presented share sheet.
     @State private var shareItem: ShareItem?
     @State private var inatObservation: INatObservation?
+    /// Mirrors `recording.isFavorite` into local state so the star flips the
+    /// instant it's tapped — `recording` itself is an immutable snapshot for
+    /// this screen's lifetime (same reason `WavFileInfoCard`'s species edit
+    /// re-reads GUANO rather than expecting `recording` to update), and a
+    /// toggle button needs to look pressed right away, unlike a correction
+    /// sheet's close-and-reopen cadence.
+    @State private var isFavorite = false
     private struct ShareItem: Identifiable { let id = UUID(); let url: URL }
 
     /// The fixed tile pyramid, built once the overview exists (it measures
@@ -297,6 +304,24 @@ struct WavPlayerView: View {
         .accessibilityLabel("Colour palette")
     }
 
+    /// Same pill treatment as `palettePill`, beside it in the Spectrogram
+    /// header — favouriting is what makes a recording eligible for Demo Mode
+    /// (see `Recording.isFavorite`).
+    private var favoriteButton: some View {
+        Button(action: toggleFavorite) {
+            Image(systemName: isFavorite ? "star.fill" : "star")
+                .font(.callout)
+                .frame(width: 18, height: 18)
+        }
+        .tint(isFavorite ? Color.batAccent : .secondary)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(.ultraThinMaterial, in: Capsule())
+        .accessibilityLabel(isFavorite
+            ? "Favorited — shows in Demo Mode. Tap to remove."
+            : "Not favorited. Tap to favorite and show in Demo Mode.")
+    }
+
     /// Prepares the export item off the main actor (file copy + PNG encode +
     /// zip), then presents the share sheet. Bundles the whole-file overview
     /// image regardless of hide-silence, so the shared PNG is the full
@@ -310,6 +335,11 @@ struct WavPlayerView: View {
             let item = WavExport.makeShareItem(wavURL: url, overview: image, baseName: baseName)
             await MainActor.run { shareItem = ShareItem(url: item) }
         }
+    }
+
+    private func toggleFavorite() {
+        isFavorite.toggle()
+        store.setFavorite(recordingID: recording.id, isFavorite: isFavorite)
     }
 
     /// The share menu's iNaturalist entry, or nil when posting is switched off.
@@ -452,7 +482,10 @@ struct WavPlayerView: View {
                 }
             }
         }
-        .onAppear { load() }
+        .onAppear {
+            isFavorite = recording.isFavorite
+            load()
+        }
         .onDisappear {
             followTask?.cancel()
             // Leaving the screen must end an in-flight iCloud wait too — it
@@ -673,8 +706,14 @@ struct WavPlayerView: View {
                 // Palette pill in the header, matching the Detector screen's
                 // spectrogram header (its palette lives in a header pill too);
                 // this slot used to hold nothing and the palette lived down in
-                // the transport controls (now the Share button).
-                palettePill
+                // the transport controls (now the Share button). Favourite
+                // sits beside it — it used to be a transport button, but that
+                // put a picker-of-sorts (in/out of Demo Mode) among the
+                // playback controls rather than the file's own header.
+                HStack(spacing: 8) {
+                    favoriteButton
+                    palettePill
+                }
             }
                 .padding(.horizontal, 8)
                 .padding(.top, 8)

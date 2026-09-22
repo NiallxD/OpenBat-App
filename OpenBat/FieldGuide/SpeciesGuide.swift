@@ -337,8 +337,12 @@ extension GuideSpecies {
     }
 }
 
-private extension String {
+extension String {
     /// Case/diacritic-insensitive normal form for matching.
+    ///
+    /// Not private any more: `BlogPost.searchScore` matches against the same
+    /// query in the same results list, and two scorers folding differently would
+    /// mean a query that finds a species but not the post about it.
     var folded: String { folding(options: [.caseInsensitive, .diacriticInsensitive],
                                  locale: .current) }
 }

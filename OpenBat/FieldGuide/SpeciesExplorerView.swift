@@ -33,14 +33,31 @@ enum SpeciesGuideDestination: Hashable {
     /// it lives in two different stacks (the guide's and
     /// `NearbySpeciesSheet`'s) and neither owns it.
     case compare(GuideSpecies, GuideSpecies)
+    /// The blog feed, from the button beside the search field.
+    case blogList
+    /// One post. Routed here rather than from a destination declared inside the
+    /// reader, because a post can link to another post and the reader would then
+    /// be declaring a second destination for a type the stack already routes —
+    /// see the note on `BlogPostView.onOpenPost`.
+    case blogPost(BlogPost)
 }
 
 struct SpeciesExplorerView: View {
     let store: SpeciesGuideStore
     let presenceStore: SpeciesPresenceStore
+    let blogStore: BlogStore
+    /// The section's own stack, so the reader can push the next post from a link
+    /// inside its HTML — which is not a tap on a `NavigationLink` and so cannot
+    /// push by itself.
+    @Binding var path: NavigationPath
     /// Where to pre-pan the globe — the user's current location, if known.
     /// Falls back to a fixed mid-Atlantic center when nil (no fix yet / denied).
     let userCoordinate: CLLocationCoordinate2D?
+
+    /// Read where each feature is actually used, not cached once — see
+    /// `FeatureFlagStore.isEnabled`. The remote answer can land a moment after
+    /// this screen first appears.
+    @Environment(FeatureFlagStore.self) private var featureFlags
 
     @State private var query = ""
     /// Measured height of the search results, so the dropdown can be as tall as
@@ -68,6 +85,8 @@ struct SpeciesExplorerView: View {
     /// firing and mutating `camera` on an off-screen view for the rest of its
     /// ~`swoopDuration` regardless of navigation.
     @State private var swoopTimer: Timer?
+    /// Which dial position is showing. 0 is always Species.
+    @State private var dialSelection = 0
 
     /// Ceiling on the results dropdown. Roughly four rows — enough that the list
     /// visibly shrinks as the query narrows, while leaving the globe readable
@@ -85,9 +104,13 @@ struct SpeciesExplorerView: View {
     private static let swoopDuration = 2.0
     private static let swoopStepInterval = 1.0 / 60.0
 
-    init(store: SpeciesGuideStore, presenceStore: SpeciesPresenceStore, userCoordinate: CLLocationCoordinate2D? = nil) {
+    init(store: SpeciesGuideStore, presenceStore: SpeciesPresenceStore,
+         blogStore: BlogStore, path: Binding<NavigationPath>,
+         userCoordinate: CLLocationCoordinate2D? = nil) {
         self.store = store
         self.presenceStore = presenceStore
+        self.blogStore = blogStore
+        self._path = path
         self.userCoordinate = userCoordinate
         _camera = State(initialValue: .camera(
             MapCamera(centerCoordinate: Self.openingCenter, distance: 60_000_000)
@@ -124,6 +147,73 @@ struct SpeciesExplorerView: View {
             .map(\.0)
     }
 
+    /// Posts matching the same query, scored on the same scale so a post that
+    /// matches by title sits among the species rather than always below them.
+    /// Only cached posts are searchable — nothing here goes to the network.
+    private var postResults: [BlogPost] {
+        // Off means off everywhere a post could surface, not just the button —
+        // see `Feature.blog`'s doc comment.
+        guard featureFlags.isEnabled(.blog) else { return [] }
+        let trimmed = query.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return [] }
+        return blogStore.posts
+            .compactMap { p in p.searchScore(for: trimmed).map { (p, $0) } }
+            .sorted { $0.1 > $1.1 }
+            .map(\.0)
+    }
+
+    private var hasResults: Bool { !results.isEmpty || !postResults.isEmpty }
+
+    /// Species first — it is the guide's own content and what this screen is for
+    /// — then whatever the website declares, in its order.
+    ///
+    /// Blog categories are left off entirely when `.blog` is remotely disabled,
+    /// not merely unreachable through the button — a category left on the dial
+    /// would still turn the globe to blog pins and let a tap push a post, which
+    /// is the whole feature back again through a different door. Species alone
+    /// is also what a dial with `.mapFilter` off effectively shows, so the two
+    /// switches degrade to the same map by different routes.
+    private var dialCategories: [DialCategory] {
+        guard featureFlags.isEnabled(.blog) else { return [.species] }
+        return [.species] + blogStore.feed.categoryList.map {
+            DialCategory(categoryID: $0.id, label: $0.label)
+        }
+    }
+
+    private var selectedDial: DialCategory {
+        dialCategories.indices.contains(dialSelection) ? dialCategories[dialSelection] : .species
+    }
+
+    /// Species pins show only at position zero. Everywhere else the globe belongs
+    /// to that category's posts — showing both at once would make the map a
+    /// jumble and defeat the filter.
+    private var showingSpecies: Bool { selectedDial.categoryID == nil }
+
+    /// What the dial's readout says is on the map. Species counts REGIONS — the
+    /// position draws the guide's region shapes and the pins on them, not one pin
+    /// per species — so saying "species" here would misreport it by an order of
+    /// magnitude.
+    private var dialCountDescription: String {
+        if showingSpecies {
+            let n = store.guide.regions.count
+            return n == 1 ? "1 region" : "\(n) regions"
+        }
+        let n = pinnedPosts.count
+        guard n > 0 else {
+            // A category can hold posts and still pin none of them — an explainer
+            // has nowhere to be. Saying "nothing here yet" would be wrong twice
+            // over: there IS something, and it is not coming later.
+            let total = selectedDial.categoryID.map { blogStore.feed.posts(in: $0).count } ?? 0
+            return total > 0 ? "\(total) to read, none on the map" : "nothing here yet"
+        }
+        return n == 1 ? "1 on the map" : "\(n) on the map"
+    }
+
+    private var pinnedPosts: [BlogPost] {
+        guard let id = selectedDial.categoryID else { return [] }
+        return blogStore.feed.pinnedPosts(in: id)
+    }
+
     var body: some View {
         // The globe fills the screen and the search field floats ON it as a glass
         // capsule. It used to be a row in a VStack above the globe, which gave it
@@ -151,7 +241,15 @@ struct SpeciesExplorerView: View {
             .simultaneousGesture(TapGesture().onEnded { searchFieldFocused = false })
             .overlay(alignment: .top) {
                 VStack(spacing: 8) {
-                    searchPill
+                    // `.fixedSize` vertically so the row is exactly as tall as
+                    // the search pill wants to be, and the button then fills it.
+                    // Without it the row would have no natural height for the
+                    // button's `maxHeight: .infinity` to resolve against.
+                    HStack(spacing: 8) {
+                        searchPill
+                        if featureFlags.isEnabled(.blog) { blogButton }
+                    }
+                    .fixedSize(horizontal: false, vertical: true)
                     if !query.trimmingCharacters(in: .whitespaces).isEmpty {
                         searchResults
                             // Grows downward out of the pill rather than fading in
@@ -189,6 +287,22 @@ struct SpeciesExplorerView: View {
             // No reading column (Niall, 2026-09-02): a globe is not reading
             // matter, and taking 45% of a landscape iPad off it leaves a small
             // world in a large empty room. See `PageColumn`.
+        // **The dial needs the feed, and the dial is on this screen.** The blog
+        // list used to be the only thing that loaded it, on the reasoning that
+        // nothing else needed it — true until the dial started building its
+        // positions from the categories. Until you had opened the blog once, the
+        // dial offered Species and nothing else, which looks exactly like a
+        // feature that does not work.
+        //
+        // Cheap enough to sit on the guide tab's first screen: the cached read is
+        // off the main thread and the refresh is skipped unless a day has passed.
+        .task {
+            // Off means the app does not fetch it, not just that it hides what
+            // it already has — see `Feature.blog`.
+            guard featureFlags.isEnabled(.blog) else { return }
+            await blogStore.loadCached()
+            await blogStore.refresh()
+        }
         .navigationDestination(for: SpeciesGuideDestination.self) { destination in
             switch destination {
             case .region(let region):
@@ -203,6 +317,12 @@ struct SpeciesExplorerView: View {
             case .compare(let first, let second):
                 SpeciesComparisonView(first: first, second: second,
                                       store: store, presenceStore: presenceStore)
+            case .blogList:
+                BlogListView(store: blogStore) { path.append(SpeciesGuideDestination.blogPost($0)) }
+            case .blogPost(let post):
+                BlogPostView(post: post, store: blogStore) {
+                    path.append(SpeciesGuideDestination.blogPost($0))
+                }
             case .nearby:
                 SpeciesCollectionView(
                     title: "Bats Near You",
@@ -357,6 +477,34 @@ struct SpeciesExplorerView: View {
         .onTapGesture { searchFieldFocused = true }
     }
 
+    /// Sits on the search row because that is where someone is already looking
+    /// when they want to read rather than identify. Same glass capsule as the
+    /// field beside it, so the two read as one control strip rather than as a
+    /// field with something bolted to it.
+    private var blogButton: some View {
+        NavigationLink(value: SpeciesGuideDestination.blogList) {
+            HStack(spacing: 5) {
+                Image(systemName: "text.book.closed")
+                Text("Blog")
+            }
+            .font(.subheadline.weight(.medium))
+            .padding(.horizontal, 14)
+            // **Height comes from the row, not from matching paddings.** The
+            // capsule beside this one is sized by a `TextField` at body size;
+            // this is a label at subheadline. Giving both the same vertical
+            // padding therefore produced two capsules of visibly different
+            // height — the paddings matched and the things inside them did not.
+            // Filling the row's height instead makes the search field the one
+            // that decides, which is what the eye expects of a control strip.
+            .frame(maxHeight: .infinity)
+            .liquidGlass(interactive: true, in: Capsule())
+        }
+        .buttonStyle(.plain)
+        // Horizontal only: the label must not wrap when the field is wide, but
+        // the vertical axis is deliberately left flexible for the frame above.
+        .fixedSize(horizontal: true, vertical: false)
+    }
+
     /// The matches, in a card hanging below the search pill.
     ///
     /// A `ScrollView`/`LazyVStack` rather than a `List`, for two reasons that
@@ -368,11 +516,11 @@ struct SpeciesExplorerView: View {
     /// query narrows, which is the whole feedback the user is after.
     @ViewBuilder private var searchResults: some View {
         VStack(spacing: 0) {
-            if results.isEmpty {
+            if !hasResults {
                 // A row, not a `ContentUnavailableView`: that type is built to
                 // own a screen, and in a dropdown it renders as a large centred
                 // island of empty space.
-                Text("No species match \u{201C}\(query.trimmingCharacters(in: .whitespaces))\u{201D}")
+                Text("Nothing matches \u{201C}\(query.trimmingCharacters(in: .whitespaces))\u{201D}")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -394,6 +542,30 @@ struct SpeciesExplorerView: View {
                                     .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
+                        }
+                        // Posts after species, under a heading. The guide's
+                        // search is a species search that also finds writing —
+                        // putting a post above the bat someone just typed the
+                        // name of would be answering a different question.
+                        if !postResults.isEmpty {
+                            if !results.isEmpty { Divider().padding(.leading, 14) }
+                            Text("From the blog")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, 14)
+                                .padding(.top, 10)
+                                .padding(.bottom, 4)
+                            ForEach(Array(postResults.enumerated()), id: \.element.id) { index, post in
+                                if index > 0 { Divider().padding(.leading, 14) }
+                                NavigationLink(value: SpeciesGuideDestination.blogPost(post)) {
+                                    BlogSearchRow(post: post)
+                                        .padding(.horizontal, 14)
+                                        .padding(.vertical, 10)
+                                        .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                            }
                         }
                     }
                     // Measured, and the height below is driven from it. A
@@ -438,7 +610,7 @@ struct SpeciesExplorerView: View {
 
     private var globe: some View {
         Map(position: $camera) {
-            ForEach(store.guide.regions) { region in
+            ForEach(showingSpecies ? store.guide.regions : []) { region in
                 if region.polygons.isEmpty {
                     // No boundary data yet for this region — fall back to a pin.
                     Annotation(region.name, coordinate: region.coordinate) {
@@ -457,6 +629,16 @@ struct SpeciesExplorerView: View {
                         NavigationLink(value: SpeciesGuideDestination.region(region)) {
                             RegionLabel(name: region.name, color: regionColor(region),
                                         count: store.guide.species(in: region).count)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            ForEach(pinnedPosts) { post in
+                if let location = post.location {
+                    Annotation(location.name, coordinate: location.coordinate) {
+                        NavigationLink(value: SpeciesGuideDestination.blogPost(post)) {
+                            BlogPin(post: post)
                         }
                         .buttonStyle(.plain)
                     }
@@ -481,6 +663,21 @@ struct SpeciesExplorerView: View {
         // bar used to be. The bottom is unchanged — see the ORDER MATTERS
         // note above.
         .ignoresSafeArea(edges: [.top, .bottom])
+        // The dial owns whether it is open; it is a knob in the corner until
+        // tapped. Above the footer in the overlay order so the open face is not
+        // cut off by it.
+        //
+        // `.mapFilter` off means the knob itself is gone, not merely inert — a
+        // dial nobody can turn is a dead corner of the screen, and `dialSelection`
+        // staying at its initial 0 leaves `selectedDial` at Species regardless,
+        // which is exactly the map this screen showed before the dial existed.
+        .overlay {
+            if featureFlags.isEnabled(.mapFilter) {
+                GlobeDial(categories: dialCategories,
+                          selection: $dialSelection,
+                          countDescription: dialCountDescription)
+            }
+        }
         .overlay(alignment: .bottom) { globeFooter }
         .opacity(globeOpacity)
         .onAppear {
@@ -660,6 +857,29 @@ private struct UserLocationDot: View {
 }
 
 /// Bat pin used for regions on the globe — species count badged alongside.
+/// A post's pin. Deliberately not a `RegionPin` in another colour: a region pin
+/// is a count of bats and this is one piece of writing, so it carries the blog's
+/// own glyph and the post's place name rather than a number badge.
+private struct BlogPin: View {
+    let post: BlogPost
+
+    var body: some View {
+        VStack(spacing: 2) {
+            Image(systemName: "text.book.closed.fill")
+                .font(.system(size: 15))
+                .foregroundStyle(.white)
+                .frame(width: 32, height: 32)
+                .background(.indigo.gradient, in: Circle())
+                .shadow(radius: 3)
+            Text(post.location?.name ?? post.title)
+                .font(.caption2.weight(.medium))
+                .foregroundStyle(.white)
+                .shadow(radius: 2)
+                .fixedSize()
+        }
+    }
+}
+
 private struct RegionPin: View {
     let count: Int
 

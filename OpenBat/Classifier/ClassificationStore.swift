@@ -286,6 +286,13 @@ struct Recording: Codable, Identifiable, NoIDFilterable {
     /// nil means no upload was ever attempted (recorded before this field existed,
     /// or while community-science contribution was off) — see UploadStatus.swift.
     var uploadStatus: UploadStatus? = nil
+    /// Set from the WAV player's favourite button. The only thing this drives
+    /// today is which recordings Demo Mode offers — everything is a candidate
+    /// for it otherwise, and a device with months of recordings shouldn't hand
+    /// the demo picker (or, later, a favourites page) the whole library.
+    /// Defaults false so records written before this existed decode as
+    /// unfavourited rather than failing to decode.
+    var isFavorite: Bool = false
     /// See `PassRecord.isUnidentified` — never classified, as against
     /// classified and inconclusive.
     var isUnidentified: Bool { species == "UNID" }
@@ -293,6 +300,59 @@ struct Recording: Codable, Identifiable, NoIDFilterable {
     /// The model's confident "this wasn't a bat" — see `PassRecord.isNoise`,
     /// whose meaning this mirrors for a whole recording.
     var isNoise: Bool { species == "NOISE" }
+
+    /// Restores the memberwise initializer construction sites rely on — a
+    /// struct loses the compiler-synthesized one the moment it declares ANY
+    /// custom initializer of its own, `init(from:)` below included.
+    init(id: UUID, date: Date, durationSeconds: Double, species: String,
+         commonName: String, confidence: Float?, rawSpeciesConfidence: Float? = nil,
+         pulseCount: Int, sessionID: UUID?, latitude: Double? = nil, longitude: Double? = nil,
+         relativeWavPath: String, spectrogramImageFile: String? = nil,
+         uploadStatus: UploadStatus? = nil, isFavorite: Bool = false) {
+        self.id = id
+        self.date = date
+        self.durationSeconds = durationSeconds
+        self.species = species
+        self.commonName = commonName
+        self.confidence = confidence
+        self.rawSpeciesConfidence = rawSpeciesConfidence
+        self.pulseCount = pulseCount
+        self.sessionID = sessionID
+        self.latitude = latitude
+        self.longitude = longitude
+        self.relativeWavPath = relativeWavPath
+        self.spectrogramImageFile = spectrogramImageFile
+        self.uploadStatus = uploadStatus
+        self.isFavorite = isFavorite
+    }
+
+    /// Custom decode for `isFavorite` alone. A property's `= false` default is
+    /// only ever used when Swift *constructs* a `Recording` directly — the
+    /// synthesized `init(from:)` still calls plain `decode(forKey:)` for it and
+    /// throws on a missing key, same as any other required field. That silently
+    /// failed the WHOLE `[Recording]` array decode (`ClassificationStore`'s
+    /// `decode` swallows the error with `try?`), which is why every recording —
+    /// not just favourites — briefly vanished from Sessions after this field was
+    /// added. `decodeIfPresent(...) ?? false` is what the `= false` above reads
+    /// as it should have all along.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        date = try c.decode(Date.self, forKey: .date)
+        durationSeconds = try c.decode(Double.self, forKey: .durationSeconds)
+        species = try c.decode(String.self, forKey: .species)
+        commonName = try c.decode(String.self, forKey: .commonName)
+        confidence = try c.decodeIfPresent(Float.self, forKey: .confidence)
+        rawSpeciesConfidence = try c.decodeIfPresent(Float.self, forKey: .rawSpeciesConfidence)
+        pulseCount = try c.decode(Int.self, forKey: .pulseCount)
+        sessionID = try c.decodeIfPresent(UUID.self, forKey: .sessionID)
+        latitude = try c.decodeIfPresent(Double.self, forKey: .latitude)
+        longitude = try c.decodeIfPresent(Double.self, forKey: .longitude)
+        relativeWavPath = try c.decode(String.self, forKey: .relativeWavPath)
+        spectrogramImageFile = try c.decodeIfPresent(String.self, forKey: .spectrogramImageFile)
+        uploadStatus = try c.decodeIfPresent(UploadStatus.self, forKey: .uploadStatus)
+        isFavorite = try c.decodeIfPresent(Bool.self, forKey: .isFavorite) ?? false
+    }
     var coordinate: CLLocationCoordinate2D? {
         guard let latitude, let longitude else { return nil }
         return .init(latitude: latitude, longitude: longitude)
@@ -740,6 +800,17 @@ final class ClassificationStore {
         recordings[index].commonName = SpeciesInfo.commonName[resolved] ?? resolved
         // Forced: a deliberate user edit, and the only feedback that it took is
         // the list updating — it must survive a force-quit straight afterwards.
+        persistRecordings(force: true)
+    }
+
+    // MARK: Favourite
+
+    /// Flips the WAV player's favourite button. Forced for the same reason as
+    /// `setManualSpecies`: the button itself is the only feedback the tap
+    /// took, and it must survive a force-quit right after.
+    func setFavorite(recordingID: UUID, isFavorite: Bool) {
+        guard let index = recordings.firstIndex(where: { $0.id == recordingID }) else { return }
+        recordings[index].isFavorite = isFavorite
         persistRecordings(force: true)
     }
 

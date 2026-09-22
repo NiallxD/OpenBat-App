@@ -266,6 +266,11 @@ struct ContentView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var speciesGuide = SpeciesGuideStore()
     @State private var speciesPresence = SpeciesPresenceStore()
+    /// The blog feed. Loaded by the guide tab's own screen rather than at launch:
+    /// the globe's dial builds its positions from the feed's categories, so the
+    /// first screen of that tab does need it — but nothing before it does, and the
+    /// detector must not wait on a network call it has no use for.
+    @State private var blogStore = BlogStore()
 
     var body: some View {
         tabHost
@@ -1133,7 +1138,10 @@ struct ContentView: View {
                                             // opening a player that cannot have the audio session.
                                             onRequestEndSession: { showEndSessionConfirm = true })
                 case .species:
-                    SpeciesExplorerView(store: speciesGuide, presenceStore: speciesPresence, userCoordinate: location.currentCoordinate)
+                    SpeciesExplorerView(store: speciesGuide, presenceStore: speciesPresence,
+                                        blogStore: blogStore,
+                                        path: pathBinding(for: .species),
+                                        userCoordinate: location.currentCoordinate)
                 }
             }
             // The sun clock belongs to the APP, not to the detector (Niall,

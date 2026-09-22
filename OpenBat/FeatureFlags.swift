@@ -76,6 +76,17 @@ enum Feature: String, CaseIterable, Identifiable, Sendable {
     /// because hiding a map is cosmetic and changing how a call is scored is
     /// not.
     case locationWeighting = "locationWeighting"
+    /// The blog feed reachable from the field guide — the list, the reader, its
+    /// posts in search, and its posts' pins on the globe. One switch for all of
+    /// it, because a post is reachable from any of those and leaving one open
+    /// would leave the whole feature reachable through it.
+    case blog = "blog"
+    /// The globe's tuning dial — the knob, the ring and the pill above it. Off
+    /// leaves the globe showing species pins only, exactly as it did before the
+    /// dial existed; it does not touch whether blog posts exist or are
+    /// reachable elsewhere, only whether the map can be turned away from
+    /// Species.
+    case mapFilter = "mapFilter"
 
     var id: String { rawValue }
 
@@ -86,6 +97,8 @@ enum Feature: String, CaseIterable, Identifiable, Sendable {
         case .automaticID:       "Automatic identification"
         case .rangeMaps:         "Distribution maps"
         case .locationWeighting: "Location weighting"
+        case .blog:              "Blog"
+        case .mapFilter:         "Map filter"
         }
     }
 
@@ -100,6 +113,10 @@ enum Feature: String, CaseIterable, Identifiable, Sendable {
             "The maps in the field guide showing where a species lives."
         case .locationWeighting:
             "Adjusting a species' confidence by whether it lives where you are standing."
+        case .blog:
+            "The blog list, its posts, and their pins on the field guide's globe."
+        case .mapFilter:
+            "The dial that turns the globe between species and blog categories. Off, the globe just shows species."
         }
     }
 
@@ -112,6 +129,8 @@ enum Feature: String, CaseIterable, Identifiable, Sendable {
         case .automaticID:       "Species identification is temporarily switched off."
         case .rangeMaps:         "Distribution maps are temporarily unavailable."
         case .locationWeighting: "Location weighting is temporarily switched off."
+        case .blog:               "The blog is temporarily unavailable."
+        case .mapFilter:          "The map filter is temporarily unavailable."
         }
     }
 }

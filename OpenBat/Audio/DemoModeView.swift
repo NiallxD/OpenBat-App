@@ -4,8 +4,11 @@
 //
 //  File picker for demo mode: choose what feeds the pipeline in place of the
 //  microphone. The bundled clip sits at the top as the default — it's hand
-//  picked to be representative, which no arbitrary user recording is — with the
-//  user's own recordings listed below for demoing against real local species.
+//  picked to be representative, which no arbitrary user recording is — with
+//  the user's own FAVOURITED recordings listed below for demoing against real
+//  local species. Favouriting (a star in the WAV player, next to Share) is
+//  what puts a recording here — every recording used to qualify, which meant
+//  scrolling months of fieldwork to find the clip worth demoing.
 //
 //  Tapping a row starts the demo immediately (see `onSelect` in ContentView):
 //  the demo is the point of opening this sheet, so a separate confirm step
@@ -91,9 +94,9 @@ struct DemoModeView: View {
                     }
                 }
 
-                Section("Your Recordings") {
+                Section {
                     if playableRecordings.isEmpty {
-                        Text("No recordings yet.")
+                        Text("No favourite recordings yet. Star one in the player to add it here.")
                             .foregroundStyle(.secondary)
                     } else {
                         ForEach(playableRecordings) { recording in
@@ -110,6 +113,10 @@ struct DemoModeView: View {
                             }
                         }
                     }
+                } header: {
+                    Text("Favourite Recordings")
+                } footer: {
+                    Text("Only recordings you've favourited (⭐ in the player) show up here, so the list stays short enough to actually pick from.")
                 }
             }
             .pageBackground()
@@ -117,12 +124,14 @@ struct DemoModeView: View {
             .navigationBarTitleDisplayMode(.inline)
     }
 
-    /// `classStore.recordings` is already newest-first. Capped rather than
-    /// unbounded: this is a demo picker, not the Sessions browser, and a device
-    /// with thousands of recordings shouldn't build a thousand rows to find the
-    /// one from last night.
+    /// Favourited recordings only (see `Recording.isFavorite`) — this used to
+    /// be every recording, which meant a season of fieldwork was one long
+    /// scroll to find the clip worth demoing. `classStore.recordings` is
+    /// already newest-first; capped on top of the filter for the same reason
+    /// the old list was capped: a device with hundreds of favourites
+    /// shouldn't build hundreds of rows for a demo picker.
     private var playableRecordings: [Recording] {
-        Array(classStore.recordings.prefix(50))
+        Array(classStore.recordings.filter(\.isFavorite).prefix(50))
     }
 
     private func subtitle(for recording: Recording) -> String {
