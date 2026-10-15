@@ -92,6 +92,45 @@ final class AudioEngineController {
     /// does stop it running away into hiss. See Context.md §6.
     private(set) var isOutputOnSpeaker = false
 
+    /// Whether the live capture stream is carrying an OpenBat Micro's weather
+    /// readings right now. Together with `openBatMicroAttached` it drives the
+    /// weather icon beside the sun clock. Kept apart from `sensorReading` on
+    /// purpose: ContentView's toolbar reads only these two, so a reading
+    /// changing once a second invalidates the popover and nothing above it.
+    private(set) var sensorConnected = false
+    /// An OpenBat Micro is plugged in, capturing or not. Lets the weather icon
+    /// show while idle, where tapping it takes a one-off reading
+    /// (`startSensorReadings`). Recognised by the USB product name the
+    /// firmware gives itself (`USB_PRODUCT_NAME` in its config.h), which iOS
+    /// passes through as the port name.
+    private(set) var openBatMicroAttached = false
+    /// The latest weather reading hidden in the audio. See `SensorDataDecoder`.
+    /// **Kept when capture stops**, so the popover can still show it with its
+    /// time. A one-off idle read would otherwise lose its own result the
+    /// moment it closes the mic.
+    private(set) var sensorReading: SensorReading?
+    /// When `sensorReading` last changed, which is when the board last sent a
+    /// new reading (the sequence number is part of it).
+    private(set) var sensorReadingTime: Date?
+    /// An idle read is open and has published a reading, so the popover's
+    /// numbers are live rather than the last ones kept.
+    private(set) var isSensorReadingLive = false
+    /// What the idle read is doing, for the popover.
+    private(set) var sensorReadState: SensorReadState = .idle
+    enum SensorReadState: Equatable {
+        case idle
+        case reading
+        /// Packets arrived, but the board's sensor isn't answering.
+        case noSensor
+        /// Nothing decodable arrived: no packets at all, or iOS altered the
+        /// samples on the way in.
+        case failed
+    }
+    private var sensorReadTask: Task<Void, Never>?
+    /// Set while `start()` waits for an idle read to let go of the mic, so
+    /// the read knows not to deactivate the session out from under it.
+    private var isStartingSession = false
+
     /// Media volume above which the speaker route is loud enough to put the
     /// phone's own output into the recording, not just into the listener's ear.
     ///
@@ -522,6 +561,9 @@ final class AudioEngineController {
     /// Frames still to be thrown away before the QA numbers start, sized from
     /// the first buffer's rate — see `AudioLevel.micQASettleSeconds`.
     private nonisolated(unsafe) var micQASettleFrames: Int64 = -1
+    /// Finds the weather readings an OpenBat Micro hides in the samples. Locks
+    /// for itself, so it sits outside `statsLock`.
+    private nonisolated let sensorMonitor = SensorDataMonitor()
     private var statsTimer: Timer?
     private let statsFlushRate = 15.0 // Hz
 
@@ -692,6 +734,14 @@ final class AudioEngineController {
 
     func start() async {
         guard !isRunning else { return }
+        // A one-off weather read holds the mic on its own engine. Stop it and
+        // wait (a fraction of a second) so the two never share the input.
+        if let read = sensorReadTask {
+            isStartingSession = true
+            read.cancel()
+            await read.value
+            isStartingSession = false
+        }
 
         if let demoURL {
             await startDemoCapture(url: demoURL)
@@ -770,6 +820,10 @@ final class AudioEngineController {
         // Drop the meter to silence — otherwise it freezes at the last live value.
         statsLock.lock(); latestLevelDB = AudioLevel.minDB; statsLock.unlock()
         diagnostics.currentLevelDB = AudioLevel.minDB
+        // No stream, so nothing is live any more. The reading itself is kept,
+        // and the popover shows it with its time.
+        sensorMonitor.reset()
+        if sensorConnected { sensorConnected = false }
         if status.hasPrefix("Capturing") || status.hasPrefix("Running") || status.hasPrefix("Demo") {
             status = "Stopped"
         }
@@ -956,7 +1010,112 @@ final class AudioEngineController {
         diagnostics.clippedSampleCount = clipped
         diagnostics.totalSampleCount = totalSamples
         syncSlowDiagnostics()
+        let live = sensorMonitor.current
+        if let live { publishSensorReading(live) }
+        if sensorConnected != (live != nil) { sensorConnected = live != nil }
         updateAutoTune()
+    }
+
+    /// Equality-guarded, like `syncSlowDiagnostics`: the flush runs at 15 Hz and
+    /// `@Observable` notifies on every set, changed or not. A reading only
+    /// differs from the last when the board sends a new one, so the timestamp
+    /// moves once a second, not fifteen times.
+    private func publishSensorReading(_ reading: SensorReading) {
+        guard sensorReading != reading else { return }
+        sensorReading = reading
+        sensorReadingTime = Date()
+    }
+
+    /// Take weather readings while idle, for as long as the weather popover is
+    /// open: open the mic, publish each new packet as it arrives (about once a
+    /// second), and close it again on `stopSensorReadings()`. Gives up after
+    /// 2.5 s if nothing decodable has arrived.
+    ///
+    /// Niall's choice, 2026-10-15, over sampling every minute in the background.
+    /// Opening the mic shows the orange indicator and can pause another app's
+    /// audio while it's open, so it happens only while someone is looking, with
+    /// the weather popover open.
+    ///
+    /// A throwaway engine, not `engine`: the real one carries the listen
+    /// graph and stats timer, and none of that should start for this. The
+    /// session setup is `configureSession()`'s, so the read gets the same
+    /// native-rate, no-AGC input that capture does, which the hidden bits need
+    /// to survive.
+    func startSensorReadings() {
+        guard !isRunning, !isDemoMode, sensorReadTask == nil else { return }
+        sensorReadState = .reading
+        sensorReadTask = Task { [weak self] in
+            await self?.readSensorWhileOpen()
+            self?.sensorReadTask = nil
+        }
+    }
+
+    /// The popover closed: hand the mic back.
+    func stopSensorReadings() {
+        sensorReadTask?.cancel()
+    }
+
+    private func readSensorWhileOpen() async {
+        guard await requestPermission() else { sensorReadState = .failed; return }
+        let found = LatestSensorResult()
+        let probe = AVAudioEngine()
+        var sawAny = false
+        do {
+            try await configureSession()
+            let input = probe.inputNode
+            input.installTap(onBus: 0, bufferSize: 2048, format: input.inputFormat(forBus: 0)) { buffer, _ in
+                // Every buffer, not one a second like `SensorDataMonitor`: the
+                // first few after the route opens can be a settling 48 kHz
+                // stream, and the first reading should land fast.
+                let result = SensorDataDecoder.decode(buffer)
+                if result != .nothing { found.set(result) }
+            }
+            probe.prepare()
+            try probe.start()
+            // Runs until the popover closes, or `start()` cancels it to take
+            // the mic for a session.
+            var waited = 0
+            while !Task.isCancelled {
+                switch found.result {
+                case .reading(let reading):
+                    sawAny = true
+                    publishSensorReading(reading)
+                    sensorReadState = .idle
+                    isSensorReadingLive = true
+                case .noReading:
+                    sawAny = true
+                    sensorReadState = .noSensor
+                    isSensorReadingLive = false
+                case .nothing?, nil:
+                    break
+                }
+                if !sawAny {
+                    waited += 1
+                    if waited >= 25 { break }
+                }
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            input.removeTap(onBus: 0)
+            probe.stop()
+        } catch {
+            if probe.isRunning { probe.stop() }
+        }
+        isSensorReadingLive = false
+        // Hand the mic back, the same way `stop()` does. Not if a session is
+        // taking over: `start()` is waiting for this to finish, and it
+        // reconfigures the session itself. Closing the popover cancels too,
+        // so cancellation alone can't tell the two apart.
+        if !isStartingSession {
+            pendingDeactivation?.cancel()
+            pendingDeactivation = Task.detached(priority: .utility) {
+                try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            }
+        }
+        if !sawAny {
+            sensorReadState = Task.isCancelled ? .idle : .failed
+        } else if sensorReadState == .reading {
+            sensorReadState = .idle
+        }
     }
 
     /// Adopt a delivered buffer rate into `diagnostics.actualSampleRate` once it
@@ -1148,6 +1307,9 @@ final class AudioEngineController {
         diagnostics.isUSBInput = port?.portType == .usbAudio
         diagnostics.usbMicAvailable = diagnostics.isUSBInput
             || session.availableInputs?.contains { $0.portType == .usbAudio } ?? false
+        let micro = ((session.availableInputs ?? []) + (port.map { [$0] } ?? []))
+            .contains { $0.portType == .usbAudio && $0.portName.localizedCaseInsensitiveContains("OpenBat Micro") }
+        if openBatMicroAttached != micro { openBatMicroAttached = micro }
         diagnostics.sessionSampleRate = session.sampleRate
         // Provisional until the first real buffer arrives and flushStats corrects it.
         if diagnostics.actualSampleRate == 0 { diagnostics.actualSampleRate = session.sampleRate }
@@ -1240,6 +1402,8 @@ final class AudioEngineController {
     private nonisolated func consume(_ buffer: AVAudioPCMBuffer) {
         let level = AudioLevel.rmsDB(of: buffer)
         let analysis = AudioLevel.analyze(buffer)
+        // About once a second of audio; returns straight away otherwise.
+        sensorMonitor.feed(buffer)
         // Cheap, lock-guarded accumulation only — the UI flush happens on a
         // timer (see `flushStats`) to keep the main thread free for rendering.
         statsLock.lock()

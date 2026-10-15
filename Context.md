@@ -1682,6 +1682,43 @@ reasons (`OnboardingState.applyEveryLaunchOverrideOnce`).
   what you get from a run with recording off, or from Settings ▸ Storage's
   "Delete NoID Recordings", which deliberately keeps the pass log.
 
+### Weather readings hidden in the audio (2026-10-14)
+
+The OpenBat Micro (Niall's own RP2040 detector, firmware in `Misc Projects/
+OpenBat Micro`) has a BME280 sensor. iOS can't read the board's USB serial port,
+and 384 kHz stereo doesn't fit on full-speed USB, so the firmware hides each
+reading in **bit 0 of every sample**: a 17-byte CRC-checked packet at the start
+of every 1 ms block. The format spec is the firmware repo's
+`docs/hidden-data-format.md`.
+
+- **Decoding:** `SensorDataDecoder` / `SensorDataMonitor`, fed from `consume`,
+  so every capture buffer passes through. It decodes about one buffer per second
+  of audio, and forgets the reading after three misses. That is what makes the
+  icon go away when the board is unplugged, with no timer of its own.
+- **Showing it:** `WeatherPill`, a weather glyph beside the sun clock that opens
+  a popover with the readings. It shows while a Micro is plugged in
+  (`openBatMicroAttached`, matched on the USB product name) or its packets are
+  in the stream (`sensorConnected`). Those two flags are all ContentView reads.
+  Only the popover reads `sensorReading`, which changes once a second.
+- **While idle, live readings while the popover is open** (Niall, 2026-10-15,
+  chosen over sampling in the background). Opening the popover calls
+  `startSensorReadings`: a throwaway engine on `configureSession()`'s session
+  publishes each new packet (once a second) until the popover closes
+  (`stopSensorReadings`), or gives up after 2.5 s with nothing. The mic
+  indicator stays on while it's open. `start()` cancels and awaits a read in
+  flight, flagging `isStartingSession` so the read doesn't deactivate the
+  session under it. The last reading is kept after capture stops and is shown
+  with its time.
+- **IDs don't move.** Niall made that the condition for the approach. Over the
+  105-file UK sample (`tools/bd2_eval`, trigger 0.25), the app's species
+  verdicts were 105/105 the same with and without the packets. BatDetect2's own
+  pipeline changed 2/105, each a call at 0.30 ± 0.01 against its cutoff. A
+  second embedding with different filler bits flipped one too, so this is how
+  sensitive borderline calls are to any −90 dB change.
+- **Saved WAVs don't carry it yet.** `AudioRecorder.write` scales by 32767 and
+  truncates, which moves every nonzero sample one step toward zero and flips its
+  lowest bit. Writing the readings into GUANO is the open next step.
+
 ---
 
 ## 7. Spectrogram and display

@@ -1174,6 +1174,14 @@ struct ContentView: View {
                     ToolbarItem(placement: .topBarLeading) {
                         SunWindowPill(coordinate: location.currentCoordinate)
                     }
+                    // While an OpenBat Micro is plugged in (idle, it takes a
+                    // reading on tap) or its readings are in the stream. Gives
+                    // the slot back along with the sun clock.
+                    if audio.sensorConnected || audio.openBatMicroAttached {
+                        ToolbarItem(placement: .topBarLeading) {
+                            WeatherPill(audio: audio)
+                        }
+                    }
                 }
             }
             // Reserves the height of the hand-built bar, so the last row of a
