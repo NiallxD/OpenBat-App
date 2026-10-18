@@ -2,7 +2,7 @@
 //  SensorDataDecoderTests.swift
 //  OpenBatTests
 //
-//  The OpenBat Micro's weather readings, hidden in the lowest bit of each
+//  The OpenBat Mini's weather readings, hidden in the lowest bit of each
 //  sample. The encoder below is a line-for-line copy of the firmware's
 //  `hidden_data.c` (build_packet + hidden_data_add), so these tests break if
 //  the app's reading of the format drifts from what the board sends.

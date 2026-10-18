@@ -92,18 +92,18 @@ final class AudioEngineController {
     /// does stop it running away into hiss. See Context.md §6.
     private(set) var isOutputOnSpeaker = false
 
-    /// Whether the live capture stream is carrying an OpenBat Micro's weather
-    /// readings right now. Together with `openBatMicroAttached` it drives the
+    /// Whether the live capture stream is carrying an OpenBat Mini's weather
+    /// readings right now. Together with `openBatMiniAttached` it drives the
     /// weather icon beside the sun clock. Kept apart from `sensorReading` on
     /// purpose: ContentView's toolbar reads only these two, so a reading
     /// changing once a second invalidates the popover and nothing above it.
     private(set) var sensorConnected = false
-    /// An OpenBat Micro is plugged in, capturing or not. Lets the weather icon
+    /// An OpenBat Mini is plugged in, capturing or not. Lets the weather icon
     /// show while idle, where tapping it takes a one-off reading
     /// (`startSensorReadings`). Recognised by the USB product name the
     /// firmware gives itself (`USB_PRODUCT_NAME` in its config.h), which iOS
     /// passes through as the port name.
-    private(set) var openBatMicroAttached = false
+    private(set) var openBatMiniAttached = false
     /// The latest weather reading hidden in the audio. See `SensorDataDecoder`.
     /// **Kept when capture stops**, so the popover can still show it with its
     /// time. A one-off idle read would otherwise lose its own result the
@@ -561,7 +561,7 @@ final class AudioEngineController {
     /// Frames still to be thrown away before the QA numbers start, sized from
     /// the first buffer's rate — see `AudioLevel.micQASettleSeconds`.
     private nonisolated(unsafe) var micQASettleFrames: Int64 = -1
-    /// Finds the weather readings an OpenBat Micro hides in the samples. Locks
+    /// Finds the weather readings an OpenBat Mini hides in the samples. Locks
     /// for itself, so it sits outside `statsLock`.
     private nonisolated let sensorMonitor = SensorDataMonitor()
     private var statsTimer: Timer?
@@ -1307,9 +1307,12 @@ final class AudioEngineController {
         diagnostics.isUSBInput = port?.portType == .usbAudio
         diagnostics.usbMicAvailable = diagnostics.isUSBInput
             || session.availableInputs?.contains { $0.portType == .usbAudio } ?? false
-        let micro = ((session.availableInputs ?? []) + (port.map { [$0] } ?? []))
-            .contains { $0.portType == .usbAudio && $0.portName.localizedCaseInsensitiveContains("OpenBat Micro") }
-        if openBatMicroAttached != micro { openBatMicroAttached = micro }
+        // Boards flashed before the rename still report "OpenBat Micro".
+        let mini = ((session.availableInputs ?? []) + (port.map { [$0] } ?? []))
+            .contains { $0.portType == .usbAudio
+                && ($0.portName.localizedCaseInsensitiveContains("OpenBat Mini")
+                    || $0.portName.localizedCaseInsensitiveContains("OpenBat Micro")) }
+        if openBatMiniAttached != mini { openBatMiniAttached = mini }
         diagnostics.sessionSampleRate = session.sampleRate
         // Provisional until the first real buffer arrives and flushStats corrects it.
         if diagnostics.actualSampleRate == 0 { diagnostics.actualSampleRate = session.sampleRate }

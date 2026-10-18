@@ -2,11 +2,11 @@
 //  WeatherPill.swift
 //  OpenBat
 //
-//  A weather icon beside the sun clock, for the OpenBat Micro's environmental
+//  A weather icon beside the sun clock, for the OpenBat Mini's environmental
 //  sensor (see `SensorDataDecoder`). Tapping it opens a popover with the
 //  readings.
 //
-//  Shown while a Micro is plugged in, or while its readings are in the capture
+//  Shown while a Mini is plugged in, or while its readings are in the capture
 //  stream. The popover is live, updating every second. During a session the
 //  readings come from the capture stream; idle, opening it opens the mic until
 //  it closes (`AudioEngineController.startSensorReadings`). Niall chose that

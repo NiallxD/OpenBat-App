@@ -1684,8 +1684,8 @@ reasons (`OnboardingState.applyEveryLaunchOverrideOnce`).
 
 ### Weather readings hidden in the audio (2026-10-14)
 
-The OpenBat Micro (Niall's own RP2040 detector, firmware in `Misc Projects/
-OpenBat Micro`) has a BME280 sensor. iOS can't read the board's USB serial port,
+The OpenBat Mini (Niall's own RP2040 detector, firmware in `Hardware/
+OpenBat Mini`) has a BME280 sensor. iOS can't read the board's USB serial port,
 and 384 kHz stereo doesn't fit on full-speed USB, so the firmware hides each
 reading in **bit 0 of every sample**: a 17-byte CRC-checked packet at the start
 of every 1 ms block. The format spec is the firmware repo's
@@ -1696,8 +1696,8 @@ of every 1 ms block. The format spec is the firmware repo's
   of audio, and forgets the reading after three misses. That is what makes the
   icon go away when the board is unplugged, with no timer of its own.
 - **Showing it:** `WeatherPill`, a weather glyph beside the sun clock that opens
-  a popover with the readings. It shows while a Micro is plugged in
-  (`openBatMicroAttached`, matched on the USB product name) or its packets are
+  a popover with the readings. It shows while a Mini is plugged in
+  (`openBatMiniAttached`, matched on the USB product name) or its packets are
   in the stream (`sensorConnected`). Those two flags are all ContentView reads.
   Only the popover reads `sensorReading`, which changes once a second.
 - **While idle, live readings while the popover is open** (Niall, 2026-10-15,

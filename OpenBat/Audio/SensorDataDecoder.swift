@@ -2,7 +2,7 @@
 //  SensorDataDecoder.swift
 //  OpenBat
 //
-//  Reads the weather readings an OpenBat Micro hides in the lowest bit of its
+//  Reads the weather readings an OpenBat Mini hides in the lowest bit of its
 //  audio samples.
 //
 //  Why it arrives this way: an iPhone can use a USB microphone but can't read
@@ -14,7 +14,7 @@
 //  the same over the UK test sample with and without it.
 //
 //  The format is defined by the firmware repo, not here:
-//  `Misc Projects/OpenBat Micro/docs/hidden-data-format.md`. Its reference
+//  `Hardware/OpenBat Mini/docs/hidden-data-format.md`. Its reference
 //  decoder is `tools/hidden_data.py`. In brief: a 17-byte packet,
 //
 //    0-3   "OBat"      4  version (1)    5  flags    6  sequence
@@ -89,7 +89,7 @@ nonisolated enum SensorDataDecoder {
 
     /// The result of looking at one buffer.
     enum Result: Equatable {
-        /// No valid packet: not an OpenBat Micro, or the bits didn't survive.
+        /// No valid packet: not an OpenBat Mini, or the bits didn't survive.
         case nothing
         /// A valid packet, but the board has no reading to give (no sensor
         /// found, or it hasn't finished its first measurement).
@@ -185,7 +185,7 @@ nonisolated enum SensorDataDecoder {
 /// read by the controller's 15 Hz stats flush on the main actor.
 ///
 /// **It forgets after three misses in a row.** That's what makes the weather
-/// icon disappear when the Micro is unplugged or swapped for a Griff, with no
+/// icon disappear when the Mini is unplugged or swapped for a Griff, with no
 /// timer of its own. Three rather than one so a single glitched buffer (a USB
 /// hiccup mid-packet) doesn't make the icon flicker.
 nonisolated final class SensorDataMonitor: @unchecked Sendable {
